@@ -2,6 +2,13 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { prisma } from '@/lib/prisma'
 import styles from './page.module.css'
+import * as LucideIcons from 'lucide-react'
+
+// Helper component to render dynamic icons
+const DynamicIcon = ({ name, className }: { name: string, className?: string }) => {
+  const Icon = (LucideIcons as any)[name]
+  return Icon ? <Icon className={className} /> : null
+}
 
 interface Props {
   params: Promise<{ slug: string }>
@@ -29,18 +36,31 @@ export default async function CoursePage({ params }: Props) {
     <main className={styles.main}>
       <nav className={styles.nav}>
         <Link href="/" className={styles.back}>
-          ← Все курсы
+          <LucideIcons.ArrowLeft size={18} />
+          Все курсы
         </Link>
       </nav>
 
-      <header className={styles.header}>
-        <span className={styles.icon}>{course.icon}</span>
+      <header 
+        className={styles.header}
+        style={{
+          backgroundImage: `linear-gradient(to bottom, rgba(15, 23, 42, 0.85), rgba(15, 23, 42, 0.95)), url('/assets/courses/${course.slug}.webp')`,
+          backgroundSize: 'cover',
+          backgroundPosition: 'center'
+        }}
+      >
+        <div className={styles.iconWrapper}>
+          <DynamicIcon name={course.icon || 'Code2'} className={styles.icon} />
+        </div>
         <h1>{course.title}</h1>
         <p>{course.description}</p>
       </header>
 
       <section className={styles.lessons}>
-        <h2>Уроки</h2>
+        <h2>
+          <LucideIcons.List size={24} />
+          Уроки
+        </h2>
         <div className={styles.lessonList}>
           {course.lessons.map((lesson, index) => (
             <Link
@@ -50,7 +70,7 @@ export default async function CoursePage({ params }: Props) {
             >
               <span className={styles.lessonNumber}>{index + 1}</span>
               <span className={styles.lessonTitle}>{lesson.title}</span>
-              <span className={styles.arrow}>→</span>
+              <LucideIcons.ArrowRight className={styles.arrow} size={20} />
             </Link>
           ))}
         </div>
@@ -58,15 +78,3 @@ export default async function CoursePage({ params }: Props) {
     </main>
   )
 }
-
-/*
-export async function generateStaticParams() {
-  const courses = await prisma.course.findMany({
-    select: { slug: true }
-  })
-  
-  return courses.map((course) => ({
-    slug: course.slug,
-  }))
-}
-*/

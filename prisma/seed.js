@@ -7,7 +7,7 @@ const courses = [
     slug: 'html',
     title: 'HTML: Скелет',
     description: 'Изучи фундамент веба — структуру страниц.',
-    icon: '💀',
+    icon: 'Code2',
     order: 1,
     lessons: [
       { 
@@ -148,7 +148,7 @@ HTML документ имеет четкую иерархическую стр�
     slug: 'css',
     title: 'CSS: Стиль',
     description: 'Сделай свои страницы красивыми.',
-    icon: '🎨',
+    icon: 'Palette',
     order: 2,
     lessons: [
       { 
@@ -219,7 +219,7 @@ ID > Class > Tag
     slug: 'javascript',
     title: 'JavaScript: Мозги',
     description: 'Добавь интерактивность и логику.',
-    icon: '🧠',
+    icon: 'Braces',
     order: 3,
     lessons: [
       { 
@@ -289,7 +289,7 @@ add(2, 3); // 5
     slug: 'typescript',
     title: 'TypeScript: Броня',
     description: 'JavaScript с суперсилой — типами.',
-    icon: '🛡️',
+    icon: 'ShieldCheck',
     order: 4,
     lessons: [
       { 
@@ -333,7 +333,7 @@ greet(42); // Ошибка при компиляции! ✅
     slug: 'react',
     title: 'React: Движок',
     description: 'Строй интерфейсы из компонентов.',
-    icon: '⚛️',
+    icon: 'Atom',
     order: 5,
     lessons: [
       { 
@@ -381,7 +381,7 @@ function Card({ title, children }: CardProps) {
     slug: 'git',
     title: 'Git: Машина времени',
     description: 'Контроль версий для твоего кода.',
-    icon: '🕰️',
+    icon: 'GitBranch',
     order: 6,
     lessons: [
       { 
