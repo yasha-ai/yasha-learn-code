@@ -1,6 +1,9 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import ReactMarkdown from 'react-markdown'
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import remarkGfm from 'remark-gfm'
 import { prisma } from '@/lib/prisma'
 import styles from './page.module.css'
 
@@ -48,7 +51,30 @@ export default async function LessonPage({ params }: Props) {
       </nav>
 
       <article className={styles.content}>
-        <ReactMarkdown>{lesson.content}</ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            code({node, inline, className, children, ...props}: any) {
+              const match = /language-(\w+)/.exec(className || '')
+              return !inline && match ? (
+                <SyntaxHighlighter
+                  style={vscDarkPlus}
+                  language={match[1]}
+                  PreTag="div"
+                  {...props}
+                >
+                  {String(children).replace(/\n$/, '')}
+                </SyntaxHighlighter>
+              ) : (
+                <code className={className} {...props}>
+                  {children}
+                </code>
+              )
+            }
+          }}
+        >
+          {lesson.content}
+        </ReactMarkdown>
       </article>
 
       <nav className={styles.pagination}>
@@ -73,22 +99,3 @@ export default async function LessonPage({ params }: Props) {
     </main>
   )
 }
-
-/*
-export async function generateStaticParams() {
-  const courses = await prisma.course.findMany({
-    include: {
-      lessons: {
-        select: { slug: true }
-      }
-    }
-  })
-  
-  return courses.flatMap((course) =>
-    course.lessons.map((lesson) => ({
-      slug: course.slug,
-      lessonSlug: lesson.slug,
-    }))
-  )
-}
-*/
