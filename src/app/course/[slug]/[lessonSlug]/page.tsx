@@ -8,6 +8,8 @@ interface Props {
   params: Promise<{ slug: string; lessonSlug: string }>
 }
 
+export const dynamic = 'force-dynamic'
+
 export default async function LessonPage({ params }: Props) {
   const { slug, lessonSlug } = await params
   
