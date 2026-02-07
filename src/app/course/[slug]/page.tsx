@@ -7,6 +7,8 @@ interface Props {
   params: Promise<{ slug: string }>
 }
 
+export const dynamic = 'force-dynamic'
+
 export default async function CoursePage({ params }: Props) {
   const { slug } = await params
   
@@ -57,6 +59,7 @@ export default async function CoursePage({ params }: Props) {
   )
 }
 
+/*
 export async function generateStaticParams() {
   const courses = await prisma.course.findMany({
     select: { slug: true }
@@ -66,3 +69,4 @@ export async function generateStaticParams() {
     slug: course.slug,
   }))
 }
+*/

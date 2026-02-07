@@ -72,6 +72,7 @@ export default async function LessonPage({ params }: Props) {
   )
 }
 
+/*
 export async function generateStaticParams() {
   const courses = await prisma.course.findMany({
     include: {
@@ -88,3 +89,4 @@ export async function generateStaticParams() {
     }))
   )
 }
+*/
