@@ -63,15 +63,11 @@ Include: Relevant programming symbols, code snippets visualization, abstract tec
 Colors: Deep blue (#1a1a2e), purple accents (#6366f1), cyan highlights (#22d3ee).
 NO text, NO words, just visual elements.`;
 
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=${GEMINI_API_KEY}`, {
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=${GEMINI_API_KEY}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        responseModalities: ["image", "text"],
-        imageSizes: ["1024x1024"]
-      }
+      contents: [{ parts: [{ text: prompt }] }]
     })
   });
 
