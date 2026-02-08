@@ -1,0 +1,510 @@
+## TypeScript: Броня. Урок 17: Рекурсивные типы (Recursive Types)
+
+Рекурсивные типы - это типы, которые ссылаются на сами себя в своём определении. Они критически важны для работы с древовидными структурами, вложенными объектами, списками и другими рекурсивными структурами данных. TypeScript полностью поддерживает рекурсивные типы и позволяет создавать сложные, но type-safe абстракции.
+
+### Базовые рекурсивные структуры
+
+```typescript
+// Простой односвязный список
+interface ListNode<T> {
+  value: T;
+  next: ListNode<T> | null;
+}
+
+// Использование
+const list: ListNode<number> = {
+  value: 1,
+  next: {
+    value: 2,
+    next: {
+      value: 3,
+      next: null,
+    },
+  },
+};
+
+// Бинарное дерево
+interface TreeNode<T> {
+  value: T;
+  left: TreeNode<T> | null;
+  right: TreeNode<T> | null;
+}
+
+const tree: TreeNode<number> = {
+  value: 10,
+  left: {
+    value: 5,
+    left: null,
+    right: null,
+  },
+  right: {
+    value: 15,
+    left: null,
+    right: null,
+  },
+};
+
+// N-арное дерево
+interface Node<T> {
+  value: T;
+  children: Node<T>[];
+}
+
+const fileSystem: Node<string> = {
+  value: 'root',
+  children: [
+    {
+      value: 'src',
+      children: [
+        { value: 'index.ts', children: [] },
+        { value: 'app.ts', children: [] },
+      ],
+    },
+    {
+      value: 'package.json',
+      children: [],
+    },
+  ],
+};
+```
+
+### Рекурсивные Type Aliases
+
+```typescript
+// JSON тип
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+const jsonData: JsonValue = {
+  name: 'Alice',
+  age: 30,
+  active: true,
+  tags: ['developer', 'typescript'],
+  metadata: {
+    created: '2024-01-01',
+    nested: {
+      deep: {
+        value: 42,
+      },
+    },
+  },
+};
+
+// Вложенные массивы
+type NestedArray<T> = T | NestedArray<T>[];
+
+const nested: NestedArray<number> = [1, [2, [3, [4, 5]]]];
+
+// Nested object paths
+type Path = string | number | Path[];
+
+const path1: Path = 'user.profile.name';
+const path2: Path = ['user', 'posts', 0, 'title'];
+const path3: Path = ['users', [0, 'name']];
+```
+
+### Deep Readonly и Deep Partial
+
+```typescript
+// Deep Readonly - рекурсивно делает все поля readonly
+type DeepReadonly<T> = {
+  readonly [P in keyof T]: T[P] extends object
+    ? DeepReadonly<T[P]>
+    : T[P];
+};
+
+interface Config {
+  server: {
+    host: string;
+    port: number;
+    ssl: {
+      enabled: boolean;
+      cert: string;
+    };
+  };
+  database: {
+    url: string;
+  };
+}
+
+type ImmutableConfig = DeepReadonly<Config>;
+
+const config: ImmutableConfig = {
+  server: {
+    host: 'localhost',
+    port: 3000,
+    ssl: {
+      enabled: true,
+      cert: '/path/to/cert',
+    },
+  },
+  database: {
+    url: 'postgresql://localhost',
+  },
+};
+
+// config.server.host = 'newhost'; // ✗ Ошибка: readonly
+// config.server.ssl.enabled = false; // ✗ Ошибка: readonly
+
+// Deep Partial - рекурсивно делает все поля optional
+type DeepPartial<T> = {
+  [P in keyof T]?: T[P] extends object
+    ? DeepPartial<T[P]>
+    : T[P];
+};
+
+type PartialConfig = DeepPartial<Config>;
+
+const partialConfig: PartialConfig = {
+  server: {
+    ssl: {
+      enabled: true,
+      // cert не обязателен
+    },
+    // host и port не обязательны
+  },
+  // database не обязателен
+};
+```
+
+### Практический пример: Flatten Types
+
+```typescript
+// Рекурсивное раскрытие вложенных массивов
+type Flatten<T> = T extends Array<infer U>
+  ? Flatten<U>
+  : T;
+
+type Nested1 = Flatten<number[][][]>; // number
+type Nested2 = Flatten<string[][]>;   // string
+type NotArray = Flatten<boolean>;     // boolean
+
+// Deep Keys - получение всех вложенных ключей
+type DeepKeys<T> = T extends object
+  ? {
+      [K in keyof T]: K extends string
+        ? T[K] extends object
+          ? K | `${K}.${DeepKeys<T[K]>}`
+          : K
+        : never;
+    }[keyof T]
+  : never;
+
+interface User {
+  name: string;
+  profile: {
+    age: number;
+    address: {
+      city: string;
+      street: string;
+    };
+  };
+}
+
+type UserKeys = DeepKeys<User>;
+// "name" | "profile" | "profile.age" | "profile.address" |
+// "profile.address.city" | "profile.address.street"
+```
+
+### Жизненный пример: Component Tree
+
+```typescript
+// React component tree typing
+type ComponentProps = Record<string, any>;
+
+interface Component<P extends ComponentProps = {}> {
+  type: string;
+  props: P;
+  children: ComponentTree[];
+}
+
+type ComponentTree = Component | string | number | null;
+
+// Пример использования
+const app: ComponentTree = {
+  type: 'div',
+  props: { className: 'app' },
+  children: [
+    {
+      type: 'header',
+      props: {},
+      children: [
+        {
+          type: 'h1',
+          props: {},
+          children: ['Welcome to TypeScript'],
+        },
+      ],
+    },
+    {
+      type: 'main',
+      props: {},
+      children: [
+        {
+          type: 'p',
+          props: {},
+          children: ['This is recursive typing'],
+        },
+      ],
+    },
+  ],
+};
+
+// Рекурсивная функция для обхода дерева
+function renderComponent(component: ComponentTree): string {
+  if (typeof component === 'string' || typeof component === 'number') {
+    return String(component);
+  }
+  
+  if (component === null) {
+    return '';
+  }
+  
+  const childrenHtml = component.children
+    .map(renderComponent)
+    .join('');
+  
+  return `<${component.type}>${childrenHtml}</${component.type}>`;
+}
+```
+
+### Рекурсивные условные типы
+
+```typescript
+// Unwrap всех вложенных Promise
+type DeepAwaited<T> = T extends Promise<infer U>
+  ? DeepAwaited<U>
+  : T;
+
+type Result1 = DeepAwaited<Promise<Promise<Promise<number>>>>;
+// number
+
+type Result2 = DeepAwaited<Promise<string>>;
+// string
+
+// Замена типа во всех вложенных структурах
+type ReplaceDeep<T, From, To> = T extends From
+  ? To
+  : T extends object
+  ? { [K in keyof T]: ReplaceDeep<T[K], From, To> }
+  : T;
+
+interface Data {
+  id: string;
+  items: {
+    name: string;
+    values: string[];
+  }[];
+}
+
+type NumericData = ReplaceDeep<Data, string, number>;
+// {
+//   id: number;
+//   items: {
+//     name: number;
+//     values: number[];
+//   }[];
+// }
+
+// Pick deep - выбор вложенных полей
+type PickDeep<T, Path> = Path extends `${infer Key}.${infer Rest}`
+  ? Key extends keyof T
+    ? PickDeep<T[Key], Rest>
+    : never
+  : Path extends keyof T
+  ? T[Path]
+  : never;
+
+interface Config {
+  server: {
+    ssl: {
+      cert: string;
+      key: string;
+    };
+  };
+}
+
+type CertType = PickDeep<Config, 'server.ssl.cert'>; // string
+```
+
+### Ограничения глубины рекурсии
+
+```typescript
+// TypeScript имеет лимит глубины рекурсии (около 45-50 уровней)
+// Можно контролировать глубину явно:
+
+type DeepReadonlyWithLimit<T, Depth extends number = 10> = {
+  readonly [P in keyof T]: Depth extends 0
+    ? T[P]
+    : T[P] extends object
+    ? DeepReadonlyWithLimit<T[P], Prev<Depth>>
+    : T[P];
+};
+
+// Helper для декремента числа
+type Prev<N extends number> = N extends 0
+  ? 0
+  : N extends 1
+  ? 0
+  : N extends 2
+  ? 1
+  : N extends 3
+  ? 2
+  : N extends 4
+  ? 3
+  : N extends 5
+  ? 4
+  : number; // упрощённая версия
+
+// Альтернатива: использование tuple для счётчика
+type TuplePrev<T extends readonly any[]> = T extends readonly [any, ...infer Rest]
+  ? Rest
+  : [];
+
+type DeepReadonlyTuple<T, Depth extends readonly any[] = [any, any, any, any, any]> = {
+  readonly [P in keyof T]: Depth extends []
+    ? T[P]
+    : T[P] extends object
+    ? DeepReadonlyTuple<T[P], TuplePrev<Depth>>
+    : T[P];
+};
+```
+
+### Circular References
+
+```typescript
+// Циклические ссылки в типах
+interface Person {
+  name: string;
+  friends: Person[];
+  spouse?: Person;
+}
+
+const alice: Person = {
+  name: 'Alice',
+  friends: [],
+};
+
+const bob: Person = {
+  name: 'Bob',
+  friends: [alice],
+  spouse: alice,
+};
+
+// Добавление циклической ссылки
+alice.friends.push(bob);
+alice.spouse = bob;
+
+// Graph структуры
+interface GraphNode<T> {
+  value: T;
+  edges: GraphNode<T>[];
+}
+
+// AST (Abstract Syntax Tree)
+type ASTNode =
+  | { type: 'number'; value: number }
+  | { type: 'string'; value: string }
+  | { type: 'binary'; operator: string; left: ASTNode; right: ASTNode }
+  | { type: 'unary'; operator: string; operand: ASTNode }
+  | { type: 'call'; name: string; args: ASTNode[] };
+
+const expression: ASTNode = {
+  type: 'binary',
+  operator: '+',
+  left: {
+    type: 'number',
+    value: 5,
+  },
+  right: {
+    type: 'binary',
+    operator: '*',
+    left: { type: 'number', value: 2 },
+    right: { type: 'number', value: 3 },
+  },
+};
+```
+
+### Utility Types для рекурсии
+
+```typescript
+// Paths - все возможные пути в объекте
+type Paths<T, Prefix extends string = ''> = T extends object
+  ? {
+      [K in keyof T]: K extends string
+        ? T[K] extends object
+          ?
+              | `${Prefix}${K}`
+              | Paths<T[K], `${Prefix}${K}.`>
+          : `${Prefix}${K}`
+        : never;
+    }[keyof T]
+  : never;
+
+interface AppState {
+  user: {
+    profile: {
+      name: string;
+      age: number;
+    };
+    settings: {
+      theme: string;
+    };
+  };
+  posts: {
+    items: string[];
+  };
+}
+
+type StatePaths = Paths<AppState>;
+// "user" | "user.profile" | "user.profile.name" | "user.profile.age" |
+// "user.settings" | "user.settings.theme" | "posts" | "posts.items"
+
+// Get по пути
+type Get<T, Path> = Path extends `${infer Key}.${infer Rest}`
+  ? Key extends keyof T
+    ? Get<T[Key], Rest>
+    : never
+  : Path extends keyof T
+  ? T[Path]
+  : never;
+
+type ThemeType = Get<AppState, 'user.settings.theme'>; // string
+type AgeType = Get<AppState, 'user.profile.age'>;      // number
+
+// Set по пути (более сложный пример)
+type Set<T, Path, Value> = Path extends `${infer Key}.${infer Rest}`
+  ? Key extends keyof T
+    ? {
+        [K in keyof T]: K extends Key
+          ? Set<T[K], Rest, Value>
+          : T[K];
+      }
+    : never
+  : Path extends keyof T
+  ? {
+      [K in keyof T]: K extends Path ? Value : T[K];
+    }
+  : never;
+
+type UpdatedState = Set<AppState, 'user.settings.theme', 'dark'>;
+// theme будет иметь тип 'dark' вместо string
+```
+
+### Ключевые моменты
+
+- Рекурсивные типы ссылаются на сами себя в определении
+- Идеальны для деревьев, списков, вложенных объектов, графов
+- TypeScript имеет лимит глубины рекурсии (~45-50 уровней)
+- Deep utility types (DeepReadonly, DeepPartial) используют рекурсию
+- Рекурсивные условные типы с `infer` очень мощны
+- Можно контролировать глубину рекурсии явно
+- Поддерживают циклические ссылки в runtime (но не в type-level inference)
+- Используются для type-safe работы с JSON, AST, component trees
+- Комбинируются с template literal types для создания путей
+- Критически важны для библиотек state management, роутинга, валидации
