@@ -50,11 +50,11 @@
 - [x] Паттерны на чистом CSS
 
 ### Трансформации и 3D (5)
-- [ ] transform: translate, rotate, scale, skew
-- [ ] transform-origin
-- [ ] perspective и 3D-трансформации
-- [ ] backface-visibility
-- [ ] 3D-карточки и кубы
+- [x] transform: translate, rotate, scale, skew
+- [x] transform-origin
+- [x] perspective и 3D-трансформации
+- [x] backface-visibility
+- [x] 3D-карточки и кубы
 
 ### Анимации продвинутые (6)
 - [ ] @keyframes детально
