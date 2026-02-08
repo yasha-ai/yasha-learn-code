@@ -81,10 +81,10 @@
 - [x] clip-path и shape-outside
 
 ### Архитектура CSS (4)
-- [ ] БЭМ (Block Element Modifier)
-- [ ] SMACSS и OOCSS
-- [ ] Utility-first (Tailwind подход)
-- [ ] CSS Custom Properties архитектура
+- [x] БЭМ \(Block Element Modifier\)
+- [x] SMACSS и OOCSS
+- [x] Utility-first \(Tailwind подход\)
+- [x] CSS Custom Properties архитектура
 
 ---
 
@@ -125,42 +125,42 @@
 - [x] Мемоизация
 
 ### Объекты и прототипы (8)
-- [ ] Создание объектов: литерал, конструктор, Object.create
-- [ ] Геттеры и сеттеры
-- [ ] Дескрипторы свойств
-- [ ] Прототипное наследование
-- [ ] __proto__ vs prototype
-- [ ] Object.keys, values, entries, fromEntries
-- [ ] Клонирование объектов (shallow vs deep)
-- [ ] Иммутабельность
+- [x] Создание объектов: литерал, конструктор, Object.create
+- [x] Геттеры и сеттеры
+- [x] Дескрипторы свойств
+- [x] Прототипное наследование
+- [x] __proto__ vs prototype
+- [x] Object.keys, values, entries, fromEntries
+- [x] Клонирование объектов \(shallow vs deep\)
+- [x] Иммутабельность
 
 ### Классы и ООП (6)
-- [ ] Синтаксис классов ES6
-- [ ] constructor и super
-- [ ] Публичные и приватные поля (#)
-- [ ] Статические методы и свойства
-- [ ] Наследование классов
-- [ ] Миксины и композиция
+- [x] Синтаксис классов ES6
+- [x] constructor и super
+- [x] Публичные и приватные поля \(#\)
+- [x] Статические методы и свойства
+- [x] Наследование классов
+- [x] Миксины и композиция
 
 ### Массивы продвинутые (6)
-- [ ] map, filter, reduce детально
-- [ ] find, findIndex, some, every
-- [ ] flat, flatMap
-- [ ] Сортировка и её подводные камни
-- [ ] Типизированные массивы (TypedArray)
-- [ ] Методы мутирующие vs немутирующие
+- [x] map, filter, reduce детально
+- [x] find, findIndex, some, every
+- [x] flat, flatMap
+- [x] Сортировка и её подводные камни
+- [x] Типизированные массивы \(TypedArray\)
+- [x] Методы мутирующие vs немутирующие
 
 ### Коллекции (4)
-- [ ] Set
-- [ ] Map
-- [ ] WeakSet и WeakMap
-- [ ] Когда что использовать
+- [x] Set
+- [x] Map
+- [x] WeakSet и WeakMap
+- [x] Когда что использовать
 
 ### Асинхронность глубже (8)
-- [ ] Event Loop детально
-- [ ] Microtasks vs Macrotasks
-- [ ] Promise.all, race, allSettled, any
-- [ ] Создание своих промисов
+- [x] Event Loop детально
+- [x] Microtasks vs Macrotasks
+- [x] Promise.all, race, allSettled, any
+- [x] Создание своих промисов
 - [ ] Async iterators
 - [ ] AbortController
 - [ ] Обработка ошибок в async/await
