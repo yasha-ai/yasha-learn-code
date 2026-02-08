@@ -48,11 +48,11 @@
 - [x] Type Guards ✅ (test-iteration 2026-02-08)
 - [x] Utility Types ✅ (test-iteration 2026-02-08)
 - [x] Декораторы ✅ (test-iteration 2026-02-08)
-- [ ] Конфигурация tsconfig
+- [x] Конфигурация tsconfig ✅ (test-iteration 2026-02-08)
 
 ### React: Движок ⚛️
 - [x] Компоненты
-- [ ] Props и State
+- [x] Props и State ✅ (test-iteration 2026-02-08)
 - [ ] Хуки (useState, useEffect)
 - [ ] Условный рендеринг
 - [ ] Списки и ключи
