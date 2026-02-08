@@ -44,10 +44,10 @@
 - [x] Интерфейсы ✅ (test-iteration 2026-02-08)
 - [x] Type vs Interface ✅ (test-iteration 2026-02-08)
 - [x] Generics ✅ (test-iteration 2026-02-08)
-- [ ] Union и Intersection типы
-- [ ] Type Guards
-- [ ] Utility Types
-- [ ] Декораторы
+- [x] Union и Intersection типы ✅ (test-iteration 2026-02-08)
+- [x] Type Guards ✅ (test-iteration 2026-02-08)
+- [x] Utility Types ✅ (test-iteration 2026-02-08)
+- [x] Декораторы ✅ (test-iteration 2026-02-08)
 - [ ] Конфигурация tsconfig
 
 ### React: Движок ⚛️
