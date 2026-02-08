@@ -1,0 +1,405 @@
+## TypeScript: Броня. Урок 38: Strict Mode и Компиляторные Флаги
+
+Strict mode в TypeScript - это набор строгих проверок, которые делают код максимально type-safe. Понимание компиляторных флагов и правильная настройка `tsconfig.json` критически важны для production-ready проектов.
+
+### strict Флаг
+
+```json
+// tsconfig.json
+{
+  "compilerOptions": {
+    "strict": true  // Включает ВСЕ строгие проверки
+  }
+}
+```
+
+`"strict": true` эквивалентен включению всех этих флагов:
+- `strictNullChecks`
+- `strictFunctionTypes`
+- `strictBindCallApply`
+- `strictPropertyInitialization`
+- `noImplicitThis`
+- `alwaysStrict`
+- `noImplicitAny`
+- `useUnknownInCatchVariables`
+
+### strictNullChecks
+
+Запрещает присваивание `null` и `undefined` к другим типам:
+
+```typescript
+// strictNullChecks: true
+let name: string = "Alice";
+// name = null; // ✗ Ошибка!
+// name = undefined; // ✗ Ошибка!
+
+// Нужно явно указать
+let maybeName: string | null = "Bob";
+maybeName = null; // ✓
+
+// Проверка перед использованием
+function getLength(str: string | null): number {
+  // return str.length; // ✗ Ошибка! str может быть null
+  
+  if (str === null) {
+    return 0;
+  }
+  return str.length; // ✓ TypeScript знает, что str не null
+}
+
+// Optional chaining
+interface User {
+  profile?: {
+    name?: string;
+  };
+}
+
+const user: User = {};
+const name = user.profile?.name?.toUpperCase(); // string | undefined
+
+// Nullish coalescing
+const displayName = user.profile?.name ?? 'Anonymous';
+```
+
+### strictFunctionTypes
+
+Обеспечивает правильную контравариантность параметров функций:
+
+```typescript
+// strictFunctionTypes: true
+interface Animal {
+  name: string;
+}
+
+interface Dog extends Animal {
+  bark(): void;
+}
+
+// Без strictFunctionTypes
+type AnimalHandler = (animal: Animal) => void;
+type DogHandler = (dog: Dog) => void;
+
+// const handler: AnimalHandler = (dog: Dog) => {}; // ✗ Ошибка с strictFunctionTypes
+
+// Правильно - контравариантность
+const animalHandler: AnimalHandler = (animal: Animal) => {
+  console.log(animal.name);
+};
+
+const dogHandler: DogHandler = animalHandler; // ✓ Безопасно
+
+// Методы в интерфейсах бивариантны (для совместимости)
+interface Handler {
+  handle(animal: Animal): void;
+}
+
+class DogOnlyHandler implements Handler {
+  handle(dog: Dog): void {
+    dog.bark(); // Работает, но небезопасно
+  }
+}
+```
+
+### strictBindCallApply
+
+Проверяет типы для `bind`, `call` и `apply`:
+
+```typescript
+// strictBindCallApply: true
+function greet(name: string, age: number): string {
+  return `Hello, ${name}! You are ${age} years old.`;
+}
+
+// call - правильные типы
+greet.call(null, "Alice", 30); // ✓
+// greet.call(null, "Alice", "30"); // ✗ Ошибка! "30" не number
+
+// apply - правильные типы
+greet.apply(null, ["Bob", 25]); // ✓
+// greet.apply(null, ["Bob"]); // ✗ Ошибка! Не хватает аргументов
+
+// bind - правильные типы
+const boundGreet = greet.bind(null, "Charlie");
+boundGreet(35); // ✓
+// boundGreet("35"); // ✗ Ошибка!
+```
+
+### strictPropertyInitialization
+
+Требует инициализацию всех свойств класса:
+
+```typescript
+// strictPropertyInitialization: true
+class User {
+  name: string; // ✗ Ошибка! Не инициализировано
+  email: string;
+  age: number;
+  
+  constructor(name: string, email: string) {
+    this.name = name;
+    this.email = email;
+    // this.age не инициализирован - ошибка!
+  }
+}
+
+// Решения:
+
+// 1. Инициализация в конструкторе
+class User1 {
+  name: string;
+  email: string;
+  age: number;
+  
+  constructor(name: string, email: string, age: number) {
+    this.name = name;
+    this.email = email;
+    this.age = age; // ✓
+  }
+}
+
+// 2. Значение по умолчанию
+class User2 {
+  name: string;
+  email: string;
+  age: number = 0; // ✓ Значение по умолчанию
+  
+  constructor(name: string, email: string) {
+    this.name = name;
+    this.email = email;
+  }
+}
+
+// 3. Optional property
+class User3 {
+  name: string;
+  email: string;
+  age?: number; // ✓ Optional
+  
+  constructor(name: string, email: string) {
+    this.name = name;
+    this.email = email;
+  }
+}
+
+// 4. Definite assignment assertion (!)
+class User4 {
+  name!: string; // ✓ "Я знаю, что инициализирую это позже"
+  email!: string;
+  age!: number;
+  
+  constructor() {
+    this.initialize();
+  }
+  
+  private initialize() {
+    this.name = "Default";
+    this.email = "default@example.com";
+    this.age = 0;
+  }
+}
+```
+
+### noImplicitThis
+
+Запрещает неявный `this` тип `any`:
+
+```typescript
+// noImplicitThis: true
+interface Point {
+  x: number;
+  y: number;
+  moveBy(dx: number, dy: number): void;
+}
+
+const point: Point = {
+  x: 0,
+  y: 0,
+  moveBy(dx: number, dy: number) {
+    // this.x += dx; // ✗ Ошибка! this имеет тип any
+  },
+};
+
+// Решение - явный тип this
+const point2: Point = {
+  x: 0,
+  y: 0,
+  moveBy(this: Point, dx: number, dy: number) {
+    this.x += dx; // ✓
+    this.y += dy; // ✓
+  },
+};
+
+// В классах this выводится автоматически
+class Point3 {
+  x = 0;
+  y = 0;
+  
+  moveBy(dx: number, dy: number) {
+    this.x += dx; // ✓ this имеет тип Point3
+    this.y += dy;
+  }
+}
+```
+
+### alwaysStrict
+
+Генерирует `"use strict"` в выходных JS файлах:
+
+```json
+{
+  "compilerOptions": {
+    "alwaysStrict": true
+  }
+}
+```
+
+```javascript
+// Сгенерированный JS
+"use strict";
+function example() {
+    // ...
+}
+```
+
+### noImplicitAny
+
+Запрещает неявный тип `any`:
+
+```typescript
+// noImplicitAny: true
+
+// ✗ Ошибка! Параметр имеет неявный тип any
+// function log(message) {
+//   console.log(message);
+// }
+
+// ✓ Правильно - явный тип
+function log(message: string): void {
+  console.log(message);
+}
+
+// ✓ Правильно - явный any
+function logAny(message: any): void {
+  console.log(message);
+}
+
+// ✗ Ошибка в деструктуризации
+// function process({ name, age }) {
+//   console.log(name, age);
+// }
+
+// ✓ Правильно
+function process({ name, age }: { name: string; age: number }) {
+  console.log(name, age);
+}
+```
+
+### useUnknownInCatchVariables
+
+Тип `unknown` вместо `any` для переменных catch:
+
+```typescript
+// useUnknownInCatchVariables: true (TS 4.4+)
+try {
+  throw new Error("Something went wrong");
+} catch (error) {
+  // error имеет тип unknown (не any)
+  
+  // console.log(error.message); // ✗ Ошибка! unknown не имеет message
+  
+  // ✓ Правильно - type guard
+  if (error instanceof Error) {
+    console.log(error.message);
+  }
+  
+  // ✓ Правильно - type assertion
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    console.log((error as Error).message);
+  }
+}
+```
+
+### Практический tsconfig.json
+
+```json
+{
+  "compilerOptions": {
+    // Основные опции
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020", "DOM"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    
+    // Strict mode
+    "strict": true,
+    
+    // Дополнительные строгие проверки
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "exactOptionalPropertyTypes": true,
+    
+    // Module resolution
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    
+    // Source maps
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+    
+    // Другое
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "**/*.spec.ts"]
+}
+```
+
+### Дополнительные Полезные Флаги
+
+```json
+{
+  "compilerOptions": {
+    // Неиспользуемые переменные
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    
+    // Все пути должны возвращать значение
+    "noImplicitReturns": true,
+    
+    // Проверка fallthrough в switch
+    "noFallthroughCasesInSwitch": true,
+    
+    // Проверка индексного доступа
+    "noUncheckedIndexedAccess": true,
+    
+    // Требует override для переопределения
+    "noImplicitOverride": true,
+    
+    // Точная проверка optional properties
+    "exactOptionalPropertyTypes": true
+  }
+}
+```
+
+### Ключевые моменты
+
+- `strict: true` включает все строгие проверки
+- `strictNullChecks` запрещает `null`/`undefined` без явного указания
+- `strictFunctionTypes` обеспечивает правильную вариантность
+- `strictBindCallApply` проверяет типы для `bind`/`call`/`apply`
+- `strictPropertyInitialization` требует инициализацию свойств класса
+- `noImplicitThis` запрещает неявный `any` для `this`
+- `noImplicitAny` запрещает неявный тип `any`
+- `useUnknownInCatchVariables` делает `catch` переменные `unknown`
+- Дополнительные флаги улучшают code quality
+- Всегда используйте `strict: true` в новых проектах
