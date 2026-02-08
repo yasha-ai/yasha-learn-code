@@ -1,0 +1,122 @@
+# CSS Grid: grid-template-areas
+
+Привет! Сегодня мы погрузимся в мощный инструмент CSS Grid Layout – `grid-template-areas`. Он позволяет нам создавать сложные макеты, определяя области сетки именами, что делает структуру страницы более читаемой и интуитивно понятной.
+
+## Что такое grid-template-areas?
+
+`grid-template-areas` позволяет визуально представить структуру сетки, присваивая имена областям, занимаемым элементами. Вместо указания номеров строк и столбцов для каждого элемента, мы определяем именованные области в свойстве `grid-template-areas` родительского элемента (grid container).  Каждая строка в этом свойстве представляет строку в сетке, а каждое значение (имя) в строке представляет столбец.
+
+## Практический пример
+
+Давайте создадим простой макет с шапкой, навигацией, основным контентом и подвалом.
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+<title>Grid Areas Example</title>
+<style>
+.container {
+  display: grid;
+  grid-template-columns: 1fr 3fr 1fr; /* Три колонки: 1fr, 3fr, 1fr */
+  grid-template-rows: auto auto 1fr auto; /* Четыре строки: auto, auto, 1fr, auto */
+  grid-template-areas:
+    "header header header"
+    "nav main aside"
+    "nav main aside"
+    "footer footer footer";
+  gap: 10px; /* Отступы между ячейками */
+  height: 100vh; /* Занимаем всю высоту экрана */
+}
+
+header {
+  grid-area: header;
+  background-color: #eee;
+  padding: 20px;
+  text-align: center;
+}
+
+nav {
+  grid-area: nav;
+  background-color: #ddd;
+  padding: 20px;
+}
+
+main {
+  grid-area: main;
+  background-color: #ccc;
+  padding: 20px;
+}
+
+aside {
+  grid-area: aside;
+  background-color: #bbb;
+  padding: 20px;
+}
+
+footer {
+  grid-area: footer;
+  background-color: #aaa;
+  padding: 20px;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>Header</header>
+  <nav>Navigation</nav>
+  <main>Main Content</main>
+  <aside>Aside</aside>
+  <footer>Footer</footer>
+</div>
+
+</body>
+</html>
+```
+
+В этом примере:
+
+*   `.container` – наш grid container.
+*   `grid-template-columns` определяет ширину колонок.
+*   `grid-template-rows` определяет высоту строк.
+*   `grid-template-areas` определяет, как элементы будут располагаться в сетке.  Обратите внимание на визуальное представление макета:  "header header header" означает, что шапка занимает все три колонки в первой строке.
+*   Каждому элементу (header, nav, main, aside, footer) присваивается соответствующая область с помощью `grid-area`.
+
+## Использование точек (.)
+
+Точка (`.`) в `grid-template-areas` представляет пустую ячейку. Это полезно для создания пробелов или неиспользованных областей в макете.
+
+Пример:
+
+```css
+.container {
+  display: grid;
+  grid-template-columns: 1fr 2fr 1fr;
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "header header header"
+    "nav main ."
+    "footer footer footer";
+}
+```
+
+В этом случае, правая нижняя ячейка останется пустой.
+
+## Жизненный пример
+
+`grid-template-areas` широко используется во фреймворках и дизайн-системах для создания гибких и адаптивных макетов. Например, в большинстве современных веб-приложений, использующих CSS Grid, вы найдете этот подход для организации структуры страницы: шапка, боковая панель, основное содержимое, подвал.
+
+Многие сайты новостей и блоги используют `grid-template-areas` для управления расположением статей, рекламных блоков и другого контента.  Это позволяет легко менять макет страницы в зависимости от размера экрана или других условий.
+
+## Ключевые моменты
+
+*   `grid-template-areas` позволяет задавать макет сетки, используя имена областей.
+*   Каждая строка в `grid-template-areas` представляет строку в сетке.
+*   Каждое значение в строке представляет столбец.
+*   Используйте `grid-area` для назначения элементам именованных областей.
+*   Точка (`.`) представляет пустую ячейку.
+*   `grid-template-areas` делает структуру макета более читаемой и понятной.
+
+Поздравляю! Теперь вы знаете, как использовать `grid-template-areas` для создания сложных и гибких макетов.  Практикуйтесь, экспериментируйте, и вы увидите, насколько это мощный инструмент!

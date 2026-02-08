@@ -1,0 +1,104 @@
+## CSS: backface-visibility - Скрываем обратную сторону
+
+Привет! В этом уроке мы изучим свойство `backface-visibility` в CSS. Оно позволяет контролировать, будет ли видна обратная сторона элемента при его вращении в 3D пространстве.
+
+### Что такое backface-visibility?
+
+Представьте себе лист бумаги. У него есть лицевая и обратная стороны. Когда мы вращаем этот лист, мы можем видеть обе стороны. Свойство `backface-visibility` позволяет скрыть обратную сторону элемента, когда он повернут к нам этой стороной.
+
+По умолчанию, обратная сторона элемента видна (`backface-visibility: visible`). Мы можем её скрыть, установив значение `backface-visibility: hidden`.
+
+### Практические примеры
+
+Давайте рассмотрим примеры кода, чтобы лучше понять, как это работает.
+
+**Пример 1: Базовый пример**
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+<title>backface-visibility Example</title>
+<style>
+.container {
+  width: 200px;
+  height: 200px;
+  perspective: 500px; /* Необходимо для 3D трансформаций */
+}
+
+.cube {
+  width: 200px;
+  height: 200px;
+  position: relative;
+  transform-style: preserve-3d; /* Важно для 3D */
+  transition: transform 1s;
+}
+
+.cube:hover {
+  transform: rotateY(180deg); /* Вращаем куб при наведении */
+}
+
+.face {
+  width: 200px;
+  height: 200px;
+  position: absolute;
+  backface-visibility: hidden; /* Скрываем обратную сторону */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 2em;
+  color: white;
+}
+
+.front {
+  background-color: red;
+}
+
+.back {
+  background-color: blue;
+  transform: rotateY(180deg); /* Поворачиваем обратную сторону на 180 градусов */
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="cube">
+    <div class="face front">Front</div>
+    <div class="face back">Back</div>
+  </div>
+</div>
+</body>
+</html>
+```
+
+В этом примере мы создали куб. При наведении на куб он вращается.  Благодаря `backface-visibility: hidden`, обратная сторона куба исчезает, когда она повернута к нам.
+
+**Пример 2: Без backface-visibility**
+
+Если убрать `backface-visibility: hidden`, то при вращении куба мы увидим обратную сторону зеркально отображенной.
+
+```css
+.face {
+  width: 200px;
+  height: 200px;
+  position: absolute;
+  /* backface-visibility: hidden;  Удаляем это свойство */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 2em;
+  color: white;
+}
+```
+
+### Жизненный пример
+
+`backface-visibility` широко используется в создании интерактивных элементов, таких как карточки с переворотом (flip cards).  Например, во многих UI-библиотеках и фреймворках (React, Vue, Angular) при реализации анимаций и переходов часто используют это свойство для создания более плавных и реалистичных эффектов.  Также, его можно встретить в проектах, где используются 3D-трансформации для создания сложных визуальных эффектов, таких как галереи или презентации.
+
+### Ключевые моменты
+
+*   `backface-visibility` управляет видимостью обратной стороны элемента.
+*   `backface-visibility: hidden` скрывает обратную сторону.
+*   `backface-visibility: visible` (по умолчанию) показывает обратную сторону.
+*   Необходимо использовать `transform-style: preserve-3d` для работы с 3D трансформациями.
+*   Требуется `perspective` на родительском элементе для создания 3D пространства.

@@ -1,0 +1,94 @@
+## JavaScript: Мозги. Урок: __proto__ vs prototype
+
+В JavaScript понимание прототипного наследования – ключ к освоению языка. Сегодня мы разберемся с двумя важными, но часто путаемыми понятиями: `__proto__` и `prototype`.
+
+### Что такое `__proto__`?
+
+`__proto__` – это свойство объекта, которое указывает на его прототип. Прототип – это другой объект, от которого текущий объект наследует свойства и методы. Когда мы пытаемся получить доступ к свойству объекта, которого у него нет, JavaScript ищет это свойство в прототипе объекта (указанном через `__proto__`), затем в прототипе прототипа и так далее, пока не достигнет `null`.
+
+```javascript
+const animal = {
+  name: "Generic Animal",
+  makeSound: function() {
+    console.log("Generic sound");
+  }
+};
+
+const dog = {
+  name: "Dog",
+  bark: function() {
+    console.log("Woof!");
+  }
+};
+
+// Устанавливаем прототип для dog
+dog.__proto__ = animal;
+
+console.log(dog.name); // Выведет "Dog"
+dog.makeSound(); // Выведет "Generic sound" - метод унаследован от animal
+dog.bark(); // Выведет "Woof!"
+```
+
+### Что такое `prototype`?
+
+`prototype` – это свойство **функции-конструктора**. Оно определяет прототип для всех объектов, созданных с помощью этой функции-конструктора.  Другими словами,  `prototype` функции определяет `__proto__` создаваемых ею объектов.
+
+```javascript
+function Animal(name) {
+  this.name = name;
+}
+
+Animal.prototype.makeSound = function() {
+  console.log("Generic sound");
+};
+
+const cat = new Animal("Cat");
+cat.makeSound(); // Выведет "Generic sound"
+console.log(cat.__proto__ === Animal.prototype); // Выведет true
+```
+
+В этом примере, `Animal.prototype` является прототипом для объекта `cat`.  `cat.__proto__` указывает на `Animal.prototype`.
+
+### Ключевое различие
+
+*   `__proto__` – это свойство **объекта**, указывающее на его прототип.
+*   `prototype` – это свойство **функции-конструктора**, определяющее прототип для объектов, создаваемых этой функцией.
+
+### Практический пример кода
+
+```javascript
+function Person(name, age) {
+  this.name = name;
+  this.age = age;
+}
+
+Person.prototype.greet = function() {
+  console.log(`Hello, my name is ${this.name} and I am ${this.age} years old.`);
+};
+
+const john = new Person("John", 30);
+john.greet(); // Выведет "Hello, my name is John and I am 30 years old."
+
+const jane = new Person("Jane", 25);
+jane.greet(); // Выведет "Hello, my name is Jane and I am 25 years old."
+
+// Добавляем метод в прототип Person после создания объектов
+Person.prototype.sayGoodbye = function() {
+  console.log("Goodbye!");
+};
+
+john.sayGoodbye(); // Выведет "Goodbye!"
+jane.sayGoodbye(); // Выведет "Goodbye!"
+```
+
+### Жизненный пример
+
+Многие JavaScript фреймворки и библиотеки (React, Vue, Angular) активно используют прототипное наследование. Например, при создании компонентов в React, часто используется наследование от базового класса `React.Component`.  Методы, определенные в `React.Component.prototype`, становятся доступны всем компонентам, созданным на его основе.  Это позволяет избежать дублирования кода и делает структуру приложения более организованной.  В Vue.js также широко используется прототипное наследование для добавления глобальных методов и свойств во все экземпляры Vue.
+
+### Ключевые моменты
+
+*   `__proto__` - это свойство объекта, указывающее на его прототип.
+*   `prototype` - это свойство функции-конструктора, определяющее прототип для создаваемых объектов.
+*   Прототипное наследование позволяет объектам наследовать свойства и методы от других объектов.
+*   Изменения в `prototype` функции-конструктора отражаются на всех объектах, созданных с помощью этой функции.
+*   Понимание прототипного наследования необходимо для эффективной работы с JavaScript.
