@@ -1,0 +1,97 @@
+## JavaScript: AbortController - Контроль над асинхронностью
+
+В мире JavaScript, особенно при работе с асинхронными операциями, важно уметь их контролировать. `AbortController` предоставляет мощный механизм для отмены таких операций, например, HTTP-запросов или длительных вычислений.
+
+### Что такое AbortController?
+
+`AbortController` - это API в JavaScript, который позволяет вам отменять асинхронные операции.  Он состоит из двух частей: `AbortController` и `AbortSignal`. `AbortController` используется для создания сигнала отмены, а `AbortSignal` передается в асинхронную операцию, чтобы она могла при необходимости прерваться.
+
+Представьте, что вы отправили запрос на сервер, но пользователь решил перейти на другую страницу до получения ответа. Без `AbortController` браузер все равно будет ждать ответа, что неэффективно.
+
+### Пример использования
+
+```javascript
+// 1. Создаем экземпляр AbortController
+const controller = new AbortController();
+// 2. Получаем AbortSignal
+const signal = controller.signal;
+
+// Функция для выполнения асинхронной операции (например, fetch)
+async function fetchData() {
+  try {
+    const response = await fetch('https://api.example.com/data', { signal }); // Передаем signal в fetch
+    const data = await response.json();
+    console.log('Данные:', data);
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      console.log('Запрос отменен!');
+    } else {
+      console.error('Ошибка:', error);
+    }
+  }
+}
+
+// Запускаем асинхронную операцию
+fetchData();
+
+// 3. Отменяем запрос (например, при клике на кнопку)
+setTimeout(() => {
+  controller.abort(); // Отменяем запрос через 1 секунду
+}, 1000);
+```
+
+В этом примере мы создаем `AbortController` и передаем его `signal` в функцию `fetch`. Через секунду мы вызываем `controller.abort()`, что приводит к отмене запроса.  `fetch` выбрасывает `AbortError`, который мы обрабатываем в блоке `catch`.
+
+### Более сложный пример с UI
+
+```html
+<button id="fetchButton">Получить данные</button>
+<button id="cancelButton">Отменить</button>
+<div id="dataContainer"></div>
+
+<script>
+  const fetchButton = document.getElementById('fetchButton');
+  const cancelButton = document.getElementById('cancelButton');
+  const dataContainer = document.getElementById('dataContainer');
+
+  let controller = null;
+
+  fetchButton.addEventListener('click', async () => {
+    controller = new AbortController();
+    const signal = controller.signal;
+
+    try {
+      const response = await fetch('https://api.example.com/data', { signal });
+      const data = await response.json();
+      dataContainer.textContent = JSON.stringify(data);
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        dataContainer.textContent = 'Запрос отменен пользователем.';
+      } else {
+        dataContainer.textContent = 'Произошла ошибка: ' + error;
+      }
+    }
+  });
+
+  cancelButton.addEventListener('click', () => {
+    if (controller) {
+      controller.abort();
+      controller = null; // Сбрасываем контроллер
+    }
+  });
+</script>
+```
+
+Этот пример демонстрирует, как `AbortController` можно использовать для отмены запроса по нажатию кнопки.  Важно сбрасывать `controller` после отмены, чтобы при следующем нажатии кнопки "Получить данные" создавался новый `AbortController`.
+
+### Жизненный пример
+
+`AbortController` широко используется во фреймворках, таких как React и Vue, для управления асинхронными операциями в компонентах. Например, при переключении между маршрутами или при размонтировании компонента, можно отменить все незавершенные HTTP-запросы, чтобы избежать утечек памяти и нежелательных побочных эффектов.  Также, он используется в библиотеках для работы с сетью, например, `axios`, для предоставления пользователю возможности отменять запросы.
+
+### Ключевые моменты
+
+*   `AbortController` позволяет отменять асинхронные операции.
+*   `AbortController` создает `AbortSignal`, который передается в асинхронную операцию.
+*   Вызов `controller.abort()` отменяет операцию и генерирует `AbortError`.
+*   Важно обрабатывать `AbortError` в блоке `catch`.
+*   `AbortController` полезен для предотвращения утечек памяти и нежелательных побочных эффектов в асинхронных операциях, особенно в UI-приложениях.

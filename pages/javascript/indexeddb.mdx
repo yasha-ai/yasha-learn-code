@@ -1,0 +1,129 @@
+## JavaScript: Мозги. IndexedDB
+
+IndexedDB - это мощный инструмент для хранения структурированных данных в браузере. Он позволяет создавать базы данных прямо в браузере пользователя, обеспечивая офлайн-доступ и более быструю загрузку данных.
+
+### Что такое IndexedDB?
+
+IndexedDB - это NoSQL база данных, встроенная в браузер.  Она работает асинхронно и использует транзакции для обеспечения целостности данных.  В отличие от cookies или localStorage, IndexedDB может хранить гораздо большие объемы данных и обладает более развитыми возможностями индексации и поиска.
+
+### Основы работы с IndexedDB
+
+Давайте рассмотрим основные шаги работы с IndexedDB на примере:
+
+1.  **Открытие базы данных:**
+
+```javascript
+let db;
+const dbName = "myDatabase";
+const dbVersion = 1;
+
+const request = indexedDB.open(dbName, dbVersion);
+
+request.onerror = function(event) {
+  console.log("Ошибка открытия базы данных: " + event.target.errorCode);
+};
+
+request.onsuccess = function(event) {
+  db = event.target.result;
+  console.log("База данных успешно открыта");
+  // Здесь можно выполнять операции с базой данных
+};
+
+request.onupgradeneeded = function(event) {
+  db = event.target.result;
+
+  // Создаем хранилище объектов (object store)
+  const objectStore = db.createObjectStore("myObjectStore", { keyPath: "id", autoIncrement: true });
+
+  // Создаем индекс для поиска по полю "name"
+  objectStore.createIndex("name", "name", { unique: false });
+
+  console.log("База данных обновлена или создана");
+};
+```
+
+2.  **Добавление данных:**
+
+```javascript
+function addData(data) {
+  const transaction = db.transaction(["myObjectStore"], "readwrite");
+  const objectStore = transaction.objectStore("myObjectStore");
+  const request = objectStore.add(data);
+
+  request.onsuccess = function(event) {
+    console.log("Данные успешно добавлены: " + event.target.result);
+  };
+
+  request.onerror = function(event) {
+    console.log("Ошибка добавления данных: " + event.target.errorCode);
+  };
+}
+
+// Пример добавления данных
+const newData = { name: "John Doe", age: 30 };
+addData(newData);
+```
+
+3.  **Получение данных:**
+
+```javascript
+function getData(id) {
+  const transaction = db.transaction(["myObjectStore"], "readonly");
+  const objectStore = transaction.objectStore("myObjectStore");
+  const request = objectStore.get(id);
+
+  request.onsuccess = function(event) {
+    const data = event.target.result;
+    if (data) {
+      console.log("Полученные данные: ", data);
+    } else {
+      console.log("Данные с id " + id + " не найдены");
+    }
+  };
+
+  request.onerror = function(event) {
+    console.log("Ошибка получения данных: " + event.target.errorCode);
+  };
+}
+
+// Пример получения данных
+getData(1);
+```
+
+4.  **Удаление данных:**
+
+```javascript
+function deleteData(id) {
+  const transaction = db.transaction(["myObjectStore"], "readwrite");
+  const objectStore = transaction.objectStore("myObjectStore");
+  const request = objectStore.delete(id);
+
+  request.onsuccess = function(event) {
+    console.log("Данные с id " + id + " успешно удалены");
+  };
+
+  request.onerror = function(event) {
+    console.log("Ошибка удаления данных: " + event.target.errorCode);
+  };
+}
+
+// Пример удаления данных
+deleteData(1);
+```
+
+### Жизненный пример
+
+IndexedDB широко используется в веб-приложениях, требующих офлайн-доступ к данным или кэширование больших объемов информации. Например:
+
+*   **Офлайн-приложения:**  Приложения для заметок, редакторы текста, приложения для чтения, которые позволяют пользователям работать без подключения к интернету.
+*   **Кэширование данных:**  Кэширование изображений, видео и других ресурсов для ускорения загрузки веб-страниц.
+*   **Progressive Web Apps (PWA):**  IndexedDB часто используется в PWA для хранения данных и обеспечения офлайн-функциональности.
+*   **Фреймворки:** Многие современные JavaScript фреймворки и библиотеки (например, React, Angular, Vue.js) предоставляют абстракции над IndexedDB для упрощения работы с ней.
+
+### Ключевые моменты
+
+*   IndexedDB - это NoSQL база данных в браузере.
+*   Работает асинхронно и использует транзакции.
+*   Позволяет хранить большие объемы данных.
+*   Используется для офлайн-доступа и кэширования.
+*   Важно правильно обрабатывать ошибки и обновления схемы базы данных.
