@@ -40,10 +40,10 @@
 
 ### TypeScript: Броня 🛡️
 - [x] Зачем TypeScript?
-- [ ] Базовые типы
-- [ ] Интерфейсы
-- [ ] Type vs Interface
-- [ ] Generics
+- [x] Базовые типы ✅ (test-iteration 2026-02-08)
+- [x] Интерфейсы ✅ (test-iteration 2026-02-08)
+- [x] Type vs Interface ✅ (test-iteration 2026-02-08)
+- [x] Generics ✅ (test-iteration 2026-02-08)
 - [ ] Union и Intersection типы
 - [ ] Type Guards
 - [ ] Utility Types
