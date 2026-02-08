@@ -1,0 +1,496 @@
+## TypeScript: Броня. Урок 21: Слияние интерфейсов (Interface Merging)
+
+Interface merging (или declaration merging для интерфейсов) - это уникальная фича TypeScript, которая позволяет определить один и тот же интерфейс несколько раз, и TypeScript автоматически объединит все определения в одно. Это мощный механизм для расширения существующих типов, особенно полезный при работе с внешними библиотеками.
+
+### Базовое слияние
+
+```typescript
+// Первое определение
+interface User {
+  name: string;
+  email: string;
+}
+
+// Второе определение того же интерфейса
+interface User {
+  age: number;
+  role: string;
+}
+
+// TypeScript автоматически объединяет их
+const user: User = {
+  name: 'Alice',
+  email: 'alice@example.com',
+  age: 30,
+  role: 'admin',
+};
+
+// user должен иметь все свойства из обоих определений
+```
+
+### Слияние с методами
+
+```typescript
+interface Calculator {
+  add(a: number, b: number): number;
+}
+
+interface Calculator {
+  subtract(a: number, b: number): number;
+}
+
+interface Calculator {
+  multiply(a: number, b: number): number;
+  divide(a: number, b: number): number;
+}
+
+// Объединённый интерфейс
+const calc: Calculator = {
+  add: (a, b) => a + b,
+  subtract: (a, b) => a - b,
+  multiply: (a, b) => a * b,
+  divide: (a, b) => a / b,
+};
+```
+
+### Перегрузка функций через слияние
+
+```typescript
+// Слияние позволяет создавать перегрузки функций
+interface Formatter {
+  format(value: number): string;
+}
+
+interface Formatter {
+  format(value: Date): string;
+}
+
+interface Formatter {
+  format(value: boolean): string;
+}
+
+// Реализация должна учитывать все перегрузки
+const formatter: Formatter = {
+  format(value: number | Date | boolean): string {
+    if (typeof value === 'number') {
+      return value.toFixed(2);
+    }
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+    return value ? 'Yes' : 'No';
+  },
+};
+
+// TypeScript знает все перегрузки
+const num = formatter.format(42);        // ✓ string
+const date = formatter.format(new Date()); // ✓ string
+const bool = formatter.format(true);     // ✓ string
+```
+
+### Практический пример: Расширение Window
+
+```typescript
+// Расширение глобального объекта Window
+// Файл: globals.d.ts
+
+interface Window {
+  myCustomProperty: string;
+  myAPI: {
+    version: string;
+    init(): void;
+  };
+}
+
+// Теперь можно использовать без ошибок
+window.myCustomProperty = 'Hello';
+window.myAPI = {
+  version: '1.0.0',
+  init() {
+    console.log('API initialized');
+  },
+};
+
+// В другом файле можно добавить ещё свойства
+interface Window {
+  analytics?: {
+    track(event: string, data?: any): void;
+  };
+}
+
+// TypeScript объединит оба определения
+if (window.analytics) {
+  window.analytics.track('page_view');
+}
+```
+
+### Расширение сторонних библиотек
+
+```typescript
+// Расширение типов из библиотеки (например, Express)
+
+// Файл: express.d.ts
+declare namespace Express {
+  interface Request {
+    // Добавление кастомных свойств в Request
+    user?: {
+      id: string;
+      email: string;
+      role: string;
+    };
+    requestId?: string;
+    startTime?: number;
+  }
+
+  interface Response {
+    // Добавление кастомных методов в Response
+    success(data: any): void;
+    error(message: string, code?: number): void;
+  }
+}
+
+// Использование в коде
+import { Request, Response } from 'express';
+
+app.use((req: Request, res: Response, next) => {
+  req.requestId = generateId();
+  req.startTime = Date.now();
+  next();
+});
+
+app.get('/profile', (req: Request, res: Response) => {
+  if (!req.user) {
+    return res.error('Unauthorized', 401);
+  }
+  
+  res.success({
+    user: req.user,
+    requestId: req.requestId,
+  });
+});
+
+// Реализация кастомных методов
+import express from 'express';
+
+express.response.success = function(data: any) {
+  this.json({ success: true, data });
+};
+
+express.response.error = function(message: string, code = 500) {
+  this.status(code).json({ success: false, error: message });
+};
+```
+
+### Жизненный пример: Plugin System
+
+```typescript
+// Базовый интерфейс плагина
+interface Plugin {
+  name: string;
+  version: string;
+  init(): void;
+}
+
+// Разные модули могут добавлять свои методы
+// analytics-plugin.ts
+interface Plugin {
+  trackEvent?(event: string, data?: any): void;
+}
+
+// auth-plugin.ts
+interface Plugin {
+  authenticate?(token: string): Promise<boolean>;
+  getUser?(): Promise<User | null>;
+}
+
+// storage-plugin.ts
+interface Plugin {
+  saveData?(key: string, value: any): Promise<void>;
+  loadData?(key: string): Promise<any>;
+}
+
+// Все методы объединяются в один тип
+const myPlugin: Plugin = {
+  name: 'my-plugin',
+  version: '1.0.0',
+  init() {
+    console.log('Plugin initialized');
+  },
+  trackEvent(event, data) {
+    console.log(`Event: ${event}`, data);
+  },
+  async authenticate(token) {
+    return token === 'valid-token';
+  },
+  async getUser() {
+    return { id: '1', name: 'Alice' };
+  },
+  async saveData(key, value) {
+    localStorage.setItem(key, JSON.stringify(value));
+  },
+  async loadData(key) {
+    const item = localStorage.getItem(key);
+    return item ? JSON.parse(item) : null;
+  },
+};
+```
+
+### Слияние generic интерфейсов
+
+```typescript
+// Generic интерфейс может сливаться
+interface Box<T> {
+  value: T;
+  getValue(): T;
+}
+
+interface Box<T> {
+  setValue(value: T): void;
+  map<U>(fn: (value: T) => U): Box<U>;
+}
+
+// Объединённый интерфейс
+class BoxImpl<T> implements Box<T> {
+  constructor(public value: T) {}
+  
+  getValue() {
+    return this.value;
+  }
+  
+  setValue(value: T) {
+    this.value = value;
+  }
+  
+  map<U>(fn: (value: T) => U): Box<U> {
+    return new BoxImpl(fn(this.value));
+  }
+}
+
+const numberBox = new BoxImpl(42);
+const stringBox = numberBox.map(n => n.toString());
+```
+
+### Ограничения слияния
+
+```typescript
+// ✗ Нельзя объявить одно и то же свойство с разными типами
+interface Config {
+  port: number;
+}
+
+// interface Config {
+//   port: string; // ✗ Ошибка! Конфликт типов
+// }
+
+// ✓ Можно сузить тип
+interface Response {
+  data: any;
+}
+
+interface Response {
+  data: { id: string; name: string }; // ✓ Более специфичный тип
+}
+
+// ✗ Слияние работает только для интерфейсов, не для type aliases
+// type User = { name: string };
+// type User = { age: number }; // ✗ Ошибка! Duplicate identifier
+
+// ✓ Используйте interface для слияния
+interface User {
+  name: string;
+}
+interface User {
+  age: number;
+}
+```
+
+### Module Augmentation
+
+```typescript
+// Расширение модулей из node_modules
+// Файл: augmentations.d.ts
+
+// Расширение библиотеки 'axios'
+import 'axios';
+
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    // Добавление кастомных опций
+    retryCount?: number;
+    retryDelay?: number;
+    timeout?: number;
+  }
+}
+
+// Использование
+import axios from 'axios';
+
+axios.get('/api/data', {
+  retryCount: 3,
+  retryDelay: 1000,
+  timeout: 5000,
+}); // ✓ TypeScript знает о новых опциях
+
+// Расширение React
+import 'react';
+
+declare module 'react' {
+  interface HTMLAttributes<T> {
+    // Добавление кастомных data-атрибутов
+    'data-analytics-id'?: string;
+    'data-feature-flag'?: string;
+  }
+}
+
+// Использование в JSX
+<div data-analytics-id="hero-section" data-feature-flag="new-ui">
+  Content
+</div>
+```
+
+### Global Augmentation
+
+```typescript
+// Расширение глобальных типов
+// Файл: global.d.ts
+
+declare global {
+  interface Array<T> {
+    // Добавление кастомных методов в Array
+    first(): T | undefined;
+    last(): T | undefined;
+    shuffle(): T[];
+  }
+
+  interface String {
+    // Добавление методов в String
+    capitalize(): string;
+    truncate(length: number): string;
+  }
+
+  // Добавление глобальных переменных
+  var API_URL: string;
+  var IS_PRODUCTION: boolean;
+}
+
+export {}; // Делает файл модулем
+
+// Реализация расширений
+Array.prototype.first = function<T>(this: T[]): T | undefined {
+  return this[0];
+};
+
+Array.prototype.last = function<T>(this: T[]): T | undefined {
+  return this[this.length - 1];
+};
+
+Array.prototype.shuffle = function<T>(this: T[]): T[] {
+  const arr = [...this];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+};
+
+String.prototype.capitalize = function(): string {
+  return this.charAt(0).toUpperCase() + this.slice(1);
+};
+
+String.prototype.truncate = function(length: number): string {
+  return this.length > length ? this.slice(0, length) + '...' : this.toString();
+};
+
+// Использование
+const numbers = [1, 2, 3, 4, 5];
+console.log(numbers.first()); // 1
+console.log(numbers.last());  // 5
+console.log(numbers.shuffle()); // [3, 1, 5, 2, 4]
+
+const text = "hello world";
+console.log(text.capitalize()); // "Hello world"
+console.log(text.truncate(5));  // "hello..."
+```
+
+### Namespace Merging с Interfaces
+
+```typescript
+// Интерфейсы могут сливаться с namespace
+interface Logger {
+  log(message: string): void;
+}
+
+namespace Logger {
+  export const level = 'info';
+  
+  export function create(): Logger {
+    return {
+      log(message) {
+        console.log(`[${level}] ${message}`);
+      },
+    };
+  }
+}
+
+// Использование
+const logger = Logger.create();
+logger.log('Hello'); // [info] Hello
+console.log(Logger.level); // info
+```
+
+### Best Practices
+
+```typescript
+// ✓ Хорошо: Организованное расширение
+// types/express.d.ts
+import 'express';
+
+declare module 'express' {
+  interface Request {
+    userId?: string;
+  }
+}
+
+// types/window.d.ts
+interface Window {
+  config: AppConfig;
+}
+
+// ✗ Плохо: Беспорядочное расширение в разных файлах
+// Может привести к путанице и ошибкам
+
+// ✓ Хорошо: Документирование расширений
+/**
+ * Расширение Express Request для добавления информации о пользователе
+ * Устанавливается в auth middleware
+ */
+declare module 'express' {
+  interface Request {
+    /** ID авторизованного пользователя */
+    userId?: string;
+    /** Роль пользователя */
+    userRole?: 'admin' | 'user' | 'moderator';
+  }
+}
+
+// ✓ Хорошо: Проверка существования перед использованием
+if (window.myAPI) {
+  window.myAPI.init();
+}
+
+// ✗ Плохо: Предположение что расширение всегда есть
+window.myAPI.init(); // Может быть undefined
+```
+
+### Ключевые моменты
+
+- Interface merging позволяет определить интерфейс несколько раз
+- TypeScript автоматически объединяет все определения в один интерфейс
+- Работает только с интерфейсами, не с type aliases
+- Идеально для расширения сторонних библиотек и глобальных объектов
+- Module augmentation позволяет расширять экспортируемые типы из node_modules
+- Global augmentation расширяет встроенные типы (Array, String, Window и т.д.)
+- Нельзя объявлять одно свойство с разными несовместимыми типами
+- Можно создавать перегрузки функций через слияние
+- Интерфейсы могут сливаться с namespace
+- Используйте для создания plugin систем и расширяемых архитектур
