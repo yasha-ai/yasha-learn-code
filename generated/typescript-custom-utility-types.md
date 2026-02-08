@@ -1,0 +1,422 @@
+## TypeScript: Броня. Урок 36: Создание Custom Utility Types
+
+Создание собственных utility types - это мощный навык, который позволяет создавать переиспользуемые типовые абстракции для вашего проекта. Знание того, как комбинировать встроенные utility types и создавать кастомные, критически важно для advanced TypeScript разработки.
+
+### Базовые Custom Utility Types
+
+```typescript
+// Делаем только определённые поля optional
+type Optional<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  age: number;
+}
+
+// id и name обязательны, email и age опциональны
+type UserRegistration = Optional<User, 'email' | 'age'>;
+// {
+//   id: string;
+//   name: string;
+//   email?: string;
+//   age?: number;
+// }
+
+// Делаем только определённые поля readonly
+type ReadonlyBy<T, K extends keyof T> = Omit<T, K> & Readonly<Pick<T, K>>;
+
+// id readonly, остальные можно менять
+type UserWithReadonlyId = ReadonlyBy<User, 'id'>;
+
+// Делаем только определённые поля required
+type RequiredBy<T, K extends keyof T> = T & Required<Pick<T, K>>;
+
+interface Config {
+  host?: string;
+  port?: number;
+  ssl?: boolean;
+}
+
+// host обязателен, остальные опциональны
+type ConfigWithRequiredHost = RequiredBy<Config, 'host'>;
+// {
+//   host: string;
+//   port?: number;
+//   ssl?: boolean;
+// }
+```
+
+### Nullable и Optional Types
+
+```typescript
+// Делает все поля nullable
+type Nullable<T> = {
+  [K in keyof T]: T[K] | null;
+};
+
+type NullableUser = Nullable<User>;
+// {
+//   id: string | null;
+//   name: string | null;
+//   email: string | null;
+//   age: number | null;
+// }
+
+// Делает все поля optional и nullable
+type Maybe<T> = {
+  [K in keyof T]?: T[K] | null;
+};
+
+type MaybeUser = Maybe<User>;
+// {
+//   id?: string | null;
+//   name?: string | null;
+//   email?: string | null;
+//   age?: number | null;
+// }
+
+// Unwrap nullable
+type NonNullableFields<T> = {
+  [K in keyof T]: NonNullable<T[K]>;
+};
+```
+
+### Deep Utility Types
+
+```typescript
+// Deep Partial - рекурсивно делает все поля optional
+type DeepPartial<T> = {
+  [P in keyof T]?: T[P] extends object ? DeepPartial<T[P]> : T[P];
+};
+
+// Deep Readonly - рекурсивно делает все поля readonly
+type DeepReadonly<T> = {
+  readonly [P in keyof T]: T[P] extends object ? DeepReadonly<T[P]> : T[P];
+};
+
+// Deep Required - рекурсивно делает все поля required
+type DeepRequired<T> = {
+  [P in keyof T]-?: T[P] extends object ? DeepRequired<T[P]> : T[P];
+};
+
+// Deep Nullable - рекурсивно добавляет null
+type DeepNullable<T> = {
+  [P in keyof T]: T[P] extends object
+    ? DeepNullable<T[P]> | null
+    : T[P] | null;
+};
+
+// Пример использования
+interface NestedConfig {
+  server: {
+    host: string;
+    port: number;
+    ssl: {
+      enabled: boolean;
+      cert: string;
+    };
+  };
+}
+
+type PartialNestedConfig = DeepPartial<NestedConfig>;
+// Все вложенные поля опциональны
+```
+
+### Mutable Types
+
+```typescript
+// Удаляет readonly модификаторы
+type Mutable<T> = {
+  -readonly [P in keyof T]: T[P];
+};
+
+interface ReadonlyUser {
+  readonly id: string;
+  readonly name: string;
+  readonly email: string;
+}
+
+type MutableUser = Mutable<ReadonlyUser>;
+// {
+//   id: string;
+//   name: string;
+//   email: string;
+// }
+
+// Deep Mutable
+type DeepMutable<T> = {
+  -readonly [P in keyof T]: T[P] extends object ? DeepMutable<T[P]> : T[P];
+};
+```
+
+### Filtering Types
+
+```typescript
+// Выбирает только поля определённого типа
+type PickByType<T, ValueType> = {
+  [K in keyof T as T[K] extends ValueType ? K : never]: T[K];
+};
+
+interface Mixed {
+  id: string;
+  name: string;
+  age: number;
+  count: number;
+  active: boolean;
+}
+
+type OnlyStrings = PickByType<Mixed, string>;
+// { id: string; name: string }
+
+type OnlyNumbers = PickByType<Mixed, number>;
+// { age: number; count: number }
+
+// Исключает поля определённого типа
+type OmitByType<T, ValueType> = {
+  [K in keyof T as T[K] extends ValueType ? never : K]: T[K];
+};
+
+type NoStrings = OmitByType<Mixed, string>;
+// { age: number; count: number; active: boolean }
+
+// Только функции
+type FunctionKeys<T> = {
+  [K in keyof T]: T[K] extends Function ? K : never;
+}[keyof T];
+
+type PickFunctions<T> = Pick<T, FunctionKeys<T>>;
+
+interface UserService {
+  name: string;
+  getUser(): User;
+  deleteUser(id: string): void;
+  updateUser(user: User): Promise<void>;
+}
+
+type ServiceMethods = PickFunctions<UserService>;
+// {
+//   getUser: () => User;
+//   deleteUser: (id: string) => void;
+//   updateUser: (user: User) => Promise<void>;
+// }
+```
+
+### Практический пример: API DTO Types
+
+```typescript
+// Автоматическое создание DTO типов
+type CreateDTO<T> = Omit<T, 'id' | 'createdAt' | 'updatedAt'>;
+
+type UpdateDTO<T> = Partial<Omit<T, 'id' | 'createdAt' | 'updatedAt'>>;
+
+type ResponseDTO<T> = Omit<T, never>; // Все поля as-is
+
+interface BaseEntity {
+  id: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface Product extends BaseEntity {
+  name: string;
+  description: string;
+  price: number;
+  categoryId: string;
+}
+
+// Автоматически сгенерированные DTOs
+type CreateProductDTO = CreateDTO<Product>;
+// {
+//   name: string;
+//   description: string;
+//   price: number;
+//   categoryId: string;
+// }
+
+type UpdateProductDTO = UpdateDTO<Product>;
+// {
+//   name?: string;
+//   description?: string;
+//   price?: number;
+//   categoryId?: string;
+// }
+
+// Более продвинутый DTO generator
+type ApiDTO<T, Mode extends 'create' | 'update' | 'response'> = Mode extends 'create'
+  ? CreateDTO<T>
+  : Mode extends 'update'
+  ? UpdateDTO<T>
+  : ResponseDTO<T>;
+
+type ProductCreate = ApiDTO<Product, 'create'>;
+type ProductUpdate = ApiDTO<Product, 'update'>;
+type ProductResponse = ApiDTO<Product, 'response'>;
+```
+
+### Жизненный пример: Form Builder Types
+
+```typescript
+// Type-safe форма builder
+type FormValue = string | number | boolean | Date;
+
+type FormField<T extends FormValue> = {
+  value: T;
+  defaultValue: T;
+  required: boolean;
+  error: string | null;
+  touched: boolean;
+};
+
+type FormConfig<T extends Record<string, FormValue>> = {
+  [K in keyof T]: Omit<FormField<T[K]>, 'value' | 'error' | 'touched'>;
+};
+
+type FormState<T extends Record<string, FormValue>> = {
+  [K in keyof T]: FormField<T[K]>;
+};
+
+// Validation rules
+type ValidationRule<T> = (value: T) => string | null;
+
+type FormValidation<T extends Record<string, FormValue>> = {
+  [K in keyof T]?: ValidationRule<T[K]>[];
+};
+
+// Extract form values
+type FormValues<T extends Record<string, FormValue>> = {
+  [K in keyof T]: T[K];
+};
+
+// Extract touched fields
+type TouchedFields<T extends Record<string, FormValue>> = {
+  [K in keyof T]: boolean;
+};
+
+// Extract errors
+type FormErrors<T extends Record<string, FormValue>> = {
+  [K in keyof T]: string | null;
+};
+
+// Пример использования
+interface LoginForm {
+  email: string;
+  password: string;
+  rememberMe: boolean;
+}
+
+type LoginFormConfig = FormConfig<LoginForm>;
+type LoginFormState = FormState<LoginForm>;
+type LoginFormValidation = FormValidation<LoginForm>;
+type LoginFormValues = FormValues<LoginForm>;
+```
+
+### Rename Keys
+
+```typescript
+// Переименование ключей
+type RenameKey<T, OldKey extends keyof T, NewKey extends string> = 
+  Omit<T, OldKey> & Record<NewKey, T[OldKey]>;
+
+interface User {
+  id: string;
+  name: string;
+}
+
+type UserWithUserId = RenameKey<User, 'id', 'userId'>;
+// { name: string; userId: string }
+
+// Rename multiple keys
+type RenameKeys<T, KeyMap extends Partial<Record<keyof T, string>>> = {
+  [K in keyof T as K extends keyof KeyMap
+    ? KeyMap[K] extends string
+      ? KeyMap[K]
+      : K
+    : K]: T[K];
+};
+
+type UserRenamed = RenameKeys<User, { id: 'userId'; name: 'userName' }>;
+// { userId: string; userName: string }
+```
+
+### Flatten Types
+
+```typescript
+// Flatten nested object
+type Flatten<T> = T extends object
+  ? {
+      [K in keyof T]: T[K];
+    }
+  : T;
+
+type User = {
+  id: string;
+} & {
+  name: string;
+} & {
+  email: string;
+};
+
+type FlatUser = Flatten<User>;
+// { id: string; name: string; email: string }
+
+// Expand - делает тип более читаемым в IDE
+type Expand<T> = T extends infer O ? { [K in keyof O]: O[K] } : never;
+
+type Complex = Pick<User, 'id'> & Pick<User, 'name'>;
+type Expanded = Expand<Complex>;
+// { id: string; name: string }
+```
+
+### Merge Types
+
+```typescript
+// Merge с override
+type Merge<T, U> = Omit<T, keyof U> & U;
+
+interface Base {
+  id: string;
+  name: string;
+  age: number;
+}
+
+interface Override {
+  age: string; // меняем тип
+  email: string; // добавляем новое поле
+}
+
+type Merged = Merge<Base, Override>;
+// {
+//   id: string;
+//   name: string;
+//   age: string;    // переопределён
+//   email: string;  // добавлен
+// }
+
+// Deep Merge
+type DeepMerge<T, U> = {
+  [K in keyof T | keyof U]: K extends keyof U
+    ? U[K]
+    : K extends keyof T
+    ? T[K] extends object
+      ? U[K & keyof U] extends object
+        ? DeepMerge<T[K], U[K & keyof U]>
+        : T[K]
+      : T[K]
+    : never;
+};
+```
+
+### Ключевые моменты
+
+- Custom utility types создаются комбинированием встроенных utility types
+- `Omit` + `Partial` + `Pick` - основа для многих кастомных типов
+- Deep версии используют рекурсию для вложенных структур
+- Filtering types используют conditional types и mapped types
+- Можно создавать типы для автоматической генерации DTOs
+- RenameKeys позволяет переименовывать свойства
+- Merge types полезны для комбинирования типов с override
+- Expand/Flatten улучшают читаемость сложных типов в IDE
+- Создавайте библиотеку utility types для вашего проекта
+- Документируйте сложные utility types для команды

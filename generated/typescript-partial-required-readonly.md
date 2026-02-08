@@ -1,0 +1,457 @@
+## TypeScript: Броня. Урок 30: Partial, Required, Readonly
+
+`Partial`, `Required` и `Readonly` - это встроенные utility types TypeScript, которые трансформируют свойства объектных типов. Они являются основой для создания гибких и type-safe API, особенно полезны при работе с формами, конфигурациями и частичными обновлениями данных.
+
+### Partial<T>
+
+`Partial<T>` делает все свойства типа `T` optional:
+
+```typescript
+// Определение Partial (встроенное)
+type Partial<T> = {
+  [P in keyof T]?: T[P];
+};
+
+// Пример использования
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  age: number;
+}
+
+// Все поля опциональны
+type PartialUser = Partial<User>;
+// {
+//   id?: string;
+//   name?: string;
+//   email?: string;
+//   age?: number;
+// }
+
+// Практическое применение: partial update
+function updateUser(id: string, updates: Partial<User>): User {
+  const currentUser = getUserById(id);
+  return { ...currentUser, ...updates };
+}
+
+// Можем обновлять только нужные поля
+updateUser('123', { name: 'Alice' });           // ✓
+updateUser('123', { email: 'new@example.com' }); // ✓
+updateUser('123', { name: 'Bob', age: 31 });    // ✓
+```
+
+### Required<T>
+
+`Required<T>` делает все свойства типа `T` обязательными (удаляет `?`):
+
+```typescript
+// Определение Required (встроенное)
+type Required<T> = {
+  [P in keyof T]-?: T[P];
+};
+
+// Пример использования
+interface Config {
+  host?: string;
+  port?: number;
+  ssl?: boolean;
+}
+
+// Все поля обязательны
+type RequiredConfig = Required<Config>;
+// {
+//   host: string;
+//   port: number;
+//   ssl: boolean;
+// }
+
+// Практическое применение: валидация конфигурации
+function validateConfig(config: Config): config is RequiredConfig {
+  return (
+    config.host !== undefined &&
+    config.port !== undefined &&
+    config.ssl !== undefined
+  );
+}
+
+function startServer(config: Config): void {
+  if (!validateConfig(config)) {
+    throw new Error('Invalid config');
+  }
+  
+  // Теперь TypeScript знает, что все поля есть
+  console.log(`Server starting on ${config.host}:${config.port}`);
+}
+```
+
+### Readonly<T>
+
+`Readonly<T>` делает все свойства типа `T` только для чтения:
+
+```typescript
+// Определение Readonly (встроенное)
+type Readonly<T> = {
+  readonly [P in keyof T]: T[P];
+};
+
+// Пример использования
+interface Point {
+  x: number;
+  y: number;
+}
+
+type ReadonlyPoint = Readonly<Point>;
+// {
+//   readonly x: number;
+//   readonly y: number;
+// }
+
+const point: ReadonlyPoint = { x: 10, y: 20 };
+// point.x = 30; // ✗ Ошибка: readonly
+
+// Практическое применение: immutable данные
+function createImmutableConfig<T extends object>(config: T): Readonly<T> {
+  return Object.freeze(config);
+}
+
+const appConfig = createImmutableConfig({
+  apiUrl: 'https://api.example.com',
+  timeout: 5000,
+});
+
+// appConfig.apiUrl = 'https://new-api.com'; // ✗ Ошибка: readonly
+```
+
+### Комбинирование Utility Types
+
+```typescript
+// Partial + Readonly = опциональные readonly поля
+type PartialReadonly<T> = Partial<Readonly<T>>;
+
+interface Settings {
+  theme: 'light' | 'dark';
+  language: string;
+  notifications: boolean;
+}
+
+type PartialReadonlySettings = PartialReadonly<Settings>;
+// {
+//   readonly theme?: 'light' | 'dark';
+//   readonly language?: string;
+//   readonly notifications?: boolean;
+// }
+
+// Required + Readonly = все обязательные и readonly
+type RequiredReadonly<T> = Required<Readonly<T>>;
+
+// Conditional utility type
+type MakeRequired<T, K extends keyof T> = T & Required<Pick<T, K>>;
+
+interface Form {
+  name?: string;
+  email?: string;
+  age?: number;
+}
+
+// Делаем только email обязательным
+type FormWithRequiredEmail = MakeRequired<Form, 'email'>;
+// {
+//   name?: string;
+//   email: string;  // обязательно!
+//   age?: number;
+// }
+```
+
+### Практический пример: Form State
+
+```typescript
+// Система управления состоянием формы
+interface FormField<T> {
+  value: T;
+  error: string | null;
+  touched: boolean;
+}
+
+type FormState<T extends Record<string, any>> = {
+  [K in keyof T]: FormField<T[K]>;
+};
+
+// Initial state - все поля опциональны
+type InitialFormState<T extends Record<string, any>> = Partial<
+  FormState<T>
+>;
+
+// Submitted state - все поля обязательны и readonly
+type SubmittedFormState<T extends Record<string, any>> = Readonly<
+  Required<FormState<T>>
+>;
+
+// Определение формы
+interface LoginFormData {
+  email: string;
+  password: string;
+  rememberMe: boolean;
+}
+
+class FormManager<T extends Record<string, any>> {
+  private state: FormState<T>;
+  
+  constructor(initialState: InitialFormState<T>) {
+    this.state = {} as FormState<T>;
+    
+    for (const key in initialState) {
+      this.state[key] = initialState[key]!;
+    }
+  }
+  
+  setValue<K extends keyof T>(field: K, value: T[K]): void {
+    this.state[field].value = value;
+    this.state[field].touched = true;
+  }
+  
+  setError<K extends keyof T>(field: K, error: string | null): void {
+    this.state[field].error = error;
+  }
+  
+  getState(): Readonly<FormState<T>> {
+    return this.state;
+  }
+  
+  submit(): SubmittedFormState<T> | null {
+    // Валидация - все поля заполнены
+    for (const key in this.state) {
+      if (this.state[key].error !== null) {
+        return null;
+      }
+    }
+    
+    return Object.freeze(this.state) as SubmittedFormState<T>;
+  }
+}
+
+// Использование
+const loginForm = new FormManager<LoginFormData>({
+  email: {
+    value: '',
+    error: null,
+    touched: false,
+  },
+  password: {
+    value: '',
+    error: null,
+    touched: false,
+  },
+  rememberMe: {
+    value: false,
+    error: null,
+    touched: false,
+  },
+});
+
+loginForm.setValue('email', 'user@example.com');
+loginForm.setValue('password', 'secret123');
+
+const submittedData = loginForm.submit();
+if (submittedData) {
+  // Все поля гарантированно заполнены и readonly
+  console.log(submittedData.email.value);
+}
+```
+
+### Deep Versions
+
+```typescript
+// Deep Partial - рекурсивно делает все поля optional
+type DeepPartial<T> = {
+  [P in keyof T]?: T[P] extends object ? DeepPartial<T[P]> : T[P];
+};
+
+interface NestedConfig {
+  server: {
+    host: string;
+    port: number;
+    ssl: {
+      enabled: boolean;
+      cert: string;
+    };
+  };
+  database: {
+    url: string;
+    pool: {
+      min: number;
+      max: number;
+    };
+  };
+}
+
+type PartialNestedConfig = DeepPartial<NestedConfig>;
+// Все вложенные поля опциональны
+
+const partialConfig: PartialNestedConfig = {
+  server: {
+    ssl: {
+      enabled: true,
+      // cert не обязателен
+    },
+    // host и port не обязательны
+  },
+  // database не обязателен
+};
+
+// Deep Readonly - рекурсивно делает все поля readonly
+type DeepReadonly<T> = {
+  readonly [P in keyof T]: T[P] extends object
+    ? DeepReadonly<T[P]>
+    : T[P];
+};
+
+type ImmutableConfig = DeepReadonly<NestedConfig>;
+
+const config: ImmutableConfig = {
+  server: {
+    host: 'localhost',
+    port: 3000,
+    ssl: {
+      enabled: true,
+      cert: '/path/to/cert',
+    },
+  },
+  database: {
+    url: 'postgresql://localhost',
+    pool: { min: 2, max: 10 },
+  },
+};
+
+// config.server.host = 'new'; // ✗ Ошибка: readonly
+// config.server.ssl.enabled = false; // ✗ Ошибка: readonly
+```
+
+### Жизненный пример: API Client
+
+```typescript
+// Type-safe API client с utility types
+
+interface ApiResponse<T> {
+  data: T;
+  status: number;
+  headers: Readonly<Record<string, string>>;
+}
+
+interface RequestConfig {
+  baseURL?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  params?: Record<string, string | number>;
+}
+
+class ApiClient {
+  private config: Required<Readonly<RequestConfig>>;
+  
+  constructor(config: RequestConfig = {}) {
+    // Устанавливаем defaults и делаем readonly
+    this.config = Object.freeze({
+      baseURL: config.baseURL ?? '',
+      timeout: config.timeout ?? 5000,
+      headers: config.headers ?? {},
+      params: config.params ?? {},
+    });
+  }
+  
+  async get<T>(
+    endpoint: string,
+    config?: Partial<RequestConfig>
+  ): Promise<ApiResponse<T>> {
+    const mergedConfig = { ...this.config, ...config };
+    
+    // implementation
+    return {
+      data: {} as T,
+      status: 200,
+      headers: {},
+    };
+  }
+  
+  async post<T, D = any>(
+    endpoint: string,
+    data: D,
+    config?: Partial<RequestConfig>
+  ): Promise<ApiResponse<T>> {
+    // implementation
+    return {
+      data: {} as T,
+      status: 201,
+      headers: {},
+    };
+  }
+  
+  // Обновление конфигурации (создаёт новый клиент)
+  withConfig(updates: Partial<RequestConfig>): ApiClient {
+    return new ApiClient({
+      ...this.config,
+      ...updates,
+    });
+  }
+}
+
+// Использование
+const api = new ApiClient({
+  baseURL: 'https://api.example.com',
+  timeout: 10000,
+});
+
+// Partial config для отдельного запроса
+const response = await api.get<User>('/user/123', {
+  headers: { 'Authorization': 'Bearer token' },
+});
+
+// Новый клиент с обновлённой конфигурацией
+const apiWithAuth = api.withConfig({
+  headers: { 'Authorization': 'Bearer token' },
+});
+```
+
+### Selective Partial/Required/Readonly
+
+```typescript
+// Делаем только определённые поля optional
+type PartialBy<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  description: string;
+}
+
+// id и name обязательны, остальные опциональны
+type ProductInput = PartialBy<Product, 'price' | 'description'>;
+// {
+//   id: string;
+//   name: string;
+//   price?: number;
+//   description?: string;
+// }
+
+// Делаем только определённые поля readonly
+type ReadonlyBy<T, K extends keyof T> = Omit<T, K> & Readonly<Pick<T, K>>;
+
+// id readonly, остальные можно менять
+type ProductWithReadonlyId = ReadonlyBy<Product, 'id'>;
+
+// Делаем только определённые поля required
+type RequiredBy<T, K extends keyof T> = T & Required<Pick<T, K>>;
+```
+
+### Ключевые моменты
+
+- `Partial<T>` делает все свойства опциональными (`?`)
+- `Required<T>` делает все свойства обязательными (удаляет `?`)
+- `Readonly<T>` делает все свойства неизменяемыми (`readonly`)
+- Можно комбинировать utility types для создания новых трансформаций
+- Deep версии рекурсивно применяют трансформацию ко всем вложенным полям
+- Selective версии применяют трансформацию только к выбранным полям
+- Используются для форм, API, конфигураций, partial updates
+- `Object.freeze()` обеспечивает runtime immutability для `Readonly`
+- Комбинируются с другими utility types (`Pick`, `Omit`) для точного контроля
+- Критически важны для создания flexible и type-safe API

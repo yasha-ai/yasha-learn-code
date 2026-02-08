@@ -1,0 +1,421 @@
+## TypeScript: Броня. Урок 35: NonNullable и Never
+
+`NonNullable` и тип `never` - это фундаментальные типы TypeScript для работы с отсутствием значений и невозможными состояниями. Понимание этих типов критически важно для создания robust и type-safe кода.
+
+### NonNullable<T>
+
+`NonNullable<T>` удаляет `null` и `undefined` из типа:
+
+```typescript
+// Определение NonNullable (встроенное)
+type NonNullable<T> = T extends null | undefined ? never : T;
+
+// Простые примеры
+type A = NonNullable<string | null | undefined>;  // string
+type B = NonNullable<number | null>;              // number
+type C = NonNullable<boolean | undefined>;        // boolean
+
+// С union типами
+type MaybeUser = User | null | undefined;
+type DefiniteUser = NonNullable<MaybeUser>; // User
+
+// С опциональными полями
+interface Config {
+  host?: string;
+  port?: number;
+}
+
+// Делаем все поля required и non-nullable
+type RequiredConfig = {
+  [K in keyof Config]-?: NonNullable<Config[K]>;
+};
+// { host: string; port: number }
+
+// Практическое применение
+function processValue(value: string | null | undefined): string {
+  // Assertion
+  return value!; // Небезопасно
+  
+  // Лучше - проверка
+  if (value === null || value === undefined) {
+    throw new Error('Value is null or undefined');
+  }
+  return value; // TypeScript знает, что это string
+}
+
+// Type guard
+function isDefined<T>(value: T): value is NonNullable<T> {
+  return value !== null && value !== undefined;
+}
+
+const maybeString: string | null = getValue();
+if (isDefined(maybeString)) {
+  // TypeScript знает, что maybeString это string
+  console.log(maybeString.toUpperCase());
+}
+```
+
+### Never Type
+
+`never` - это тип для значений, которые никогда не возникают:
+
+```typescript
+// Функции, которые никогда не возвращают значение
+function throwError(message: string): never {
+  throw new Error(message);
+}
+
+function infiniteLoop(): never {
+  while (true) {
+    // бесконечный цикл
+  }
+}
+
+// Never в union типах - исключается
+type A = string | never;  // string
+type B = number | never;  // number
+
+// Никогда не достигаемый код
+function processValue(value: string | number) {
+  if (typeof value === 'string') {
+    return value.toUpperCase();
+  } else if (typeof value === 'number') {
+    return value.toFixed(2);
+  }
+  
+  // TypeScript знает, что эта строка недостижима
+  const _exhaustive: never = value;
+  return _exhaustive;
+}
+
+// Never в conditional types
+type IsString<T> = T extends string ? true : false;
+
+type Test1 = IsString<string>; // true
+type Test2 = IsString<never>;  // never (не false!)
+```
+
+### Exhaustiveness Checking
+
+```typescript
+// Проверка полноты обработки всех вариантов
+type Shape =
+  | { kind: 'circle'; radius: number }
+  | { kind: 'square'; size: number }
+  | { kind: 'rectangle'; width: number; height: number };
+
+function getArea(shape: Shape): number {
+  switch (shape.kind) {
+    case 'circle':
+      return Math.PI * shape.radius ** 2;
+    
+    case 'square':
+      return shape.size ** 2;
+    
+    case 'rectangle':
+      return shape.width * shape.height;
+    
+    default:
+      // Проверка exhaustiveness
+      const _exhaustive: never = shape;
+      throw new Error(`Unhandled shape: ${_exhaustive}`);
+  }
+}
+
+// Если добавить новый тип фигуры
+type ShapeWithTriangle = Shape | { kind: 'triangle'; base: number; height: number };
+
+// function getBrokenArea(shape: ShapeWithTriangle): number {
+//   switch (shape.kind) {
+//     case 'circle': return Math.PI * shape.radius ** 2;
+//     case 'square': return shape.size ** 2;
+//     case 'rectangle': return shape.width * shape.height;
+//     default:
+//       const _exhaustive: never = shape; // ✗ Ошибка! triangle не обработан
+//       throw new Error(`Unhandled shape`);
+//   }
+// }
+```
+
+### Практический пример: State Machine
+
+```typescript
+// Type-safe state machine с exhaustiveness checking
+type State =
+  | { type: 'idle' }
+  | { type: 'loading'; progress: number }
+  | { type: 'success'; data: any }
+  | { type: 'error'; message: string };
+
+class StateMachine {
+  private state: State = { type: 'idle' };
+  
+  getState(): State {
+    return this.state;
+  }
+  
+  setState(newState: State): void {
+    this.state = newState;
+  }
+  
+  // Метод с exhaustiveness checking
+  getStatusMessage(): string {
+    const state = this.state;
+    
+    switch (state.type) {
+      case 'idle':
+        return 'Ready';
+      
+      case 'loading':
+        return `Loading... ${state.progress}%`;
+      
+      case 'success':
+        return 'Success!';
+      
+      case 'error':
+        return `Error: ${state.message}`;
+      
+      default:
+        // Если добавится новый state, TypeScript выдаст ошибку здесь
+        const _exhaustive: never = state;
+        throw new Error(`Unknown state: ${_exhaustive}`);
+    }
+  }
+}
+
+// Использование
+const machine = new StateMachine();
+
+machine.setState({ type: 'loading', progress: 50 });
+console.log(machine.getStatusMessage()); // "Loading... 50%"
+
+machine.setState({ type: 'success', data: { result: 'ok' } });
+console.log(machine.getStatusMessage()); // "Success!"
+```
+
+### Жизненный пример: Form Validation
+
+```typescript
+// Система валидации с NonNullable
+interface FormData {
+  email?: string;
+  password?: string;
+  confirmPassword?: string;
+}
+
+type ValidationResult =
+  | { valid: true; data: Required<FormData> }
+  | { valid: false; errors: Record<keyof FormData, string> };
+
+// Валидация с type guard
+function isFormValid(
+  data: FormData
+): data is Required<FormData> {
+  return (
+    data.email !== undefined &&
+    data.password !== undefined &&
+    data.confirmPassword !== undefined
+  );
+}
+
+function validateForm(data: FormData): ValidationResult {
+  const errors: Partial<Record<keyof FormData, string>> = {};
+  
+  if (!data.email) {
+    errors.email = 'Email is required';
+  } else if (!data.email.includes('@')) {
+    errors.email = 'Invalid email';
+  }
+  
+  if (!data.password) {
+    errors.password = 'Password is required';
+  } else if (data.password.length < 8) {
+    errors.password = 'Password too short';
+  }
+  
+  if (!data.confirmPassword) {
+    errors.confirmPassword = 'Confirm password is required';
+  } else if (data.password !== data.confirmPassword) {
+    errors.confirmPassword = 'Passwords do not match';
+  }
+  
+  if (Object.keys(errors).length > 0) {
+    return {
+      valid: false,
+      errors: errors as Record<keyof FormData, string>,
+    };
+  }
+  
+  // TypeScript знает, что все поля заполнены
+  return {
+    valid: true,
+    data: data as Required<FormData>,
+  };
+}
+
+// Использование
+const formData: FormData = {
+  email: 'user@example.com',
+  password: 'password123',
+  confirmPassword: 'password123',
+};
+
+const result = validateForm(formData);
+
+if (result.valid) {
+  // TypeScript знает, что result.data имеет все поля
+  console.log(result.data.email);
+  console.log(result.data.password);
+} else {
+  // TypeScript знает про errors
+  console.error(result.errors);
+}
+```
+
+### Never в Type Manipulation
+
+```typescript
+// Фильтрация типов с never
+type FilterNullable<T> = {
+  [K in keyof T]: T[K] extends null | undefined ? never : K;
+}[keyof T];
+
+interface User {
+  id: string;
+  name: string;
+  email: string | null;
+  age: number | undefined;
+}
+
+type NonNullableKeys = FilterNullable<User>;
+// "id" | "name"
+
+// Pick non-nullable fields
+type PickNonNullable<T> = {
+  [K in FilterNullable<T>]: T[K];
+};
+
+type SafeUser = PickNonNullable<User>;
+// { id: string; name: string }
+
+// Exclude functions
+type ExcludeFunctions<T> = {
+  [K in keyof T]: T[K] extends Function ? never : K;
+}[keyof T];
+
+interface Mixed {
+  name: string;
+  age: number;
+  greet(): void;
+  calculate(x: number): number;
+}
+
+type OnlyData = ExcludeFunctions<Mixed>;
+// "name" | "age"
+
+type DataOnly = Pick<Mixed, OnlyData>;
+// { name: string; age: number }
+```
+
+### Assert Never
+
+```typescript
+// Helper для exhaustiveness
+function assertNever(value: never): never {
+  throw new Error(`Unexpected value: ${value}`);
+}
+
+type Action =
+  | { type: 'INCREMENT' }
+  | { type: 'DECREMENT' }
+  | { type: 'RESET' };
+
+function reducer(state: number, action: Action): number {
+  switch (action.type) {
+    case 'INCREMENT':
+      return state + 1;
+    
+    case 'DECREMENT':
+      return state - 1;
+    
+    case 'RESET':
+      return 0;
+    
+    default:
+      return assertNever(action); // Гарантирует exhaustiveness
+  }
+}
+
+// Если добавим новый action тип, TypeScript выдаст ошибку
+```
+
+### Conditional Never
+
+```typescript
+// Never в conditional types
+type OnlyStrings<T> = T extends string ? T : never;
+
+type Result1 = OnlyStrings<string | number | boolean>;
+// string
+
+type Result2 = OnlyStrings<number>;
+// never
+
+// Exclude - под капотом использует never
+type MyExclude<T, U> = T extends U ? never : T;
+
+type WithoutNumbers = MyExclude<string | number | boolean, number>;
+// string | boolean
+
+// Фильтрация array типов
+type NonNullableArray<T extends any[]> = {
+  [K in keyof T]: NonNullable<T[K]>;
+};
+
+type MaybeNullArray = [string | null, number | undefined, boolean];
+type DefiniteArray = NonNullableArray<MaybeNullArray>;
+// [string, number, boolean]
+```
+
+### Deep NonNullable
+
+```typescript
+// Рекурсивное удаление null/undefined
+type DeepNonNullable<T> = T extends null | undefined
+  ? never
+  : T extends object
+  ? { [K in keyof T]: DeepNonNullable<T[K]> }
+  : T;
+
+interface NestedData {
+  user: {
+    profile: {
+      name: string | null;
+      age: number | undefined;
+    } | null;
+  } | undefined;
+}
+
+type SafeNestedData = DeepNonNullable<NestedData>;
+// {
+//   user: {
+//     profile: {
+//       name: string;
+//       age: number;
+//     };
+//   };
+// }
+```
+
+### Ключевые моменты
+
+- `NonNullable<T>` удаляет `null` и `undefined` из типа
+- `never` - тип для значений, которые никогда не возникают
+- `never` используется для exhaustiveness checking
+- `never` исключается из union типов
+- Функции, которые бросают ошибки или зацикливаются, возвращают `never`
+- `never` в mapped types используется для фильтрации свойств
+- Type guards с `NonNullable` делают код безопаснее
+- `assertNever` помогает гарантировать полноту обработки вариантов
+- Можно создавать Deep версии NonNullable для вложенных структур
+- Критически важны для type-safe state machines и reducers

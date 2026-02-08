@@ -1,0 +1,430 @@
+## TypeScript: Броня. Урок 31: Pick, Omit, Exclude
+
+`Pick`, `Omit` и `Exclude` - это встроенные utility types для выборки или исключения свойств/типов. Они позволяют создавать подмножества существующих типов без дублирования кода, что критически важно для поддержки DRY (Don't Repeat Yourself) принципа в типизации.
+
+### Pick<T, K>
+
+`Pick<T, K>` выбирает только указанные свойства из типа:
+
+```typescript
+// Определение Pick (встроенное)
+type Pick<T, K extends keyof T> = {
+  [P in K]: T[P];
+};
+
+// Пример использования
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  age: number;
+  role: 'admin' | 'user';
+  createdAt: Date;
+}
+
+// Выбираем только id и name
+type UserPreview = Pick<User, 'id' | 'name'>;
+// {
+//   id: string;
+//   name: string;
+// }
+
+// Выбираем несколько полей для публичного API
+type PublicUser = Pick<User, 'id' | 'name' | 'email'>;
+
+// Практическое применение
+function getUserPreview(user: User): UserPreview {
+  return {
+    id: user.id,
+    name: user.name,
+  };
+}
+```
+
+### Omit<T, K>
+
+`Omit<T, K>` исключает указанные свойства из типа:
+
+```typescript
+// Определение Omit (встроенное)
+type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
+
+// Пример использования
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  password: string;
+  salt: string;
+}
+
+// Исключаем чувствительные данные
+type SafeUser = Omit<User, 'password' | 'salt'>;
+// {
+//   id: string;
+//   name: string;
+//   email: string;
+// }
+
+// Практическое применение: Create DTO
+type CreateUserDTO = Omit<User, 'id'>;
+
+function createUser(userData: CreateUserDTO): User {
+  return {
+    id: generateId(),
+    ...userData,
+  };
+}
+
+const newUser = createUser({
+  name: 'Alice',
+  email: 'alice@example.com',
+  password: 'hashed',
+  salt: 'random',
+}); // ✓
+```
+
+### Exclude<T, U>
+
+`Exclude<T, U>` исключает типы из union, которые присваиваемы к `U`:
+
+```typescript
+// Определение Exclude (встроенное)
+type Exclude<T, U> = T extends U ? never : T;
+
+// Пример использования
+type AllColors = 'red' | 'green' | 'blue' | 'yellow';
+
+// Исключаем 'yellow'
+type PrimaryColors = Exclude<AllColors, 'yellow'>;
+// 'red' | 'green' | 'blue'
+
+// Исключаем несколько
+type WarmColors = Exclude<AllColors, 'blue' | 'green'>;
+// 'red' | 'yellow'
+
+// С типами объектов
+type A = string | number | boolean;
+type B = Exclude<A, string>; // number | boolean
+
+// Практическое применение
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+type SafeMethod = Exclude<HttpMethod, 'DELETE' | 'PATCH'>;
+// 'GET' | 'POST' | 'PUT'
+
+function safeFetch(method: SafeMethod, url: string) {
+  // Только безопасные методы
+}
+
+safeFetch('GET', '/api/users');  // ✓
+// safeFetch('DELETE', '/api/users'); // ✗ Ошибка
+```
+
+### Комбинирование Utility Types
+
+```typescript
+// Pick + Omit
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  description: string;
+  categoryId: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// Публичные поля без timestamps
+type PublicProduct = Omit<Product, 'createdAt' | 'updatedAt'>;
+
+// Только метаданные
+type ProductMetadata = Pick<Product, 'createdAt' | 'updatedAt'>;
+
+// Update DTO - всё кроме id и timestamps
+type UpdateProductDTO = Omit<Product, 'id' | 'createdAt' | 'updatedAt'>;
+
+// Pick + Partial
+type PartialUpdate<T, K extends keyof T> = Partial<Pick<T, K>>;
+
+type ProductPartialUpdate = PartialUpdate<Product, 'name' | 'price' | 'description'>;
+// {
+//   name?: string;
+//   price?: number;
+//   description?: string;
+// }
+```
+
+### Практический пример: API Models
+
+```typescript
+// Базовая модель
+interface BaseEntity {
+  id: string;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
+}
+
+interface User extends BaseEntity {
+  email: string;
+  username: string;
+  password: string;
+  firstName: string;
+  lastName: string;
+  role: 'admin' | 'user' | 'moderator';
+}
+
+// CREATE - без id и timestamps
+type CreateUserInput = Omit<User, keyof BaseEntity>;
+// {
+//   email: string;
+//   username: string;
+//   password: string;
+//   firstName: string;
+//   lastName: string;
+//   role: 'admin' | 'user' | 'moderator';
+// }
+
+// UPDATE - без id, timestamps, и password partial
+type UpdateUserInput = Partial<
+  Omit<User, keyof BaseEntity | 'password'>
+> & { password?: string };
+
+// PUBLIC - без password и deletedAt
+type PublicUser = Omit<User, 'password' | 'deletedAt'>;
+
+// PROFILE - только пользовательские данные
+type UserProfile = Pick<User, 'firstName' | 'lastName' | 'username'>;
+
+// Использование
+class UserService {
+  async create(input: CreateUserInput): Promise<PublicUser> {
+    const user: User = {
+      id: generateId(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      deletedAt: null,
+      ...input,
+    };
+    
+    await db.save(user);
+    
+    const { password, deletedAt, ...publicUser } = user;
+    return publicUser;
+  }
+  
+  async update(id: string, input: UpdateUserInput): Promise<PublicUser> {
+    const user = await db.findById(id);
+    
+    Object.assign(user, input, { updatedAt: new Date() });
+    await db.save(user);
+    
+    const { password, deletedAt, ...publicUser } = user;
+    return publicUser;
+  }
+  
+  async getProfile(id: string): Promise<UserProfile> {
+    const user = await db.findById(id);
+    
+    return {
+      firstName: user.firstName,
+      lastName: user.lastName,
+      username: user.username,
+    };
+  }
+}
+```
+
+### Extract (противоположность Exclude)
+
+```typescript
+// Extract - выбирает типы, которые присваиваемы к U
+type Extract<T, U> = T extends U ? T : never;
+
+type AllTypes = string | number | boolean | null | undefined;
+
+// Извлекаем только primitive types
+type Primitives = Extract<AllTypes, string | number | boolean>;
+// string | number | boolean
+
+// Извлекаем nullable types
+type Nullable = Extract<AllTypes, null | undefined>;
+// null | undefined
+
+// С union объектов
+type Shape =
+  | { kind: 'circle'; radius: number }
+  | { kind: 'square'; size: number }
+  | { kind: 'rectangle'; width: number; height: number };
+
+// Извлекаем только circle
+type Circle = Extract<Shape, { kind: 'circle' }>;
+// { kind: 'circle'; radius: number }
+
+// Извлекаем типы с определённым полем
+type HasSize = Extract<Shape, { size: number }>;
+// { kind: 'square'; size: number }
+```
+
+### Жизненный пример: Form Builder
+
+```typescript
+// Type-safe form builder
+interface FormField {
+  type: 'text' | 'number' | 'email' | 'password' | 'checkbox' | 'select';
+  label: string;
+  placeholder?: string;
+  required: boolean;
+  validation?: (value: any) => string | null;
+}
+
+interface TextField extends FormField {
+  type: 'text' | 'email' | 'password';
+  maxLength?: number;
+}
+
+interface NumberField extends FormField {
+  type: 'number';
+  min?: number;
+  max?: number;
+}
+
+interface SelectField extends FormField {
+  type: 'select';
+  options: Array<{ label: string; value: string }>;
+}
+
+type AllFields = TextField | NumberField | SelectField;
+
+// Извлекаем только text-based поля
+type TextBasedFields = Extract<AllFields, { type: 'text' | 'email' | 'password' }>;
+
+// Исключаем select поля
+type NonSelectFields = Exclude<AllFields, { type: 'select' }>;
+
+// Pick общих свойств для всех полей
+type CommonFieldProps = Pick<FormField, 'label' | 'required'>;
+
+// Omit validation для простых полей
+type SimpleField = Omit<FormField, 'validation'>;
+
+// Builder class
+class FormBuilder<T extends Record<string, any>> {
+  private fields: Map<keyof T, FormField> = new Map();
+  
+  addField<K extends keyof T>(
+    name: K,
+    field: Omit<FormField, 'label'> & { label?: string }
+  ): this {
+    this.fields.set(name, {
+      ...field,
+      label: field.label ?? String(name),
+    } as FormField);
+    
+    return this;
+  }
+  
+  getField<K extends keyof T>(name: K): Pick<FormField, 'label' | 'type'> | undefined {
+    const field = this.fields.get(name);
+    if (!field) return undefined;
+    
+    return {
+      label: field.label,
+      type: field.type,
+    };
+  }
+  
+  build(): Record<keyof T, Omit<FormField, 'validation'>> {
+    const result = {} as Record<keyof T, Omit<FormField, 'validation'>>;
+    
+    this.fields.forEach((field, name) => {
+      const { validation, ...simpleField } = field;
+      result[name] = simpleField;
+    });
+    
+    return result;
+  }
+}
+
+// Использование
+interface LoginForm {
+  email: string;
+  password: string;
+  rememberMe: boolean;
+}
+
+const form = new FormBuilder<LoginForm>()
+  .addField('email', {
+    type: 'email',
+    required: true,
+  })
+  .addField('password', {
+    type: 'password',
+    required: true,
+  })
+  .addField('rememberMe', {
+    type: 'checkbox',
+    label: 'Remember me',
+    required: false,
+  });
+
+const builtForm = form.build();
+```
+
+### Advanced Patterns
+
+```typescript
+// Omit multiple базовых типов
+type OmitMultiple<T, K extends keyof T, U extends keyof T> = Omit<T, K | U>;
+
+// Pick with rename
+type Rename<T, K extends keyof T, N extends string> = 
+  Omit<T, K> & Record<N, T[K]>;
+
+interface User {
+  id: string;
+  name: string;
+}
+
+// Переименование id в userId
+type UserWithRenamedId = Rename<User, 'id', 'userId'>;
+// { name: string; userId: string }
+
+// Conditional Omit
+type OmitByType<T, ValueType> = {
+  [K in keyof T as T[K] extends ValueType ? never : K]: T[K];
+};
+
+interface Mixed {
+  name: string;
+  age: number;
+  active: boolean;
+  count: number;
+}
+
+// Исключаем все number поля
+type NoNumbers = OmitByType<Mixed, number>;
+// { name: string; active: boolean }
+
+// Conditional Pick
+type PickByType<T, ValueType> = {
+  [K in keyof T as T[K] extends ValueType ? K : never]: T[K];
+};
+
+// Выбираем только number поля
+type OnlyNumbers = PickByType<Mixed, number>;
+// { age: number; count: number }
+```
+
+### Ключевые моменты
+
+- `Pick<T, K>` выбирает указанные свойства из типа
+- `Omit<T, K>` исключает указанные свойства из типа
+- `Exclude<T, U>` исключает типы из union
+- `Extract<T, U>` извлекает типы из union (противоположность Exclude)
+- Можно комбинировать с `Partial`, `Required`, `Readonly`
+- Используются для создания DTO, view models, API responses
+- Помогают избежать дублирования типов
+- Можно создавать custom utility types на их основе
+- Критически важны для DRY в типизации
+- Широко используются в реальных проектах для управления типами
