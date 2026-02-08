@@ -75,10 +75,10 @@
 - [x] Современные единицы: dvh, svh, lvh, cqi
 
 ### Фильтры и эффекты (4)
-- [ ] filter: blur, brightness, contrast, etc.
-- [ ] backdrop-filter
-- [ ] mix-blend-mode
-- [ ] clip-path и shape-outside
+- [x] filter: blur, brightness, contrast, etc.
+- [x] backdrop-filter
+- [x] mix-blend-mode
+- [x] clip-path и shape-outside
 
 ### Архитектура CSS (4)
 - [ ] БЭМ (Block Element Modifier)
