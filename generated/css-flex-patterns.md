@@ -1,0 +1,150 @@
+## CSS: Паттерны Holy Grail и Sticky Footer
+
+В этом уроке мы рассмотрим два популярных CSS паттерна: Holy Grail (священный грааль) и Sticky Footer (липкий подвал). Эти паттерны помогают создавать гибкие и отзывчивые макеты веб-страниц.
+
+### Holy Grail Layout
+
+"Holy Grail" - это макет веб-страницы, состоящий из шапки (header), подвала (footer), боковой навигации (sidebar), основного контента (content) и, возможно, еще одной боковой панели. Задача состоит в том, чтобы все элементы были на своих местах независимо от размера контента.
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Holy Grail Layout</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>Header</header>
+  <div class="container">
+    <nav>Navigation</nav>
+    <main>Main Content</main>
+    <aside>Sidebar</aside>
+  </div>
+  <footer>Footer</footer>
+</body>
+</html>
+```
+
+```css
+/* style.css */
+body {
+  margin: 0;
+  font-family: sans-serif;
+}
+
+header, footer {
+  background-color: #333;
+  color: white;
+  text-align: center;
+  padding: 1em;
+}
+
+.container {
+  display: grid;
+  grid-template-columns: 200px 1fr 200px; /* Боковые панели по 200px, остальное место - контенту */
+  grid-template-rows: auto 1fr auto; /* Автоматическая высота шапки и подвала, остальное - контенту */
+  min-height: 100vh; /* Минимальная высота контейнера - 100% высоты экрана */
+}
+
+nav {
+  background-color: #eee;
+  padding: 1em;
+}
+
+main {
+  padding: 1em;
+}
+
+aside {
+  background-color: #eee;
+  padding: 1em;
+}
+
+header {
+  grid-column: 1 / span 3; /* Шапка занимает всю ширину */
+}
+
+footer {
+  grid-column: 1 / span 3; /* Подвал занимает всю ширину */
+}
+
+nav {
+  grid-row: 2;
+  grid-column: 1;
+}
+
+main {
+  grid-row: 2;
+  grid-column: 2;
+}
+
+aside {
+  grid-row: 2;
+  grid-column: 3;
+}
+```
+
+В этом примере мы использовали CSS Grid для создания макета.  `grid-template-columns` определяет ширину колонок, а `grid-template-rows` - высоту строк. `grid-column` и `grid-row` указывают положение элементов внутри сетки.
+
+### Sticky Footer
+
+"Sticky Footer" - это паттерн, который позволяет прикрепить подвал к нижней части экрана, даже если контента недостаточно для заполнения всей страницы.
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Sticky Footer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrapper">
+    <header>Header</header>
+    <main>
+      <p>Some content...</p>
+      </main>
+  </div>
+  <footer>Footer</footer>
+</body>
+</html>
+```
+
+```css
+/* style.css */
+body {
+  margin: 0;
+  font-family: sans-serif;
+  min-height: 100vh; /* Минимальная высота тела страницы - 100% высоты экрана */
+  display: flex;
+  flex-direction: column;
+}
+
+.wrapper {
+  flex: 1; /* Занимает все доступное пространство между шапкой и подвалом */
+}
+
+header, footer {
+  background-color: #333;
+  color: white;
+  text-align: center;
+  padding: 1em;
+}
+
+main {
+  padding: 1em;
+}
+```
+
+В этом примере мы использовали Flexbox. `min-height: 100vh` задает минимальную высоту для `body`, равную высоте экрана. `flex: 1` для `.wrapper` заставляет его занимать все доступное пространство, тем самым "выталкивая" подвал вниз.
+
+### Жизненный пример
+
+*   **Holy Grail:** Многие новостные сайты и блоги используют этот паттерн для организации контента. Например, сайты, где есть шапка, боковая панель с навигацией или рекламой, основная статья и подвал с контактной информацией. Фреймворки, такие как Bootstrap и Materialize, часто предоставляют готовые компоненты для реализации этого макета.
+*   **Sticky Footer:** Этот паттерн часто встречается на сайтах с небольшим количеством контента, таких как страницы "О нас" или лендинги. Он гарантирует, что подвал всегда будет виден внизу экрана, даже если контента недостаточно для его "выталкивания" вниз.
+
+### Ключевые моменты
+
+*   **Holy Grail:** Подходит для сложных макетов с несколькими колонками. CSS Grid - отличный инструмент для его реализации.
+*   **Sticky Footer:** Используется для "приклеивания" подвала к нижней части экрана, особенно когда контента мало. Flexbox - хороший выбор для этого.
+*   Оба паттерна помогают создавать отзывчивые макеты, которые хорошо выглядят на разных устройствах.
+*   Выбор паттерна зависит от структуры и содержания вашего веб-сайта.
