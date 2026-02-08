@@ -65,14 +65,14 @@
 - [x] View Transitions API
 
 ### Современный CSS (8)
-- [ ] Container Queries (@container)
-- [ ] CSS Layers (@layer)
-- [ ] CSS Nesting (вложенность)
-- [ ] :has() — родительский селектор
-- [ ] Логические свойства (inline, block)
-- [ ] aspect-ratio
-- [ ] object-fit и object-position
-- [ ] Современные единицы: dvh, svh, lvh, cqi
+- [x] Container Queries (@container)
+- [x] CSS Layers (@layer)
+- [x] CSS Nesting (вложенность)
+- [x] :has() — родительский селектор
+- [x] Логические свойства (inline, block)
+- [x] aspect-ratio
+- [x] object-fit и object-position
+- [x] Современные единицы: dvh, svh, lvh, cqi
 
 ### Фильтры и эффекты (4)
 - [ ] filter: blur, brightness, contrast, etc.
