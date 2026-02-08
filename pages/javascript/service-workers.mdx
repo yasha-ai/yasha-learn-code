@@ -1,0 +1,129 @@
+## JavaScript: Мозги. Урок: Service Workers
+
+Service Workers - это мощный инструмент JavaScript, позволяющий сделать ваши веб-приложения быстрее, надежнее и способными работать в оффлайн-режиме. По сути, это скрипт, который работает в фоновом режиме, независимо от вашей веб-страницы.
+
+### Что такое Service Worker?
+
+Представьте Service Worker как посредника между вашим веб-приложением, браузером и сетью. Он перехватывает сетевые запросы, управляет кешем и может даже отправлять push-уведомления.  Он работает в отдельном потоке, поэтому не блокирует основной поток вашего приложения, обеспечивая плавную работу интерфейса.
+
+### Регистрация Service Worker
+
+Прежде чем использовать Service Worker, его необходимо зарегистрировать. Это делается в основном скрипте вашего приложения.
+
+```javascript
+// index.js
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js') // Путь к вашему service worker файлу
+    .then(registration => {
+      console.log('Service Worker зарегистрирован успешно:', registration);
+    })
+    .catch(error => {
+      console.log('Ошибка при регистрации Service Worker:', error);
+    });
+}
+```
+
+Этот код проверяет, поддерживает ли браузер Service Workers, и регистрирует `/sw.js`.
+
+### sw.js: Жизненный цикл Service Worker
+
+Файл `sw.js` содержит логику вашего Service Worker.  Основные этапы жизненного цикла:
+
+1.  **Install:**  Выполняется один раз при первой установке Service Worker.  Здесь обычно происходит кеширование статических ресурсов.
+
+```javascript
+// sw.js
+const CACHE_NAME = 'my-site-cache-v1';
+const urlsToCache = [
+  '/',
+  '/index.html',
+  '/styles.css',
+  '/script.js'
+];
+
+self.addEventListener('install', function(event) {
+  // Выполняется при установке Service Worker
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then(function(cache) {
+        console.log('Открыт кеш:', CACHE_NAME);
+        return cache.addAll(urlsToCache); // Кешируем ресурсы
+      })
+  );
+});
+```
+
+2.  **Activate:** Выполняется после установки.  Здесь часто происходит очистка старого кеша.
+
+```javascript
+self.addEventListener('activate', function(event) {
+  // Выполняется при активации Service Worker
+  event.waitUntil(
+    caches.keys().then(function(cacheNames) {
+      return Promise.all(
+        cacheNames.map(function(cacheName) {
+          if (cacheName !== CACHE_NAME) {
+            console.log('Удаляем старый кеш:', cacheName);
+            return caches.delete(cacheName); // Удаляем старый кеш
+          }
+        })
+      );
+    })
+  );
+});
+```
+
+3.  **Fetch:** Перехватывает сетевые запросы.  Здесь вы можете вернуть данные из кеша или запросить их из сети.
+
+```javascript
+self.addEventListener('fetch', function(event) {
+  // Перехватываем сетевые запросы
+  event.respondWith(
+    caches.match(event.request) // Проверяем, есть ли запрос в кеше
+      .then(function(response) {
+        // Если есть в кеше, возвращаем его
+        if (response) {
+          return response;
+        }
+
+        // Если нет в кеше, делаем запрос в сеть
+        return fetch(event.request).then(
+          function(response) {
+            // Проверяем, что ответ корректный
+            if(!response || response.status !== 200 || response.type !== 'basic') {
+              return response;
+            }
+
+            // Клонируем ответ (потому что он может быть использован только один раз)
+            var responseToCache = response.clone();
+
+            caches.open(CACHE_NAME)
+              .then(function(cache) {
+                cache.put(event.request, responseToCache); // Кешируем ответ
+              });
+
+            return response;
+          }
+        );
+      })
+    );
+});
+```
+
+### Жизненный пример
+
+Многие современные веб-приложения и сайты используют Service Workers для повышения производительности и обеспечения оффлайн-доступа.  Например:
+
+*   **Progressive Web Apps (PWAs):** Service Workers являются ключевой технологией для создания PWAs, позволяя им работать как нативные приложения.
+*   **Google Maps:** Использует Service Workers для кеширования карт, позволяя пользователям просматривать карты даже без подключения к интернету.
+*   **Новостные сайты:** Могут кешировать статьи для чтения в оффлайн-режиме.
+*   **Фреймворки (например, React, Angular, Vue):**  Имеют встроенные инструменты или библиотеки для работы с Service Workers.  Например, `create-react-app` часто содержит `service-worker.js` по умолчанию.
+
+### Ключевые моменты
+
+*   Service Workers работают в отдельном потоке.
+*   Они имеют доступ к Cache API для хранения ресурсов.
+*   Они могут перехватывать и обрабатывать сетевые запросы.
+*   Они позволяют создавать веб-приложения, работающие в оффлайн-режиме.
+*   Важно понимать жизненный цикл Service Worker (install, activate, fetch).
+*   При обновлении Service Worker важно очищать старый кеш.
