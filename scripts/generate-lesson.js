@@ -145,8 +145,33 @@ async function main() {
     console.log('⚠️ Image generation skipped or failed');
   }
   
-  // Output for seed.js format
-  console.log('\n📋 Seed.js format:');
+  // Update Nextra _meta.json and create .mdx if path exists
+  const nextraPagesDir = path.join(__dirname, '..', '..', 'yasha-learn-nextra', 'pages');
+  const courseDir = path.join(nextraPagesDir, courseSlug);
+  const courseMetaPath = path.join(courseDir, '_meta.json');
+  
+  if (fs.existsSync(courseDir)) {
+    console.log(`📝 Updating Nextra content in: ${courseDir}`);
+    
+    // Create .mdx file
+    const mdxPath = path.join(courseDir, `${lessonSlug}.mdx`);
+    fs.writeFileSync(mdxPath, content);
+    console.log(`✅ Created .mdx: ${mdxPath}`);
+
+    if (fs.existsSync(courseMetaPath)) {
+      const meta = JSON.parse(fs.readFileSync(courseMetaPath, 'utf8'));
+      
+      // Calculate new number
+      const lessonCount = Object.keys(meta).filter(key => key !== 'index').length;
+      const nextNumber = lessonCount + 1;
+      const numberedTitle = `${nextNumber}. ${lessonTitle}`;
+      
+      meta[lessonSlug] = numberedTitle;
+      
+      fs.writeFileSync(courseMetaPath, JSON.stringify(meta, null, 2));
+      console.log(`✅ Added to _meta.json: "${numberedTitle}"`);
+    }
+  }
   console.log('---');
   // Use JSON.stringify to properly escape the content
   console.log(`{
