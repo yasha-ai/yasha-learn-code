@@ -1,0 +1,127 @@
+## TypeScript: Броня - Type Guards
+
+Type Guards (защитники типов) - это инструменты в TypeScript, позволяющие сузить тип переменной в определенной области кода. Они помогают компилятору понять, что переменная имеет более конкретный тип, чем было объявлено изначально. Это особенно полезно при работе с union types и `any`.
+
+### Что такое Type Guards?
+
+Представьте, что у вас есть переменная, которая может быть либо строкой, либо числом (union type). Как вы узнаете, выполнять ли операции, предназначенные только для строк, или только для чисел? Type Guards позволяют вам безопасно определить тип переменной и выполнить соответствующий код.
+
+### Виды Type Guards
+
+Существует несколько способов реализации Type Guards:
+
+*   **`typeof`:**  Используется для примитивных типов (string, number, boolean, symbol, bigint, undefined, function).
+
+    ```typescript
+    function printValue(value: string | number) {
+      if (typeof value === "string") {
+        // Внутри этого блока value имеет тип string
+        console.log(value.toUpperCase());
+      } else {
+        // Внутри этого блока value имеет тип number
+        console.log(value * 2);
+      }
+    }
+
+    printValue("hello"); // Выводит "HELLO"
+    printValue(5);      // Выводит 10
+    ```
+
+*   **`instanceof`:** Используется для проверки, является ли объект экземпляром определенного класса.
+
+    ```typescript
+    class Animal {
+      name: string;
+      constructor(name: string) {
+        this.name = name;
+      }
+    }
+
+    class Dog extends Animal {
+      bark() {
+        console.log("Woof!");
+      }
+    }
+
+    function makeSound(animal: Animal) {
+      if (animal instanceof Dog) {
+        // Внутри этого блока animal имеет тип Dog
+        animal.bark();
+      } else {
+        console.log("Generic animal sound");
+      }
+    }
+
+    const myDog = new Dog("Buddy");
+    makeSound(myDog); // Выводит "Woof!"
+
+    const myAnimal = new Animal("Generic");
+    makeSound(myAnimal); // Выводит "Generic animal sound"
+    ```
+
+*   **`in`:**  Используется для проверки, существует ли определенное свойство в объекте.
+
+    ```typescript
+    interface Bird {
+      fly(): void;
+      layEggs(): void;
+    }
+
+    interface Fish {
+      swim(): void;
+      layEggs(): void;
+    }
+
+    function isBird(pet: Bird | Fish): pet is Bird {
+      return "fly" in pet;
+    }
+
+    function petAction(pet: Bird | Fish) {
+      if (isBird(pet)) {
+        pet.fly();
+      } else {
+        pet.swim();
+      }
+    }
+    ```
+
+*   **User-Defined Type Guards:**  Функции, которые возвращают boolean и используют type predicate (`parameterName is Type`) в качестве типа возвращаемого значения.  Пример использования `in` выше является также и user-defined type guard.
+
+### Жизненный пример
+
+В React, например, часто используются Type Guards для работы с событиями.  Представьте себе компонент, который обрабатывает различные типы событий:
+
+```typescript
+interface KeyboardEvent {
+  type: 'keyboard';
+  key: string;
+}
+
+interface MouseEvent {
+  type: 'mouse';
+  x: number;
+  y: number;
+}
+
+type Event = KeyboardEvent | MouseEvent;
+
+function handleEvent(event: Event) {
+  if (event.type === 'keyboard') {
+    // Внутри этого блока event имеет тип KeyboardEvent
+    console.log(`Key pressed: ${event.key}`);
+  } else {
+    // Внутри этого блока event имеет тип MouseEvent
+    console.log(`Mouse clicked at: x=${event.x}, y=${event.y}`);
+  }
+}
+```
+
+Здесь мы используем проверку `event.type` для определения типа события и выполнения соответствующего кода.  Многие библиотеки и фреймворки используют подобные техники для обработки различных типов данных и событий.
+
+### Ключевые моменты
+
+*   Type Guards сужают тип переменной в определенной области кода.
+*   `typeof`, `instanceof`, `in` - встроенные Type Guards.
+*   User-Defined Type Guards позволяют создавать свои собственные проверки типов.
+*   Type Guards улучшают безопасность и читаемость кода.
+*   Они широко используются в библиотеках и фреймворках для обработки различных типов данных.
