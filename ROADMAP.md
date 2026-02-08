@@ -31,9 +31,9 @@
 - [x] Функции
 - [x] Условия (if/else/switch) ✅ (test-iteration 2026-02-08)
 - [x] Циклы (for/while) ✅ (test-iteration 2026-02-08)
-- [ ] Массивы
-- [ ] Объекты
-- [ ] DOM манипуляции
+- [x] Массивы ✅ (test-iteration 2026-02-08)
+- [x] Объекты ✅ (test-iteration 2026-02-08)
+- [x] DOM манипуляции ✅ (test-iteration 2026-02-08)
 - [ ] События
 - [ ] Асинхронность (Promise, async/await)
 - [ ] Fetch API
