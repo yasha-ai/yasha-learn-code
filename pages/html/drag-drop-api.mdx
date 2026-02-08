@@ -1,0 +1,103 @@
+## Урок: HTML Drag and Drop API
+
+Drag and Drop API (Перетаскивание) в HTML позволяет пользователям перетаскивать элементы на веб-странице, что значительно улучшает взаимодействие с интерфейсом. Этот урок познакомит вас с основами этой мощной возможности.
+
+### Основы Drag and Drop
+
+Концепция Drag and Drop проста: нужно указать, какие элементы можно перетаскивать, и куда их можно перетащить. Для этого используются специальные атрибуты HTML и JavaScript события.
+
+### Атрибуты и события
+
+Основные атрибуты:
+
+*   `draggable="true"`: Указывает, что элемент можно перетаскивать.
+
+Основные события:
+
+*   `dragstart`: Срабатывает, когда пользователь начинает перетаскивание элемента.
+*   `dragenter`: Срабатывает, когда перетаскиваемый элемент входит в целевую область.
+*   `dragover`: Срабатывает, когда перетаскиваемый элемент находится над целевой областью. **Этот обработчик обязателен для разрешения drop!**
+*   `dragleave`: Срабатывает, когда перетаскиваемый элемент покидает целевую область.
+*   `drop`: Срабатывает, когда перетаскиваемый элемент отпущен в целевой области.
+*   `dragend`: Срабатывает, когда перетаскивание завершено (независимо от того, успешно ли прошло перетаскивание).
+
+### Практический пример
+
+Давайте создадим простой пример с перетаскиванием изображения в контейнер.
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Drag and Drop Пример</title>
+  <style>
+    #draggable {
+      width: 100px;
+      height: 100px;
+      background-color: lightblue;
+      cursor: move;
+    }
+
+    #dropzone {
+      width: 200px;
+      height: 200px;
+      border: 2px dashed gray;
+      text-align: center;
+      line-height: 200px;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="draggable" draggable="true">Перетащи меня!</div>
+  <div id="dropzone">Отпустите здесь!</div>
+
+  <script>
+    const draggable = document.getElementById('draggable');
+    const dropzone = document.getElementById('dropzone');
+
+    draggable.addEventListener('dragstart', (event) => {
+      event.dataTransfer.setData('text/plain', event.target.id); // Сохраняем ID перетаскиваемого элемента
+    });
+
+    dropzone.addEventListener('dragover', (event) => {
+      event.preventDefault(); // Необходимо для разрешения drop
+    });
+
+    dropzone.addEventListener('drop', (event) => {
+      event.preventDefault(); // Предотвращаем стандартное поведение браузера
+      const id = event.dataTransfer.getData('text/plain'); // Получаем ID перетаскиваемого элемента
+      const element = document.getElementById(id); // Получаем сам элемент
+      dropzone.appendChild(element); // Добавляем элемент в dropzone
+      dropzone.textContent = 'Перетащено!';
+    });
+  </script>
+
+</body>
+</html>
+```
+
+В этом примере:
+
+*   `draggable="true"` делает элемент с ID "draggable" перетаскиваемым.
+*   `event.dataTransfer.setData('text/plain', event.target.id)` сохраняет ID перетаскиваемого элемента в `dataTransfer` при начале перетаскивания.
+*   `event.preventDefault()` в `dragover` необходим для того, чтобы событие `drop` сработало.
+*   В `drop` мы получаем ID элемента из `dataTransfer` и добавляем его в `dropzone`.
+
+### Жизненный пример
+
+Drag and Drop API широко используется в различных приложениях:
+
+*   **Trello, Jira:** Для перетаскивания задач между колонками.
+*   **Интерфейсы файловых менеджеров:** Для перетаскивания файлов и папок.
+*   **Конструкторы сайтов (Webflow, Wix):** Для перетаскивания элементов на страницу.
+*   **Редакторы изображений:** Для изменения порядка слоев.
+
+Многие JavaScript библиотеки и фреймворки (React, Angular, Vue) предлагают компоненты и обертки для упрощения работы с Drag and Drop API, делая его более удобным и кросс-браузерным.
+
+### Ключевые моменты
+
+*   `draggable="true"` - необходим для активации перетаскивания.
+*   `event.preventDefault()` в `dragover` - обязателен для разрешения `drop`.
+*   `dataTransfer` - используется для передачи данных между перетаскиваемым элементом и целевой областью.
+*   Drag and Drop API предоставляет мощные возможности для создания интерактивных интерфейсов.
