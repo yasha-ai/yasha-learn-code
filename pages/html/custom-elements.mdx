@@ -1,0 +1,101 @@
+## HTML: Скелет - Custom Elements
+
+Custom Elements позволяют нам создавать собственные HTML-теги, расширяя возможности языка и делая код более семантичным и организованным. Это мощный инструмент для создания повторно используемых компонентов и улучшения читаемости HTML.
+
+### Что такое Custom Elements?
+
+Custom Elements (также известные как Web Components) — это технология, позволяющая разработчикам определять собственные HTML-теги и определять их поведение с помощью JavaScript.  Представьте, что вы создаете свой собственный кирпичик для построения веб-страницы.
+
+### Как создать Custom Element
+
+Процесс создания Custom Element состоит из нескольких шагов:
+
+1.  **Определение класса JavaScript:** Создаем класс, который расширяет `HTMLElement`.
+2.  **Определение пользовательского поведения:** Внутри класса определяем логику работы нашего элемента.  Это может включать в себя методы для обработки атрибутов, реагирования на события и обновления DOM.
+3.  **Регистрация элемента:** Регистрируем наш класс в браузере с помощью метода `customElements.define()`.
+
+Вот пример:
+
+```javascript
+// 1. Определяем класс, расширяющий HTMLElement
+class MyGreeting extends HTMLElement {
+  constructor() {
+    super(); // Обязательно вызываем super() в конструкторе
+
+    // Создаем shadow DOM (изолированную область для нашего элемента)
+    this.attachShadow({ mode: 'open' });
+
+    // Создаем элемент параграфа и добавляем текст
+    const p = document.createElement('p');
+    p.textContent = 'Привет, мир!';
+
+    // Добавляем параграф в shadow DOM
+    this.shadowRoot.appendChild(p);
+  }
+}
+
+// 2. Регистрируем элемент
+customElements.define('my-greeting', MyGreeting);
+```
+
+```html
+<!-- 3. Используем наш новый элемент -->
+<my-greeting></my-greeting>
+```
+
+В этом примере мы создали элемент `<my-greeting>`, который отображает "Привет, мир!".  `shadow DOM` обеспечивает изоляцию стилей и скриптов нашего элемента, предотвращая их конфликт с остальной частью страницы.
+
+### Работа с атрибутами
+
+Custom Elements могут реагировать на изменения атрибутов.  Для этого необходимо определить статический метод `observedAttributes()` и метод `attributeChangedCallback()`.
+
+```javascript
+class MyProfileCard extends HTMLElement {
+  static get observedAttributes() {
+    return ['name', 'title']; // Атрибуты, за которыми мы следим
+  }
+
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this.shadowRoot.innerHTML = `
+      <style>
+        .card { border: 1px solid black; padding: 10px; }
+      </style>
+      <div class="card">
+        <h2></h2>
+        <h3></h3>
+      </div>
+    `;
+  }
+
+  attributeChangedCallback(name, oldValue, newValue) {
+    // Этот метод вызывается при изменении атрибута
+    if (name === 'name') {
+      this.shadowRoot.querySelector('h2').textContent = newValue;
+    } else if (name === 'title') {
+      this.shadowRoot.querySelector('h3').textContent = newValue;
+    }
+  }
+}
+
+customElements.define('my-profile-card', MyProfileCard);
+```
+
+```html
+<my-profile-card name="Иван Иванов" title="Разработчик"></my-profile-card>
+```
+
+Теперь, при изменении атрибутов `name` или `title`, содержимое карточки будет автоматически обновляться.
+
+### Жизненный пример
+
+Многие современные JavaScript-фреймворки, такие как React, Angular и Vue.js, используют концепции, аналогичные Custom Elements, для создания повторно используемых компонентов.  Кроме того, многие библиотеки UI-компонентов (например, Material Design Components) реализуют свои компоненты как Custom Elements, что позволяет использовать их в различных проектах, независимо от используемого фреймворка.  Представьте виджет календаря или сложный график, реализованный как Custom Element - его можно легко встроить в любой HTML-документ.
+
+### Ключевые моменты
+
+*   Custom Elements позволяют создавать собственные HTML-теги.
+*   Определяются с помощью JavaScript классов, расширяющих `HTMLElement`.
+*   `shadow DOM` обеспечивает инкапсуляцию стилей и скриптов.
+*   Можно отслеживать изменения атрибутов с помощью `observedAttributes()` и `attributeChangedCallback()`.
+*   Широко используются в современных веб-фреймворках и библиотеках.
