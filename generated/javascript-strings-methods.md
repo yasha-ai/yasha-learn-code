@@ -1,0 +1,104 @@
+## JavaScript: Мозги. Урок 2: Строки - методы и шаблонные литералы
+
+Строки в JavaScript – это не просто последовательности символов, это мощный инструмент для работы с текстом. В этом уроке мы рассмотрим основные методы работы со строками и познакомимся с шаблонными литералами, которые значительно упрощают создание динамических строк.
+
+### Методы строк
+
+Строки в JavaScript – это объекты, а значит, у них есть методы, которые позволяют выполнять различные операции над строками. Вот некоторые из наиболее полезных:
+
+*   `length`: Возвращает длину строки.
+
+```javascript
+let str = "Привет, мир!";
+console.log(str.length); // Выведет: 12
+```
+
+*   `toUpperCase()`: Преобразует строку в верхний регистр.
+
+```javascript
+let str = "hello";
+console.log(str.toUpperCase()); // Выведет: HELLO
+```
+
+*   `toLowerCase()`: Преобразует строку в нижний регистр.
+
+```javascript
+let str = "WORLD";
+console.log(str.toLowerCase()); // Выведет: world
+```
+
+*   `indexOf(substring)`: Возвращает индекс первого вхождения подстроки в строку. Если подстрока не найдена, возвращает -1.
+
+```javascript
+let str = "JavaScript is awesome!";
+console.log(str.indexOf("awesome")); // Выведет: 15
+console.log(str.indexOf("Python")); // Выведет: -1
+```
+
+*   `slice(start, end)`: Извлекает часть строки от `start` до `end` (не включая `end`).
+
+```javascript
+let str = "JavaScript";
+console.log(str.slice(0, 4)); // Выведет: Java
+console.log(str.slice(4)); // Выведет: Script (от индекса 4 до конца строки)
+```
+
+*   `replace(searchValue, newValue)`: Заменяет первое вхождение `searchValue` на `newValue`.
+
+```javascript
+let str = "Hello world!";
+console.log(str.replace("world", "JavaScript")); // Выведет: Hello JavaScript!
+```
+
+*   `trim()`: Удаляет пробелы в начале и конце строки.
+
+```javascript
+let str = "   Hello   ";
+console.log(str.trim()); // Выведет: Hello
+```
+
+### Шаблонные литералы
+
+Шаблонные литералы (template literals) позволяют встраивать выражения прямо в строку, используя обратные кавычки (\`).
+
+```javascript
+let name = "Alice";
+let age = 30;
+let greeting = `Привет, меня зовут ${name}, и мне ${age} лет.`;
+console.log(greeting); // Выведет: Привет, меня зовут Alice, и мне 30 лет.
+```
+
+Внутри шаблонных литералов можно использовать любые JavaScript выражения:
+
+```javascript
+let a = 5;
+let b = 10;
+let result = `Сумма ${a} и ${b} равна ${a + b}.`;
+console.log(result); // Выведет: Сумма 5 и 10 равна 15.
+```
+
+### Жизненный пример
+
+Шаблонные литералы особенно полезны при работе с DOM. Например, при динамическом создании HTML-элементов:
+
+```javascript
+let item = { name: "Книга", price: 25 };
+
+let html = `
+  <div class="item">
+    <h3>${item.name}</h3>
+    <p>Цена: ${item.price}$</p>
+  </div>
+`;
+
+document.body.innerHTML = html;
+```
+
+Этот код создаст HTML-разметку для элемента "Книга" и добавит ее в тело документа. Фреймворки, такие как React, Vue и Angular, активно используют шаблонные литералы (или их аналоги) для динамического рендеринга компонентов.
+
+### Ключевые моменты
+
+*   Строки в JavaScript - объекты с множеством полезных методов.
+*   `length`, `toUpperCase()`, `toLowerCase()`, `indexOf()`, `slice()`, `replace()`, `trim()` – основные методы для работы со строками.
+*   Шаблонные литералы позволяют встраивать выражения в строки, делая код более читаемым и удобным.
+*   Шаблонные литералы широко используются при работе с DOM и в современных JavaScript фреймворках.
