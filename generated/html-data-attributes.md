@@ -1,0 +1,102 @@
+## HTML: Скелет - Data Attributes
+
+Data attributes - это мощный инструмент в HTML, позволяющий хранить дополнительную информацию непосредственно в HTML-элементах. Эта информация может быть использована JavaScript для динамического изменения поведения или внешнего вида страницы.
+
+### Что такое Data Attributes?
+
+Data attributes позволяют добавлять собственные атрибуты к HTML-элементам, начиная с префикса `data-`. Они предоставляют удобный способ связать произвольные данные с элементами, не нарушая при этом валидность HTML.
+
+Пример:
+
+```html
+<div id="myElement" data-user-id="123" data-username="JohnDoe">
+  Этот элемент хранит данные о пользователе.
+</div>
+```
+
+В этом примере мы добавили два data attributes: `data-user-id` и `data-username`.
+
+### Как использовать Data Attributes в JavaScript
+
+Доступ к data attributes можно получить через свойство `dataset` элемента в JavaScript.  Название атрибута после префикса `data-` преобразуется в camelCase.
+
+```javascript
+const element = document.getElementById("myElement");
+
+// Получаем значение data-user-id
+const userId = element.dataset.userId; // userId будет равен "123"
+
+// Получаем значение data-username
+const username = element.dataset.username; // username будет равен "JohnDoe"
+
+console.log(`User ID: ${userId}, Username: ${username}`);
+```
+
+Мы можем также изменить значение data attribute:
+
+```javascript
+element.dataset.userId = "456";
+console.log(element.dataset.userId); // Выведет "456"
+```
+
+### Практические примеры
+
+1.  **Фильтрация элементов списка:**
+
+```html
+<ul id="myList">
+  <li data-category="fruits">Apple</li>
+  <li data-category="vegetables">Carrot</li>
+  <li data-category="fruits">Banana</li>
+  <li data-category="vegetables">Broccoli</li>
+</ul>
+
+<button onclick="filterList('fruits')">Показать фрукты</button>
+
+<script>
+function filterList(category) {
+  const listItems = document.querySelectorAll("#myList li");
+  listItems.forEach(item => {
+    if (item.dataset.category === category) {
+      item.style.display = "block";
+    } else {
+      item.style.display = "none";
+    }
+  });
+}
+</script>
+```
+
+2.  **Хранение конфигурационных данных:**
+
+```html
+<button data-api-endpoint="/api/users" data-request-method="GET">
+  Загрузить пользователей
+</button>
+
+<script>
+const button = document.querySelector("button");
+button.addEventListener("click", () => {
+  const endpoint = button.dataset.apiEndpoint;
+  const method = button.dataset.requestMethod;
+
+  // Здесь можно использовать endpoint и method для отправки запроса
+  console.log(`Отправляем ${method} запрос на ${endpoint}`);
+});
+</script>
+```
+
+### Жизненный пример
+
+Data attributes широко используются в различных JavaScript-фреймворках и библиотеках, таких как React, Vue.js и Angular. Они применяются для хранения информации о состоянии компонента, идентификаторов элементов списка, настроек конфигурации и многого другого.
+
+Например, Bootstrap использует data attributes для управления поведением компонентов, таких как модальные окна и выпадающие списки.
+
+### Ключевые моменты
+
+*   Data attributes начинаются с префикса `data-`.
+*   Доступ к ним осуществляется через свойство `dataset` элемента в JavaScript.
+*   Название атрибута после префикса `data-` преобразуется в camelCase.
+*   Они позволяют хранить произвольные данные, связанные с HTML-элементами.
+*   Широко используются в JavaScript-фреймворках для управления поведением компонентов.
+*   Улучшают читаемость и поддерживаемость кода, позволяя хранить конфигурацию непосредственно в HTML.

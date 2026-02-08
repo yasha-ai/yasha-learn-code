@@ -1,0 +1,471 @@
+## TypeScript: Броня. Урок 25: Generic Constraints (Ограничения дженериков)
+
+Generic constraints позволяют ограничить типы, которые могут быть переданы в generic параметр. Вместо того чтобы принимать любой тип, можно указать, что тип должен соответствовать определённым требованиям. Это делает generic функции и классы более безопасными и выразительными, сохраняя их гибкость.
+
+### Базовые ограничения с extends
+
+```typescript
+// Без ограничений - принимает любой тип
+function identity<T>(value: T): T {
+  return value;
+}
+
+// С ограничением - только объекты
+function getProperty<T extends object>(obj: T, key: keyof T) {
+  return obj[key];
+}
+
+const user = { name: 'Alice', age: 30 };
+const name = getProperty(user, 'name'); // ✓ работает
+
+// const invalid = getProperty('string', 0); // ✗ Ошибка: string не extends object
+
+// Ограничение конкретным типом
+function logLength<T extends { length: number }>(value: T): number {
+  console.log(value.length);
+  return value.length;
+}
+
+logLength('hello');      // ✓ string имеет length
+logLength([1, 2, 3]);    // ✓ array имеет length
+logLength({ length: 5 }); // ✓ объект с length
+// logLength(42);        // ✗ number не имеет length
+```
+
+### Множественные ограничения
+
+```typescript
+// Intersection constraints
+interface Named {
+  name: string;
+}
+
+interface Aged {
+  age: number;
+}
+
+// T должен иметь И name, И age
+function describe<T extends Named & Aged>(entity: T): string {
+  return `${entity.name} is ${entity.age} years old`;
+}
+
+const person = { name: 'Alice', age: 30, city: 'London' };
+console.log(describe(person)); // "Alice is 30 years old"
+
+// const invalid = { name: 'Bob' }; // ✗ Ошибка: отсутствует age
+// describe(invalid);
+
+// Union constraints (менее полезно)
+function process<T extends string | number>(value: T): T {
+  // Можно работать только с методами, общими для string и number
+  return value;
+}
+```
+
+### Ограничения между параметрами
+
+```typescript
+// Один generic ограничен другим
+function getProperty<T, K extends keyof T>(obj: T, key: K): T[K] {
+  return obj[key];
+}
+
+const user = {
+  name: 'Alice',
+  age: 30,
+  email: 'alice@example.com',
+};
+
+const name = getProperty(user, 'name');  // ✓ string
+const age = getProperty(user, 'age');    // ✓ number
+// const invalid = getProperty(user, 'city'); // ✗ 'city' не в keyof User
+
+// Более сложный пример
+function setProperty<T, K extends keyof T>(
+  obj: T,
+  key: K,
+  value: T[K]
+): void {
+  obj[key] = value;
+}
+
+setProperty(user, 'name', 'Bob');    // ✓
+setProperty(user, 'age', 31);        // ✓
+// setProperty(user, 'name', 123);   // ✗ Ошибка: number не string
+```
+
+### Практический пример: Type-safe Update
+
+```typescript
+// Generic функция для частичного обновления объектов
+function updateEntity<T extends object, K extends keyof T>(
+  entity: T,
+  updates: Pick<T, K>
+): T {
+  return { ...entity, ...updates };
+}
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  age: number;
+  role: 'admin' | 'user';
+}
+
+const user: User = {
+  id: '1',
+  name: 'Alice',
+  email: 'alice@example.com',
+  age: 30,
+  role: 'user',
+};
+
+// Обновление только name и age
+const updated = updateEntity(user, {
+  name: 'Alice Smith',
+  age: 31,
+});
+
+// TypeScript знает точные типы
+const name: string = updated.name;
+const age: number = updated.age;
+
+// Partial update с ограничением
+function partialUpdate<T extends object>(
+  entity: T,
+  updates: Partial<T>
+): T {
+  return { ...entity, ...updates };
+}
+
+const partiallyUpdated = partialUpdate(user, {
+  email: 'newemail@example.com',
+});
+```
+
+### Constructor Constraints
+
+```typescript
+// Ограничение конструктором
+interface Constructable<T> {
+  new (...args: any[]): T;
+}
+
+function createInstance<T>(Constructor: Constructable<T>, ...args: any[]): T {
+  return new Constructor(...args);
+}
+
+class User {
+  constructor(public name: string, public age: number) {}
+}
+
+class Product {
+  constructor(public title: string, public price: number) {}
+}
+
+const user = createInstance(User, 'Alice', 30);
+const product = createInstance(Product, 'Laptop', 999);
+
+// С ограничениями на базовый класс
+abstract class Entity {
+  abstract id: string;
+}
+
+class UserEntity extends Entity {
+  id: string;
+  constructor(public name: string) {
+    super();
+    this.id = Math.random().toString(36);
+  }
+}
+
+// Только классы, наследующие Entity
+function createEntity<T extends Entity>(
+  Constructor: new (...args: any[]) => T,
+  ...args: any[]
+): T {
+  const instance = new Constructor(...args);
+  console.log(`Created entity with ID: ${instance.id}`);
+  return instance;
+}
+
+const userEntity = createEntity(UserEntity, 'Alice');
+```
+
+### Жизненный пример: Repository Pattern
+
+```typescript
+// Generic repository с ограничениями
+interface Entity {
+  id: string;
+}
+
+interface Timestamped {
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// Repository работает только с Entity
+class Repository<T extends Entity> {
+  private storage: Map<string, T> = new Map();
+  
+  async create(data: Omit<T, 'id'>): Promise<T> {
+    const entity = {
+      ...data,
+      id: Math.random().toString(36),
+    } as T;
+    
+    this.storage.set(entity.id, entity);
+    return entity;
+  }
+  
+  async findById(id: string): Promise<T | null> {
+    return this.storage.get(id) ?? null;
+  }
+  
+  async findAll(): Promise<T[]> {
+    return Array.from(this.storage.values());
+  }
+  
+  async update(id: string, updates: Partial<T>): Promise<T | null> {
+    const entity = await this.findById(id);
+    if (!entity) return null;
+    
+    const updated = { ...entity, ...updates };
+    this.storage.set(id, updated);
+    return updated;
+  }
+  
+  async delete(id: string): Promise<boolean> {
+    return this.storage.delete(id);
+  }
+}
+
+// TimestampedRepository только для сущностей с timestamp
+class TimestampedRepository<T extends Entity & Timestamped> extends Repository<T> {
+  async create(data: Omit<T, 'id' | 'createdAt' | 'updatedAt'>): Promise<T> {
+    const now = new Date();
+    const entity = {
+      ...data,
+      id: Math.random().toString(36),
+      createdAt: now,
+      updatedAt: now,
+    } as T;
+    
+    (this as any).storage.set(entity.id, entity);
+    return entity;
+  }
+  
+  async update(id: string, updates: Partial<T>): Promise<T | null> {
+    const result = await super.update(id, {
+      ...updates,
+      updatedAt: new Date(),
+    } as Partial<T>);
+    
+    return result;
+  }
+  
+  async findRecent(limit: number = 10): Promise<T[]> {
+    const all = await this.findAll();
+    return all
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit);
+  }
+}
+
+// Определение моделей
+interface User extends Entity, Timestamped {
+  name: string;
+  email: string;
+}
+
+interface Post extends Entity, Timestamped {
+  title: string;
+  content: string;
+  authorId: string;
+}
+
+// Использование
+const userRepo = new TimestampedRepository<User>();
+const postRepo = new TimestampedRepository<Post>();
+
+const user = await userRepo.create({
+  name: 'Alice',
+  email: 'alice@example.com',
+});
+
+const recentUsers = await userRepo.findRecent(5);
+```
+
+### Recursive Constraints
+
+```typescript
+// Рекурсивные ограничения
+type DeepReadonly<T> = {
+  readonly [P in keyof T]: T[P] extends object
+    ? DeepReadonly<T[P]>
+    : T[P];
+};
+
+interface Config {
+  server: {
+    host: string;
+    port: number;
+    ssl: {
+      enabled: boolean;
+      cert: string;
+    };
+  };
+}
+
+type ImmutableConfig = DeepReadonly<Config>;
+
+// Функция с рекурсивным ограничением
+function freeze<T extends object>(obj: T): DeepReadonly<T> {
+  Object.freeze(obj);
+  
+  for (const key in obj) {
+    if (typeof obj[key] === 'object' && obj[key] !== null) {
+      freeze(obj[key]);
+    }
+  }
+  
+  return obj as DeepReadonly<T>;
+}
+
+const config: Config = {
+  server: {
+    host: 'localhost',
+    port: 3000,
+    ssl: {
+      enabled: true,
+      cert: '/path/to/cert',
+    },
+  },
+};
+
+const frozenConfig = freeze(config);
+// frozenConfig.server.host = 'new'; // ✗ readonly
+```
+
+### Function Constraints
+
+```typescript
+// Ограничение функциональными типами
+function map<T, U>(
+  array: T[],
+  fn: (item: T) => U
+): U[] {
+  return array.map(fn);
+}
+
+const numbers = [1, 2, 3, 4, 5];
+const doubled = map(numbers, x => x * 2);
+const strings = map(numbers, x => x.toString());
+
+// Ограничение async функций
+async function mapAsync<T, U>(
+  array: T[],
+  fn: (item: T) => Promise<U>
+): Promise<U[]> {
+  return Promise.all(array.map(fn));
+}
+
+const urls = ['/api/user/1', '/api/user/2', '/api/user/3'];
+const users = await mapAsync(urls, async (url) => {
+  const response = await fetch(url);
+  return response.json();
+});
+
+// Ограничение типа возврата
+function collect<T, U extends any[]>(
+  items: T[],
+  fn: (item: T) => U
+): U[] {
+  return items.map(fn);
+}
+```
+
+### Union Constraints
+
+```typescript
+// Ограничение union типов
+type Primitive = string | number | boolean | null | undefined;
+
+function isPrimitive<T extends Primitive>(value: T): value is T {
+  const type = typeof value;
+  return (
+    type === 'string' ||
+    type === 'number' ||
+    type === 'boolean' ||
+    value === null ||
+    value === undefined
+  );
+}
+
+// Ограничение конкретными литералами
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
+
+function request<M extends HttpMethod>(
+  method: M,
+  url: string,
+  body?: M extends 'GET' ? never : any
+): Promise<Response> {
+  return fetch(url, {
+    method,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+// Type-safe использование
+request('GET', '/api/users');              // ✓
+request('POST', '/api/users', { name: 'Alice' }); // ✓
+// request('GET', '/api/users', { data: 'invalid' }); // ✗ GET не может иметь body
+```
+
+### Default Type Parameters с Constraints
+
+```typescript
+// Default значение с ограничением
+function createArray<T extends object = {}>(
+  length: number,
+  factory?: () => T
+): T[] {
+  const array: T[] = [];
+  
+  for (let i = 0; i < length; i++) {
+    array.push(factory ? factory() : ({} as T));
+  }
+  
+  return array;
+}
+
+// Использование с default
+const emptyObjects = createArray(5); // {}[]
+
+// Использование с конкретным типом
+interface User {
+  id: number;
+  name: string;
+}
+
+let userId = 0;
+const users = createArray<User>(3, () => ({
+  id: ++userId,
+  name: `User ${userId}`,
+}));
+```
+
+### Ключевые моменты
+
+- Generic constraints ограничивают типы через `extends`
+- Можно требовать наличие определённых свойств или методов
+- Intersection (`A & B`) требует соответствия всем типам
+- Один generic может быть ограничен другим (`K extends keyof T`)
+- Constructor constraints позволяют работать с классами generic
+- Рекурсивные constraints для вложенных структур
+- Function constraints для типизации callback'ов
+- Комбинируются с conditional types для мощных абстракций
+- Используются в Repository pattern, Builder pattern, Factory pattern
+- Делают generic код более безопасным без потери гибкости

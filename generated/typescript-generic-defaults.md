@@ -1,0 +1,529 @@
+## TypeScript: Броня. Урок 26: Generic Default Parameters
+
+Generic default parameters позволяют указать значение по умолчанию для generic параметра типа. Если тип не указан явно и не может быть выведен из контекста, будет использовано значение по умолчанию. Это делает generic типы более удобными в использовании, сохраняя их гибкость.
+
+### Базовый синтаксис
+
+```typescript
+// Generic с default значением
+interface Box<T = string> {
+  value: T;
+}
+
+// Использование без указания типа - используется default (string)
+const stringBox: Box = {
+  value: 'hello',
+};
+
+// Явное указание типа
+const numberBox: Box<number> = {
+  value: 42,
+};
+
+// Type inference работает
+const inferredBox: Box = {
+  value: 'inferred', // T выводится как string
+};
+
+// Функция с default generic
+function createArray<T = number>(length: number, value: T): T[] {
+  return Array(length).fill(value);
+}
+
+const numbers = createArray(3, 42);        // T = number
+const strings = createArray(3, 'hello');   // T = string
+const defaults = createArray<>(5, 10);     // T = number (default)
+```
+
+### Множественные Default Параметры
+
+```typescript
+// Несколько generic параметров с defaults
+interface Response<T = any, E = Error> {
+  data?: T;
+  error?: E;
+  loading: boolean;
+}
+
+// Все defaults
+const response1: Response = {
+  loading: false,
+  data: { message: 'success' }, // any
+};
+
+// Первый указан, второй default
+const response2: Response<User> = {
+  loading: false,
+  data: { id: '1', name: 'Alice' }, // User
+  error: new Error('Failed'), // Error
+};
+
+// Оба указаны
+const response3: Response<Post, string> = {
+  loading: false,
+  error: 'Not found', // string
+};
+
+// Функция с множественными defaults
+function fetch<T = any, E = string>(
+  url: string
+): Promise<Response<T, E>> {
+  return fetch(url)
+    .then(res => res.json())
+    .then(data => ({ data, loading: false }))
+    .catch(error => ({ error: error.message, loading: false }));
+}
+```
+
+### Default Зависящий от Другого Параметра
+
+```typescript
+// Default может ссылаться на предыдущие параметры
+type Container<T, U = T[]> = {
+  single: T;
+  multiple: U;
+};
+
+const numbers: Container<number> = {
+  single: 42,
+  multiple: [1, 2, 3], // T[] (number[])
+};
+
+const mixed: Container<number, string[]> = {
+  single: 42,
+  multiple: ['a', 'b', 'c'], // string[]
+};
+
+// Более сложный пример
+type Result<T, E = Error, M = { data: T; error: E }> = {
+  value: T;
+  error: E;
+  metadata: M;
+};
+
+// Все defaults применяются
+const result1: Result<string> = {
+  value: 'success',
+  error: new Error(),
+  metadata: {
+    data: 'success',
+    error: new Error(),
+  },
+};
+```
+
+### Практический пример: API Client
+
+```typescript
+// Type-safe API client с разумными defaults
+interface ApiResponse<T = any> {
+  data: T;
+  status: number;
+  headers: Record<string, string>;
+}
+
+interface ApiError<T = string> {
+  message: T;
+  code: number;
+  details?: any;
+}
+
+interface ApiConfig<
+  TResponse = any,
+  TError = string,
+  THeaders = Record<string, string>
+> {
+  baseUrl?: string;
+  headers?: THeaders;
+  timeout?: number;
+  onSuccess?: (response: TResponse) => void;
+  onError?: (error: ApiError<TError>) => void;
+}
+
+class ApiClient<
+  TResponse = any,
+  TError = string,
+  THeaders = Record<string, string>
+> {
+  constructor(private config: ApiConfig<TResponse, TError, THeaders> = {}) {}
+  
+  async get<T = TResponse>(
+    endpoint: string
+  ): Promise<ApiResponse<T>> {
+    // implementation
+    return {} as ApiResponse<T>;
+  }
+  
+  async post<T = TResponse, D = any>(
+    endpoint: string,
+    data: D
+  ): Promise<ApiResponse<T>> {
+    // implementation
+    return {} as ApiResponse<T>;
+  }
+}
+
+// Использование с defaults
+const api = new ApiClient(); // все defaults (any, string, Record<string, string>)
+
+// С частичной типизацией
+interface User {
+  id: string;
+  name: string;
+}
+
+const userApi = new ApiClient<User>(); // TResponse = User, остальные defaults
+
+// С полной типизацией
+interface CustomError {
+  message: string;
+  code: string;
+  stack: string;
+}
+
+const typedApi = new ApiClient<User, CustomError>({
+  onError: (err) => {
+    console.log(err.code); // string (CustomError.code)
+  },
+});
+```
+
+### Default Constraints
+
+```typescript
+// Default с ограничениями
+interface Entity {
+  id: string;
+}
+
+interface DefaultEntity extends Entity {
+  createdAt: Date;
+}
+
+// Default должен соответствовать constraint
+type Repository<T extends Entity = DefaultEntity> = {
+  findById(id: string): Promise<T>;
+  findAll(): Promise<T[]>;
+  create(entity: Omit<T, 'id'>): Promise<T>;
+};
+
+// Использование с default
+const defaultRepo: Repository = {
+  async findById(id) {
+    return {
+      id,
+      createdAt: new Date(),
+    };
+  },
+  async findAll() {
+    return [];
+  },
+  async create(entity) {
+    return {
+      ...entity,
+      id: Math.random().toString(36),
+    };
+  },
+};
+
+// С кастомным типом
+interface User extends Entity {
+  name: string;
+  email: string;
+}
+
+const userRepo: Repository<User> = {
+  async findById(id) {
+    return {
+      id,
+      name: 'Alice',
+      email: 'alice@example.com',
+    };
+  },
+  async findAll() {
+    return [];
+  },
+  async create(entity) {
+    return {
+      ...entity,
+      id: Math.random().toString(36),
+    };
+  },
+};
+```
+
+### Жизненный пример: State Management
+
+```typescript
+// Redux-like state management с defaults
+
+// Default state shape
+interface DefaultState {
+  loading: boolean;
+  error: string | null;
+}
+
+// Default action
+interface DefaultAction {
+  type: string;
+  payload?: any;
+}
+
+// Reducer с default types
+type Reducer<
+  S = DefaultState,
+  A extends DefaultAction = DefaultAction
+> = (state: S, action: A) => S;
+
+// Middleware с defaults
+type Middleware<
+  S = DefaultState,
+  A extends DefaultAction = DefaultAction,
+  D = unknown
+> = (store: Store<S, A, D>) => (next: Dispatch<A>) => Dispatch<A>;
+
+// Store interface
+interface Store<
+  S = DefaultState,
+  A extends DefaultAction = DefaultAction,
+  D = unknown
+> {
+  getState(): S;
+  dispatch: Dispatch<A>;
+  subscribe(listener: () => void): () => void;
+}
+
+type Dispatch<A extends DefaultAction = DefaultAction> = (action: A) => void;
+
+// Создание store с defaults
+function createStore<
+  S = DefaultState,
+  A extends DefaultAction = DefaultAction
+>(
+  reducer: Reducer<S, A>,
+  initialState: S
+): Store<S, A> {
+  let state = initialState;
+  const listeners: Array<() => void> = [];
+  
+  return {
+    getState: () => state,
+    dispatch: (action) => {
+      state = reducer(state, action);
+      listeners.forEach(listener => listener());
+    },
+    subscribe: (listener) => {
+      listeners.push(listener);
+      return () => {
+        const index = listeners.indexOf(listener);
+        if (index > -1) listeners.splice(index, 1);
+      };
+    },
+  };
+}
+
+// Использование с defaults
+const defaultReducer: Reducer = (state, action) => {
+  switch (action.type) {
+    case 'SET_LOADING':
+      return { ...state, loading: action.payload };
+    case 'SET_ERROR':
+      return { ...state, error: action.payload };
+    default:
+      return state;
+  }
+};
+
+const store = createStore(defaultReducer, {
+  loading: false,
+  error: null,
+});
+
+// Типизированное использование
+interface UserState {
+  users: User[];
+  loading: boolean;
+  error: string | null;
+}
+
+interface UserAction {
+  type: 'LOAD_USERS' | 'ADD_USER' | 'DELETE_USER';
+  payload: any;
+}
+
+const userReducer: Reducer<UserState, UserAction> = (state, action) => {
+  switch (action.type) {
+    case 'LOAD_USERS':
+      return { ...state, users: action.payload, loading: false };
+    case 'ADD_USER':
+      return { ...state, users: [...state.users, action.payload] };
+    case 'DELETE_USER':
+      return {
+        ...state,
+        users: state.users.filter(u => u.id !== action.payload),
+      };
+    default:
+      return state;
+  }
+};
+
+const userStore = createStore(userReducer, {
+  users: [],
+  loading: false,
+  error: null,
+});
+```
+
+### Conditional Defaults
+
+```typescript
+// Default зависящий от условия
+type DefaultValue<T> = T extends string
+  ? ''
+  : T extends number
+  ? 0
+  : T extends boolean
+  ? false
+  : never;
+
+interface Field<T, D = DefaultValue<T>> {
+  value: T;
+  defaultValue: D;
+}
+
+const stringField: Field<string> = {
+  value: 'hello',
+  defaultValue: '', // DefaultValue<string> = ''
+};
+
+const numberField: Field<number> = {
+  value: 42,
+  defaultValue: 0, // DefaultValue<number> = 0
+};
+
+// Более сложный conditional default
+type AsyncValue<T, Async extends boolean = false> = Async extends true
+  ? Promise<T>
+  : T;
+
+function getValue<T, A extends boolean = false>(
+  value: T,
+  async?: A
+): AsyncValue<T, A> {
+  if (async) {
+    return Promise.resolve(value) as any;
+  }
+  return value as any;
+}
+
+const sync = getValue('hello');           // string
+const async = getValue('hello', true);    // Promise<string>
+```
+
+### Partial Application Pattern
+
+```typescript
+// Частичное применение generic параметров через defaults
+type PartiallyApplied<
+  T,
+  U = any,
+  V = any
+> = {
+  first: T;
+  second: U;
+  third: V;
+};
+
+// Создание специализированных версий
+type StringFirst<U = string, V = number> = PartiallyApplied<string, U, V>;
+
+type NumberSecond<T = string, V = boolean> = PartiallyApplied<T, number, V>;
+
+// Использование
+const a: StringFirst = {
+  first: 'text',
+  second: 'default',
+  third: 42,
+};
+
+const b: NumberSecond = {
+  first: 'text',
+  second: 123,
+  third: true,
+};
+
+// Применение в функциях
+function create<
+  T = string,
+  U = number
+>(first: T, second: U): PartiallyApplied<T, U, boolean> {
+  return {
+    first,
+    second,
+    third: true,
+  };
+}
+
+const result1 = create('hello', 42);      // PartiallyApplied<string, number, boolean>
+const result2 = create<number>(100, 200); // PartiallyApplied<number, number, boolean>
+```
+
+### Factory Pattern с Defaults
+
+```typescript
+// Фабрика с разумными defaults
+interface FactoryOptions<T = any> {
+  validate?: (value: T) => boolean;
+  transform?: (value: T) => T;
+  defaultValue?: T;
+}
+
+class Factory<T = any> {
+  constructor(private options: FactoryOptions<T> = {}) {}
+  
+  create(value: T): T {
+    if (this.options.validate && !this.options.validate(value)) {
+      throw new Error('Validation failed');
+    }
+    
+    return this.options.transform
+      ? this.options.transform(value)
+      : value;
+  }
+  
+  createDefault(): T {
+    if (!this.options.defaultValue) {
+      throw new Error('No default value provided');
+    }
+    return this.options.defaultValue;
+  }
+}
+
+// Использование с defaults
+const genericFactory = new Factory(); // Factory<any>
+
+// Типизированная фабрика
+const userFactory = new Factory<User>({
+  validate: (user) => user.name.length > 0,
+  defaultValue: { id: '0', name: 'Guest', email: 'guest@example.com' },
+});
+
+const user = userFactory.create({
+  id: '1',
+  name: 'Alice',
+  email: 'alice@example.com',
+});
+```
+
+### Ключевые моменты
+
+- Default generic параметры указываются через `<T = DefaultType>`
+- Используются когда тип не указан явно и не может быть выведен
+- Можно указать defaults для всех или некоторых параметров
+- Default может ссылаться на предыдущие generic параметры
+- Default должен соответствовать constraint (если есть)
+- Полезны для API, которые часто используются с одними типами
+- Делают generic типы более удобными без потери гибкости
+- Могут быть conditional (зависеть от условий)
+- Используются в state management, factories, API clients
+- Позволяют создавать partially applied types для специализации
