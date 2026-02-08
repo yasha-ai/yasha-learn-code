@@ -7,7 +7,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const GEMINI_API_KEY = process.env.GOOGLE_GEMINI_API_KEY || 'AIzaSyCKb4mKtQ2Da5YsDDAKxWBm0D8VP824joA';
+const GEMINI_API_KEY = process.env.GOOGLE_GEMINI_API_KEY;
+
+if (!GEMINI_API_KEY) {
+  console.error('❌ Error: GOOGLE_GEMINI_API_KEY environment variable is not set!');
+  console.error('Please set it in .env.local or export it before running this script.');
+  process.exit(1);
+}
 
 async function generateContent(courseTitle, lessonTitle, context) {
   const prompt = `Ты — опытный преподаватель программирования. Напиши урок на русском языке для курса "${courseTitle}".
