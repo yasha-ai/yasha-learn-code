@@ -1,0 +1,541 @@
+## TypeScript: Броня. Урок 22: Declaration Merging (Слияние деклараций)
+
+Declaration merging - это механизм TypeScript, который объединяет несколько деклараций с одинаковым именем в одну. Мы уже видели interface merging, но declaration merging охватывает более широкий спектр: интерфейсы, namespace, классы, функции и enum. Понимание всех возможностей declaration merging критически важно для создания сложных типов и работы с внешними библиотеками.
+
+### Слияние Interfaces (повторение)
+
+```typescript
+// Интерфейсы с одинаковым именем объединяются
+interface Box {
+  height: number;
+  width: number;
+}
+
+interface Box {
+  depth: number;
+}
+
+// Результат: Box имеет height, width, и depth
+const box: Box = {
+  height: 10,
+  width: 20,
+  depth: 5,
+};
+```
+
+### Слияние Namespace
+
+```typescript
+// Namespace также могут сливаться
+namespace Animals {
+  export class Dog {
+    bark() { console.log('Woof!'); }
+  }
+}
+
+namespace Animals {
+  export class Cat {
+    meow() { console.log('Meow!'); }
+  }
+}
+
+namespace Animals {
+  export class Bird {
+    chirp() { console.log('Chirp!'); }
+  }
+}
+
+// Все классы доступны в одном namespace
+const dog = new Animals.Dog();
+const cat = new Animals.Cat();
+const bird = new Animals.Bird();
+```
+
+### Слияние Namespace и Interface
+
+```typescript
+// Интерфейс и namespace могут сливаться
+interface User {
+  id: string;
+  name: string;
+}
+
+namespace User {
+  export function create(name: string): User {
+    return {
+      id: Math.random().toString(36),
+      name,
+    };
+  }
+  
+  export function isValid(user: User): boolean {
+    return user.id.length > 0 && user.name.length > 0;
+  }
+}
+
+// Использование
+const user = User.create('Alice');
+const valid = User.isValid(user);
+
+// User - это и тип, и namespace одновременно
+const users: User[] = [
+  User.create('Bob'),
+  User.create('Charlie'),
+];
+```
+
+### Слияние Namespace и Class
+
+```typescript
+// Class и namespace могут сливаться
+class Product {
+  constructor(public name: string, public price: number) {}
+}
+
+namespace Product {
+  export function fromJSON(json: string): Product {
+    const data = JSON.parse(json);
+    return new Product(data.name, data.price);
+  }
+  
+  export function compare(a: Product, b: Product): number {
+    return a.price - b.price;
+  }
+  
+  export const CATEGORY = {
+    ELECTRONICS: 'electronics',
+    CLOTHING: 'clothing',
+    FOOD: 'food',
+  } as const;
+}
+
+// Использование
+const product1 = new Product('Laptop', 999);
+const product2 = Product.fromJSON('{"name":"Mouse","price":29}');
+
+const sorted = [product1, product2].sort(Product.compare);
+console.log(Product.CATEGORY.ELECTRONICS);
+```
+
+### Слияние Namespace и Function
+
+```typescript
+// Функция и namespace могут сливаться (паттерн для создания callable objects)
+function greeter(name: string): string {
+  return `Hello, ${name}!`;
+}
+
+namespace greeter {
+  export let count = 0;
+  export let lastGreeted: string | null = null;
+  
+  export function reset() {
+    count = 0;
+    lastGreeted = null;
+  }
+}
+
+// Модификация функции для использования namespace
+const originalGreeter = greeter;
+function greeter(name: string): string {
+  greeter.count++;
+  greeter.lastGreeted = name;
+  return originalGreeter(name);
+}
+
+// Использование
+console.log(greeter('Alice')); // "Hello, Alice!"
+console.log(greeter.count);    // 1
+console.log(greeter.lastGreeted); // "Alice"
+
+greeter('Bob');
+console.log(greeter.count); // 2
+
+greeter.reset();
+console.log(greeter.count); // 0
+```
+
+### Слияние Namespace и Enum
+
+```typescript
+// Enum и namespace могут сливаться
+enum Color {
+  Red = 'red',
+  Green = 'green',
+  Blue = 'blue',
+}
+
+namespace Color {
+  export function toHex(color: Color): string {
+    switch (color) {
+      case Color.Red: return '#ff0000';
+      case Color.Green: return '#00ff00';
+      case Color.Blue: return '#0000ff';
+    }
+  }
+  
+  export function fromHex(hex: string): Color | null {
+    switch (hex.toLowerCase()) {
+      case '#ff0000': return Color.Red;
+      case '#00ff00': return Color.Green;
+      case '#0000ff': return Color.Blue;
+      default: return null;
+    }
+  }
+  
+  export const ALL = [Color.Red, Color.Green, Color.Blue];
+}
+
+// Использование
+const color = Color.Red;
+const hex = Color.toHex(color); // "#ff0000"
+const parsed = Color.fromHex('#00ff00'); // Color.Green
+console.log(Color.ALL); // [Color.Red, Color.Green, Color.Blue]
+```
+
+### Практический пример: Validation Library
+
+```typescript
+// Создание validation библиотеки с declaration merging
+
+// Основной интерфейс
+interface Validator<T> {
+  validate(value: unknown): value is T;
+  errorMessage: string;
+}
+
+// Namespace с утилитами
+namespace Validator {
+  export function string(options?: {
+    minLength?: number;
+    maxLength?: number;
+    pattern?: RegExp;
+  }): Validator<string> {
+    return {
+      validate(value): value is string {
+        if (typeof value !== 'string') return false;
+        if (options?.minLength && value.length < options.minLength) return false;
+        if (options?.maxLength && value.length > options.maxLength) return false;
+        if (options?.pattern && !options.pattern.test(value)) return false;
+        return true;
+      },
+      errorMessage: 'Invalid string',
+    };
+  }
+  
+  export function number(options?: {
+    min?: number;
+    max?: number;
+    integer?: boolean;
+  }): Validator<number> {
+    return {
+      validate(value): value is number {
+        if (typeof value !== 'number') return false;
+        if (options?.min !== undefined && value < options.min) return false;
+        if (options?.max !== undefined && value > options.max) return false;
+        if (options?.integer && !Number.isInteger(value)) return false;
+        return true;
+      },
+      errorMessage: 'Invalid number',
+    };
+  }
+  
+  export function array<T>(
+    itemValidator: Validator<T>
+  ): Validator<T[]> {
+    return {
+      validate(value): value is T[] {
+        if (!Array.isArray(value)) return false;
+        return value.every(item => itemValidator.validate(item));
+      },
+      errorMessage: 'Invalid array',
+    };
+  }
+  
+  export function object<T extends Record<string, any>>(
+    schema: { [K in keyof T]: Validator<T[K]> }
+  ): Validator<T> {
+    return {
+      validate(value): value is T {
+        if (typeof value !== 'object' || value === null) return false;
+        
+        for (const key in schema) {
+          if (!(key in value)) return false;
+          if (!schema[key].validate((value as any)[key])) return false;
+        }
+        
+        return true;
+      },
+      errorMessage: 'Invalid object',
+    };
+  }
+}
+
+// Использование
+const emailValidator = Validator.string({
+  pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+});
+
+const ageValidator = Validator.number({
+  min: 0,
+  max: 120,
+  integer: true,
+});
+
+const userValidator = Validator.object<{
+  name: string;
+  email: string;
+  age: number;
+}>({
+  name: Validator.string({ minLength: 2 }),
+  email: emailValidator,
+  age: ageValidator,
+});
+
+// Type-safe validation
+const data: unknown = {
+  name: 'Alice',
+  email: 'alice@example.com',
+  age: 30,
+};
+
+if (userValidator.validate(data)) {
+  // TypeScript знает, что data имеет правильный тип
+  console.log(data.name, data.email, data.age);
+}
+```
+
+### Жизненный пример: Logger Library
+
+```typescript
+// Создание логгера с разными уровнями
+enum LogLevel {
+  Debug = 0,
+  Info = 1,
+  Warn = 2,
+  Error = 3,
+}
+
+namespace LogLevel {
+  export function toString(level: LogLevel): string {
+    switch (level) {
+      case LogLevel.Debug: return 'DEBUG';
+      case LogLevel.Info: return 'INFO';
+      case LogLevel.Warn: return 'WARN';
+      case LogLevel.Error: return 'ERROR';
+    }
+  }
+  
+  export function fromString(str: string): LogLevel | null {
+    switch (str.toUpperCase()) {
+      case 'DEBUG': return LogLevel.Debug;
+      case 'INFO': return LogLevel.Info;
+      case 'WARN': return LogLevel.Warn;
+      case 'ERROR': return LogLevel.Error;
+      default: return null;
+    }
+  }
+}
+
+// Класс Logger
+class Logger {
+  constructor(private minLevel: LogLevel = LogLevel.Info) {}
+  
+  log(level: LogLevel, message: string, ...args: any[]) {
+    if (level >= this.minLevel) {
+      const prefix = `[${LogLevel.toString(level)}]`;
+      console.log(prefix, message, ...args);
+    }
+  }
+  
+  debug(message: string, ...args: any[]) {
+    this.log(LogLevel.Debug, message, ...args);
+  }
+  
+  info(message: string, ...args: any[]) {
+    this.log(LogLevel.Info, message, ...args);
+  }
+  
+  warn(message: string, ...args: any[]) {
+    this.log(LogLevel.Warn, message, ...args);
+  }
+  
+  error(message: string, ...args: any[]) {
+    this.log(LogLevel.Error, message, ...args);
+  }
+}
+
+namespace Logger {
+  let instance: Logger | null = null;
+  
+  export function getInstance(): Logger {
+    if (!instance) {
+      instance = new Logger();
+    }
+    return instance;
+  }
+  
+  export function setLevel(level: LogLevel) {
+    getInstance()['minLevel'] = level;
+  }
+  
+  // Удобные статические методы
+  export function debug(message: string, ...args: any[]) {
+    getInstance().debug(message, ...args);
+  }
+  
+  export function info(message: string, ...args: any[]) {
+    getInstance().info(message, ...args);
+  }
+  
+  export function warn(message: string, ...args: any[]) {
+    getInstance().warn(message, ...args);
+  }
+  
+  export function error(message: string, ...args: any[]) {
+    getInstance().error(message, ...args);
+  }
+}
+
+// Использование
+const logger = new Logger(LogLevel.Debug);
+logger.info('Application started');
+
+// Или через статические методы
+Logger.info('Using static method');
+Logger.setLevel(LogLevel.Warn);
+Logger.debug('This will not be logged');
+Logger.warn('This will be logged');
+```
+
+### Порядок слияния
+
+```typescript
+// TypeScript объединяет декларации в определённом порядке
+
+// 1. Сначала не-exported члены
+// 2. Затем exported члены в порядке объявления
+
+namespace Utils {
+  function privateHelper() {
+    return 'private';
+  }
+  
+  export function publicFunction() {
+    return privateHelper();
+  }
+}
+
+namespace Utils {
+  export function anotherPublic() {
+    // privateHelper не доступен здесь
+    // return privateHelper(); // ✗ Ошибка
+    return publicFunction(); // ✓ Работает
+  }
+}
+
+// Для интерфейсов: последние объявления имеют приоритет для перегрузок
+interface Processor {
+  process(data: string): void;
+}
+
+interface Processor {
+  process(data: number): void;
+  process(data: boolean): void;
+}
+
+// Порядок перегрузок (снизу вверх):
+// 1. process(data: boolean): void
+// 2. process(data: number): void
+// 3. process(data: string): void
+```
+
+### Ограничения и Best Practices
+
+```typescript
+// ✗ Нельзя объединять interface и type alias
+// interface User { name: string; }
+// type User = { age: number; }; // ✗ Ошибка
+
+// ✗ Нельзя объединять class и interface с одним именем
+// class User {}
+// interface User {} // ✗ Ошибка
+
+// ✓ Можно объединять interface и namespace
+interface Config {
+  port: number;
+}
+
+namespace Config {
+  export function load(): Config {
+    return { port: 3000 };
+  }
+}
+
+// ✓ Можно объединять enum и namespace
+enum Status {
+  Active = 'active',
+  Inactive = 'inactive',
+}
+
+namespace Status {
+  export function isActive(status: Status): boolean {
+    return status === Status.Active;
+  }
+}
+
+// ✗ Namespace должен экспортировать члены
+// namespace Helper {
+//   function internal() {} // Не доступен снаружи
+// }
+
+// ✓ Export делает член доступным
+namespace Helper {
+  export function external() {} // Доступен
+}
+```
+
+### Module Augmentation (продвинутый паттерн)
+
+```typescript
+// Расширение модулей через declaration merging
+
+// File: node_modules/some-lib/index.d.ts
+export interface Config {
+  apiUrl: string;
+}
+
+export function loadConfig(): Config;
+
+// File: src/augmentations.d.ts
+import 'some-lib';
+
+declare module 'some-lib' {
+  interface Config {
+    // Добавление новых полей
+    timeout?: number;
+    retries?: number;
+  }
+}
+
+// File: src/app.ts
+import { loadConfig } from 'some-lib';
+
+const config = loadConfig();
+config.apiUrl; // ✓ string
+config.timeout; // ✓ number | undefined
+config.retries; // ✓ number | undefined
+```
+
+### Ключевые моменты
+
+- Declaration merging объединяет несколько деклараций с одним именем
+- Работает для interfaces, namespaces, classes (с namespace), functions (с namespace), enums (с namespace)
+- Interface + namespace = тип и значение одновременно
+- Class + namespace = класс с статическими утилитами
+- Function + namespace = callable object с дополнительными свойствами
+- Enum + namespace = enum с утилитными методами
+- Module augmentation позволяет расширять внешние модули
+- Порядок объявлений важен для перегрузок
+- Type aliases НЕ участвуют в declaration merging
+- Используется для создания богатых API с минимальным синтаксисом

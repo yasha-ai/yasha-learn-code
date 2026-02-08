@@ -1,0 +1,491 @@
+## TypeScript: Броня. Урок 23: Index Signatures (Индексные сигнатуры)
+
+Index signatures позволяют определять типы для динамических свойств объектов, когда имена ключей заранее неизвестны. Это мощный инструмент для работы с dictionary-like структурами, конфигурациями, кэшами и динамическими данными. Понимание index signatures критически важно для создания гибких и type-safe API.
+
+### Базовый синтаксис
+
+```typescript
+// Простейшая index signature
+interface StringDictionary {
+  [key: string]: string;
+}
+
+const dict: StringDictionary = {
+  name: 'Alice',
+  email: 'alice@example.com',
+  city: 'London',
+};
+
+// Можно добавлять любые string ключи
+dict.country = 'UK';
+dict['postal-code'] = 'SW1A 1AA';
+
+// ✗ Значение должно быть string
+// dict.age = 30; // Ошибка: number не присваивается string
+
+// Различные типы ключей
+interface NumberDictionary {
+  [index: number]: string;
+}
+
+const arr: NumberDictionary = {
+  0: 'zero',
+  1: 'one',
+  2: 'two',
+};
+
+// Можно использовать как массив
+console.log(arr[0]); // "zero"
+console.log(arr[1]); // "one"
+```
+
+### Комбинирование с известными свойствами
+
+```typescript
+// Index signature с известными свойствами
+interface Config {
+  // Обязательные известные свойства
+  host: string;
+  port: number;
+  
+  // Дополнительные динамические свойства
+  [key: string]: string | number | boolean;
+}
+
+const config: Config = {
+  host: 'localhost',
+  port: 3000,
+  ssl: true,
+  maxConnections: 100,
+  timeout: 5000,
+  logLevel: 'debug',
+};
+
+// ⚠️ Тип известных свойств должен быть совместим с index signature
+// interface InvalidConfig {
+//   host: string;
+//   [key: string]: number; // ✗ Ошибка! host: string несовместимо
+// }
+
+// ✓ Решение: использовать union в index signature
+interface ValidConfig {
+  host: string;
+  port: number;
+  [key: string]: string | number;
+}
+```
+
+### Readonly Index Signatures
+
+```typescript
+// Неизменяемые динамические объекты
+interface ReadonlyStringMap {
+  readonly [key: string]: string;
+}
+
+const constants: ReadonlyStringMap = {
+  PI: '3.14159',
+  E: '2.71828',
+};
+
+// constants.PI = '3.14'; // ✗ Ошибка: readonly
+// constants.GOLDEN_RATIO = '1.618'; // ✗ Ошибка: readonly
+
+// С известными свойствами
+interface ImmutableConfig {
+  readonly host: string;
+  readonly port: number;
+  readonly [key: string]: string | number;
+}
+
+const appConfig: ImmutableConfig = {
+  host: 'localhost',
+  port: 3000,
+  apiKey: 'secret',
+};
+
+// appConfig.host = 'example.com'; // ✗ Ошибка: readonly
+```
+
+### Практический пример: Translations
+
+```typescript
+// Система переводов с type safety
+type Translation = {
+  [key: string]: string | Translation;
+};
+
+const translations: Translation = {
+  welcome: 'Welcome',
+  goodbye: 'Goodbye',
+  errors: {
+    notFound: 'Not found',
+    unauthorized: 'Unauthorized',
+    serverError: 'Server error',
+  },
+  forms: {
+    validation: {
+      required: 'This field is required',
+      email: 'Invalid email address',
+      minLength: 'Minimum length is {min}',
+    },
+  },
+};
+
+// Helper функция для доступа к переводам
+function t(key: string, values: Translation = translations): string {
+  const parts = key.split('.');
+  let current: any = values;
+  
+  for (const part of parts) {
+    if (typeof current === 'object' && part in current) {
+      current = current[part];
+    } else {
+      return key; // Возврат ключа, если перевод не найден
+    }
+  }
+  
+  return typeof current === 'string' ? current : key;
+}
+
+// Использование
+console.log(t('welcome')); // "Welcome"
+console.log(t('errors.notFound')); // "Not found"
+console.log(t('forms.validation.email')); // "Invalid email address"
+```
+
+### Generic Index Signatures
+
+```typescript
+// Generic dictionary
+interface Dictionary<T> {
+  [key: string]: T;
+}
+
+// Использование с разными типами
+const stringDict: Dictionary<string> = {
+  name: 'Alice',
+  email: 'alice@example.com',
+};
+
+const numberDict: Dictionary<number> = {
+  age: 30,
+  height: 170,
+  weight: 65,
+};
+
+const userDict: Dictionary<User> = {
+  user1: { id: '1', name: 'Alice' },
+  user2: { id: '2', name: 'Bob' },
+};
+
+// Generic функции для работы с dictionaries
+function mapValues<T, U>(
+  dict: Dictionary<T>,
+  fn: (value: T, key: string) => U
+): Dictionary<U> {
+  const result: Dictionary<U> = {};
+  
+  for (const key in dict) {
+    result[key] = fn(dict[key], key);
+  }
+  
+  return result;
+}
+
+// Использование
+const ages = { alice: 30, bob: 25, charlie: 35 };
+const agesInMonths = mapValues(ages, age => age * 12);
+// { alice: 360, bob: 300, charlie: 420 }
+```
+
+### Жизненный пример: Cache System
+
+```typescript
+// Type-safe кэш система
+interface CacheEntry<T> {
+  value: T;
+  expiresAt: number;
+  createdAt: number;
+}
+
+class Cache<T> {
+  private storage: { [key: string]: CacheEntry<T> } = {};
+  
+  set(key: string, value: T, ttl: number = 60000): void {
+    const now = Date.now();
+    this.storage[key] = {
+      value,
+      expiresAt: now + ttl,
+      createdAt: now,
+    };
+  }
+  
+  get(key: string): T | null {
+    const entry = this.storage[key];
+    
+    if (!entry) {
+      return null;
+    }
+    
+    if (Date.now() > entry.expiresAt) {
+      delete this.storage[key];
+      return null;
+    }
+    
+    return entry.value;
+  }
+  
+  has(key: string): boolean {
+    return this.get(key) !== null;
+  }
+  
+  delete(key: string): boolean {
+    if (key in this.storage) {
+      delete this.storage[key];
+      return true;
+    }
+    return false;
+  }
+  
+  clear(): void {
+    this.storage = {};
+  }
+  
+  keys(): string[] {
+    return Object.keys(this.storage).filter(key => this.has(key));
+  }
+  
+  values(): T[] {
+    return this.keys().map(key => this.get(key)!);
+  }
+}
+
+// Использование
+const userCache = new Cache<User>();
+
+userCache.set('user:123', { id: '123', name: 'Alice' }, 5000);
+userCache.set('user:456', { id: '456', name: 'Bob' }, 10000);
+
+const user = userCache.get('user:123'); // User | null
+console.log(userCache.keys()); // ["user:123", "user:456"]
+```
+
+### Mapped Types как альтернатива
+
+```typescript
+// Index signatures vs Mapped types
+
+// Index signature: динамические ключи
+interface DynamicConfig {
+  [key: string]: string | number;
+}
+
+// Mapped type: известные ключи
+type StaticConfig = {
+  [K in 'host' | 'port' | 'ssl']: K extends 'host' 
+    ? string 
+    : K extends 'port' 
+    ? number 
+    : boolean;
+};
+
+// Hybrid: Record utility type
+type RecordConfig = Record<'host' | 'port' | 'ssl', string | number | boolean>;
+
+// Generic mapped type для динамических ключей
+type DynamicRecord<K extends string | number | symbol, V> = {
+  [P in K]: V;
+};
+
+// С template literals
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
+type Routes = {
+  [K in `/${string}`]: {
+    [M in HttpMethod]?: (req: any) => any;
+  };
+};
+
+const routes: Routes = {
+  '/users': {
+    GET: (req) => ({ users: [] }),
+    POST: (req) => ({ created: true }),
+  },
+  '/posts': {
+    GET: (req) => ({ posts: [] }),
+  },
+};
+```
+
+### Ограничения ключей
+
+```typescript
+// TypeScript 4.4+: template literal в index signature
+interface ApiEndpoints {
+  [key: `/${string}`]: {
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+    handler: (req: any) => any;
+  };
+}
+
+const api: ApiEndpoints = {
+  '/users': {
+    method: 'GET',
+    handler: (req) => ({ users: [] }),
+  },
+  '/posts': {
+    method: 'POST',
+    handler: (req) => ({ created: true }),
+  },
+  // 'users': {} // ✗ Ошибка: не начинается с '/'
+};
+
+// Symbol ключи
+interface SymbolKeyed {
+  [key: symbol]: string;
+}
+
+const sym1 = Symbol('key1');
+const sym2 = Symbol('key2');
+
+const obj: SymbolKeyed = {
+  [sym1]: 'value1',
+  [sym2]: 'value2',
+};
+
+console.log(obj[sym1]); // "value1"
+```
+
+### Numeric Index Signatures
+
+```typescript
+// Числовые индексы
+interface NumberIndexed {
+  [index: number]: string;
+}
+
+// ⚠️ JavaScript преобразует числовые ключи в строки
+const obj: NumberIndexed = {
+  0: 'zero',
+  1: 'one',
+  2: 'two',
+};
+
+// Оба способа работают
+console.log(obj[0]);   // "zero"
+console.log(obj['0']); // "zero" (то же самое!)
+
+// Комбинирование string и number index signatures
+interface MixedIndex {
+  [index: number]: string;
+  [key: string]: string | number;
+}
+
+// ⚠️ Тип number index должен быть подтипом string index
+// interface Invalid {
+//   [index: number]: string;
+//   [key: string]: number; // ✗ Ошибка!
+// }
+```
+
+### Type Guards с Index Signatures
+
+```typescript
+// Type-safe проверка наличия ключа
+function hasKey<T extends object>(
+  obj: T,
+  key: PropertyKey
+): key is keyof T {
+  return key in obj;
+}
+
+interface Config {
+  host: string;
+  port: number;
+  [key: string]: string | number;
+}
+
+const config: Config = {
+  host: 'localhost',
+  port: 3000,
+  ssl: true,
+};
+
+const key: string = 'host';
+
+if (hasKey(config, key)) {
+  // TypeScript знает, что config[key] существует
+  const value = config[key]; // string | number
+}
+
+// Type-safe getter
+function getProperty<T extends object, K extends keyof T>(
+  obj: T,
+  key: K
+): T[K] {
+  return obj[key];
+}
+
+const host = getProperty(config, 'host'); // string
+const port = getProperty(config, 'port'); // number
+```
+
+### Nested Index Signatures
+
+```typescript
+// Вложенные динамические структуры
+interface NestedConfig {
+  [section: string]: {
+    [key: string]: string | number | boolean;
+  };
+}
+
+const appConfig: NestedConfig = {
+  database: {
+    host: 'localhost',
+    port: 5432,
+    ssl: true,
+  },
+  server: {
+    host: '0.0.0.0',
+    port: 3000,
+    workers: 4,
+  },
+  cache: {
+    enabled: true,
+    ttl: 3600,
+  },
+};
+
+// Рекурсивные index signatures
+type DeepPartial<T> = {
+  [P in keyof T]?: T[P] extends object ? DeepPartial<T[P]> : T[P];
+};
+
+type DeepDictionary = {
+  [key: string]: string | number | DeepDictionary;
+};
+
+const nested: DeepDictionary = {
+  level1: {
+    level2: {
+      level3: {
+        value: 'deep',
+      },
+    },
+  },
+};
+```
+
+### Ключевые моменты
+
+- Index signatures определяют типы для динамических ключей объектов
+- Синтаксис: `[key: KeyType]: ValueType`
+- KeyType может быть `string`, `number`, `symbol`, или template literal (TS 4.4+)
+- Можно комбинировать с известными свойствами
+- Известные свойства должны быть совместимы с index signature
+- `readonly` делает все динамические свойства неизменяемыми
+- Generic index signatures позволяют создавать типизированные dictionaries
+- Numeric index signatures автоматически совместимы со string (JavaScript behavior)
+- Используйте для translations, конфигураций, кэшей, динамических данных
+- Альтернативы: mapped types, Record utility type
