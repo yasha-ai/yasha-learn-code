@@ -1,0 +1,289 @@
+## TypeScript: Броня. Урок 12: Template Literal Types
+
+Template Literal Types - это мощная фича TypeScript 4.1+, которая позволяет создавать новые строковые типы путём комбинирования строковых литералов. Они работают как JavaScript template literals, но на уровне системы типов. Это открывает невероятные возможности для создания type-safe API, роутинга, событий и многого другого.
+
+### Базовый синтаксис
+
+Синтаксис template literal types идентичен template literals в JavaScript, но используется для типов:
+
+```typescript
+type Greeting = `Hello, ${string}!`;
+
+const greet1: Greeting = "Hello, World!";     // ✓
+const greet2: Greeting = "Hello, TypeScript!"; // ✓
+// const greet3: Greeting = "Hi, World!";      // ✗ не начинается с "Hello,"
+
+// С конкретными литералами
+type Color = "red" | "green" | "blue";
+type HexColor = `#${string}`;
+
+type AllColors = Color | HexColor;
+
+const color1: AllColors = "red";        // ✓
+const color2: AllColors = "#ff0000";    // ✓
+const color3: AllColors = "yellow";     // ✗ не в списке
+```
+
+### Комбинирование union типов
+
+TypeScript автоматически создаёт все возможные комбинации:
+
+```typescript
+type Size = "small" | "medium" | "large";
+type Color = "red" | "blue" | "green";
+
+type SizeColor = `${Size}-${Color}`;
+// Результат: 
+// "small-red" | "small-blue" | "small-green" |
+// "medium-red" | "medium-blue" | "medium-green" |
+// "large-red" | "large-blue" | "large-green"
+
+const product: SizeColor = "medium-blue"; // ✓
+// const wrong: SizeColor = "medium-yellow"; // ✗
+
+// HTTP методы с путями
+type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
+type Endpoint = "/users" | "/posts" | "/comments";
+
+type ApiRoute = `${HttpMethod} ${Endpoint}`;
+// "GET /users" | "GET /posts" | ... | "DELETE /comments"
+```
+
+### Встроенные утилиты для строк
+
+TypeScript предоставляет встроенные типы для преобразования строк:
+
+```typescript
+type Uppercase<S extends string> = intrinsic;
+type Lowercase<S extends string> = intrinsic;
+type Capitalize<S extends string> = intrinsic;
+type Uncapitalize<S extends string> = intrinsic;
+
+// Примеры использования
+type Loud = Uppercase<"hello">;        // "HELLO"
+type Quiet = Lowercase<"WORLD">;       // "world"
+type Title = Capitalize<"typescript">; // "Typescript"
+type Lower = Uncapitalize<"TypeScript">; // "typeScript"
+
+// Практическое применение
+type EventName = "click" | "focus" | "blur";
+type EventHandler = `on${Capitalize<EventName>}`;
+// "onClick" | "onFocus" | "onBlur"
+
+type HttpMethod = "get" | "post" | "put" | "delete";
+type FunctionName = `${HttpMethod}Request`;
+// "getRequest" | "postRequest" | "putRequest" | "deleteRequest"
+```
+
+### С mapped types
+
+Комбинирование template literals с mapped types даёт огромные возможности:
+
+```typescript
+type Getters<T> = {
+  [K in keyof T as `get${Capitalize<K & string>}`]: () => T[K];
+};
+
+type Setters<T> = {
+  [K in keyof T as `set${Capitalize<K & string>}`]: (value: T[K]) => void;
+};
+
+interface User {
+  name: string;
+  age: number;
+  email: string;
+}
+
+type UserGetters = Getters<User>;
+// {
+//   getName: () => string;
+//   getAge: () => number;
+//   getEmail: () => string;
+// }
+
+type UserSetters = Setters<User>;
+// {
+//   setName: (value: string) => void;
+//   setAge: (value: number) => void;
+//   setEmail: (value: string) => void;
+// }
+
+// Комбинирование
+type Accessors<T> = Getters<T> & Setters<T>;
+```
+
+### Практические примеры
+
+```typescript
+// Создание type-safe CSS классов
+type Spacing = 0 | 1 | 2 | 3 | 4 | 5;
+type Direction = "t" | "r" | "b" | "l" | "x" | "y";
+
+type MarginClass = `m${Direction}-${Spacing}`;
+type PaddingClass = `p${Direction}-${Spacing}`;
+
+type SpacingClass = MarginClass | PaddingClass;
+
+const margin: SpacingClass = "mt-3";   // ✓ margin-top: 3
+const padding: SpacingClass = "px-2";  // ✓ padding-x: 2
+// const invalid: SpacingClass = "mt-10"; // ✗ неверное значение
+
+// REST API endpoints
+type Resource = "users" | "posts" | "comments";
+type Action = "create" | "update" | "delete" | "list";
+
+type Endpoint = `/${Resource}/${Action}`;
+// "/users/create" | "/users/update" | ... | "/comments/list"
+
+type EndpointWithId = `/${Resource}/${number}/${Action}`;
+// "/users/123/update", "/posts/456/delete", etc.
+
+// SQL query builder types
+type Table = "users" | "posts" | "comments";
+type Operation = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
+
+type Query = `${Operation} FROM ${Table}`;
+// "SELECT FROM users" | "INSERT FROM users" | ...
+```
+
+### Жизненный пример: Type-safe Event System
+
+```typescript
+// Система событий с автоматической генерацией типов
+type DomEvents = {
+  click: MouseEvent;
+  focus: FocusEvent;
+  input: InputEvent;
+  submit: SubmitEvent;
+};
+
+type EventName = keyof DomEvents;
+
+type EventHandlerName<E extends EventName> = `on${Capitalize<E>}`;
+type EventHandlerType<E extends EventName> = (event: DomEvents[E]) => void;
+
+type EventHandlers = {
+  [E in EventName as EventHandlerName<E>]: EventHandlerType<E>;
+};
+
+// Результат:
+// {
+//   onClick: (event: MouseEvent) => void;
+//   onFocus: (event: FocusEvent) => void;
+//   onInput: (event: InputEvent) => void;
+//   onSubmit: (event: SubmitEvent) => void;
+// }
+
+// Использование
+const handlers: Partial<EventHandlers> = {
+  onClick: (e) => {
+    console.log(e.clientX, e.clientY); // TypeScript знает, что это MouseEvent
+  },
+  onInput: (e) => {
+    console.log(e.data); // TypeScript знает, что это InputEvent
+  },
+};
+
+// Type-safe route definitions
+type RouteParams = {
+  "/": {};
+  "/users": {};
+  "/users/:id": { id: string };
+  "/users/:id/posts": { id: string };
+  "/users/:id/posts/:postId": { id: string; postId: string };
+};
+
+type RoutePath = keyof RouteParams;
+
+function navigate<T extends RoutePath>(
+  path: T,
+  params: RouteParams[T]
+): void {
+  // implementation
+}
+
+navigate("/users/:id", { id: "123" }); // ✓
+navigate("/users/:id/posts/:postId", { id: "123", postId: "456" }); // ✓
+// navigate("/users/:id", { userId: "123" }); // ✗ неверное имя параметра
+// navigate("/users/:id", {}); // ✗ отсутствует id
+```
+
+### Parsing строковых литералов
+
+```typescript
+// Извлечение параметров из route
+type ExtractRouteParams<T extends string> =
+  T extends `${infer _Start}:${infer Param}/${infer Rest}`
+    ? { [K in Param | keyof ExtractRouteParams<Rest>]: string }
+    : T extends `${infer _Start}:${infer Param}`
+    ? { [K in Param]: string }
+    : {};
+
+type UserRoute = ExtractRouteParams<"/users/:id">;
+// { id: string }
+
+type PostRoute = ExtractRouteParams<"/users/:userId/posts/:postId">;
+// { userId: string; postId: string }
+
+// Разбор CSS классов
+type ParseClass<T extends string> =
+  T extends `${infer Prefix}-${infer Value}`
+    ? { prefix: Prefix; value: Value }
+    : { prefix: T; value: never };
+
+type MarginTop = ParseClass<"mt-3">;
+// { prefix: "mt"; value: "3" }
+```
+
+### Комбинирование с рекурсивными типами
+
+```typescript
+// Создание dotted path типа для nested objects
+type DottedPath<T, Prefix extends string = ""> = {
+  [K in keyof T]: T[K] extends object
+    ? K extends string
+      ? DottedPath<T[K], `${Prefix}${K}.`> | `${Prefix}${K}`
+      : never
+    : K extends string
+    ? `${Prefix}${K}`
+    : never;
+}[keyof T];
+
+interface Config {
+  server: {
+    host: string;
+    port: number;
+    ssl: {
+      enabled: boolean;
+      cert: string;
+    };
+  };
+  database: {
+    url: string;
+  };
+}
+
+type ConfigPath = DottedPath<Config>;
+// "server" | "server.host" | "server.port" | 
+// "server.ssl" | "server.ssl.enabled" | "server.ssl.cert" |
+// "database" | "database.url"
+
+function getConfig<T extends ConfigPath>(path: T): any {
+  // implementation
+}
+
+getConfig("server.ssl.enabled"); // ✓
+// getConfig("server.invalid"); // ✗ путь не существует
+```
+
+### Ключевые моменты
+
+- Template literal types позволяют создавать строковые типы через интерполяцию
+- Автоматически генерируют все комбинации при использовании union типов
+- Встроенные утилиты: `Uppercase`, `Lowercase`, `Capitalize`, `Uncapitalize`
+- Мощны в комбинации с mapped types для автогенерации типов
+- Используются для type-safe роутинга, событий, CSS классов, API endpoints
+- Можно извлекать части строк с помощью `infer` в условных типах
+- Критически важны для создания DSL (Domain-Specific Languages) на уровне типов
+- Позволяют избежать ручного дублирования типов для похожих паттернов
+- Существенно улучшают developer experience и предотвращают ошибки в runtime
