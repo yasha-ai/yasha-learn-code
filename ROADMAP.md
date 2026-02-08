@@ -34,9 +34,9 @@
 - [x] Массивы ✅ (test-iteration 2026-02-08)
 - [x] Объекты ✅ (test-iteration 2026-02-08)
 - [x] DOM манипуляции ✅ (test-iteration 2026-02-08)
-- [ ] События
-- [ ] Асинхронность (Promise, async/await)
-- [ ] Fetch API
+- [x] События ✅ (manual fix 2026-02-08)
+- [x] Асинхронность (Promise, async/await) ✅ (manual fix 2026-02-08)
+- [x] Fetch API ✅ (manual fix 2026-02-08)
 
 ### TypeScript: Броня 🛡️
 - [x] Зачем TypeScript?
