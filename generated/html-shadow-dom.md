@@ -1,0 +1,85 @@
+## HTML: Скелет - Shadow DOM
+
+Shadow DOM – это мощная технология, позволяющая создавать инкапсулированные HTML-элементы. Она позволяет вам изолировать CSS, JavaScript и структуру HTML для конкретного элемента, предотвращая конфликты со стилями и скриптами остальной части страницы.
+
+### Что такое Shadow DOM?
+
+Представьте, что Shadow DOM – это мини-сайт внутри вашего основного сайта. Он имеет свою собственную структуру HTML, стили CSS и JavaScript, которые не влияют на остальную часть страницы и наоборот.  Это достигается за счет создания "теневого дерева" (shadow tree), прикрепленного к элементу.
+
+### Создание Shadow DOM
+
+Чтобы создать Shadow DOM, используется метод `attachShadow()` у HTML-элемента.  Этот метод возвращает корневой узел теневого дерева, к которому вы можете добавлять HTML-элементы.
+
+```javascript
+// Получаем элемент, к которому хотим прикрепить Shadow DOM
+const myElement = document.querySelector('#my-element');
+
+// Создаем Shadow DOM
+const shadow = myElement.attachShadow({mode: 'open'});
+
+// Добавляем контент в Shadow DOM
+shadow.innerHTML = `
+  <style>
+    p {
+      color: blue;
+    }
+  </style>
+  <p>Это текст внутри Shadow DOM!</p>
+`;
+```
+
+В этом примере:
+
+*   `document.querySelector('#my-element')` выбирает элемент с id "my-element".
+*   `myElement.attachShadow({mode: 'open'})` создает Shadow DOM в "open" режиме.  Режим "open" означает, что к Shadow DOM можно получить доступ из JavaScript снаружи элемента (через свойство `shadowRoot`).  Режим "closed" запрещает такой доступ.
+*   `shadow.innerHTML` добавляет HTML-контент в Shadow DOM, включая стили CSS.
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Shadow DOM Example</title>
+</head>
+<body>
+  <div id="my-element"></div>
+
+  <style>
+    p {
+      color: red; /* Этот стиль НЕ повлияет на p внутри Shadow DOM */
+    }
+  </style>
+
+  <script>
+    const myElement = document.querySelector('#my-element');
+    const shadow = myElement.attachShadow({mode: 'open'});
+    shadow.innerHTML = `
+      <style>
+        p {
+          color: blue;
+        }
+      </style>
+      <p>Это текст внутри Shadow DOM!</p>
+    `;
+  </script>
+</body>
+</html>
+```
+
+Запустив этот код, вы увидите, что текст внутри Shadow DOM будет синим, несмотря на то, что внешний CSS устанавливает цвет текста в красный.  Это демонстрирует инкапсуляцию стилей.
+
+### Жизненный пример
+
+Shadow DOM активно используется во многих современных веб-технологиях:
+
+*   **Web Components:** Shadow DOM является ключевой частью Web Components, позволяя создавать переиспользуемые, инкапсулированные компоненты пользовательского интерфейса.
+*   **HTML5 Input Elements:** Многие встроенные элементы HTML, такие как `<video>` и `<input type="range">`, используют Shadow DOM для реализации своей внутренней структуры и стилей.  Вы можете увидеть это, если откроете DevTools в браузере и включите отображение Shadow DOM.
+*   **Фреймворки (React, Vue, Angular):** Хотя сами фреймворки не всегда напрямую используют Shadow DOM для всех компонентов, они предоставляют механизмы для его использования при необходимости для создания инкапсулированных частей интерфейса.  Например, React поддерживает создание компонентов, использующих Shadow DOM.
+
+### Ключевые моменты
+
+*   Shadow DOM обеспечивает инкапсуляцию HTML, CSS и JavaScript.
+*   Создается с помощью метода `attachShadow()`.
+*   Изолирует стили и скрипты, предотвращая конфликты.
+*   Используется в Web Components и других веб-технологиях.
+*   Режим "open" позволяет доступ к Shadow DOM из JavaScript.
+*   Режим "closed" запрещает доступ к Shadow DOM из JavaScript.
