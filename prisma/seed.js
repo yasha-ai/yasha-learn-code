@@ -1524,15 +1524,24 @@ async function main() {
   for (const courseData of courses) {
     const { lessons, ...course } = courseData
     
+    // Upsert course
     const createdCourse = await prisma.course.upsert({
       where: { slug: course.slug },
       update: { ...course },
-      create: {
-        ...course,
-        lessons: {
-          create: lessons
-        }
-      },
+      create: { ...course },
+    })
+    
+    // Delete old lessons
+    await prisma.lesson.deleteMany({
+      where: { courseId: createdCourse.id }
+    })
+    
+    // Create new lessons
+    await prisma.lesson.createMany({
+      data: lessons.map(lesson => ({
+        ...lesson,
+        courseId: createdCourse.id
+      }))
     })
     
     console.log(`✅ Курс: ${createdCourse.title}`)
