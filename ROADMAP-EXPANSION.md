@@ -57,12 +57,12 @@
 - [x] 3D-карточки и кубы
 
 ### Анимации продвинутые (6)
-- [ ] @keyframes детально
-- [ ] animation-timing-function и кривые Безье
-- [ ] animation-fill-mode, animation-direction
-- [ ] Производительность анимаций (will-change, GPU)
-- [ ] Scroll-driven animations
-- [ ] View Transitions API
+- [x] @keyframes детально
+- [x] animation-timing-function и кривые Безье
+- [x] animation-fill-mode, animation-direction
+- [x] Производительность анимаций (will-change, GPU)
+- [x] Scroll-driven animations
+- [x] View Transitions API
 
 ### Современный CSS (8)
 - [ ] Container Queries (@container)
