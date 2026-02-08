@@ -33,11 +33,11 @@
 - [x] Flexbox vs Grid: когда что использовать
 
 ### Grid продвинутый (8)
-- [ ] grid-template-areas
-- [ ] minmax(), auto-fit, auto-fill
-- [ ] Subgrid
-- [ ] Именованные линии
-- [ ] Grid и выравнивание
+- [x] grid-template-areas
+- [x] minmax(), auto-fit, auto-fill
+- [x] Subgrid
+- [x] Именованные линии
+- [x] Grid и выравнивание
 - [ ] Вложенные гриды
 - [ ] Отзывчивые сетки без медиа-запросов
 - [ ] Паттерны раскладок на Grid
