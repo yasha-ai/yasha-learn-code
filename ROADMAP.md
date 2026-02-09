@@ -1,6 +1,6 @@
 # 🗺️ ROADMAP - yasha-learn-code
 
-**Прогресс генерации уроков:** 33/60 выполнено (55%)
+**Прогресс генерации уроков:** 45/60 выполнено (75%)
 
 ## HTML: Скелет (10 уроков)
 - [x] intro - Введение в HTML
@@ -34,27 +34,27 @@
 - [x] async - Асинхронность (Promises, async/await)
 - [x] dom - DOM манипуляции
 - [x] events - События
-- [ ] modules - Модули (ES6)
-- [ ] errors - Обработка ошибок
-- [ ] best-practices - Best practices
+- [x] modules - Модули (ES6)
+- [x] errors - Обработка ошибок
+- [x] best-practices - Best practices
 
 ## TypeScript: Броня (10 уроков)
 - [x] why-ts - Зачем TypeScript
 - [x] types - Базовые типы
 - [x] interfaces - Интерфейсы
 - [x] generics - Дженерики
-- [ ] enums - Enum и Literal types
-- [ ] utility-types - Utility types
-- [ ] decorators - Декораторы
-- [ ] namespaces - Namespaces и модули
-- [ ] tsconfig - Конфигурация tsconfig.json
-- [ ] best-practices - Best practices
+- [x] enums - Enum и Literal types
+- [x] utility-types - Utility types
+- [x] decorators - Декораторы
+- [x] namespaces - Namespaces и модули
+- [x] tsconfig - Конфигурация tsconfig.json
+- [x] best-practices - Best practices
 
 ## React: Движок (10 уроков)
 - [x] components - Компоненты
-- [ ] jsx - JSX синтаксис
-- [ ] props-state - Props и State
-- [ ] hooks - Hooks (useState, useEffect)
+- [x] jsx - JSX синтаксис
+- [x] props-state - Props и State
+- [x] hooks - Hooks (useState, useEffect)
 - [ ] forms - Формы в React
 - [ ] routing - React Router
 - [ ] context - Context API
@@ -76,8 +76,18 @@
 
 ---
 
-## Текущая сессия: #3 (02:00 9 Feb 2026)
+## Текущая сессия: #6 (05:00 9 Feb 2026)
 **Цель:** Сгенерировать 12 уроков  
+**Выполнено:**
+1. JavaScript: modules, errors, best-practices (3 урока) ✅
+2. TypeScript: enums, utility-types, decorators, namespaces, tsconfig, best-practices (6 уроков) ✅
+3. React: jsx, props-state, hooks (3 урока) ✅
+
+**Итого:** 12/12 уроков
+
+---
+
+## Предыдущая сессия: #5 (02:00 9 Feb 2026)
 **Выполнено:**
 1. HTML: meta-tags, media, accessibility, canvas-basics, best-practices (5 уроков) ✅
 2. CSS: animations, responsive, preprocessors, custom-properties, best-practices (5 уроков) ✅
