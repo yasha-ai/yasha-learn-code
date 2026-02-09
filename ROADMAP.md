@@ -1,6 +1,6 @@
 # 🗺️ ROADMAP - yasha-learn-code
 
-**Прогресс генерации уроков:** 21/60 выполнено (35%)
+**Прогресс генерации уроков:** 33/60 выполнено (55%)
 
 ## HTML: Скелет (10 уроков)
 - [x] intro - Введение в HTML
@@ -8,11 +8,11 @@
 - [x] forms - Формы и инпуты  
 - [x] tables - Таблицы
 - [x] semantic - Семантическая разметка
-- [ ] meta-tags - Meta теги и SEO
-- [ ] media - Аудио и видео
-- [ ] accessibility - Доступность (a11y)
-- [ ] canvas-basics - Canvas для графики
-- [ ] best-practices - Best practices
+- [x] meta-tags - Meta теги и SEO
+- [x] media - Аудио и видео
+- [x] accessibility - Доступность (a11y)
+- [x] canvas-basics - Canvas для графики
+- [x] best-practices - Best practices
 
 ## CSS: Стиль (10 уроков)
 - [x] selectors - Селекторы
@@ -20,11 +20,11 @@
 - [x] flexbox - Flexbox основы
 - [x] grid - CSS Grid
 - [x] positioning - Позиционирование
-- [ ] animations - Анимации и transitions
-- [ ] responsive - Responsive design
-- [ ] preprocessors - SASS/SCSS basics
-- [ ] custom-properties - CSS переменные
-- [ ] best-practices - Best practices
+- [x] animations - Анимации и transitions
+- [x] responsive - Responsive design
+- [x] preprocessors - SASS/SCSS basics
+- [x] custom-properties - CSS переменные
+- [x] best-practices - Best practices
 
 ## JavaScript: Мозги (10 уроков)
 - [x] variables - Переменные и типы
@@ -32,8 +32,8 @@
 - [x] arrays - Массивы и методы
 - [x] objects - Объекты
 - [x] async - Асинхронность (Promises, async/await)
-- [ ] dom - DOM манипуляции
-- [ ] events - События
+- [x] dom - DOM манипуляции
+- [x] events - События
 - [ ] modules - Модули (ES6)
 - [ ] errors - Обработка ошибок
 - [ ] best-practices - Best practices
@@ -76,10 +76,11 @@
 
 ---
 
-## Текущая сессия: #2 (01:00 9 Feb 2026)
+## Текущая сессия: #3 (02:00 9 Feb 2026)
 **Цель:** Сгенерировать 12 уроков  
-**План:**
-1. HTML: forms, tables, semantic (3 урока)
-2. CSS: flexbox, grid, positioning (3 урока)
-3. JavaScript: arrays, objects, async (3 урока)
-4. TypeScript: types, interfaces, generics (3 урока)
+**Выполнено:**
+1. HTML: meta-tags, media, accessibility, canvas-basics, best-practices (5 уроков) ✅
+2. CSS: animations, responsive, preprocessors, custom-properties, best-practices (5 уроков) ✅
+3. JavaScript: dom, events (2 урока) ✅
+
+**Итого:** 12/12 уроков + картинки
