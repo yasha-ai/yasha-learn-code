@@ -1,0 +1,236 @@
+## React: Оптимизация Производительности
+
+Производительность — один из ключевых аспектов современного веб-приложения. В React оптимизация чаще всего сводится к минимизации лишних перерисовок (re-renders) компонентов и ускорению тех, что необходимы. Это напрямую влияет на пользовательский опыт и отзывчивость приложения.
+
+### Концепция: Зачем и Как?
+
+React работает по принципу декларативного UI: вы описываете, как должен выглядеть UI, а React обновляет DOM. Когда состояние или пропсы компонента изменяются, React по умолчанию перерисовывает этот компонент и всех его потомков. Зачастую это избыточно, если дочерние компоненты не зависят от изменившихся данных.
+
+Основные методы оптимизации:
+1.  **Мемоизация (Memoization)**: Запоминание результатов вычислений или компонентов, чтобы избежать их повторного выполнения/рендеринга, если входные данные не изменились.
+2.  **Ленивая загрузка (Lazy Loading)**: Загрузка кода компонентов только тогда, когда они действительно нужны.
+3.  **Приоритезация обновлений (Prioritizing Updates)**: Использование Concurrent Features React 18 для улучшения отзывчивости UI во время тяжелых вычислений.
+
+### Базовый Пример (Проблема)
+
+Рассмотрим компонент, который перерисовывается без необходимости.
+
+```jsx
+// Родительский компонент
+function App() {
+  const [count, setCount] = React.useState(0);
+  const [text, setText] = React.useState('');
+
+  console.log('App re-rendered');
+
+  return (
+    <div>
+      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Введите текст" />
+      <button onClick={() => setCount(count + 1)}>Увеличить счетчик: {count}</button>
+      {/* ChildComponent перерисовывается при каждом изменении text, хотя ему нужен только count */}
+      <ChildComponent count={count} />
+    </div>
+  );
+}
+
+// Дочерний компонент
+function ChildComponent({ count }) {
+  console.log('ChildComponent re-rendered'); // Этот log будет появляться, даже если меняется только text в App
+  return <p>Счетчик в дочернем компоненте: {count}</p>;
+}
+```
+
+В этом примере `ChildComponent` будет перерисовываться при каждом изменении `text` в `App`, хотя его проп `count` не изменился. Это неэффективно.
+
+### Hooks и Мемоизация
+
+React предоставляет специальные хуки и утилиты для мемоизации:
+
+1.  **`React.memo`**: Высокоуровневый компонент (HOC), который предотвращает перерисовку функционального компонента, если его пропсы не изменились (поверхностное сравнение).
+
+    ```jsx
+    // Оптимизированный дочерний компонент
+    const MemoizedChildComponent = React.memo(function ChildComponent({ count }) {
+      console.log('MemoizedChildComponent re-rendered'); // Теперь только при изменении count
+      return <p>Счетчик в мемоизированном компоненте: {count}</p>;
+    });
+
+    // Использование в App
+    // ...
+    <MemoizedChildComponent count={count} />
+    // ...
+    ```
+
+2.  **`useCallback`**: Мемоизирует функцию-колбэк, предотвращая ее повторное создание при каждой перерисовке родительского компонента, если зависимости не изменились. Это критично, когда функция передается в `React.memo`-компонент.
+
+    ```jsx
+    function ParentComponent() {
+      const [value, setValue] = React.useState(0);
+
+      // Без useCallback, handleIncrement будет пересоздаваться при каждой перерисовке ParentComponent
+      // Что заставит MemoizedButton перерисовываться, даже если он мемоизирован
+      const handleIncrement = React.useCallback(() => {
+        setValue((prev) => prev + 1);
+      }, []); // Пустой массив зависимостей: функция создается один раз
+
+      return (
+        <div>
+          <p>Значение: {value}</p>
+          <MemoizedButton onClick={handleIncrement}>Увеличить</MemoizedButton>
+        </div>
+      );
+    }
+
+    const MemoizedButton = React.memo(({ onClick, children }) => {
+      console.log('MemoizedButton re-rendered');
+      return <button onClick={onClick}>{children}</button>;
+    });
+    ```
+
+3.  **`useMemo`**: Мемоизирует результат дорогостоящего вычисления или объекта, предотвращая его повторное вычисление/создание при каждой перерисовке, если зависимости не изменились.
+
+    ```jsx
+    function ProductList({ products, filter }) {
+      // simulateHeavyCalculation(products) - дорогая функция
+      const filteredProducts = React.useMemo(() => {
+        console.log('Вычисляем отфильтрованный список...');
+        return products.filter((p) => p.name.includes(filter));
+      }, [products, filter]); // Пересчитываем только если products или filter изменились
+
+      return (
+        <ul>
+          {filteredProducts.map((product) => (
+            <li key={product.id}>{product.name}</li>
+          ))}
+        </ul>
+      );
+    }
+    ```
+
+### React 18: `useTransition` и `useDeferredValue`
+
+Эти хуки помогают сохранять отзывчивость UI при выполнении ресурсоемких обновлений.
+
+1.  **`useTransition`**: Позволяет маркировать некоторые обновления как "переходы" (transitions), которые могут быть прерваны и не блокируют UI.
+
+    ```jsx
+    function SearchInput() {
+      const [searchText, setSearchText] = React.useState('');
+      const [displaySearchText, setDisplaySearchText] = React.useState('');
+      const [isPending, startTransition] = React.useTransition();
+
+      function handleChange(e) {
+        setSearchText(e.target.value); // Это обновление не блокируется
+
+        startTransition(() => {
+          // Это обновление может быть прервано и выполняется с низким приоритетом
+          setDisplaySearchText(e.target.value);
+        });
+      }
+
+      return (
+        <div>
+          <input type="text" value={searchText} onChange={handleChange} />
+          {isPending && <p>Загрузка...</p>}
+          <ExpensiveSearchList query={displaySearchText} />
+        </div>
+      );
+    }
+    ```
+
+2.  **`useDeferredValue`**: Откладывает обновление значения, позволяя другим, более срочным обновлениям UI (например, ввод текста), выполняться немедленно.
+
+    ```jsx
+    function SearchBar() {
+      const [input, setInput] = React.useState('');
+      const deferredInput = React.useDeferredValue(input); // Отложенное значение input
+
+      return (
+        <div>
+          <input value={input} onChange={(e) => setInput(e.target.value)} />
+          {/* ExpensiveList может отображать старое значение, пока не обновится deferredInput */}
+          <ExpensiveList query={deferredInput} />
+        </div>
+      );
+    }
+    ```
+
+### Ленивая Загрузка с `React.lazy` и `Suspense`
+
+Для уменьшения размера начального бандла приложения и ускорения загрузки страниц, можно использовать ленивую загрузку компонентов.
+
+```jsx
+// Компонент, который нужно загрузить лениво
+// HeavyComponent.jsx
+// export default function HeavyComponent() { ... }
+
+const LazyHeavyComponent = React.lazy(() => import('./HeavyComponent'));
+
+function MyPage() {
+  const [showHeavy, setShowHeavy] = React.useState(false);
+
+  return (
+    <div>
+      <button onClick={() => setShowHeavy(true)}>Показать тяжелый компонент</button>
+      {showHeavy && (
+        <React.Suspense fallback={<div>Загрузка...</div>}>
+          <LazyHeavyComponent />
+        </React.Suspense>
+      )}
+    </div>
+  );
+}
+```
+
+### Типичные Ошибки Оптимизации
+
+1.  **Чрезмерная мемоизация**: Мемоизация тоже имеет накладные расходы. Не мемоизируйте все подряд, только там, где есть заметные проблемы с производительностью.
+2.  **Неправильные зависимости**: Пустые или неполные массивы зависимостей в `useCallback`/`useMemo` могут привести к устаревшим данным или бесконечным циклам.
+3.  **Создание объектов/массивов в пропсах**: Даже если компонент мемоизирован, передача нового объекта или массива в пропсы при каждой перерисовке родителя (например, `{ propA: value }` или `[item1, item2]`) приведет к его перерисовке, так как поверхностное сравнение не сработает. Используйте `useMemo` для создания стабильных объектов/массивов.
+4.  **Забывать `Suspense`**: `React.lazy` всегда должен быть обернут в `React.Suspense`.
+
+### Практика
+
+Оптимизируйте следующий компонент списка пользователей, чтобы избежать лишних перерисовок:
+
+```jsx
+function UserApp() {
+  const [filterText, setFilterText] = React.useState('');
+  const [users, setUsers] = React.useState([
+    { id: 1, name: 'Алексей' },
+    { id: 2, name: 'Мария' },
+    { id: 3, name: 'Иван' },
+  ]);
+
+  const handleFilterChange = (e) => {
+    setFilterText(e.target.value);
+  };
+
+  // Задача: Оптимизировать UserList и передачу пропсов, чтобы
+  // UserList перерисовывался только при изменении filterText или users.
+
+  // 1. Мемоизируйте функцию-обработчик handleFilterChange (если она нужна в дочернем компоненте).
+  // 2. Мемоизируйте отфильтрованный список users.
+  // 3. Мемоизируйте сам компонент UserList.
+
+  const filteredUsers = /* Ваш useMemo здесь */ users.filter(user => user.name.includes(filterText));
+
+  return (
+    <div>
+      <input type="text" value={filterText} onChange={handleFilterChange} placeholder="Фильтр по имени" />
+      <UserList users={filteredUsers} />
+    </div>
+  );
+}
+
+function UserList({ users }) {
+  console.log('UserList re-rendered');
+  return (
+    <ul>
+      {users.map((user) => (
+        <li key={user.id}>{user.name}</li>
+      ))}
+    </ul>
+  );
+}
+```

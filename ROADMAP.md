@@ -1,6 +1,6 @@
 # 🗺️ ROADMAP - yasha-learn-code
 
-**Прогресс генерации уроков:** 45/60 выполнено (75%)
+**Прогресс генерации уроков:** 60/60 выполнено (100%)
 
 ## HTML: Скелет (10 уроков)
 - [x] intro - Введение в HTML
@@ -55,24 +55,24 @@
 - [x] jsx - JSX синтаксис
 - [x] props-state - Props и State
 - [x] hooks - Hooks (useState, useEffect)
-- [ ] forms - Формы в React
-- [ ] routing - React Router
-- [ ] context - Context API
-- [ ] performance - Оптимизация
-- [ ] testing - Тестирование
-- [ ] best-practices - Best practices
+- [x] forms - Формы в React
+- [x] routing - React Router
+- [x] context - Context API
+- [x] performance - Оптимизация
+- [x] testing - Тестирование
+- [x] best-practices - Best practices
 
 ## Git: Машина времени (10 уроков)
 - [x] init-commit - Init и Commit
-- [ ] branches - Ветки
-- [ ] merge-rebase - Merge vs Rebase
-- [ ] remote - Удалённые репозитории
-- [ ] pull-requests - Pull Requests
-- [ ] conflicts - Разрешение конфликтов
-- [ ] stash - Git Stash
-- [ ] tags - Теги и релизы
-- [ ] workflows - Git Flow и workflows
-- [ ] best-practices - Best practices
+- [x] branches - Ветки
+- [x] merge-rebase - Merge vs Rebase
+- [x] remote - Удалённые репозитории
+- [x] pull-requests - Pull Requests
+- [x] conflicts - Разрешение конфликтов
+- [x] stash - Git Stash
+- [x] tags - Теги и релизы
+- [x] workflows - Git Flow и workflows
+- [x] best-practices - Best practices
 
 ---
 
