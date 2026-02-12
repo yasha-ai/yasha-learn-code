@@ -1,12 +1,12 @@
 import { Sandpack } from "@codesandbox/sandpack-react";
 
 interface PlaygroundProps {
-  template?: "react" | "react-ts" | "vanilla" | "vanilla-ts" | "static";
+  template?: "react" | "react-ts" | "vanilla" | "vanilla-ts" | "static" | "vite" | "vite-react" | "vite-react-ts";
   files?: Record<string, string | { code: string; active?: boolean; hidden?: boolean }>;
   options?: any;
 }
 
-export const Playground = ({ template = "react", files = {}, options = {} }: PlaygroundProps) => {
+export const Playground = ({ template = "vite-react", files = {}, options = {} }: PlaygroundProps) => {
   return (
     <div className="sandpack-container my-6 border border-white/10 rounded-lg overflow-hidden">
       <Sandpack
