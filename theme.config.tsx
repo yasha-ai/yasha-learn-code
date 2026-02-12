@@ -12,6 +12,12 @@ export default {
     link: 'https://github.com/yasha-ai/yasha-learn-code'
   },
   docsRepositoryBase: 'https://github.com/yasha-ai/yasha-learn-code/tree/main',
+  head: (
+    <>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    </>
+  ),
   footer: {
     text: 'Создано с 💜 от Яши'
   },
