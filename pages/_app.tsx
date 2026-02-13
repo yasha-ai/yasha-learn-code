@@ -1,9 +1,15 @@
 import Script from 'next/script'
+import { MDXProvider } from '@mdx-js/react'
+import { Playground } from '../components/Playground'
 import '../styles/mermaid-theme.css'
+
+const components = {
+  Playground,
+}
 
 export default function App({ Component, pageProps }) {
   return (
-    <>
+    <MDXProvider components={components}>
       <Script
         id="mermaid-config"
         strategy="beforeInteractive"
@@ -34,6 +40,6 @@ export default function App({ Component, pageProps }) {
         }}
       />
       <Component {...pageProps} />
-    </>
+    </MDXProvider>
   )
 }
