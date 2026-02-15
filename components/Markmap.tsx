@@ -28,8 +28,8 @@ export default function MarkmapComponent({ content }: MarkmapProps) {
       markmapRef.current = Markmap.create(svgRef.current, {
         colorFreezeLevel: 2,
         duration: 500,
-        maxWidth: 300,
-        initialExpandLevel: 2,
+        initialExpandLevel: -1,  // Expand all levels
+        fitRatio: 0.95,          // Use 95% of available space
       });
     }
 
