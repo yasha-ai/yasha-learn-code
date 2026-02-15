@@ -38,7 +38,7 @@ export default function MarkmapComponent({ content }: MarkmapProps) {
   }, [content]);
 
   return (
-    <div className="w-full h-[600px] bg-[#0a0e1a] rounded-lg border border-emerald-800/30 overflow-hidden">
+    <div className="w-full h-[85vh] min-h-[700px] bg-[#0a0e1a] rounded-lg border border-emerald-800/30 overflow-hidden">
       <svg ref={svgRef} className="w-full h-full" />
     </div>
   );
