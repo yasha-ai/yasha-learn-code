@@ -5,9 +5,29 @@ interface PlaygroundProps {
   template?: "react" | "react-ts" | "vanilla" | "vanilla-ts" | "static" | "vite" | "vite-react" | "vite-react-ts";
   files?: Record<string, string | { code: string; active?: boolean; hidden?: boolean }>;
   options?: any;
+  // Старый формат (для обратной совместимости)
+  html?: string;
+  css?: string;
+  js?: string;
 }
 
-export const Playground = ({ template = "vite-react", files = {}, options = {} }: PlaygroundProps) => {
+export const Playground = ({ 
+  template = "vite-react", 
+  files = {}, 
+  options = {},
+  html,
+  css,
+  js
+}: PlaygroundProps) => {
+  // Если используется старый формат (html/css/js), конвертируем в новый
+  const convertedFiles = (html || css || js) ? {
+    '/index.html': html || '<!DOCTYPE html><html><body><div id="root"></div></body></html>',
+    ...(css ? { '/styles.css': css } : {}),
+    ...(js ? { '/index.js': js } : {}),
+  } : files;
+  
+  const finalTemplate = (html || css || js) ? 'static' : template;
+  const finalFiles = Object.keys(convertedFiles).length > 0 ? convertedFiles : files;
   const [isSecure, setIsSecure] = useState(true);
 
   useEffect(() => {
@@ -36,9 +56,9 @@ export const Playground = ({ template = "vite-react", files = {}, options = {} }
   return (
     <div className="sandpack-container my-6 border border-white/10 rounded-lg overflow-hidden">
       <Sandpack
-        template={template}
+        template={finalTemplate}
         theme="dark"
-        files={files}
+        files={finalFiles}
         options={{
           showNavigator: true,
           showLineNumbers: true,

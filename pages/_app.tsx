@@ -1,5 +1,6 @@
 import Script from 'next/script'
 import { MDXProvider } from '@mdx-js/react'
+import { useEffect } from 'react'
 import { Playground } from '../components/Playground'
 import '../styles/mermaid-theme.css'
 
@@ -8,6 +9,42 @@ const components = {
 }
 
 export default function App({ Component, pageProps }) {
+  // Client-side only: throttle prefetch to prevent 503 on scroll
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    
+    let prefetchQueue = []
+    let processing = false
+    const MAX_CONCURRENT = 3
+    const DELAY = 300
+    
+    const originalFetch = window.fetch
+    window.fetch = function(...args) {
+      const url = args[0]
+      // Only throttle Next.js chunk prefetch
+      if (typeof url === 'string' && url.includes('/_next/static/chunks/pages/')) {
+        return new Promise((resolve, reject) => {
+          prefetchQueue.push(() => originalFetch(...args).then(resolve).catch(reject))
+          processQueue()
+        })
+      }
+      return originalFetch(...args)
+    }
+    
+    function processQueue() {
+      if (processing || prefetchQueue.length === 0) return
+      processing = true
+      
+      const batch = prefetchQueue.splice(0, MAX_CONCURRENT)
+      Promise.all(batch.map(fn => fn())).finally(() => {
+        processing = false
+        if (prefetchQueue.length > 0) {
+          setTimeout(processQueue, DELAY)
+        }
+      })
+    }
+  }, [])
+  
   return (
     <MDXProvider components={components}>
       <Script
