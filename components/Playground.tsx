@@ -21,7 +21,26 @@ export const Playground = ({
 }: PlaygroundProps) => {
   // Если используется старый формат (html/css/js), конвертируем в новый
   const convertedFiles = (html || css || js) ? {
-    '/index.html': html || '<!DOCTYPE html><html><body><div id="root"></div></body></html>',
+    '/index.html': (() => {
+      const baseHtml = html || '<!DOCTYPE html><html><body><div id="root"></div></body></html>';
+      
+      // Если есть CSS, добавляем <link> тег в <head>, если его там нет
+      if (css && !baseHtml.includes('styles.css')) {
+        // Если есть тег <head>, вставляем внутрь
+        if (baseHtml.includes('<head>')) {
+          return baseHtml.replace('<head>', '<head>\n  <link rel="stylesheet" href="styles.css">');
+        }
+        // Если нет <head>, добавляем после <!DOCTYPE html> или <html>
+        if (baseHtml.includes('<!DOCTYPE html>')) {
+          return baseHtml.replace('<!DOCTYPE html>', '<!DOCTYPE html>\n<head>\n  <link rel="stylesheet" href="styles.css">\n</head>');
+        }
+        if (baseHtml.includes('<html>')) {
+          return baseHtml.replace('<html>', '<html>\n<head>\n  <link rel="stylesheet" href="styles.css">\n</head>');
+        }
+      }
+      
+      return baseHtml;
+    })(),
     ...(css ? { '/styles.css': css } : {}),
     ...(js ? { '/index.js': js } : {}),
   } : files;
