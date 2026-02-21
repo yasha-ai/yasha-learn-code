@@ -2,10 +2,12 @@ import Script from 'next/script'
 import { MDXProvider } from '@mdx-js/react'
 import { useEffect } from 'react'
 import { Playground } from '../components/Playground'
+import { Sandpack } from '@codesandbox/sandpack-react'
 import '../styles/mermaid-theme.css'
 
 const components = {
   Playground,
+  Sandpack,
 }
 
 export default function App({ Component, pageProps }) {
