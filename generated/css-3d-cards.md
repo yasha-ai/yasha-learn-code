@@ -1,0 +1,161 @@
+# CSS: 3D-карточки и кубы
+
+В этом уроке мы изучим, как создавать впечатляющие 3D-карточки и кубы, используя CSS-трансформации. Это отличный способ добавить интерактивности и глубины вашим веб-страницам.
+
+## Основы 3D-трансформаций
+
+Для работы с 3D-трансформациями нам понадобятся свойства `transform` и `transform-style`. Свойство `transform` позволяет применять различные трансформации, такие как вращение, масштабирование и перемещение. Свойство `transform-style` определяет, как дочерние элементы будут отображаться в 3D-пространстве.
+
+`transform-style: preserve-3d;` - это ключевое значение, которое позволяет дочерним элементам сохранять свою 3D-позицию. Без него дочерние элементы будут сплющены в 2D.
+
+## Создание 3D-карточки
+
+Давайте создадим простую 3D-карточку, которая переворачивается при наведении.
+
+```html
+<div class="card-container">
+  <div class="card">
+    <div class="front">Лицевая сторона</div>
+    <div class="back">Оборотная сторона</div>
+  </div>
+</div>
+```
+
+```css
+.card-container {
+  width: 200px;
+  height: 300px;
+  perspective: 800px; /* Важно для создания 3D-эффекта */
+}
+
+.card {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transition: transform 0.8s;
+  transform-style: preserve-3d; /* Включаем 3D-пространство */
+}
+
+.card-container:hover .card {
+  transform: rotateY(180deg); /* Поворот вокруг оси Y при наведении */
+}
+
+.front, .back {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  backface-visibility: hidden; /* Скрываем заднюю сторону элемента */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 20px;
+  color: white;
+}
+
+.front {
+  background-color: #3498db;
+}
+
+.back {
+  background-color: #e74c3c;
+  transform: rotateY(180deg); /* Поворачиваем оборотную сторону изначально */
+}
+```
+
+В этом примере `perspective` определяет расстояние зрителя до 3D-объекта.  `backface-visibility: hidden;` скрывает заднюю сторону элемента, что предотвращает ее отображение, когда она повернута от зрителя.
+
+## Создание 3D-куба
+
+Теперь создадим 3D-куб.
+
+```html
+<div class="cube-container">
+  <div class="cube">
+    <div class="face front">1</div>
+    <div class="face back">2</div>
+    <div class="face right">3</div>
+    <div class="face left">4</div>
+    <div class="face top">5</div>
+    <div class="face bottom">6</div>
+  </div>
+</div>
+```
+
+```css
+.cube-container {
+  width: 200px;
+  height: 200px;
+  perspective: 600px;
+  margin: 50px auto;
+}
+
+.cube {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transform-style: preserve-3d;
+  transform: rotateX(45deg) rotateY(45deg); /* Начальное положение куба */
+}
+
+.face {
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 40px;
+  color: white;
+}
+
+.front {
+  background-color: rgba(46, 204, 113, 0.7);
+  transform: translateZ(100px);
+}
+
+.back {
+  background-color: rgba(231, 76, 60, 0.7);
+  transform: rotateY(180deg) translateZ(100px);
+}
+
+.right {
+  background-color: rgba(155, 89, 182, 0.7);
+  transform: rotateY(90deg) translateZ(100px);
+}
+
+.left {
+  background-color: rgba(52, 152, 219, 0.7);
+  transform: rotateY(-90deg) translateZ(100px);
+}
+
+.top {
+  background-color: rgba(241, 196, 15, 0.7);
+  transform: rotateX(90deg) translateZ(100px);
+}
+
+.bottom {
+  background-color: rgba(149, 165, 166, 0.7);
+  transform: rotateX(-90deg) translateZ(100px);
+}
+```
+
+Здесь каждая грань куба позиционируется с помощью `translateZ` (перемещение по оси Z) и `rotateX/Y` (вращение вокруг осей X и Y).
+
+## Жизненный пример
+
+3D-карточки и кубы широко используются в веб-дизайне для создания интерактивных элементов. Например:
+
+*   **Портфолио:** Для отображения проектов с возможностью переворота карточки и показа дополнительной информации.
+*   **Интернет-магазины:** Для интерактивного отображения товаров с разных сторон.
+*   **Веб-сайты с презентациями:** Для создания эффектных переходов между слайдами.
+*   **UI/UX:** В интерфейсах, где нужна интерактивность и визуальная обратная связь.
+
+Многие библиотеки и фреймворки используют 3D-трансформации для создания сложных анимаций и переходов, например, Three.js.
+
+## Ключевые моменты
+
+*   `transform-style: preserve-3d;` - позволяет дочерним элементам сохранять 3D-позицию.
+*   `perspective` - создает ощущение глубины.
+*   `backface-visibility: hidden;` - скрывает заднюю сторону элемента.
+*   `translateZ` - перемещает элемент по оси Z.
+*   `rotateX/Y/Z` - вращает элемент вокруг осей X, Y и Z.

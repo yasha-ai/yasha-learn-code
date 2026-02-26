@@ -1,0 +1,122 @@
+## TypeScript: Union и Intersection типы. Броня против неожиданностей.
+
+В этом уроке мы разберем два мощных инструмента TypeScript: Union и Intersection типы. Они позволяют создавать более гибкие и точные типы, которые отражают сложность реальных данных.
+
+### Union типы: Или то, или другое.
+
+Union типы позволяют переменной иметь один из нескольких указанных типов.  Иными словами, это тип, который может принимать значения разных типов. Обозначаются они символом `|`.
+
+```typescript
+// Переменная может быть либо строкой, либо числом.
+let result: string | number;
+
+result = "Hello"; // Ok
+result = 123;     // Ok
+// result = true;   // Ошибка! Тип boolean не входит в Union тип.
+```
+
+Union типы особенно полезны, когда функция может возвращать разные типы в зависимости от условий.
+
+```typescript
+function processInput(input: string | number): string {
+  if (typeof input === 'string') {
+    return input.toUpperCase();
+  } else {
+    return (input * 2).toString();
+  }
+}
+
+console.log(processInput("world")); // WORLD
+console.log(processInput(5));      // 10
+```
+
+TypeScript использует сужение типов (Type Narrowing), чтобы определить, какой тип имеет переменная внутри блока кода. В примере выше, `typeof input === 'string'` позволяет TypeScript понять, что внутри `if` блока `input` является строкой.
+
+### Intersection типы: И то, и другое.
+
+Intersection типы позволяют объединять несколько типов в один.  Это значит, что переменная должна соответствовать *всем* указанным типам одновременно. Обозначаются они символом `&`.
+
+```typescript
+interface Colorful {
+  color: string;
+}
+
+interface Circle {
+  radius: number;
+}
+
+// Тип ColoredCircle должен иметь и color, и radius.
+type ColoredCircle = Colorful & Circle;
+
+const coloredCircle: ColoredCircle = {
+  color: "red",
+  radius: 10,
+};
+
+console.log(coloredCircle.color); // red
+console.log(coloredCircle.radius); // 10
+```
+
+Intersection типы часто используются для расширения интерфейсов или типов, добавляя новые свойства.
+
+```typescript
+interface Person {
+  name: string;
+  age: number;
+}
+
+interface Address {
+  street: string;
+  city: string;
+}
+
+// Employee должен иметь все свойства Person и Address.
+type Employee = Person & Address;
+
+const employee: Employee = {
+  name: "John Doe",
+  age: 30,
+  street: "123 Main St",
+  city: "Anytown",
+};
+
+console.log(employee.name);  // John Doe
+console.log(employee.city);  // Anytown
+```
+
+### Жизненный пример
+
+В React часто используются Intersection типы для создания типов props для компонентов, которые принимают различные наборы свойств. Например, компонент может принимать общие свойства и специфические свойства в зависимости от его конфигурации.
+
+```typescript
+interface BaseProps {
+  className?: string;
+}
+
+interface ButtonProps {
+  onClick: () => void;
+  label: string;
+}
+
+interface LinkProps {
+  href: string;
+}
+
+// Компонент может быть либо кнопкой, либо ссылкой.
+type MyComponentProps = BaseProps & (ButtonProps | LinkProps);
+
+function MyComponent(props: MyComponentProps) {
+  // ... Логика компонента.
+  return null; // Заглушка
+}
+```
+
+В Redux, Intersection типы могут использоваться для объединения типов состояния (state) разных редьюсеров.
+
+### Ключевые моменты
+
+*   **Union типы (`|`)** позволяют переменной иметь один из нескольких указанных типов.
+*   **Intersection типы (`&`)** позволяют объединять несколько типов в один, требуя наличия всех свойств.
+*   TypeScript использует **сужение типов** для определения типа переменной внутри блоков кода.
+*   Union и Intersection типы помогают создавать более **гибкие и точные типы**, отражающие сложность реальных данных.
+*   Оба типа широко применяются в популярных фреймворках и библиотеках, таких как **React и Redux**.

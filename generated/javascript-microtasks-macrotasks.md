@@ -1,0 +1,91 @@
+## JavaScript: Microtasks vs Macrotasks. Погружение в асинхронность.
+
+В JavaScript асинхронные операции играют ключевую роль. Чтобы понять, как JavaScript справляется с ними, важно разобраться в разнице между microtasks и macrotasks.
+
+### Что такое Microtasks и Macrotasks?
+
+JavaScript - однопоточный язык, но он умеет выполнять асинхронные операции.  Для этого существует механизм Event Loop (цикл событий), который управляет выполнением задач. Задачи делятся на два основных типа:
+
+*   **Macrotasks (макрозадачи):** Это задачи, добавляемые в очередь задач (task queue). Примеры: `setTimeout`, `setInterval`, обработка событий (click, scroll), сетевые запросы (fetch, XMLHttpRequest).
+*   **Microtasks (микрозадачи):** Это задачи, добавляемые в очередь микрозадач (microtask queue). Примеры: `Promise.then`, `MutationObserver`, `process.nextTick` (в Node.js).
+
+Главное отличие в порядке выполнения: Event Loop сначала выполняет текущий macrotask, затем все доступные microtasks, и только потом переходит к следующему macrotask.
+
+### Пример кода
+
+```javascript
+console.log("Начало");
+
+setTimeout(() => {
+  console.log("Macrotask: setTimeout");
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log("Microtask: Promise.then");
+});
+
+console.log("Конец");
+
+// Вывод:
+// Начало
+// Конец
+// Microtask: Promise.then
+// Macrotask: setTimeout
+```
+
+В этом примере сначала выполняются синхронные операции ("Начало" и "Конец"). Затем, перед следующим macrotask, выполняются все microtasks, в данном случае `Promise.then`.  `setTimeout` добавляется в очередь macrotasks и выполняется позже.
+
+### Еще один пример
+
+```javascript
+console.log("Начало");
+
+setTimeout(() => {
+  console.log("Macrotask 1");
+  Promise.resolve().then(() => {
+    console.log("Microtask внутри Macrotask 1");
+  });
+}, 0);
+
+setTimeout(() => {
+  console.log("Macrotask 2");
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log("Microtask 1");
+  return Promise.resolve();
+}).then(() => {
+  console.log("Microtask 2");
+});
+
+console.log("Конец");
+
+// Вывод:
+// Начало
+// Конец
+// Microtask 1
+// Microtask 2
+// Macrotask 1
+// Microtask внутри Macrotask 1
+// Macrotask 2
+```
+
+Этот пример демонстрирует, что microtasks, созданные внутри macrotasks, выполняются после завершения текущего macrotask, но до начала следующего.
+
+### Жизненный пример
+
+В реальных веб-приложениях понимание разницы между microtasks и macrotasks важно для:
+
+*   **Оптимизации производительности:**  Например, если у вас есть большое количество операций, которые нужно выполнить после обновления DOM, лучше использовать `Promise.then` (microtask), чтобы они выполнились сразу после обновления и не задерживали отрисовку следующего кадра.
+*   **React:** React использует пакетные обновления. Изменения состояния (setState) часто планируются как microtasks, чтобы гарантировать, что все обновления состояния будут применены до того, как браузер перерисует DOM. Это помогает избежать ненужных перерисовок.
+*   **Angular:** Angular использует Zone.js для отслеживания асинхронных операций. Zone.js также опирается на концепцию microtasks и macrotasks для управления жизненным циклом компонентов и обнаружения изменений.
+*   **Vue.js:** Vue.js также использует microtasks для асинхронного обновления DOM.
+
+### Ключевые моменты
+
+*   Macrotasks (setTimeout, setInterval, обработчики событий, сетевые запросы) добавляются в очередь задач (task queue).
+*   Microtasks (Promise.then, MutationObserver) добавляются в очередь микрозадач (microtask queue).
+*   Event Loop сначала выполняет текущий macrotask.
+*   Затем Event Loop выполняет все microtasks, накопившиеся в очереди.
+*   Только после этого Event Loop переходит к следующему macrotask.
+*   Знание разницы между microtasks и macrotasks помогает оптимизировать производительность и понимать, как работают популярные JavaScript фреймворки.

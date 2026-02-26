@@ -1,0 +1,127 @@
+## JavaScript: Мозги. Урок: Миксины и композиция
+
+Миксины и композиция – мощные техники, позволяющие переиспользовать код и создавать сложные объекты из более простых частей. Они помогают избежать дублирования и делают код более модульным и понятным.
+
+### Что такое миксины?
+
+Миксин – это объект, содержащий функциональность (методы и свойства), которую можно "подмешать" в другие объекты.  Представьте это как рецепт, который вы можете добавить к разным блюдам, чтобы улучшить их вкус.
+
+```javascript
+// Пример миксина
+const CanFly = {
+  fly() {
+    console.log(`${this.name} is flying!`);
+  }
+};
+
+const CanSwim = {
+  swim() {
+    console.log(`${this.name} is swimming!`);
+  }
+};
+
+// Функция для применения миксина к объекту
+function applyMixin(target, mixin) {
+  for (let key in mixin) {
+    if (mixin.hasOwnProperty(key)) {
+      target[key] = mixin[key];
+    }
+  }
+}
+
+// Создаем объект Bird
+const bird = {
+  name: "Eagle"
+};
+
+// Применяем миксин CanFly к bird
+applyMixin(bird, CanFly);
+
+// Теперь bird может летать!
+bird.fly(); // Вывод: Eagle is flying!
+
+// Создаем объект Fish
+const fish = {
+  name: "Salmon"
+};
+
+// Применяем миксин CanSwim к fish
+applyMixin(fish, CanSwim);
+
+// Теперь fish может плавать!
+fish.swim(); // Вывод: Salmon is swimming!
+```
+
+### Композиция: собираем объекты из частей
+
+Композиция – это создание нового объекта путем объединения функциональности нескольких других объектов. В отличие от миксинов, где функциональность "подмешивается" в существующий объект, композиция предполагает создание *нового* объекта.
+
+```javascript
+// Функции-компоненты (как микросервисы)
+const withFlying = (state) => ({
+  fly: () => console.log(`${state.name} is flying!`)
+});
+
+const withSwimming = (state) => ({
+  swim: () => console.log(`${state.name} is swimming!`)
+});
+
+// Создаем объект Duck, используя композицию
+const createDuck = (name) => {
+  const state = {
+    name: name
+  };
+
+  return Object.assign({}, state, withFlying(state), withSwimming(state));
+};
+
+const duck = createDuck("Donald");
+duck.fly();   // Вывод: Donald is flying!
+duck.swim();  // Вывод: Donald is swimming!
+```
+
+### Жизненный пример
+
+В React, Higher-Order Components (HOC) часто используют принципы композиции.  HOC принимает компонент и возвращает новый, расширенный компонент.  Например, HOC может добавить аутентификацию или логирование к существующему компоненту.
+
+```javascript
+// Пример HOC в React (упрощенный)
+const withAuthentication = (WrappedComponent) => {
+  return class extends React.Component {
+    constructor(props) {
+      super(props);
+      this.state = {
+        isAuthenticated: false
+      };
+    }
+
+    componentDidMount() {
+      // Проверяем аутентификацию
+      this.setState({ isAuthenticated: true }); // Просто пример
+    }
+
+    render() {
+      if (this.state.isAuthenticated) {
+        return <WrappedComponent {...this.props} />;
+      } else {
+        return <div>Please log in.</div>;
+      }
+    }
+  };
+};
+
+// Использование HOC
+const MyComponent = () => <div>Hello, World!</div>;
+const AuthenticatedComponent = withAuthentication(MyComponent);
+
+// Теперь AuthenticatedComponent требует аутентификации
+<AuthenticatedComponent />;
+```
+
+### Ключевые моменты
+
+*   **Миксины:**  Добавляют функциональность к существующим объектам.
+*   **Композиция:** Создает новые объекты путем объединения функциональности.
+*   **Переиспользование кода:** Обе техники помогают избежать дублирования кода.
+*   **Модульность:**  Облегчают понимание и поддержку кода.
+*   **Гибкость:** Позволяют создавать сложные объекты из простых частей.
