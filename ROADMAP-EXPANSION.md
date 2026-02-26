@@ -161,38 +161,38 @@
 - [x] Microtasks vs Macrotasks
 - [x] Promise.all, race, allSettled, any
 - [x] Создание своих промисов
-- [ ] Async iterators
-- [ ] AbortController
-- [ ] Обработка ошибок в async/await
-- [ ] Параллельное vs последовательное выполнение
+- [x] Async iterators
+- [x] AbortController
+- [x] Обработка ошибок в async/await
+- [x] Параллельное vs последовательное выполнение
 
 ### Модули (4)
-- [ ] ES Modules: import/export
-- [ ] Динамический import()
-- [ ] CommonJS vs ESM
-- [ ] Циклические зависимости
+- [x] ES Modules: import/export
+- [x] Динамический import()
+- [x] CommonJS vs ESM
+- [x] Циклические зависимости
 
 ### Регулярные выражения (4)
-- [ ] Синтаксис и флаги
-- [ ] Группы и обратные ссылки
-- [ ] Lookahead и lookbehind
-- [ ] Практические паттерны
+- [x] Синтаксис и флаги
+- [x] Группы и обратные ссылки
+- [x] Lookahead и lookbehind
+- [x] Практические паттерны
 
 ### Web APIs (10)
-- [ ] localStorage и sessionStorage
-- [ ] IndexedDB основы
-- [ ] Web Workers
-- [ ] Service Workers и PWA
-- [ ] WebSocket
-- [ ] Geolocation API
-- [ ] Intersection Observer
-- [ ] Resize Observer
-- [ ] Clipboard API
-- [ ] Notifications API
+- [x] localStorage и sessionStorage
+- [x] IndexedDB основы
+- [x] Web Workers
+- [x] Service Workers и PWA
+- [x] WebSocket
+- [x] Geolocation API
+- [x] Intersection Observer
+- [x] Resize Observer
+- [x] Clipboard API
+- [x] Notifications API
 
 ### Продвинутые концепции (6)
-- [ ] Proxy
-- [ ] Reflect
+- [x] Proxy
+- [x] Reflect
 - [ ] Symbol
 - [ ] Generators и Iterators
 - [ ] Декораторы (stage 3)
