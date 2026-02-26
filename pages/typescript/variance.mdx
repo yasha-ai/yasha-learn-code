@@ -1,0 +1,360 @@
+## TypeScript: Броня. Урок 18: Вариантность типов (Variance)
+
+Вариантность (variance) описывает, как отношения подтипов между сложными типами зависят от отношений между их компонентами. Это фундаментальная концепция системы типов, которая определяет, когда один generic тип может быть присвоен другому. В TypeScript существует четыре вида вариантности: ковариантность, контравариантность, инвариантность и бивариантность.
+
+### Ковариантность (Covariance)
+
+Ковариантность означает, что отношение подтипов сохраняется в том же направлении:
+
+```typescript
+// Если Dog extends Animal, то Array<Dog> extends Array<Animal>
+
+class Animal {
+  name: string;
+  constructor(name: string) {
+    this.name = name;
+  }
+}
+
+class Dog extends Animal {
+  bark() {
+    console.log('Woof!');
+  }
+}
+
+class Cat extends Animal {
+  meow() {
+    console.log('Meow!');
+  }
+}
+
+// Ковариантность в массивах (только для чтения)
+const dogs: Dog[] = [new Dog('Rex'), new Dog('Max')];
+const animals: readonly Animal[] = dogs; // ✓ Ковариантно
+
+// Можем читать как Animal
+animals.forEach(animal => {
+  console.log(animal.name); // ✓ Безопасно
+});
+
+// Но не можем писать (readonly)
+// animals[0] = new Cat('Fluffy'); // ✗ readonly
+
+// Ковариантность в return types
+type Producer<T> = () => T;
+
+const produceDog: Producer<Dog> = () => new Dog('Buddy');
+const produceAnimal: Producer<Animal> = produceDog; // ✓ Ковариантно
+
+const animal = produceAnimal(); // Animal (на самом деле Dog)
+```
+
+### Контравариантность (Contravariance)
+
+Контравариантность означает, что отношение подтипов меняется на противоположное:
+
+```typescript
+// Для функций параметры контравариантны
+
+type Consumer<T> = (value: T) => void;
+
+const consumeAnimal: Consumer<Animal> = (animal) => {
+  console.log(animal.name);
+};
+
+// Контравариантность: можем присвоить Consumer<Animal> к Consumer<Dog>
+const consumeDog: Consumer<Dog> = consumeAnimal; // ✓ Контравариантно
+
+consumeDog(new Dog('Rex')); // ✓ Безопасно
+// Dog это подтип Animal, поэтому consumeAnimal может обработать Dog
+
+// Обратное НЕ работает:
+const consumeCat: Consumer<Cat> = (cat) => {
+  cat.meow(); // Специфично для Cat
+};
+
+// const wrongConsumer: Consumer<Animal> = consumeCat; // ✗ Небезопасно!
+// wrongConsumer(new Dog('Max')); // ✗ Dog не имеет meow()
+
+// Практический пример
+interface Logger {
+  log(message: string): void;
+}
+
+interface VerboseLogger extends Logger {
+  logDetailed(message: string, context: object): void;
+}
+
+type LogFunction = (logger: Logger) => void;
+type VerboseLogFunction = (logger: VerboseLogger) => void;
+
+const verboseLog: VerboseLogFunction = (logger) => {
+  logger.logDetailed('message', {});
+};
+
+// Контравариантность в параметрах функций
+const basicLog: LogFunction = verboseLog; // ✗ Небезопасно!
+// Но TypeScript позволяет это в режиме --strictFunctionTypes=false
+
+// С --strictFunctionTypes=true это будет ошибкой
+```
+
+### Инвариантность (Invariance)
+
+Инвариантность означает, что типы должны совпадать точно:
+
+```typescript
+// Изменяемые структуры инвариантны
+
+// Неправильный пример (если бы массивы были ковариантны для записи)
+// const dogs: Dog[] = [new Dog('Rex')];
+// const animals: Animal[] = dogs; // Предположим, это разрешено
+// animals.push(new Cat('Fluffy')); // ✗ Проблема! Cat в массиве Dog
+// dogs[0].bark(); // ✗ Runtime ошибка! Cat не имеет bark()
+
+// TypeScript не позволяет это для изменяемых массивов:
+interface MutableArray<T> {
+  get(index: number): T;      // Ковариантная позиция
+  set(index: number, value: T): void; // Контравариантная позиция
+}
+
+// Тип MutableArray<T> инвариантен по T
+const dogArray: MutableArray<Dog> = {
+  get: (i) => new Dog('Rex'),
+  set: (i, dog) => {},
+};
+
+// const animalArray: MutableArray<Animal> = dogArray; // ✗ Ошибка (в strict режиме)
+
+// Практический пример: State management
+interface State<T> {
+  getValue(): T;           // Ковариантно
+  setValue(value: T): void; // Контравариантно
+}
+
+// State<T> инвариантен, т.к. T в обеих позициях
+```
+
+### Бивариантность (Bivariance)
+
+Бивариантность означает, что тип может быть как ковариантным, так и контравариантным (небезопасно):
+
+```typescript
+// В TypeScript (без --strictFunctionTypes) методы бивариантны
+
+interface Handler<T> {
+  handle(value: T): void;
+}
+
+class AnimalHandler implements Handler<Animal> {
+  handle(animal: Animal) {
+    console.log(animal.name);
+  }
+}
+
+class DogHandler implements Handler<Dog> {
+  handle(dog: Dog) {
+    dog.bark();
+  }
+}
+
+// Без strictFunctionTypes это работает (бивариантность)
+const handler1: Handler<Animal> = new DogHandler(); // Небезопасно!
+// handler1.handle(new Cat('Fluffy')); // Runtime ошибка!
+
+// С --strictFunctionTypes=true это будет ошибкой для методов,
+// определённых через свойства функционального типа:
+
+interface StrictHandler<T> {
+  handle: (value: T) => void; // Строгая контравариантность
+}
+
+// С strictFunctionTypes это не скомпилируется:
+// const strictHandler: StrictHandler<Animal> = new DogHandler(); // ✗ Ошибка
+```
+
+### Практический пример: Event Handlers
+
+```typescript
+// Type-safe event handling с правильной вариантностью
+
+interface DOMEvent {
+  target: HTMLElement;
+  preventDefault(): void;
+}
+
+interface MouseEvent extends DOMEvent {
+  clientX: number;
+  clientY: number;
+}
+
+interface KeyboardEvent extends DOMEvent {
+  key: string;
+  code: string;
+}
+
+// Правильная ковариантность для producers
+type EventProducer<E> = () => E;
+
+const mouseEventProducer: EventProducer<MouseEvent> = () => ({
+  target: document.body,
+  preventDefault: () => {},
+  clientX: 100,
+  clientY: 200,
+});
+
+const eventProducer: EventProducer<DOMEvent> = mouseEventProducer; // ✓ Ковариантно
+
+// Правильная контравариантность для consumers
+type EventHandler<E> = (event: E) => void;
+
+const domEventHandler: EventHandler<DOMEvent> = (event) => {
+  console.log(event.target);
+};
+
+const mouseHandler: EventHandler<MouseEvent> = domEventHandler; // ✓ Контравариантно
+mouseHandler({ target: document.body, preventDefault: () => {}, clientX: 0, clientY: 0 });
+
+// Небезопасно (TypeScript предупредит с strictFunctionTypes):
+const keyboardHandler: EventHandler<KeyboardEvent> = (event) => {
+  console.log(event.key);
+};
+
+// const wrongHandler: EventHandler<DOMEvent> = keyboardHandler; // ✗ Ошибка
+```
+
+### Жизненный пример: React Components
+
+```typescript
+// Вариантность в React props
+
+interface BaseProps {
+  id: string;
+  className?: string;
+}
+
+interface ButtonProps extends BaseProps {
+  onClick: () => void;
+  label: string;
+}
+
+// React компоненты ковариантны по props (только чтение)
+type Component<P> = (props: P) => JSX.Element;
+
+const BaseComponent: Component<BaseProps> = ({ id, className }) => (
+  <div id={id} className={className} />
+);
+
+// Ковариантность: можем использовать более специфичный компонент
+const ButtonComponent: Component<ButtonProps> = ({ id, onClick, label }) => (
+  <button id={id} onClick={onClick}>{label}</button>
+);
+
+// ✗ Это небезопасно, но TypeScript может разрешить без strict режима
+// const component: Component<BaseProps> = ButtonComponent;
+// component({ id: '1' }); // ✗ onClick отсутствует!
+
+// Правильный подход: использовать контравариантность для children
+type ComponentWithChildren<P> = (props: P & { children?: React.ReactNode }) => JSX.Element;
+
+// Higher-order components учитывают вариантность
+type HOC<P1, P2> = (Component: Component<P1>) => Component<P2>;
+
+// Безопасный HOC: P2 extends P1 (контравариантность входа)
+const withLogger = <P extends BaseProps>(
+  WrappedComponent: Component<P>
+): Component<P> => {
+  return (props) => {
+    console.log('Rendering with props:', props);
+    return <WrappedComponent {...props} />;
+  };
+};
+```
+
+### Проверка вариантности на уровне типов
+
+```typescript
+// Helper типы для проверки вариантности
+
+// Проверка ковариантности
+type IsCovariant<T, U, F> = 
+  T extends U 
+    ? (F extends F ? (arg: F) => void : never) extends (arg: F) => void
+      ? true 
+      : false
+    : false;
+
+// Проверка контравариантности  
+type IsContravariant<T, U, F> =
+  T extends U
+    ? ((arg: F) => void) extends (arg: F) => void
+      ? true
+      : false
+    : false;
+
+// Проверка инвариантности
+type IsInvariant<F> = 
+  IsCovariant<Dog, Animal, F> extends false
+    ? IsContravariant<Dog, Animal, F> extends false
+      ? true
+      : false
+    : false;
+
+// Тесты
+type ArrayIsCovariant = IsCovariant<Dog, Animal, Dog[]>; // Для readonly - true
+type FunctionReturnIsCovariant = IsCovariant<Dog, Animal, () => Dog>; // true
+type FunctionParamIsContravariant = IsContravariant<Animal, Dog, (x: Animal) => void>; // true
+```
+
+### Практические рекомендации
+
+```typescript
+// 1. Используйте readonly для ковариантных структур
+interface ReadOnlyBox<out T> { // 'out' - явная ковариантность (TS 4.7+)
+  readonly value: T;
+  get(): T;
+}
+
+const dogBox: ReadOnlyBox<Dog> = {
+  value: new Dog('Rex'),
+  get: () => new Dog('Rex'),
+};
+
+const animalBox: ReadOnlyBox<Animal> = dogBox; // ✓ Безопасно
+
+// 2. Используйте функциональные типы для контравариантности
+interface Writer<in T> { // 'in' - явная контравариантность (TS 4.7+)
+  write: (value: T) => void;
+}
+
+const animalWriter: Writer<Animal> = {
+  write: (animal) => console.log(animal.name),
+};
+
+const dogWriter: Writer<Dog> = animalWriter; // ✓ Безопасно
+
+// 3. Изменяемые структуры должны быть инвариантны
+interface Box<T> {
+  value: T;
+  set(value: T): void;
+  get(): T;
+}
+
+// Box<T> инвариантен, запрещая небезопасные присваивания
+
+// 4. Включайте --strictFunctionTypes для безопасности
+// tsconfig.json: { "strictFunctionTypes": true }
+```
+
+### Ключевые моменты
+
+- Вариантность описывает отношения между generic типами и их параметрами
+- **Ковариантность**: `Dog extends Animal` → `Producer<Dog> extends Producer<Animal>`
+- **Контравариантность**: `Dog extends Animal` → `Consumer<Animal> extends Consumer<Dog>`
+- **Инвариантность**: типы должны совпадать точно (для изменяемых структур)
+- **Бивариантность**: небезопасное поведение (избегайте)
+- Return types ковариантны, параметры функций контравариантны
+- Readonly структуры могут быть ковариантными безопасно
+- Изменяемые структуры должны быть инвариантными
+- Используйте `--strictFunctionTypes` для корректной проверки
+- TypeScript 4.7+ поддерживает явные `in`/`out` модификаторы вариантности

@@ -1,188 +1,197 @@
 #!/usr/bin/env node
-/**
- * Generate lesson content and image using Gemini API
- * Usage: node scripts/generate-lesson.js "course-slug" "lesson-slug" "Lesson Title"
- */
 
 const fs = require('fs');
 const path = require('path');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-const GEMINI_API_KEY = process.env.GOOGLE_GEMINI_API_KEY;
+// Получаем аргументы командной строки
+const [category, slug, title] = process.argv.slice(2);
 
-if (!GEMINI_API_KEY) {
-  console.error('❌ Error: GOOGLE_GEMINI_API_KEY environment variable is not set!');
-  console.error('Please set it in .env.local or export it before running this script.');
+if (!category || !slug || !title) {
+  console.error('Usage: node generate-lesson.js <category> <slug> "Title"');
+  console.error('Example: node generate-lesson.js typescript conditional-types "Условные типы"');
   process.exit(1);
 }
 
-async function generateContent(courseTitle, lessonTitle, context) {
-  const prompt = `Ты — опытный преподаватель программирования. Напиши урок на русском языке для курса "${courseTitle}".
-
-Тема урока: "${lessonTitle}"
-
-Контекст курса: ${context}
-
-Требования к уроку:
-1. Начни с краткого введения (2-3 предложения)
-2. Объясни концепцию простым языком с примерами кода
-3. Используй markdown форматирование
-4. Добавь практические примеры кода с комментариями
-5. Добавь раздел "Жизненный пример" — покажи, где и как это применяется в реальных проектах (сайты, приложения, фреймворки)
-6. В конце добавь раздел "Ключевые моменты" с bullet points
-7. Длина: 400-600 слов
-8. Код должен быть в блоках с указанием языка (\`\`\`javascript, \`\`\`html и т.д.)
-9. НЕ ИСПОЛЬЗУЙ эмодзи - только текст и markdown
-10. Для разделов используй обычные заголовки с ## или ###
-
-Формат ответа: только markdown текст урока, без дополнительных комментариев.`;
-
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 2048,
-      }
-    })
-  });
-
-  const data = await response.json();
-  
-  if (data.error) {
-    throw new Error(`Gemini API error: ${data.error.message}`);
-  }
-  
-  return data.candidates[0].content.parts[0].text;
+const apiKey = process.env.GOOGLE_GEMINI_API_KEY;
+if (!apiKey) {
+  console.error('Error: GOOGLE_GEMINI_API_KEY environment variable not set');
+  process.exit(1);
 }
 
-async function generateImage(lessonTitle, courseTitle) {
-  const prompt = `Educational illustration for programming lesson. Topic: "${lessonTitle}" from "${courseTitle}" course. 
-Style: Modern, clean, minimalist tech illustration. Dark blue gradient background. 
-Include: Relevant programming symbols, code snippets visualization, abstract tech elements.
-Colors: Deep blue (#1a1a2e), purple accents (#6366f1), cyan highlights (#22d3ee).
-NO text, NO words, just visual elements.`;
+const genAI = new GoogleGenerativeAI(apiKey);
 
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=${GEMINI_API_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }]
-    })
-  });
+const SYSTEM_PROMPTS = {
+  html: `Ты — эксперт по HTML, создающий образовательный курс на русском языке в стиле "Yasha Learn Code".
 
-  const data = await response.json();
-  
-  if (data.error) {
-    console.error('Image generation error:', data.error.message);
-    return null;
-  }
-  
-  // Find image part in response
-  const parts = data.candidates?.[0]?.content?.parts || [];
-  for (const part of parts) {
-    if (part.inlineData) {
-      return Buffer.from(part.inlineData.data, 'base64');
-    }
-  }
-  
-  return null;
-}
+СТИЛЬ:
+- Технический, но доступный
+- Практичные примеры кода
+- Структура: теория → примеры → практика
 
-async function main() {
-  const [,, courseSlug, lessonSlug, lessonTitle] = process.argv;
-  
-  if (!courseSlug || !lessonSlug || !lessonTitle) {
-    console.error('Usage: node generate-lesson.js <course-slug> <lesson-slug> "Lesson Title"');
-    process.exit(1);
-  }
+ФОРМАТ MDX:
+- Начни с H2 заголовка: ## HTML: [Название темы]
+- Подзаголовки используй H3 (###)
+- Блоки кода: \`\`\`html
+- Комментарии в коде на русском
+- В конце: "### 🎯 Практика" с заданиями
+- И раздел "### 💡 Совет"
 
-  const courseInfo = {
-    'html': { title: 'HTML: Скелет', context: 'Основы HTML, структура веб-страниц' },
-    'css': { title: 'CSS: Стиль', context: 'Стилизация веб-страниц, селекторы, свойства' },
-    'javascript': { title: 'JavaScript: Мозги', context: 'Программирование на JavaScript, логика, DOM' },
-    'typescript': { title: 'TypeScript: Броня', context: 'Типизированный JavaScript, интерфейсы, типы' },
-    'react': { title: 'React: Движок', context: 'Компонентный подход, хуки, состояние' },
-    'git': { title: 'Git: Машина времени', context: 'Контроль версий, ветки, коммиты' },
-  };
+СТРУКТУРА:
+1. Что это и зачем
+2. Основная теория с примерами
+3. Продвинутые примеры
+4. Типичные ошибки (опционально)
+5. Практика (3-5 заданий)
+6. Совет/заключение
 
-  const course = courseInfo[courseSlug];
-  if (!course) {
-    console.error(`Unknown course: ${courseSlug}`);
-    process.exit(1);
-  }
+Длина: 80-120 строк. Минимум 5 примеров кода. Современный HTML5.`,
+  
+  css: `Ты — эксперт по CSS, создающий образовательный курс на русском языке.
 
-  console.log(`🎓 Generating lesson: ${lessonTitle}`);
-  console.log(`📚 Course: ${course.title}`);
-  
-  // Generate content
-  console.log('📝 Generating content via Gemini...');
-  const content = await generateContent(course.title, lessonTitle, course.context);
-  console.log('✅ Content generated!');
-  
-  // Generate image
-  console.log('🎨 Generating image via Gemini...');
-  const imageBuffer = await generateImage(lessonTitle, course.title);
-  
-  // Save outputs
-  const outputDir = path.join(__dirname, '..', 'generated');
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir, { recursive: true });
-  }
-  
-  // Save content
-  const contentPath = path.join(outputDir, `${courseSlug}-${lessonSlug}.md`);
-  fs.writeFileSync(contentPath, content);
-  console.log(`💾 Content saved: ${contentPath}`);
-  
-  // Save image if generated
-  if (imageBuffer) {
-    const imagePath = path.join(outputDir, `${courseSlug}-${lessonSlug}.png`);
-    fs.writeFileSync(imagePath, imageBuffer);
-    console.log(`🖼️ Image saved: ${imagePath}`);
-  } else {
-    console.log('⚠️ Image generation skipped or failed');
-  }
-  
-  // Update Nextra _meta.json and create .mdx if path exists
-  const nextraPagesDir = path.join(__dirname, '..', '..', 'yasha-learn-nextra', 'pages');
-  const courseDir = path.join(nextraPagesDir, courseSlug);
-  const courseMetaPath = path.join(courseDir, '_meta.json');
-  
-  if (fs.existsSync(courseDir)) {
-    console.log(`📝 Updating Nextra content in: ${courseDir}`);
+СТИЛЬ: Технический, практичный, с визуальными примерами.
+
+ФОРМАТ MDX:
+- H2: ## CSS: [Название]
+- H3 подзаголовки
+- Блоки кода: \`\`\`css
+- Комментарии на русском
+- В конце: "### 🎯 Практика" и "### 💡 Совет"
+
+СТРУКТУРА: теория → примеры → типичные ошибки → практика → совет
+
+Длина: 80-120 строк. Минимум 5-7 примеров. Современный CSS (Grid, Flexbox, Custom Properties).`,
+
+  javascript: `Ты — эксперт по JavaScript, создающий курс на русском языке.
+
+СТИЛЬ: Современный JS (ES6+), практичный, с реальными примерами.
+
+ФОРМАТ MDX:
+- H2: ## JavaScript: [Название]
+- Блоки кода: \`\`\`javascript
+- Комментарии на русском
+- Практика и советы в конце
+
+СТРУКТУРА: концепция → примеры → продвинутое использование → типичные баги → практика
+
+Длина: 100-130 строк. Минимум 6-8 примеров. Современный синтаксис (async/await, destructuring, spread).`,
+
+  typescript: `Ты — эксперт по TypeScript, создающий продвинутый курс на русском языке.
+
+СТИЛЬ: Технический, для среднего+ уровня. Показывай типобезопасность и best practices.
+
+ФОРМАТ MDX:
+- H2: ## TypeScript: [Название]
+- Блоки кода: \`\`\`typescript
+- Примеры должны демонстрировать силу типов
+
+СТРУКТУРА: проблема без типов → решение с TypeScript → продвинутые техники → практика
+
+Длина: 100-140 строк. Минимум 6-8 примеров. TypeScript 5.x.`,
+
+  react: `Ты — эксперт по React, создающий курс на русском языке.
+
+СТИЛЬ: Функциональные компоненты, hooks, современный React.
+
+ФОРМАТ MDX:
+- H2: ## React: [Название]
+- Блоки кода: \`\`\`jsx или \`\`\`typescript (для TSX)
+- Комментарии на русском
+
+СТРУКТУРА: концепция → базовый пример → hooks → оптимизация → типичные ошибки → практика
+
+Длина: 100-140 строк. Минимум 5-7 примеров. React 18+.`,
+
+  git: `Ты — эксперт по Git, создающий курс на русском языке.
+
+СТИЛЬ: Практичный, с командами и визуальными схемами (ASCII).
+
+ФОРМАТ MDX:
+- H2: ## Git: [Название]
+- Блоки кода: \`\`\`bash
+- Примеры реальных команд
+- Пояснения последствий команд
+
+СТРУКТУРА: задача → команды → примеры → типичные проблемы → практика
+
+Длина: 80-110 строк. Минимум 5-6 примеров команд. Git best practices.`
+};
+
+async function generateLesson() {
+  console.log(`\n🔧 Генерирую урок: ${title}`);
+  console.log(`📁 Категория: ${category}, slug: ${slug}\n`);
+
+  try {
+    const systemPrompt = SYSTEM_PROMPTS[category] || SYSTEM_PROMPTS.html;
     
-    // Create .mdx file
-    const mdxPath = path.join(courseDir, `${lessonSlug}.mdx`);
-    fs.writeFileSync(mdxPath, content);
-    console.log(`✅ Created .mdx: ${mdxPath}`);
+    // Инициализируем модель
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-2.5-flash',
+      systemInstruction: systemPrompt
+    });
 
-    if (fs.existsSync(courseMetaPath)) {
-      const meta = JSON.parse(fs.readFileSync(courseMetaPath, 'utf8'));
-      
-      // Calculate new number
-      const lessonCount = Object.keys(meta).filter(key => key !== 'index').length;
-      const nextNumber = lessonCount + 1;
-      const numberedTitle = `${nextNumber}. ${lessonTitle}`;
-      
-      meta[lessonSlug] = numberedTitle;
-      
-      fs.writeFileSync(courseMetaPath, JSON.stringify(meta, null, 2));
-      console.log(`✅ Added to _meta.json: "${numberedTitle}"`);
+    // Генерируем контент
+    const prompt = `Создай подробный урок на тему: "${title}".
+    
+Генерируй MDX контент напрямую, начиная с ## заголовка.`;
+
+    console.log('⏳ Отправляю запрос к Gemini API...');
+    const result = await model.generateContent(prompt);
+    const response = result.response;
+    const content = response.text();
+
+    // Путь к файлу урока
+    const lessonDir = path.join(process.cwd(), 'pages', category);
+    const lessonPath = path.join(lessonDir, `${slug}.mdx`);
+
+    // Создаём директорию если не существует
+    if (!fs.existsSync(lessonDir)) {
+      fs.mkdirSync(lessonDir, { recursive: true });
     }
+
+    // Записываем файл
+    fs.writeFileSync(lessonPath, content, 'utf8');
+    console.log(`✅ Урок создан: ${lessonPath}`);
+
+    // Обновляем _meta.json
+    updateMetaJson(category, slug, title);
+
+    console.log('✨ Готово!\n');
+  } catch (error) {
+    console.error('❌ Ошибка при генерации:', error.message);
+    process.exit(1);
   }
-  console.log('---');
-  // Use JSON.stringify to properly escape the content
-  console.log(`{
-  title: ${JSON.stringify(lessonTitle)},
-  slug: ${JSON.stringify(lessonSlug)},
-  order: X, // Set appropriate order
-  content: ${JSON.stringify(content)}
-}`);
-  console.log('---');
-  
-  console.log('\n✅ Done!');
 }
 
-main().catch(console.error);
+function updateMetaJson(category, slug, title) {
+  const metaPath = path.join(process.cwd(), 'pages', category, '_meta.json');
+  
+  let meta = {};
+  if (fs.existsSync(metaPath)) {
+    meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  }
+
+  // Check if slug already exists to preserve numbering or use a new one
+  if (!meta[slug]) {
+    const existingNumbers = Object.values(meta)
+      .map(val => {
+        const match = val.match(/^(\d+)\./);
+        return match ? parseInt(match[1]) : 0;
+      })
+      .filter(num => num > 0);
+
+    const nextNumber = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : 1;
+    meta[slug] = `${nextNumber}. ${title}`;
+  } else {
+    // Keep existing number if just regenerating content
+    const match = meta[slug].match(/^(\d+)\./);
+    const num = match ? match[1] : '0';
+    meta[slug] = `${num}. ${title}`;
+  }
+
+  // Сохраняем обновлённый _meta.json
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+}
+
+// Запускаем генерацию
+generateLesson();

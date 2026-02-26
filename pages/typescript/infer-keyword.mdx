@@ -1,0 +1,314 @@
+## TypeScript: Броня. Урок 13: Ключевое слово infer
+
+Ключевое слово `infer` - это мощный инструмент TypeScript, который позволяет извлекать и сохранять типы внутри условных типов. Оно работает как "захват" типа: TypeScript пытается вывести тип из структуры и сохранить его в переменную типа. Это открывает огромные возможности для создания гибких и умных типов.
+
+### Базовый синтаксис
+
+`infer` используется только внутри условной части `extends` в условных типах:
+
+```typescript
+type ExtractType<T> = T extends SomePattern<infer U> ? U : never;
+```
+
+Где:
+- `infer U` - объявление переменной типа `U`, которую TypeScript попытается вывести
+- Если вывод успешен, возвращается `U`
+- Если нет - возвращается тип из `false` ветки
+
+### Простые примеры
+
+```typescript
+// Пример 1: Извлечение типа из массива
+type ArrayElement<T> = T extends (infer U)[] ? U : never;
+
+type Strings = ArrayElement<string[]>;  // string
+type Numbers = ArrayElement<number[]>;  // number
+type NotArray = ArrayElement<boolean>;  // never
+
+// Пример 2: Извлечение возвращаемого типа функции
+type ReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
+
+type Func1 = () => string;
+type Func2 = (x: number) => boolean;
+
+type Return1 = ReturnType<Func1>; // string
+type Return2 = ReturnType<Func2>; // boolean
+
+// Пример 3: Извлечение типов параметров
+type Parameters<T> = T extends (...args: infer P) => any ? P : never;
+
+type Params1 = Parameters<(a: string, b: number) => void>;
+// [a: string, b: number]
+
+type Params2 = Parameters<(x: boolean) => void>;
+// [x: boolean]
+```
+
+### Извлечение из Promise
+
+```typescript
+// Распаковка Promise
+type UnwrapPromise<T> = T extends Promise<infer U> ? U : T;
+
+type AsyncString = UnwrapPromise<Promise<string>>;  // string
+type SyncNumber = UnwrapPromise<number>;            // number
+
+// Рекурсивная распаковка вложенных Promise
+type DeepUnwrapPromise<T> = T extends Promise<infer U>
+  ? DeepUnwrapPromise<U>
+  : T;
+
+type Nested = DeepUnwrapPromise<Promise<Promise<Promise<number>>>>;
+// number
+
+// Практический пример с async функциями
+type AsyncReturnType<T> = T extends (...args: any[]) => Promise<infer R>
+  ? R
+  : T extends (...args: any[]) => infer R
+  ? R
+  : never;
+
+async function fetchUser() {
+  return { id: 1, name: "Alice" };
+}
+
+type User = AsyncReturnType<typeof fetchUser>;
+// { id: number; name: string }
+```
+
+### Множественные infer
+
+Можно использовать несколько `infer` в одном условном типе:
+
+```typescript
+// Извлечение первого и последнего элемента кортежа
+type FirstAndLast<T> = T extends [infer First, ...any[], infer Last]
+  ? [First, Last]
+  : never;
+
+type Result1 = FirstAndLast<[1, 2, 3, 4, 5]>;
+// [1, 5]
+
+type Result2 = FirstAndLast<["a", "b", "c"]>;
+// ["a", "c"]
+
+// Извлечение типов из функции
+type FunctionParts<T> = T extends (
+  ...args: infer Args
+) => infer Return
+  ? { args: Args; return: Return }
+  : never;
+
+type Parts = FunctionParts<(x: number, y: string) => boolean>;
+// { args: [x: number, y: string]; return: boolean }
+
+// Разбор generic типов
+type UnwrapArray<T> = T extends Array<infer U> ? U : T;
+type UnwrapSet<T> = T extends Set<infer U> ? U : T;
+type UnwrapMap<T> = T extends Map<infer K, infer V> ? [K, V] : T;
+
+type ArrType = UnwrapArray<string[]>;        // string
+type SetType = UnwrapSet<Set<number>>;       // number
+type MapType = UnwrapMap<Map<string, User>>; // [string, User]
+```
+
+### Практические примеры
+
+```typescript
+// Извлечение типа из конструктора
+type InstanceType<T> = T extends new (...args: any[]) => infer R ? R : never;
+
+class User {
+  name: string;
+  age: number;
+  constructor(name: string, age: number) {
+    this.name = name;
+    this.age = age;
+  }
+}
+
+type UserInstance = InstanceType<typeof User>;
+// User
+
+// Извлечение типа элемента из Observable/EventEmitter
+type ExtractEventType<T> = T extends EventEmitter<infer E> ? E : never;
+
+class EventEmitter<T> {
+  emit(event: T) { /* ... */ }
+}
+
+type StringEmitter = EventEmitter<string>;
+type EventType = ExtractEventType<StringEmitter>; // string
+
+// Flatten массива
+type Flatten<T> = T extends Array<infer U> ? Flatten<U> : T;
+
+type Deep = Flatten<string[][][]>;  // string
+type Shallow = Flatten<number[]>;   // number
+```
+
+### Жизненный пример: Type-safe Redux Actions
+
+```typescript
+// Система типизированных actions для Redux
+type ActionCreator<T = any> = (...args: any[]) => { type: string; payload: T };
+
+type ExtractPayload<T> = T extends ActionCreator<infer P> ? P : never;
+
+type ExtractAction<T> = T extends (...args: any[]) => infer A ? A : never;
+
+// Определение action creators
+const loginAction = (userId: string, token: string) => ({
+  type: 'USER_LOGIN' as const,
+  payload: { userId, token },
+});
+
+const logoutAction = () => ({
+  type: 'USER_LOGOUT' as const,
+  payload: undefined,
+});
+
+const updateProfileAction = (name: string, email: string) => ({
+  type: 'PROFILE_UPDATE' as const,
+  payload: { name, email },
+});
+
+// Извлечение типов
+type LoginPayload = ExtractPayload<typeof loginAction>;
+// { userId: string; token: string }
+
+type LoginAction = ExtractAction<typeof loginAction>;
+// { type: 'USER_LOGIN'; payload: { userId: string; token: string } }
+
+// Создание union всех actions
+type Actions =
+  | ExtractAction<typeof loginAction>
+  | ExtractAction<typeof logoutAction>
+  | ExtractAction<typeof updateProfileAction>;
+
+// Type-safe reducer
+function reducer(state: State, action: Actions) {
+  switch (action.type) {
+    case 'USER_LOGIN':
+      // TypeScript знает, что action.payload имеет тип { userId: string; token: string }
+      return { ...state, userId: action.payload.userId };
+    case 'USER_LOGOUT':
+      // TypeScript знает, что action.payload имеет тип undefined
+      return { ...state, userId: null };
+    case 'PROFILE_UPDATE':
+      // TypeScript знает точный тип payload
+      return { ...state, profile: action.payload };
+  }
+}
+```
+
+### Разбор строковых литералов
+
+```typescript
+// Извлечение параметров из template literal types
+type ExtractParam<T> = T extends `:${infer Param}` ? Param : never;
+
+type UserId = ExtractParam<":id">;       // "id"
+type PostId = ExtractParam<":postId">;   // "postId"
+type Nothing = ExtractParam<"users">;    // never
+
+// Разбор сложных путей
+type ExtractRouteParams<T extends string> =
+  T extends `${infer _}/:${infer Param}/${infer Rest}`
+    ? { [K in Param]: string } & ExtractRouteParams<`/${Rest}`>
+    : T extends `${infer _}/:${infer Param}`
+    ? { [K in Param]: string }
+    : {};
+
+type Params1 = ExtractRouteParams<"/users/:id">;
+// { id: string }
+
+type Params2 = ExtractRouteParams<"/users/:userId/posts/:postId">;
+// { userId: string; postId: string }
+
+// Разбор типов в строках
+type ParseCSSValue<T> = T extends `${infer Num}${infer Unit}`
+  ? { value: Num; unit: Unit }
+  : never;
+
+type Parsed1 = ParseCSSValue<"16px">;
+// { value: "16"; unit: "px" }
+
+type Parsed2 = ParseCSSValue<"2rem">;
+// { value: "2"; unit: "rem" }
+```
+
+### Вариадические кортежи с infer
+
+```typescript
+// Извлечение первого элемента
+type First<T> = T extends [infer F, ...any[]] ? F : never;
+
+type FirstNum = First<[1, 2, 3]>;  // 1
+type FirstStr = First<["a", "b"]>; // "a"
+
+// Извлечение всех элементов кроме первого
+type Tail<T> = T extends [any, ...infer Rest] ? Rest : never;
+
+type TailResult = Tail<[1, 2, 3, 4]>; // [2, 3, 4]
+
+// Извлечение последнего элемента
+type Last<T> = T extends [...any[], infer L] ? L : never;
+
+type LastNum = Last<[1, 2, 3]>; // 3
+
+// Реверс кортежа (рекурсивно)
+type Reverse<T> = T extends [infer First, ...infer Rest]
+  ? [...Reverse<Rest>, First]
+  : T;
+
+type Reversed = Reverse<[1, 2, 3, 4]>;
+// [4, 3, 2, 1]
+```
+
+### Продвинутые паттерны
+
+```typescript
+// Извлечение readonly модификатора
+type IsReadonly<T, K extends keyof T> = {
+  readonly [P in K]: T[P];
+} extends { [P in K]: T[P] }
+  ? false
+  : true;
+
+// Извлечение optional модификатора
+type IsOptional<T, K extends keyof T> = {} extends Pick<T, K> ? true : false;
+
+// Deep Property Access Type
+type DeepValue<T, Path> = Path extends `${infer Key}.${infer Rest}`
+  ? Key extends keyof T
+    ? DeepValue<T[Key], Rest>
+    : never
+  : Path extends keyof T
+  ? T[Path]
+  : never;
+
+interface Config {
+  server: {
+    ssl: {
+      enabled: boolean;
+      cert: string;
+    };
+  };
+}
+
+type SSLEnabled = DeepValue<Config, "server.ssl.enabled">; // boolean
+type CertPath = DeepValue<Config, "server.ssl.cert">;      // string
+```
+
+### Ключевые моменты
+
+- `infer` позволяет извлекать типы из структур внутри условных типов
+- Работает только в части `extends` условного типа
+- Можно использовать несколько `infer` в одном условии
+- Основа для многих встроенных utility типов (`ReturnType`, `Parameters`, `InstanceType`)
+- Мощно комбинируется с template literal types для parsing строк
+- Используется для рекурсивных типов и работы с вариадическими кортежами
+- Критически важен для создания type inference в библиотеках и фреймворках
+- Позволяет TypeScript "понимать" сложные паттерны кода и выводить типы автоматически
+- Делает возможным создание мета-программирования на уровне типов

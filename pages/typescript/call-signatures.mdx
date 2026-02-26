@@ -1,0 +1,482 @@
+## TypeScript: Броня. Урок 24: Call Signatures (Сигнатуры вызова)
+
+Call signatures определяют, как объект или интерфейс может быть вызван как функция. Это позволяет создавать callable objects - объекты, которые одновременно являются функциями и имеют дополнительные свойства. Call signatures критически важны для понимания типизации функций и создания сложных API.
+
+### Базовый синтаксис
+
+```typescript
+// Call signature в интерфейсе
+interface Greeter {
+  (name: string): string;
+}
+
+// Реализация
+const greet: Greeter = (name) => {
+  return `Hello, ${name}!`;
+};
+
+console.log(greet('Alice')); // "Hello, Alice!"
+
+// Альтернативный синтаксис с type alias
+type Multiplier = (x: number, y: number) => number;
+
+const multiply: Multiplier = (x, y) => x * y;
+console.log(multiply(3, 4)); // 12
+```
+
+### Call Signatures с дополнительными свойствами
+
+```typescript
+// Callable object с свойствами
+interface Counter {
+  // Call signature
+  (): number;
+  
+  // Свойства
+  count: number;
+  reset(): void;
+}
+
+// Создание callable object
+function createCounter(): Counter {
+  // Функция
+  const counter = (() => {
+    counter.count++;
+    return counter.count;
+  }) as Counter;
+  
+  // Свойства
+  counter.count = 0;
+  counter.reset = () => {
+    counter.count = 0;
+  };
+  
+  return counter;
+}
+
+// Использование
+const counter = createCounter();
+console.log(counter());  // 1
+console.log(counter());  // 2
+console.log(counter());  // 3
+console.log(counter.count); // 3
+counter.reset();
+console.log(counter());  // 1
+```
+
+### Перегрузки в Call Signatures
+
+```typescript
+// Множественные call signatures (перегрузки)
+interface Formatter {
+  (value: number): string;
+  (value: Date): string;
+  (value: boolean): string;
+}
+
+const format: Formatter = (value: number | Date | boolean): string => {
+  if (typeof value === 'number') {
+    return value.toFixed(2);
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  return value ? 'Yes' : 'No';
+};
+
+// TypeScript знает все перегрузки
+console.log(format(42));           // "42.00"
+console.log(format(new Date()));   // "2024-01-01T00:00:00.000Z"
+console.log(format(true));         // "Yes"
+
+// Более сложный пример: API client
+interface ApiClient {
+  <T>(endpoint: string): Promise<T>;
+  <T>(endpoint: string, options: { method: 'GET' }): Promise<T>;
+  <T>(endpoint: string, options: { method: 'POST'; body: any }): Promise<T>;
+}
+
+const api: ApiClient = async <T>(
+  endpoint: string,
+  options?: any
+): Promise<T> => {
+  const response = await fetch(endpoint, options);
+  return response.json();
+};
+
+// Type-safe использование
+interface User {
+  id: string;
+  name: string;
+}
+
+const user = await api<User>('/api/user');
+const users = await api<User[]>('/api/users', { method: 'GET' });
+const created = await api<User>('/api/users', {
+  method: 'POST',
+  body: { name: 'Alice' },
+});
+```
+
+### Generic Call Signatures
+
+```typescript
+// Generic функция через call signature
+interface Transform {
+  <T, U>(value: T, fn: (val: T) => U): U;
+}
+
+const transform: Transform = (value, fn) => fn(value);
+
+const result1 = transform(42, x => x.toString());     // string
+const result2 = transform('hello', x => x.length);    // number
+const result3 = transform([1, 2, 3], x => x.join(',')); // string
+
+// Generic с ограничениями
+interface Mapper {
+  <T extends object, K extends keyof T>(obj: T, key: K): T[K];
+}
+
+const getProperty: Mapper = (obj, key) => obj[key];
+
+const user = { name: 'Alice', age: 30 };
+const name = getProperty(user, 'name'); // string
+const age = getProperty(user, 'age');   // number
+
+// Множественные generic параметры
+interface Reducer {
+  <T, U>(array: T[], fn: (acc: U, val: T) => U, initial: U): U;
+}
+
+const reduce: Reducer = (array, fn, initial) => {
+  let acc = initial;
+  for (const val of array) {
+    acc = fn(acc, val);
+  }
+  return acc;
+};
+
+const sum = reduce([1, 2, 3, 4], (acc, val) => acc + val, 0); // number: 10
+const joined = reduce(['a', 'b', 'c'], (acc, val) => acc + val, ''); // string: "abc"
+```
+
+### Практический пример: Query Builder
+
+```typescript
+// Type-safe query builder с call signatures
+interface QueryBuilder<T> {
+  // Call signature возвращает новый builder
+  <K extends keyof T>(field: K, value: T[K]): QueryBuilder<T>;
+  
+  // Методы
+  where<K extends keyof T>(field: K, value: T[K]): QueryBuilder<T>;
+  orderBy<K extends keyof T>(field: K, direction?: 'asc' | 'desc'): QueryBuilder<T>;
+  limit(count: number): QueryBuilder<T>;
+  execute(): Promise<T[]>;
+  
+  // Свойства
+  readonly query: string;
+}
+
+function createQueryBuilder<T>(): QueryBuilder<T> {
+  const conditions: string[] = [];
+  let orderClause = '';
+  let limitClause = '';
+  
+  const builder: any = function(field: keyof T, value: any) {
+    return builder.where(field, value);
+  };
+  
+  builder.where = function(field: keyof T, value: any) {
+    conditions.push(`${String(field)} = ${JSON.stringify(value)}`);
+    return builder;
+  };
+  
+  builder.orderBy = function(field: keyof T, direction = 'asc') {
+    orderClause = `ORDER BY ${String(field)} ${direction}`;
+    return builder;
+  };
+  
+  builder.limit = function(count: number) {
+    limitClause = `LIMIT ${count}`;
+    return builder;
+  };
+  
+  builder.execute = async function() {
+    const query = [
+      'SELECT *',
+      `WHERE ${conditions.join(' AND ')}`,
+      orderClause,
+      limitClause,
+    ].filter(Boolean).join(' ');
+    
+    // Выполнение запроса
+    console.log(query);
+    return [] as T[];
+  };
+  
+  Object.defineProperty(builder, 'query', {
+    get() {
+      return [
+        'SELECT *',
+        conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+        orderClause,
+        limitClause,
+      ].filter(Boolean).join(' ');
+    },
+  });
+  
+  return builder as QueryBuilder<T>;
+}
+
+// Использование
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  age: number;
+}
+
+const query = createQueryBuilder<User>();
+
+// Все варианты type-safe
+query('name', 'Alice').execute();
+query.where('age', 30).orderBy('name', 'desc').limit(10).execute();
+query('email', 'alice@example.com').where('age', 30).execute();
+
+console.log(query('name', 'Bob').query); // "SELECT * WHERE name = \"Bob\""
+```
+
+### Жизненный пример: Event Emitter
+
+```typescript
+// Type-safe event emitter с call signatures
+interface EventMap {
+  [event: string]: any;
+}
+
+interface EventEmitter<T extends EventMap> {
+  // Call signature для emit
+  <K extends keyof T>(event: K, payload: T[K]): void;
+  
+  // Методы
+  on<K extends keyof T>(event: K, handler: (payload: T[K]) => void): void;
+  off<K extends keyof T>(event: K, handler: (payload: T[K]) => void): void;
+  once<K extends keyof T>(event: K, handler: (payload: T[K]) => void): void;
+  
+  // Свойства
+  listenerCount<K extends keyof T>(event: K): number;
+}
+
+function createEventEmitter<T extends EventMap>(): EventEmitter<T> {
+  const listeners: Map<keyof T, Set<Function>> = new Map();
+  
+  const emitter: any = function(event: keyof T, payload: any) {
+    const handlers = listeners.get(event);
+    if (handlers) {
+      handlers.forEach(handler => handler(payload));
+    }
+  };
+  
+  emitter.on = function(event: keyof T, handler: Function) {
+    if (!listeners.has(event)) {
+      listeners.set(event, new Set());
+    }
+    listeners.get(event)!.add(handler);
+  };
+  
+  emitter.off = function(event: keyof T, handler: Function) {
+    listeners.get(event)?.delete(handler);
+  };
+  
+  emitter.once = function(event: keyof T, handler: Function) {
+    const wrapper = (payload: any) => {
+      handler(payload);
+      emitter.off(event, wrapper);
+    };
+    emitter.on(event, wrapper);
+  };
+  
+  emitter.listenerCount = function(event: keyof T) {
+    return listeners.get(event)?.size ?? 0;
+  };
+  
+  return emitter as EventEmitter<T>;
+}
+
+// Определение событий
+interface AppEvents {
+  'user:login': { userId: string; timestamp: number };
+  'user:logout': { userId: string };
+  'data:update': { key: string; value: any };
+  'error': { message: string; code: number };
+}
+
+// Использование
+const emitter = createEventEmitter<AppEvents>();
+
+// Type-safe listeners
+emitter.on('user:login', (data) => {
+  console.log(`User ${data.userId} logged in at ${data.timestamp}`);
+});
+
+emitter.on('error', (err) => {
+  console.error(`Error ${err.code}: ${err.message}`);
+});
+
+// Type-safe emit через call signature
+emitter('user:login', {
+  userId: '123',
+  timestamp: Date.now(),
+});
+
+emitter('error', {
+  message: 'Something went wrong',
+  code: 500,
+});
+
+// Или через метод emit (если добавить)
+// emitter.emit('user:logout', { userId: '123' });
+```
+
+### Construct Signatures
+
+```typescript
+// Construct signature (для конструкторов)
+interface Constructable<T> {
+  new (...args: any[]): T;
+}
+
+// Generic фабрика
+function createInstance<T>(constructor: Constructable<T>, ...args: any[]): T {
+  return new constructor(...args);
+}
+
+class User {
+  constructor(public name: string, public age: number) {}
+}
+
+class Product {
+  constructor(public title: string, public price: number) {}
+}
+
+const user = createInstance(User, 'Alice', 30);
+const product = createInstance(Product, 'Laptop', 999);
+
+// Комбинирование call и construct signatures
+interface Builder<T> {
+  // Call signature
+  (): T;
+  
+  // Construct signature
+  new (): T;
+  
+  // Статические методы
+  create(): T;
+}
+
+class UserBuilder implements Builder<User> {
+  // Call signature implementation (через static)
+  static create(): User {
+    return new User('Default', 0);
+  }
+  
+  // Construct signature implementation
+  constructor() {
+    return new User('Built', 25);
+  }
+}
+
+// Оба способа работают
+const user1 = UserBuilder.create(); // через call
+const user2 = new UserBuilder();    // через construct
+```
+
+### Call Signatures в Type Aliases
+
+```typescript
+// Type alias с call signature
+type Logger = {
+  (message: string): void;
+  level: 'info' | 'warn' | 'error';
+  setLevel(level: 'info' | 'warn' | 'error'): void;
+};
+
+const logger: Logger = Object.assign(
+  (message: string) => {
+    console.log(`[${logger.level}] ${message}`);
+  },
+  {
+    level: 'info' as const,
+    setLevel(newLevel: 'info' | 'warn' | 'error') {
+      logger.level = newLevel;
+    },
+  }
+);
+
+// Использование
+logger('Application started');  // [info] Application started
+logger.setLevel('warn');
+logger('Warning message');      // [warn] Warning message
+```
+
+### Async Call Signatures
+
+```typescript
+// Асинхронные call signatures
+interface AsyncFetcher {
+  <T>(url: string): Promise<T>;
+  <T>(url: string, options: RequestInit): Promise<T>;
+  
+  cache: Map<string, any>;
+  clearCache(): void;
+}
+
+const fetcher: AsyncFetcher = Object.assign(
+  async <T>(url: string, options?: RequestInit): Promise<T> => {
+    const cacheKey = `${url}:${JSON.stringify(options)}`;
+    
+    if (fetcher.cache.has(cacheKey)) {
+      return fetcher.cache.get(cacheKey);
+    }
+    
+    const response = await fetch(url, options);
+    const data = await response.json();
+    
+    fetcher.cache.set(cacheKey, data);
+    return data;
+  },
+  {
+    cache: new Map<string, any>(),
+    clearCache() {
+      this.cache.clear();
+    },
+  }
+);
+
+// Type-safe использование
+interface Post {
+  id: number;
+  title: string;
+  body: string;
+}
+
+const post = await fetcher<Post>('/api/posts/1');
+const posts = await fetcher<Post[]>('/api/posts', { method: 'GET' });
+
+console.log(fetcher.cache.size); // 2
+fetcher.clearCache();
+```
+
+### Ключевые моменты
+
+- Call signatures определяют, как интерфейс/тип может быть вызван как функция
+- Синтаксис: `(param: Type): ReturnType` внутри интерфейса/типа
+- Позволяют создавать callable objects с дополнительными свойствами
+- Поддерживают перегрузки функций
+- Generic call signatures обеспечивают type safety для параметризованных функций
+- Construct signatures для конструкторов: `new (...args: any[]): T`
+- Можно комбинировать call и construct signatures в одном типе
+- Используются для создания fluent API, builders, event emitters
+- Критически важны для понимания типизации функций в TypeScript
+- Альтернатива: type aliases с arrow function syntax

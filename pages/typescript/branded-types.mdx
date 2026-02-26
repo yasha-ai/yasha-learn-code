@@ -1,0 +1,394 @@
+## TypeScript: Броня. Урок 16: Branded Types (Номинальные типы)
+
+Branded types (также называемые nominal types или opaque types) - это техника создания типов, которые структурно идентичны, но семантически различны. TypeScript использует структурную типизацию, но иногда нужна номинальная типизация - когда два типа с одинаковой структурой не должны быть взаимозаменяемы. Branded types решают эту проблему.
+
+### Проблема структурной типизации
+
+TypeScript использует структурную типизацию - типы совместимы, если их структура совпадает:
+
+```typescript
+// Проблема: эти типы взаимозаменяемы
+type UserId = string;
+type PostId = string;
+type Email = string;
+
+function getUser(id: UserId): User { /* ... */ }
+function getPost(id: PostId): Post { /* ... */ }
+
+const userId: UserId = "user_123";
+const postId: PostId = "post_456";
+const email: Email = "user@example.com";
+
+// Все эти вызовы допустимы, но семантически неверны!
+getUser(postId);  // ✗ Логически неправильно, но TypeScript разрешает
+getUser(email);   // ✗ Логически неправильно, но TypeScript разрешает
+getPost(userId);  // ✗ Логически неправильно, но TypeScript разрешает
+```
+
+### Создание Branded Types
+
+Branded types добавляют "бренд" - уникальное символьное свойство, которое делает типы несовместимыми:
+
+```typescript
+// Паттерн брендирования
+type Brand<K, T> = K & { readonly __brand: T };
+
+// Создание branded типов
+type UserId = Brand<string, 'UserId'>;
+type PostId = Brand<string, 'PostId'>;
+type Email = Brand<string, 'Email'>;
+
+// Теперь типы несовместимы!
+function getUser(id: UserId): User { /* ... */ }
+function getPost(id: PostId): Post { /* ... */ }
+
+// const userId: UserId = "user_123"; // ✗ Ошибка! Нужна явная конверсия
+// const postId: PostId = "post_456"; // ✗ Ошибка!
+
+// Правильный способ - через функции-конструкторы
+function createUserId(id: string): UserId {
+  // Здесь может быть валидация
+  if (!id.startsWith('user_')) {
+    throw new Error('Invalid user ID format');
+  }
+  return id as UserId;
+}
+
+function createPostId(id: string): PostId {
+  if (!id.startsWith('post_')) {
+    throw new Error('Invalid post ID format');
+  }
+  return id as PostId;
+}
+
+function createEmail(email: string): Email {
+  if (!email.includes('@')) {
+    throw new Error('Invalid email format');
+  }
+  return email as Email;
+}
+
+// Использование
+const userId = createUserId("user_123");
+const postId = createPostId("post_456");
+
+getUser(userId);  // ✓ Правильно
+// getUser(postId); // ✗ Ошибка типов!
+// getPost(userId); // ✗ Ошибка типов!
+```
+
+### Branded Numbers
+
+```typescript
+// Брендирование числовых типов
+type PositiveNumber = Brand<number, 'Positive'>;
+type NegativeNumber = Brand<number, 'Negative'>;
+type Percentage = Brand<number, 'Percentage'>;  // 0-100
+type Timestamp = Brand<number, 'Timestamp'>;
+
+// Конструкторы с валидацией
+function positive(n: number): PositiveNumber {
+  if (n <= 0) {
+    throw new Error('Number must be positive');
+  }
+  return n as PositiveNumber;
+}
+
+function negative(n: number): NegativeNumber {
+  if (n >= 0) {
+    throw new Error('Number must be negative');
+  }
+  return n as NegativeNumber;
+}
+
+function percentage(n: number): Percentage {
+  if (n < 0 || n > 100) {
+    throw new Error('Percentage must be between 0 and 100');
+  }
+  return n as Percentage;
+}
+
+function timestamp(ms: number): Timestamp {
+  return ms as Timestamp;
+}
+
+// Использование
+function calculateDiscount(
+  price: PositiveNumber,
+  discount: Percentage
+): PositiveNumber {
+  const amount = price * (discount / 100);
+  return positive(price - amount);
+}
+
+const price = positive(100);
+const discount = percentage(20);
+const finalPrice = calculateDiscount(price, discount);
+
+// const invalid = calculateDiscount(positive(100), positive(150)); // ✗ Типы несовместимы
+```
+
+### Практический пример: Единицы измерения
+
+```typescript
+// Система единиц измерения
+type Meters = Brand<number, 'Meters'>;
+type Kilometers = Brand<number, 'Kilometers'>;
+type Seconds = Brand<number, 'Seconds'>;
+type MetersPerSecond = Brand<number, 'MetersPerSecond'>;
+
+// Конструкторы
+const meters = (n: number): Meters => n as Meters;
+const kilometers = (n: number): Kilometers => n as Kilometers;
+const seconds = (n: number): Seconds => n as Seconds;
+const metersPerSecond = (n: number): MetersPerSecond => n as MetersPerSecond;
+
+// Конверсии
+function kmToMeters(km: Kilometers): Meters {
+  return meters(km * 1000);
+}
+
+function metersToKm(m: Meters): Kilometers {
+  return kilometers(m / 1000);
+}
+
+// Вычисления с единицами
+function calculateSpeed(distance: Meters, time: Seconds): MetersPerSecond {
+  return metersPerSecond(distance / time);
+}
+
+function calculateDistance(speed: MetersPerSecond, time: Seconds): Meters {
+  return meters(speed * time);
+}
+
+// Использование
+const distance = meters(1000);
+const time = seconds(10);
+const speed = calculateSpeed(distance, time);
+// metersPerSecond(100)
+
+const distanceKm = metersToKm(distance);
+// kilometers(1)
+
+// const invalid = calculateSpeed(kilometers(1), seconds(10)); // ✗ Ошибка типов!
+// Нужна явная конверсия:
+const correct = calculateSpeed(kmToMeters(kilometers(1)), seconds(10)); // ✓
+```
+
+### Жизненный пример: URL Types
+
+```typescript
+// Type-safe URLs
+type AbsoluteURL = Brand<string, 'AbsoluteURL'>;
+type RelativeURL = Brand<string, 'RelativeURL'>;
+type ApiEndpoint = Brand<string, 'ApiEndpoint'>;
+
+// Валидация и создание
+function absoluteURL(url: string): AbsoluteURL {
+  try {
+    new URL(url); // Проверка через браузерный API
+    return url as AbsoluteURL;
+  } catch {
+    throw new Error(`Invalid absolute URL: ${url}`);
+  }
+}
+
+function relativeURL(url: string): RelativeURL {
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    throw new Error('Relative URL cannot be absolute');
+  }
+  if (!url.startsWith('/')) {
+    throw new Error('Relative URL must start with /');
+  }
+  return url as RelativeURL;
+}
+
+function apiEndpoint(path: string): ApiEndpoint {
+  if (!path.startsWith('/api/')) {
+    throw new Error('API endpoint must start with /api/');
+  }
+  return path as ApiEndpoint;
+}
+
+// Type-safe функции
+function fetchAbsolute(url: AbsoluteURL): Promise<Response> {
+  return fetch(url);
+}
+
+function fetchApi(endpoint: ApiEndpoint): Promise<Response> {
+  const baseUrl = 'https://api.example.com';
+  return fetch(baseUrl + endpoint);
+}
+
+function navigate(url: AbsoluteURL | RelativeURL): void {
+  window.location.href = url;
+}
+
+// Использование
+const homeUrl = relativeURL('/home');
+const apiUrl = apiEndpoint('/api/users');
+const externalUrl = absoluteURL('https://google.com');
+
+navigate(homeUrl);        // ✓
+fetchApi(apiUrl);         // ✓
+fetchAbsolute(externalUrl); // ✓
+
+// navigate(apiUrl);      // ✗ ApiEndpoint не совместим с RelativeURL
+// fetchApi(homeUrl);     // ✗ RelativeURL не совместим с ApiEndpoint
+```
+
+### Branded Arrays и Collections
+
+```typescript
+// Брендированные коллекции
+type NonEmptyArray<T> = Brand<T[], 'NonEmpty'>;
+type SortedArray<T> = Brand<T[], 'Sorted'>;
+type UniqueArray<T> = Brand<T[], 'Unique'>;
+
+// Конструкторы
+function nonEmptyArray<T>(arr: T[]): NonEmptyArray<T> {
+  if (arr.length === 0) {
+    throw new Error('Array cannot be empty');
+  }
+  return arr as NonEmptyArray<T>;
+}
+
+function sortedArray<T>(arr: T[], compareFn?: (a: T, b: T) => number): SortedArray<T> {
+  const sorted = [...arr].sort(compareFn);
+  return sorted as SortedArray<T>;
+}
+
+function uniqueArray<T>(arr: T[]): UniqueArray<T> {
+  const unique = Array.from(new Set(arr));
+  return unique as UniqueArray<T>;
+}
+
+// Функции, работающие с брендированными массивами
+function head<T>(arr: NonEmptyArray<T>): T {
+  return arr[0]; // Гарантированно существует
+}
+
+function binarySearch<T>(arr: SortedArray<T>, value: T): number {
+  // Можем использовать binary search, т.к. массив отсортирован
+  // implementation
+  return -1;
+}
+
+// Использование
+const numbers = nonEmptyArray([1, 2, 3]);
+const first = head(numbers); // ✓ Безопасно
+
+// const empty: number[] = [];
+// const invalid = head(empty); // ✗ Ошибка типов!
+
+const sorted = sortedArray([3, 1, 2]);
+const index = binarySearch(sorted, 2); // ✓
+
+// const unsorted = [3, 1, 2];
+// binarySearch(unsorted, 2); // ✗ Нужен SortedArray
+```
+
+### С Generic Constraints
+
+```typescript
+// Branded generic типы
+type Validated<T, Brand extends string> = T & { readonly __brand: Brand };
+
+// Создание валидаторов
+interface Validator<T, Brand extends string> {
+  validate(value: T): Validated<T, Brand>;
+}
+
+class EmailValidator implements Validator<string, 'Email'> {
+  validate(value: string): Validated<string, 'Email'> {
+    if (!value.includes('@') || !value.includes('.')) {
+      throw new Error('Invalid email');
+    }
+    return value as Validated<string, 'Email'>;
+  }
+}
+
+class PhoneValidator implements Validator<string, 'Phone'> {
+  validate(value: string): Validated<string, 'Phone'> {
+    if (!/^\+?[0-9]{10,15}$/.test(value)) {
+      throw new Error('Invalid phone number');
+    }
+    return value as Validated<string, 'Phone'>;
+  }
+}
+
+// Generic функция для валидации
+function createValidator<T, Brand extends string>(
+  validate: (value: T) => boolean,
+  errorMsg: string
+): (value: T) => Validated<T, Brand> {
+  return (value: T): Validated<T, Brand> => {
+    if (!validate(value)) {
+      throw new Error(errorMsg);
+    }
+    return value as Validated<T, Brand>;
+  };
+}
+
+// Использование
+const emailValidator = new EmailValidator();
+const phoneValidator = new PhoneValidator();
+
+const email = emailValidator.validate('user@example.com');
+const phone = phoneValidator.validate('+79991234567');
+
+// Кастомный валидатор
+type Username = Validated<string, 'Username'>;
+
+const validateUsername = createValidator<string, 'Username'>(
+  (val) => val.length >= 3 && val.length <= 20 && /^[a-zA-Z0-9_]+$/.test(val),
+  'Username must be 3-20 characters, alphanumeric and underscores only'
+);
+
+const username = validateUsername('john_doe123'); // ✓
+// const invalid = validateUsername('ab'); // ✗ Throws error
+```
+
+### Runtime проверки
+
+```typescript
+// Комбинирование branded types с runtime валидацией
+type JsonString = Brand<string, 'JsonString'>;
+
+function parseJson(json: JsonString): unknown {
+  // Здесь мы уверены, что строка валидна
+  return JSON.parse(json);
+}
+
+function toJsonString(value: unknown): JsonString {
+  try {
+    const json = JSON.stringify(value);
+    // Проверяем, что можем парсить обратно
+    JSON.parse(json);
+    return json as JsonString;
+  } catch (e) {
+    throw new Error('Failed to create JSON string');
+  }
+}
+
+// Использование
+const obj = { name: 'Alice', age: 30 };
+const json = toJsonString(obj);
+const parsed = parseJson(json);
+
+// const invalid = '{ invalid json }';
+// parseJson(invalid); // ✗ Ошибка типов - нужен JsonString
+```
+
+### Ключевые моменты
+
+- Branded types обеспечивают номинальную типизацию в структурной системе TypeScript
+- Паттерн: `type Brand<K, T> = K & { readonly __brand: T }`
+- Требуют явных конструкторов и конверсий между типами
+- Предотвращают случайное смешивание семантически разных данных
+- Идеальны для ID, URLs, единиц измерения, валидированных данных
+- Валидация может быть встроена в конструкторы
+- Runtime overhead отсутствует - бренды существуют только на уровне типов
+- Улучшают type safety без изменения runtime поведения
+- Особенно полезны в больших кодовых базах для предотвращения ошибок
+- Комбинируются с другими продвинутыми техниками TypeScript

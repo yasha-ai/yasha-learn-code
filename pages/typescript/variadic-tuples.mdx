@@ -1,0 +1,401 @@
+## TypeScript: Броня. Урок 28: Variadic Tuple Types
+
+Variadic tuple types (вариадические кортежи), введённые в TypeScript 4.0, позволяют работать с кортежами переменной длины и создавать мощные типы для функций с произвольным количеством аргументов. Это критически важная фича для type-safe работы с rest parameters, spread operators и generic tuple manipulation.
+
+### Базовый синтаксис
+
+```typescript
+// Spread в tuple types
+type StringNumber = [string, number];
+type BooleanStringNumber = [boolean, ...StringNumber];
+// [boolean, string, number]
+
+// Generic spread
+type Concat<T extends unknown[], U extends unknown[]> = [...T, ...U];
+
+type Result1 = Concat<[1, 2], [3, 4]>;  // [1, 2, 3, 4]
+type Result2 = Concat<[string], [number, boolean]>; // [string, number, boolean]
+
+// Spread в начале
+type Prepend<T extends unknown[], U> = [U, ...T];
+
+type WithId = Prepend<[string, number], 'id'>; // ['id', string, number]
+
+// Spread в конце
+type Append<T extends unknown[], U> = [...T, U];
+
+type WithTimestamp = Append<[string, number], Date>; // [string, number, Date]
+```
+
+### Rest Elements в Tuples
+
+```typescript
+// Rest element может быть в начале, середине или конце
+type Start = [string, ...number[]];  // string, потом любое количество number
+type Middle = [string, ...boolean[], number]; // string, boolean[], number
+type End = [...string[], number];    // любое количество string, потом number
+
+// Примеры использования
+const start: Start = ['hello', 1, 2, 3, 4, 5];
+const middle: Middle = ['text', true, false, true, 42];
+const end: End = ['a', 'b', 'c', 100];
+
+// Generic rest elements
+type Tail<T extends unknown[]> = T extends [unknown, ...infer Rest]
+  ? Rest
+  : [];
+
+type Numbers = Tail<[string, number, boolean]>; // [number, boolean]
+type Empty = Tail<[string]>;                    // []
+```
+
+### Type-safe Rest Parameters
+
+```typescript
+// Функция принимающая произвольное количество аргументов
+function concat<T extends unknown[]>(...args: T): T {
+  return args;
+}
+
+const result1 = concat(1, 'a', true);  // [number, string, boolean]
+const result2 = concat();              // []
+const result3 = concat('x', 'y', 'z'); // [string, string, string]
+
+// Prepend к rest parameters
+function logWithPrefix<T extends unknown[]>(
+  prefix: string,
+  ...args: T
+): void {
+  console.log(prefix, ...args);
+}
+
+logWithPrefix('Info:', 'User logged in', { userId: 123 });
+// T = [string, { userId: number }]
+
+// Множественные rest parameters через generics
+function merge<T extends unknown[], U extends unknown[]>(
+  first: [...T],
+  second: [...U]
+): [...T, ...U] {
+  return [...first, ...second];
+}
+
+const merged = merge([1, 2], ['a', 'b']); // [number, number, string, string]
+```
+
+### Практический пример: Type-safe Curry
+
+```typescript
+// Curry function с полной типизацией
+type Curry<T extends unknown[], R> = T extends [infer First, ...infer Rest]
+  ? (arg: First) => Rest extends []
+    ? R
+    : Curry<Rest, R>
+  : R;
+
+function curry<T extends unknown[], R>(
+  fn: (...args: T) => R
+): Curry<T, R> {
+  return function curried(...args: unknown[]): any {
+    if (args.length >= fn.length) {
+      return fn(...args as T);
+    }
+    
+    return (...nextArgs: unknown[]) =>
+      curried(...args, ...nextArgs);
+  } as Curry<T, R>;
+}
+
+// Использование
+function add(a: number, b: number, c: number): number {
+  return a + b + c;
+}
+
+const curriedAdd = curry(add);
+// (arg: number) => (arg: number) => (arg: number) => number
+
+const result = curriedAdd(1)(2)(3); // 6
+
+// Type-safe на каждом шаге
+const step1 = curriedAdd(10);        // (arg: number) => (arg: number) => number
+const step2 = step1(20);             // (arg: number) => number
+const step3 = step2(30);             // number (60)
+```
+
+### Variadic Generics в Functions
+
+```typescript
+// Generic функция с variadic tuples
+function pipe<T extends unknown[], U>(
+  value: T,
+  fn: (...args: T) => U
+): U {
+  return fn(...value);
+}
+
+const result1 = pipe([1, 2, 3], (a, b, c) => a + b + c); // number
+const result2 = pipe(['hello', 5], (str, num) => str.repeat(num)); // string
+
+// Composition с variadic tuples
+type AnyFunction = (...args: any[]) => any;
+
+type LastReturnType<T extends AnyFunction[]> = T extends [
+  ...any[],
+  infer Last extends AnyFunction
+]
+  ? ReturnType<Last>
+  : never;
+
+type FirstParameters<T extends AnyFunction[]> = T extends [
+  infer First extends AnyFunction,
+  ...any[]
+]
+  ? Parameters<First>
+  : never;
+
+function compose<T extends AnyFunction[]>(
+  ...fns: T
+): (...args: FirstParameters<T>) => LastReturnType<T> {
+  return (...args: any[]) => {
+    return fns.reduceRight(
+      (acc, fn) => (Array.isArray(acc) ? fn(...acc) : fn(acc)),
+      args
+    );
+  };
+}
+
+// Использование
+const add1 = (x: number) => x + 1;
+const double = (x: number) => x * 2;
+const toString = (x: number) => x.toString();
+
+const composed = compose(toString, double, add1);
+// (x: number) => string
+
+const result = composed(5); // "12" ((5 + 1) * 2).toString()
+```
+
+### Жизненный пример: Type-safe Event Bus
+
+```typescript
+// Event bus с variadic payload types
+type EventMap = {
+  [key: string]: unknown[];
+};
+
+class TypedEventBus<TEvents extends EventMap> {
+  private listeners: {
+    [K in keyof TEvents]?: Array<(...args: TEvents[K]) => void>;
+  } = {};
+  
+  on<K extends keyof TEvents>(
+    event: K,
+    handler: (...args: TEvents[K]) => void
+  ): void {
+    if (!this.listeners[event]) {
+      this.listeners[event] = [];
+    }
+    this.listeners[event]!.push(handler);
+  }
+  
+  emit<K extends keyof TEvents>(
+    event: K,
+    ...args: TEvents[K]
+  ): void {
+    const handlers = this.listeners[event];
+    if (handlers) {
+      handlers.forEach(handler => handler(...args));
+    }
+  }
+  
+  off<K extends keyof TEvents>(
+    event: K,
+    handler: (...args: TEvents[K]) => void
+  ): void {
+    const handlers = this.listeners[event];
+    if (handlers) {
+      const index = handlers.indexOf(handler);
+      if (index !== -1) {
+        handlers.splice(index, 1);
+      }
+    }
+  }
+}
+
+// Определение событий с variadic payloads
+interface AppEvents extends EventMap {
+  'user:login': [userId: string, timestamp: number, ip: string];
+  'user:logout': [userId: string];
+  'data:update': [key: string, oldValue: unknown, newValue: unknown];
+  'error': [message: string, code: number, stack?: string];
+}
+
+const bus = new TypedEventBus<AppEvents>();
+
+// Type-safe listeners
+bus.on('user:login', (userId, timestamp, ip) => {
+  // userId: string, timestamp: number, ip: string
+  console.log(`User ${userId} logged in from ${ip} at ${timestamp}`);
+});
+
+bus.on('error', (message, code, stack) => {
+  // message: string, code: number, stack: string | undefined
+  console.error(`Error ${code}: ${message}`);
+  if (stack) console.error(stack);
+});
+
+// Type-safe emit
+bus.emit('user:login', 'user123', Date.now(), '192.168.1.1'); // ✓
+// bus.emit('user:login', 'user123', Date.now()); // ✗ отсутствует ip
+```
+
+### Tuple Manipulation Types
+
+```typescript
+// Извлечение первого элемента
+type First<T extends unknown[]> = T extends [infer F, ...unknown[]]
+  ? F
+  : never;
+
+type FirstNumber = First<[number, string, boolean]>; // number
+
+// Извлечение последнего элемента
+type Last<T extends unknown[]> = T extends [...unknown[], infer L]
+  ? L
+  : never;
+
+type LastBoolean = Last<[number, string, boolean]>; // boolean
+
+// Удаление первого элемента
+type Tail<T extends unknown[]> = T extends [unknown, ...infer Rest]
+  ? Rest
+  : [];
+
+type TailResult = Tail<[1, 2, 3, 4]>; // [2, 3, 4]
+
+// Удаление последнего элемента
+type Init<T extends unknown[]> = T extends [...infer I, unknown]
+  ? I
+  : [];
+
+type InitResult = Init<[1, 2, 3, 4]>; // [1, 2, 3]
+
+// Reverse tuple
+type Reverse<T extends unknown[]> = T extends [infer F, ...infer R]
+  ? [...Reverse<R>, F]
+  : [];
+
+type Reversed = Reverse<[1, 2, 3, 4]>; // [4, 3, 2, 1]
+
+// Concat tuples
+type Concat<T extends unknown[], U extends unknown[]> = [...T, ...U];
+
+type Combined = Concat<[1, 2], [3, 4, 5]>; // [1, 2, 3, 4, 5]
+
+// Flatten nested tuples
+type Flatten<T extends unknown[]> = T extends [infer F, ...infer R]
+  ? F extends unknown[]
+    ? [...Flatten<F>, ...Flatten<R>]
+    : [F, ...Flatten<R>]
+  : [];
+
+type Flat = Flatten<[1, [2, 3], [4, [5, 6]]]>; // [1, 2, 3, 4, [5, 6]]
+```
+
+### Type-safe Promisify
+
+```typescript
+// Promisify функций с variadic arguments
+type Callback<T extends unknown[]> = (error: Error | null, ...result: T) => void;
+
+type PromisifyFunction<T extends unknown[], R extends unknown[]> = 
+  (...args: [...T, Callback<R>]) => void;
+
+type Promisified<T extends unknown[], R extends unknown[]> =
+  (...args: T) => Promise<R extends [infer Single] ? Single : R>;
+
+function promisify<T extends unknown[], R extends unknown[]>(
+  fn: PromisifyFunction<T, R>
+): Promisified<T, R> {
+  return (...args: T): Promise<any> => {
+    return new Promise((resolve, reject) => {
+      fn(...args, (error, ...result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result.length === 1 ? result[0] : result);
+        }
+      });
+    });
+  };
+}
+
+// Использование
+declare function readFile(
+  path: string,
+  encoding: string,
+  callback: (error: Error | null, data: string) => void
+): void;
+
+const readFileAsync = promisify(readFile);
+// (path: string, encoding: string) => Promise<string>
+
+const content = await readFileAsync('/path/to/file', 'utf-8'); // string
+```
+
+### Partial Tuples
+
+```typescript
+// Partial для tuples
+type PartialTuple<T extends unknown[]> = Partial<T> & unknown[];
+
+type OptionalNumbers = PartialTuple<[number, number, number]>;
+// (number | undefined)[]
+
+// Required для tuples
+type RequiredTuple<T extends unknown[]> = Required<T> & unknown[];
+
+// Readonly для tuples
+type ReadonlyTuple<T extends unknown[]> = Readonly<T>;
+
+const tuple: ReadonlyTuple<[number, string]> = [42, 'hello'];
+// tuple[0] = 100; // ✗ readonly
+```
+
+### Mapped Types с Variadic Tuples
+
+```typescript
+// Transform каждого элемента tuple
+type MapTuple<T extends unknown[], F> = {
+  [K in keyof T]: T[K] extends infer U ? F extends (arg: U) => infer R ? R : never : never;
+};
+
+// Пример: обёртка в Promise
+type PromisifyAll<T extends unknown[]> = {
+  [K in keyof T]: Promise<T[K]>;
+};
+
+type AsyncTuple = PromisifyAll<[number, string, boolean]>;
+// [Promise<number>, Promise<string>, Promise<boolean>]
+
+// Nullable tuple
+type NullableTuple<T extends unknown[]> = {
+  [K in keyof T]: T[K] | null;
+};
+
+type MaybeNull = NullableTuple<[string, number]>;
+// [string | null, number | null]
+```
+
+### Ключевые моменты
+
+- Variadic tuple types позволяют работать с кортежами переменной длины
+- Spread operator (`...`) работает в типах так же, как в JavaScript
+- Rest elements могут быть в начале, середине или конце tuple
+- Критически важны для type-safe rest/spread parameters
+- Позволяют создавать точно типизированные curry, compose, pipe
+- Используются для manipulation tuple types (reverse, concat, flatten)
+- Поддерживают generic constraints и inference
+- Mapped types работают с variadic tuples
+- Необходимы для создания type-safe event systems, HOF, utilities
+- Доступны с TypeScript 4.0+

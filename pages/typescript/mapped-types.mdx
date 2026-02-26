@@ -1,0 +1,308 @@
+## TypeScript: Броня. Урок 11: Mapped Types (Преобразованные типы)
+
+Mapped types позволяют создавать новые типы путём трансформации свойств существующих типов. Это один из самых мощных инструментов TypeScript для создания гибких и переиспользуемых типов. С их помощью можно автоматически добавлять модификаторы (`readonly`, `?`), изменять названия ключей или типы значений.
+
+### Базовый синтаксис
+
+Синтаксис mapped types выглядит как итерация по ключам типа:
+
+```typescript
+type MappedType<T> = {
+  [K in keyof T]: T[K];
+};
+```
+
+Где:
+- `K` - переменная, которая принимает каждый ключ из `T`
+- `keyof T` - оператор, возвращающий union всех ключей типа `T`
+- `T[K]` - тип значения для ключа `K`
+
+### Простые примеры
+
+```typescript
+// Пример 1: Создание Readonly версии типа
+type Readonly<T> = {
+  readonly [K in keyof T]: T[K];
+};
+
+interface User {
+  name: string;
+  age: number;
+}
+
+type ReadonlyUser = Readonly<User>;
+// {
+//   readonly name: string;
+//   readonly age: number;
+// }
+
+// Пример 2: Создание Optional версии
+type Partial<T> = {
+  [K in keyof T]?: T[K];
+};
+
+type PartialUser = Partial<User>;
+// {
+//   name?: string;
+//   age?: number;
+// }
+
+// Пример 3: Удаление модификаторов
+type Mutable<T> = {
+  -readonly [K in keyof T]: T[K]; // Удаление readonly
+};
+
+type Required<T> = {
+  [K in keyof T]-?: T[K]; // Удаление optional (?)
+};
+```
+
+### Преобразование типов значений
+
+```typescript
+// Обёртка всех полей в Promise
+type Promisify<T> = {
+  [K in keyof T]: Promise<T[K]>;
+};
+
+interface SyncAPI {
+  getUser: () => User;
+  getPost: () => Post;
+}
+
+type AsyncAPI = Promisify<SyncAPI>;
+// {
+//   getUser: Promise<() => User>;
+//   getPost: Promise<() => Post>;
+// }
+
+// Обёртка значений в массивы
+type Arrayify<T> = {
+  [K in keyof T]: T[K][];
+};
+
+interface Config {
+  host: string;
+  port: number;
+}
+
+type ConfigArray = Arrayify<Config>;
+// {
+//   host: string[];
+//   port: number[];
+// }
+
+// Nullable версия всех полей
+type Nullable<T> = {
+  [K in keyof T]: T[K] | null;
+};
+```
+
+### Переименование ключей
+
+С TypeScript 4.1+ можно использовать `as` для переименования ключей:
+
+```typescript
+// Добавление префикса ко всем ключам
+type Prefixed<T, P extends string> = {
+  [K in keyof T as `${P}${K & string}`]: T[K];
+};
+
+interface User {
+  name: string;
+  age: number;
+}
+
+type PrefixedUser = Prefixed<User, "user_">;
+// {
+//   user_name: string;
+//   user_age: number;
+// }
+
+// Добавление суффикса
+type Getters<T> = {
+  [K in keyof T as `get${Capitalize<K & string>}`]: () => T[K];
+};
+
+type UserGetters = Getters<User>;
+// {
+//   getName: () => string;
+//   getAge: () => number;
+// }
+
+// Фильтрация ключей
+type OnlyStrings<T> = {
+  [K in keyof T as T[K] extends string ? K : never]: T[K];
+};
+
+interface Mixed {
+  name: string;
+  age: number;
+  email: string;
+  active: boolean;
+}
+
+type StringFields = OnlyStrings<Mixed>;
+// {
+//   name: string;
+//   email: string;
+// }
+```
+
+### Практические примеры
+
+```typescript
+// Создание EventHandlers из событий
+type EventHandlers<T> = {
+  [K in keyof T as `on${Capitalize<K & string>}`]: (
+    payload: T[K]
+  ) => void;
+};
+
+interface Events {
+  login: { userId: string };
+  logout: { timestamp: number };
+  error: { message: string; code: number };
+}
+
+type Handlers = EventHandlers<Events>;
+// {
+//   onLogin: (payload: { userId: string }) => void;
+//   onLogout: (payload: { timestamp: number }) => void;
+//   onError: (payload: { message: string; code: number }) => void;
+// }
+
+// Создание API endpoint типов
+type APIEndpoints<T> = {
+  [K in keyof T as `/${K & string}`]: {
+    request: T[K];
+    response: ApiResponse<T[K]>;
+  };
+};
+
+interface ApiResponse<T> {
+  data: T;
+  status: number;
+}
+
+interface Requests {
+  users: { id: string };
+  posts: { limit: number };
+}
+
+type Endpoints = APIEndpoints<Requests>;
+// {
+//   "/users": { request: { id: string }, response: ApiResponse<{ id: string }> };
+//   "/posts": { request: { limit: number }, response: ApiResponse<{ limit: number }> };
+// }
+```
+
+### Жизненный пример: Form State Management
+
+```typescript
+// Система управления состоянием форм
+type FormState<T> = {
+  values: T;
+  errors: Partial<Record<keyof T, string>>;
+  touched: Partial<Record<keyof T, boolean>>;
+  isValid: boolean;
+};
+
+type FormHandlers<T> = {
+  [K in keyof T as `set${Capitalize<K & string>}`]: (
+    value: T[K]
+  ) => void;
+} & {
+  [K in keyof T as `validate${Capitalize<K & string>}`]: (
+    value: T[K]
+  ) => string | undefined;
+};
+
+interface LoginForm {
+  email: string;
+  password: string;
+  rememberMe: boolean;
+}
+
+type LoginFormState = FormState<LoginForm>;
+type LoginFormHandlers = FormHandlers<LoginForm>;
+
+// Использование:
+const loginForm: LoginFormState = {
+  values: { email: '', password: '', rememberMe: false },
+  errors: {},
+  touched: {},
+  isValid: false,
+};
+
+const handlers: LoginFormHandlers = {
+  setEmail: (value) => { /* ... */ },
+  setPassword: (value) => { /* ... */ },
+  setRememberMe: (value) => { /* ... */ },
+  validateEmail: (value) => {
+    return value.includes('@') ? undefined : 'Invalid email';
+  },
+  validatePassword: (value) => {
+    return value.length >= 8 ? undefined : 'Password too short';
+  },
+  validateRememberMe: (value) => undefined,
+};
+```
+
+### Комбинирование с условными типами
+
+```typescript
+// Deep Partial - рекурсивная версия Partial
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
+};
+
+interface NestedConfig {
+  server: {
+    host: string;
+    port: number;
+    ssl: {
+      enabled: boolean;
+      cert: string;
+    };
+  };
+}
+
+type PartialConfig = DeepPartial<NestedConfig>;
+// Все вложенные поля становятся optional
+
+// Извлечение функциональных свойств
+type FunctionProperties<T> = {
+  [K in keyof T]: T[K] extends Function ? K : never;
+}[keyof T];
+
+type PickFunctions<T> = {
+  [K in FunctionProperties<T>]: T[K];
+};
+
+interface UserService {
+  name: string;
+  getUser(): User;
+  updateUser(user: User): void;
+  deleteUser(id: string): Promise<void>;
+}
+
+type UserServiceMethods = PickFunctions<UserService>;
+// {
+//   getUser: () => User;
+//   updateUser: (user: User) => void;
+//   deleteUser: (id: string) => Promise<void>;
+// }
+```
+
+### Ключевые моменты
+
+- Mapped types позволяют создавать новые типы через трансформацию существующих
+- Синтаксис `[K in keyof T]` итерируется по всем ключам типа
+- Модификаторы `readonly` и `?` можно добавлять или удалять с помощью `+`/`-`
+- С версии TS 4.1+ доступно переименование ключей через `as`
+- Template literal types в сочетании с mapped types дают огромную гибкость
+- Встроенные utility types (`Partial`, `Required`, `Readonly`, `Pick`, `Omit`) построены на mapped types
+- Можно комбинировать с условными типами для создания сложных трансформаций
+- Используются для автогенерации типов API, форм, event handlers и других повторяющихся паттернов
+- Критически важны для создания type-safe библиотек и фреймворков

@@ -1,0 +1,411 @@
+## TypeScript: Броня. Урок 33: ReturnType и Parameters
+
+`ReturnType` и `Parameters` - это встроенные utility types для извлечения типов из функциональных сигнатур. Они критически важны для работы с higher-order functions, декораторами и type inference в сложных сценариях.
+
+### ReturnType<T>
+
+`ReturnType<T>` извлекает тип возврата функции:
+
+```typescript
+// Определение ReturnType (встроенное)
+type ReturnType<T extends (...args: any) => any> = T extends (
+  ...args: any
+) => infer R
+  ? R
+  : any;
+
+// Простой пример
+function getUser() {
+  return {
+    id: '123',
+    name: 'Alice',
+    email: 'alice@example.com',
+  };
+}
+
+type User = ReturnType<typeof getUser>;
+// { id: string; name: string; email: string }
+
+// С generic функциями
+function createArray<T>(value: T): T[] {
+  return [value];
+}
+
+type ArrayResult = ReturnType<typeof createArray<number>>;
+// number[]
+
+// С async функциями
+async function fetchData() {
+  return { data: 'value' };
+}
+
+type FetchResult = ReturnType<typeof fetchData>;
+// Promise<{ data: string }>
+
+// Чтобы получить unwrapped тип, используйте Awaited
+type UnwrappedFetchResult = Awaited<ReturnType<typeof fetchData>>;
+// { data: string }
+```
+
+### Parameters<T>
+
+`Parameters<T>` извлекает типы параметров функции как tuple:
+
+```typescript
+// Определение Parameters (встроенное)
+type Parameters<T extends (...args: any) => any> = T extends (
+  ...args: infer P
+) => any
+  ? P
+  : never;
+
+// Простой пример
+function addNumbers(a: number, b: number): number {
+  return a + b;
+}
+
+type AddParams = Parameters<typeof addNumbers>;
+// [a: number, b: number]
+
+// Доступ к отдельным параметрам
+type FirstParam = Parameters<typeof addNumbers>[0];  // number
+type SecondParam = Parameters<typeof addNumbers>[1]; // number
+
+// С rest parameters
+function log(message: string, ...tags: string[]): void {
+  console.log(message, tags);
+}
+
+type LogParams = Parameters<typeof log>;
+// [message: string, ...tags: string[]]
+
+// С optional parameters
+function greet(name: string, greeting?: string): string {
+  return `${greeting || 'Hello'}, ${name}!`;
+}
+
+type GreetParams = Parameters<typeof greet>;
+// [name: string, greeting?: string]
+```
+
+### Практический пример: Type-safe Decorator
+
+```typescript
+// Создание type-safe декоратора для функций
+type AnyFunction = (...args: any[]) => any;
+
+function withLogging<T extends AnyFunction>(
+  fn: T
+): (...args: Parameters<T>) => ReturnType<T> {
+  return (...args: Parameters<T>): ReturnType<T> => {
+    console.log(`Calling ${fn.name} with:`, args);
+    const result = fn(...args);
+    console.log(`Result:`, result);
+    return result;
+  };
+}
+
+// Использование
+function add(a: number, b: number): number {
+  return a + b;
+}
+
+const loggedAdd = withLogging(add);
+
+// Type-safe вызов
+const result = loggedAdd(5, 3); // number, логирует: Calling add with: [5, 3], Result: 8
+
+// Async версия
+function withAsyncLogging<T extends (...args: any[]) => Promise<any>>(
+  fn: T
+): (...args: Parameters<T>) => ReturnType<T> {
+  return async (...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
+    console.log(`Async calling ${fn.name} with:`, args);
+    const result = await fn(...args);
+    console.log(`Async result:`, result);
+    return result;
+  };
+}
+
+async function fetchUser(id: string): Promise<User> {
+  // fetch implementation
+  return { id, name: 'Alice', email: 'alice@example.com' };
+}
+
+const loggedFetchUser = withAsyncLogging(fetchUser);
+const user = await loggedFetchUser('123'); // User
+```
+
+### ConstructorParameters<T>
+
+`ConstructorParameters<T>` извлекает типы параметров конструктора:
+
+```typescript
+// Определение ConstructorParameters (встроенное)
+type ConstructorParameters<T extends abstract new (...args: any) => any> =
+  T extends abstract new (...args: infer P) => any ? P : never;
+
+// Пример
+class User {
+  constructor(
+    public name: string,
+    public email: string,
+    public age: number
+  ) {}
+}
+
+type UserConstructorParams = ConstructorParameters<typeof User>;
+// [name: string, email: string, age: number]
+
+// Создание фабрики
+function createInstance<T extends new (...args: any[]) => any>(
+  constructor: T,
+  ...args: ConstructorParameters<T>
+): InstanceType<T> {
+  return new constructor(...args);
+}
+
+const user = createInstance(User, 'Alice', 'alice@example.com', 30);
+// User
+```
+
+### InstanceType<T>
+
+`InstanceType<T>` извлекает тип экземпляра из конструктора:
+
+```typescript
+// Определение InstanceType (встроенное)
+type InstanceType<T extends abstract new (...args: any) => any> =
+  T extends abstract new (...args: any) => infer R ? R : any;
+
+// Пример
+class Product {
+  constructor(
+    public id: string,
+    public name: string,
+    public price: number
+  ) {}
+  
+  getInfo(): string {
+    return `${this.name} - $${this.price}`;
+  }
+}
+
+type ProductInstance = InstanceType<typeof Product>;
+// Product
+
+// Generic фабрика с правильным типом возврата
+function createFactory<T extends new (...args: any[]) => any>(
+  constructor: T
+) {
+  return (...args: ConstructorParameters<T>): InstanceType<T> => {
+    return new constructor(...args);
+  };
+}
+
+const productFactory = createFactory(Product);
+const product = productFactory('1', 'Laptop', 999); // Product
+```
+
+### Жизненный пример: Type-safe Event Handler
+
+```typescript
+// Система type-safe event handlers
+type EventHandler<T extends (...args: any[]) => any> = {
+  handler: T;
+  params: Parameters<T>;
+  result: ReturnType<T>;
+};
+
+class EventEmitter<TEvents extends Record<string, (...args: any[]) => any>> {
+  private listeners: {
+    [K in keyof TEvents]?: Array<TEvents[K]>;
+  } = {};
+  
+  on<K extends keyof TEvents>(event: K, handler: TEvents[K]): void {
+    if (!this.listeners[event]) {
+      this.listeners[event] = [];
+    }
+    this.listeners[event]!.push(handler);
+  }
+  
+  emit<K extends keyof TEvents>(
+    event: K,
+    ...args: Parameters<TEvents[K]>
+  ): ReturnType<TEvents[K]>[] {
+    const handlers = this.listeners[event];
+    if (!handlers) return [];
+    
+    return handlers.map(handler => handler(...args));
+  }
+  
+  off<K extends keyof TEvents>(event: K, handler: TEvents[K]): void {
+    const handlers = this.listeners[event];
+    if (handlers) {
+      const index = handlers.indexOf(handler);
+      if (index !== -1) {
+        handlers.splice(index, 1);
+      }
+    }
+  }
+}
+
+// Определение событий
+interface AppEvents {
+  userLogin: (userId: string, timestamp: number) => void;
+  dataLoaded: (data: any[]) => boolean;
+  error: (message: string, code: number) => void;
+}
+
+const emitter = new EventEmitter<AppEvents>();
+
+// Type-safe подписка
+emitter.on('userLogin', (userId, timestamp) => {
+  // userId: string, timestamp: number
+  console.log(`User ${userId} logged in at ${timestamp}`);
+});
+
+emitter.on('dataLoaded', (data) => {
+  // data: any[]
+  console.log(`Loaded ${data.length} items`);
+  return true; // boolean (ReturnType)
+});
+
+// Type-safe вызов
+emitter.emit('userLogin', 'user123', Date.now()); // ✓
+const results = emitter.emit('dataLoaded', [1, 2, 3]); // boolean[]
+
+// emitter.emit('userLogin', 'user123'); // ✗ Ошибка: отсутствует timestamp
+```
+
+### ThisParameterType<T>
+
+`ThisParameterType<T>` извлекает тип `this` из функции:
+
+```typescript
+// Определение ThisParameterType
+type ThisParameterType<T> = T extends (this: infer U, ...args: any[]) => any
+  ? U
+  : unknown;
+
+// Пример
+function greet(this: User, greeting: string): string {
+  return `${greeting}, ${this.name}!`;
+}
+
+type ThisType = ThisParameterType<typeof greet>;
+// User
+
+// OmitThisParameter - удаление this из сигнатуры
+type OmitThisParameter<T> = unknown extends ThisParameterType<T>
+  ? T
+  : T extends (...args: infer A) => infer R
+  ? (...args: A) => R
+  : T;
+
+type GreetWithoutThis = OmitThisParameter<typeof greet>;
+// (greeting: string) => string
+```
+
+### Композиция Utility Types
+
+```typescript
+// Создание сложных типов из функций
+type FunctionInfo<T extends (...args: any[]) => any> = {
+  params: Parameters<T>;
+  return: ReturnType<T>;
+  length: Parameters<T>['length'];
+};
+
+function processOrder(
+  orderId: string,
+  items: string[],
+  total: number
+): { success: boolean; orderId: string } {
+  return { success: true, orderId };
+}
+
+type ProcessOrderInfo = FunctionInfo<typeof processOrder>;
+// {
+//   params: [orderId: string, items: string[], total: number];
+//   return: { success: boolean; orderId: string };
+//   length: 3;
+// }
+
+// Async function info
+type AsyncFunctionInfo<T extends (...args: any[]) => Promise<any>> = {
+  params: Parameters<T>;
+  return: Awaited<ReturnType<T>>;
+  async: true;
+};
+
+async function loadData(url: string): Promise<{ data: any[] }> {
+  const response = await fetch(url);
+  return response.json();
+}
+
+type LoadDataInfo = AsyncFunctionInfo<typeof loadData>;
+// {
+//   params: [url: string];
+//   return: { data: any[] };
+//   async: true;
+// }
+```
+
+### Type-safe Function Wrapper
+
+```typescript
+// Universal function wrapper
+function createWrapper<T extends (...args: any[]) => any>(
+  fn: T,
+  before?: (...args: Parameters<T>) => void,
+  after?: (result: ReturnType<T>) => void
+): (...args: Parameters<T>) => ReturnType<T> {
+  return (...args: Parameters<T>): ReturnType<T> => {
+    before?.(...args);
+    const result = fn(...args);
+    after?.(result);
+    return result;
+  };
+}
+
+// Использование
+function calculate(a: number, b: number): number {
+  return a + b;
+}
+
+const wrappedCalculate = createWrapper(
+  calculate,
+  (a, b) => console.log(`Input: ${a}, ${b}`),
+  (result) => console.log(`Output: ${result}`)
+);
+
+wrappedCalculate(5, 3); // Input: 5, 3 / Output: 8
+
+// Async wrapper
+function createAsyncWrapper<T extends (...args: any[]) => Promise<any>>(
+  fn: T,
+  before?: (...args: Parameters<T>) => void,
+  after?: (result: Awaited<ReturnType<T>>) => void
+): (...args: Parameters<T>) => ReturnType<T> {
+  return async (...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
+    before?.(...args);
+    const result = await fn(...args);
+    after?.(result);
+    return result;
+  };
+}
+```
+
+### Ключевые моменты
+
+- `ReturnType<T>` извлекает тип возврата функции
+- `Parameters<T>` извлекает типы параметров как tuple
+- `ConstructorParameters<T>` извлекает параметры конструктора
+- `InstanceType<T>` извлекает тип экземпляра класса
+- `ThisParameterType<T>` извлекает тип `this` из функции
+- Используются для создания type-safe декораторов и wrappers
+- Критически важны для HOF (higher-order functions)
+- Комбинируются для создания сложных типов из функций
+- Работают с async функциями (используйте `Awaited` для unwrap Promise)
+- Основа для создания type-safe event systems и frameworks

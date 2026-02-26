@@ -1,0 +1,539 @@
+## TypeScript: Броня. Урок 15: Discriminated Unions (Размеченные объединения)
+
+Discriminated unions (также известные как tagged unions или algebraic data types) - это паттерн типизации, где несколько типов объединены и различаются по общему литеральному полю (discriminant). Это один из самых мощных паттернов TypeScript для моделирования состояний и обработки разных вариантов данных type-safe способом.
+
+### Базовая структура
+
+Discriminated union состоит из трёх компонентов:
+1. Общее literal поле (discriminant) - обычно `type` или `kind`
+2. Union нескольких типов
+3. Type guard на discriminant поле
+
+```typescript
+// Базовый пример
+interface Circle {
+  kind: 'circle';
+  radius: number;
+}
+
+interface Square {
+  kind: 'square';
+  sideLength: number;
+}
+
+interface Rectangle {
+  kind: 'rectangle';
+  width: number;
+  height: number;
+}
+
+type Shape = Circle | Square | Rectangle;
+
+// TypeScript автоматически сужает тип на основе discriminant
+function getArea(shape: Shape): number {
+  switch (shape.kind) {
+    case 'circle':
+      // TypeScript знает, что shape это Circle
+      return Math.PI * shape.radius ** 2;
+    
+    case 'square':
+      // TypeScript знает, что shape это Square
+      return shape.sideLength ** 2;
+    
+    case 'rectangle':
+      // TypeScript знает, что shape это Rectangle
+      return shape.width * shape.height;
+  }
+}
+```
+
+### Exhaustiveness Checking
+
+TypeScript может проверить, что обработаны все возможные варианты:
+
+```typescript
+type Shape = Circle | Square | Rectangle;
+
+function getArea(shape: Shape): number {
+  switch (shape.kind) {
+    case 'circle':
+      return Math.PI * shape.radius ** 2;
+    
+    case 'square':
+      return shape.sideLength ** 2;
+    
+    case 'rectangle':
+      return shape.width * shape.height;
+    
+    default:
+      // Проверка полноты обработки всех вариантов
+      const _exhaustive: never = shape;
+      return _exhaustive;
+  }
+}
+
+// Если добавить новый тип фигуры
+interface Triangle {
+  kind: 'triangle';
+  base: number;
+  height: number;
+}
+
+type ShapeWithTriangle = Circle | Square | Rectangle | Triangle;
+
+// function getAreaBroken(shape: ShapeWithTriangle): number {
+//   switch (shape.kind) {
+//     case 'circle': return Math.PI * shape.radius ** 2;
+//     case 'square': return shape.sideLength ** 2;
+//     case 'rectangle': return shape.width * shape.height;
+//     default:
+//       const _exhaustive: never = shape; // ✗ Ошибка! Triangle не обработан
+//       return _exhaustive;
+//   }
+// }
+```
+
+### Практические примеры
+
+```typescript
+// API Response States
+interface LoadingState {
+  status: 'loading';
+}
+
+interface SuccessState<T> {
+  status: 'success';
+  data: T;
+}
+
+interface ErrorState {
+  status: 'error';
+  error: string;
+  code?: number;
+}
+
+type AsyncState<T> = LoadingState | SuccessState<T> | ErrorState;
+
+// Type-safe обработка состояний
+function renderUserProfile(state: AsyncState<User>) {
+  switch (state.status) {
+    case 'loading':
+      return <Spinner />;
+    
+    case 'success':
+      // TypeScript знает, что state.data существует и имеет тип User
+      return <UserProfile user={state.data} />;
+    
+    case 'error':
+      // TypeScript знает, что state.error существует
+      return <ErrorMessage message={state.error} code={state.code} />;
+  }
+}
+
+// Redux Actions с discriminated unions
+interface LoginAction {
+  type: 'USER_LOGIN';
+  payload: { userId: string; token: string };
+}
+
+interface LogoutAction {
+  type: 'USER_LOGOUT';
+}
+
+interface UpdateProfileAction {
+  type: 'PROFILE_UPDATE';
+  payload: { name: string; email: string };
+}
+
+interface FetchUsersAction {
+  type: 'FETCH_USERS';
+  payload: { page: number; limit: number };
+}
+
+type UserAction = 
+  | LoginAction 
+  | LogoutAction 
+  | UpdateProfileAction 
+  | FetchUsersAction;
+
+// Type-safe reducer
+function userReducer(state: UserState, action: UserAction): UserState {
+  switch (action.type) {
+    case 'USER_LOGIN':
+      // TypeScript знает структуру payload
+      return {
+        ...state,
+        userId: action.payload.userId,
+        token: action.payload.token,
+        isLoggedIn: true,
+      };
+    
+    case 'USER_LOGOUT':
+      // TypeScript знает, что payload отсутствует
+      return {
+        ...state,
+        userId: null,
+        token: null,
+        isLoggedIn: false,
+      };
+    
+    case 'PROFILE_UPDATE':
+      return {
+        ...state,
+        profile: action.payload,
+      };
+    
+    case 'FETCH_USERS':
+      // TypeScript знает точную структуру
+      return {
+        ...state,
+        fetchParams: action.payload,
+      };
+  }
+}
+```
+
+### Вложенные Discriminated Unions
+
+```typescript
+// Система уведомлений
+interface EmailNotification {
+  type: 'email';
+  recipient: string;
+  subject: string;
+  body: string;
+}
+
+interface SmsNotification {
+  type: 'sms';
+  phone: string;
+  message: string;
+}
+
+interface PushNotification {
+  type: 'push';
+  deviceToken: string;
+  title: string;
+  body: string;
+  data?: Record<string, any>;
+}
+
+type NotificationType = EmailNotification | SmsNotification | PushNotification;
+
+// Обёртка с метаданными
+interface ScheduledNotification {
+  status: 'scheduled';
+  scheduledAt: Date;
+  notification: NotificationType;
+}
+
+interface SentNotification {
+  status: 'sent';
+  sentAt: Date;
+  notification: NotificationType;
+  messageId: string;
+}
+
+interface FailedNotification {
+  status: 'failed';
+  failedAt: Date;
+  notification: NotificationType;
+  error: string;
+  retryCount: number;
+}
+
+type Notification = 
+  | ScheduledNotification 
+  | SentNotification 
+  | FailedNotification;
+
+// Вложенная обработка
+function processNotification(notification: Notification) {
+  switch (notification.status) {
+    case 'scheduled':
+      console.log(`Scheduled for ${notification.scheduledAt}`);
+      
+      // Вложенный switch по типу уведомления
+      switch (notification.notification.type) {
+        case 'email':
+          console.log(`Email to ${notification.notification.recipient}`);
+          break;
+        case 'sms':
+          console.log(`SMS to ${notification.notification.phone}`);
+          break;
+        case 'push':
+          console.log(`Push to device ${notification.notification.deviceToken}`);
+          break;
+      }
+      break;
+    
+    case 'sent':
+      console.log(`Sent at ${notification.sentAt}, ID: ${notification.messageId}`);
+      break;
+    
+    case 'failed':
+      console.log(`Failed: ${notification.error}, retries: ${notification.retryCount}`);
+      break;
+  }
+}
+```
+
+### Жизненный пример: Form Field Types
+
+```typescript
+// Типизированная система полей формы
+interface TextField {
+  type: 'text';
+  value: string;
+  placeholder?: string;
+  maxLength?: number;
+}
+
+interface NumberField {
+  type: 'number';
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+interface SelectField {
+  type: 'select';
+  value: string;
+  options: Array<{ label: string; value: string }>;
+  multiple?: boolean;
+}
+
+interface CheckboxField {
+  type: 'checkbox';
+  value: boolean;
+  label: string;
+}
+
+interface DateField {
+  type: 'date';
+  value: Date;
+  minDate?: Date;
+  maxDate?: Date;
+}
+
+type FormField = 
+  | TextField 
+  | NumberField 
+  | SelectField 
+  | CheckboxField 
+  | DateField;
+
+// Type-safe валидация
+function validateField(field: FormField): string | null {
+  switch (field.type) {
+    case 'text':
+      if (field.maxLength && field.value.length > field.maxLength) {
+        return `Maximum length is ${field.maxLength}`;
+      }
+      return null;
+    
+    case 'number':
+      if (field.min !== undefined && field.value < field.min) {
+        return `Minimum value is ${field.min}`;
+      }
+      if (field.max !== undefined && field.value > field.max) {
+        return `Maximum value is ${field.max}`;
+      }
+      return null;
+    
+    case 'select':
+      const validValues = field.options.map(opt => opt.value);
+      if (!validValues.includes(field.value)) {
+        return 'Invalid selection';
+      }
+      return null;
+    
+    case 'checkbox':
+      // Checkboxes обычно не требуют валидации
+      return null;
+    
+    case 'date':
+      if (field.minDate && field.value < field.minDate) {
+        return `Date must be after ${field.minDate.toLocaleDateString()}`;
+      }
+      if (field.maxDate && field.value > field.maxDate) {
+        return `Date must be before ${field.maxDate.toLocaleDateString()}`;
+      }
+      return null;
+  }
+}
+
+// Type-safe рендеринг
+function renderField(field: FormField): JSX.Element {
+  switch (field.type) {
+    case 'text':
+      return (
+        <input
+          type="text"
+          value={field.value}
+          placeholder={field.placeholder}
+          maxLength={field.maxLength}
+        />
+      );
+    
+    case 'number':
+      return (
+        <input
+          type="number"
+          value={field.value}
+          min={field.min}
+          max={field.max}
+          step={field.step}
+        />
+      );
+    
+    case 'select':
+      return (
+        <select value={field.value} multiple={field.multiple}>
+          {field.options.map(opt => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      );
+    
+    case 'checkbox':
+      return (
+        <label>
+          <input type="checkbox" checked={field.value} />
+          {field.label}
+        </label>
+      );
+    
+    case 'date':
+      return (
+        <input
+          type="date"
+          value={field.value.toISOString().split('T')[0]}
+          min={field.minDate?.toISOString().split('T')[0]}
+          max={field.maxDate?.toISOString().split('T')[0]}
+        />
+      );
+  }
+}
+```
+
+### С Generic Types
+
+```typescript
+// Generic Result type
+type Result<T, E = Error> =
+  | { success: true; value: T }
+  | { success: false; error: E };
+
+// Использование
+function divide(a: number, b: number): Result<number, string> {
+  if (b === 0) {
+    return { success: false, error: 'Division by zero' };
+  }
+  return { success: true, value: a / b };
+}
+
+const result = divide(10, 2);
+
+if (result.success) {
+  console.log(`Result: ${result.value}`); // TypeScript знает про value
+} else {
+  console.error(`Error: ${result.error}`); // TypeScript знает про error
+}
+
+// Generic Option type (как в Rust)
+type Option<T> =
+  | { type: 'some'; value: T }
+  | { type: 'none' };
+
+function findUser(id: string): Option<User> {
+  const user = database.find(u => u.id === id);
+  return user 
+    ? { type: 'some', value: user }
+    : { type: 'none' };
+}
+
+const userOption = findUser('123');
+
+if (userOption.type === 'some') {
+  console.log(userOption.value.name); // ✓ TypeScript знает про value
+} else {
+  console.log('User not found'); // ✓ Нет доступа к value
+}
+```
+
+### Helper Functions
+
+```typescript
+// Создание helper функций для работы с discriminated unions
+type AsyncState<T> = LoadingState | SuccessState<T> | ErrorState;
+
+// Constructors
+const loading = (): LoadingState => ({ status: 'loading' });
+
+const success = <T>(data: T): SuccessState<T> => ({
+  status: 'success',
+  data,
+});
+
+const error = (error: string, code?: number): ErrorState => ({
+  status: 'error',
+  error,
+  code,
+});
+
+// Type guards
+function isLoading<T>(state: AsyncState<T>): state is LoadingState {
+  return state.status === 'loading';
+}
+
+function isSuccess<T>(state: AsyncState<T>): state is SuccessState<T> {
+  return state.status === 'success';
+}
+
+function isError<T>(state: AsyncState<T>): state is ErrorState {
+  return state.status === 'error';
+}
+
+// Utility функции
+function map<T, U>(
+  state: AsyncState<T>,
+  fn: (data: T) => U
+): AsyncState<U> {
+  if (isSuccess(state)) {
+    return success(fn(state.data));
+  }
+  return state; // loading или error без изменений
+}
+
+function flatMap<T, U>(
+  state: AsyncState<T>,
+  fn: (data: T) => AsyncState<U>
+): AsyncState<U> {
+  if (isSuccess(state)) {
+    return fn(state.data);
+  }
+  return state;
+}
+
+// Использование
+const userState = success({ id: '123', name: 'Alice' });
+const nameState = map(userState, user => user.name);
+// nameState имеет тип AsyncState<string>
+```
+
+### Ключевые моменты
+
+- Discriminated unions используют общее literal поле для различения типов
+- TypeScript автоматически сужает типы на основе discriminant в `switch` или `if`
+- Exhaustiveness checking гарантирует обработку всех возможных вариантов
+- Идеально подходят для моделирования состояний (loading/success/error)
+- Широко используются в Redux для типизации actions
+- Можно вкладывать discriminated unions друг в друга
+- Хорошо комбинируются с generic типами (Result, Option, Either)
+- Helper функции (constructors, type guards, utilities) упрощают работу
+- Паттерн особенно полезен для API responses, форм, state management
+- Альтернатива наследованию классов - более функциональный подход

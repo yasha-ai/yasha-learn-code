@@ -1,0 +1,423 @@
+## TypeScript: Броня. Урок 14: Продвинутые Type Guards
+
+Type guards - это механизм сужения типов (type narrowing) в TypeScript. Продвинутые type guards включают пользовательские функции проверки типов, assertion functions, discriminated unions и другие техники, которые делают код более type-safe и выразительным. В этом уроке мы рассмотрим сложные паттерны и лучшие практики.
+
+### User-Defined Type Guards
+
+Пользовательские type guards - это функции, которые возвращают `value is Type`:
+
+```typescript
+// Базовый пример
+interface User {
+  type: 'user';
+  name: string;
+  email: string;
+}
+
+interface Admin {
+  type: 'admin';
+  name: string;
+  permissions: string[];
+}
+
+type Person = User | Admin;
+
+// Type guard function
+function isAdmin(person: Person): person is Admin {
+  return person.type === 'admin';
+}
+
+function processUser(person: Person) {
+  if (isAdmin(person)) {
+    // TypeScript знает, что person это Admin
+    console.log(person.permissions); // ✓
+  } else {
+    // TypeScript знает, что person это User
+    console.log(person.email); // ✓
+  }
+}
+
+// Generic type guard
+function isArrayOf<T>(
+  value: unknown,
+  check: (item: unknown) => item is T
+): value is T[] {
+  return Array.isArray(value) && value.every(check);
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === 'number';
+}
+
+const data: unknown = ["a", "b", "c"];
+
+if (isArrayOf(data, isString)) {
+  // TypeScript знает, что data это string[]
+  data.forEach(str => console.log(str.toUpperCase()));
+}
+```
+
+### Assertion Functions
+
+Assertion functions бросают ошибку, если условие не выполнено, и сообщают TypeScript об изменении типа:
+
+```typescript
+// С синтаксисом 'asserts'
+function assertIsString(value: unknown): asserts value is string {
+  if (typeof value !== 'string') {
+    throw new Error('Value must be a string');
+  }
+}
+
+function assertIsDefined<T>(value: T): asserts value is NonNullable<T> {
+  if (value === null || value === undefined) {
+    throw new Error('Value must be defined');
+  }
+}
+
+// Использование
+function processValue(value: unknown) {
+  assertIsString(value);
+  // После этой строки TypeScript знает, что value это string
+  console.log(value.toUpperCase());
+}
+
+function getUserName(user: { name?: string }) {
+  assertIsDefined(user.name);
+  // После этой строки TypeScript знает, что user.name это string (не undefined)
+  return user.name.toUpperCase();
+}
+
+// Более сложный assertion
+function assertIsUser(value: unknown): asserts value is User {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('name' in value) ||
+    !('email' in value)
+  ) {
+    throw new Error('Value is not a User');
+  }
+}
+
+// Generic assertion
+function assertType<T>(
+  value: unknown,
+  check: (val: unknown) => val is T
+): asserts value is T {
+  if (!check(value)) {
+    throw new Error('Type assertion failed');
+  }
+}
+```
+
+### Narrowing с оператором 'in'
+
+```typescript
+interface Dog {
+  bark(): void;
+  wagTail(): void;
+}
+
+interface Cat {
+  meow(): void;
+  purr(): void;
+}
+
+type Pet = Dog | Cat;
+
+function handlePet(pet: Pet) {
+  if ('bark' in pet) {
+    // TypeScript знает, что это Dog
+    pet.bark();
+    pet.wagTail();
+  } else {
+    // TypeScript знает, что это Cat
+    pet.meow();
+    pet.purr();
+  }
+}
+
+// Работает с nested свойствами
+interface Response {
+  data?: {
+    user?: {
+      name: string;
+    };
+  };
+}
+
+function processResponse(response: Response) {
+  if ('data' in response && response.data && 'user' in response.data) {
+    // TypeScript знает структуру
+    console.log(response.data.user?.name);
+  }
+}
+```
+
+### Narrowing с instanceof и typeof
+
+```typescript
+// instanceof для классов
+class ApiError extends Error {
+  statusCode: number;
+  
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
+class ValidationError extends Error {
+  fields: string[];
+  
+  constructor(message: string, fields: string[]) {
+    super(message);
+    this.fields = fields;
+  }
+}
+
+function handleError(error: Error) {
+  if (error instanceof ApiError) {
+    console.log(`API Error ${error.statusCode}: ${error.message}`);
+  } else if (error instanceof ValidationError) {
+    console.log(`Validation failed for fields: ${error.fields.join(', ')}`);
+  } else {
+    console.log(`Unknown error: ${error.message}`);
+  }
+}
+
+// typeof для примитивов
+function processValue(value: string | number | boolean) {
+  if (typeof value === 'string') {
+    console.log(value.toUpperCase());
+  } else if (typeof value === 'number') {
+    console.log(value.toFixed(2));
+  } else {
+    console.log(value ? 'yes' : 'no');
+  }
+}
+```
+
+### Практический пример: Валидация API responses
+
+```typescript
+// Система валидации API ответов
+interface ApiResponse<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+interface SuccessResponse<T> extends ApiResponse<T> {
+  success: true;
+  data: T;
+}
+
+interface ErrorResponse extends ApiResponse<never> {
+  success: false;
+  error: string;
+}
+
+type Response<T> = SuccessResponse<T> | ErrorResponse;
+
+// Type guard для успешного ответа
+function isSuccess<T>(response: Response<T>): response is SuccessResponse<T> {
+  return response.success === true && response.data !== undefined;
+}
+
+// Assertion для успешного ответа
+function assertSuccess<T>(
+  response: Response<T>
+): asserts response is SuccessResponse<T> {
+  if (!isSuccess(response)) {
+    throw new Error(response.error || 'Unknown error');
+  }
+}
+
+// Использование
+async function fetchUser(id: string): Promise<Response<User>> {
+  const response = await fetch(`/api/users/${id}`);
+  return response.json();
+}
+
+async function processUser(id: string) {
+  const response = await fetchUser(id);
+  
+  if (isSuccess(response)) {
+    // TypeScript знает, что response.data существует и имеет тип User
+    console.log(response.data.name);
+  } else {
+    // TypeScript знает, что response.error существует
+    console.error(response.error);
+  }
+}
+
+// Или с assertion
+async function getUser(id: string): Promise<User> {
+  const response = await fetchUser(id);
+  assertSuccess(response);
+  // После assertion TypeScript знает, что response это SuccessResponse<User>
+  return response.data;
+}
+```
+
+### Жизненный пример: Redux Action Guards
+
+```typescript
+// Type-safe Redux actions
+interface LoginAction {
+  type: 'USER_LOGIN';
+  payload: { userId: string; token: string };
+}
+
+interface LogoutAction {
+  type: 'USER_LOGOUT';
+}
+
+interface UpdateProfileAction {
+  type: 'PROFILE_UPDATE';
+  payload: { name: string; email: string };
+}
+
+type Action = LoginAction | LogoutAction | UpdateProfileAction;
+
+// Type guards для каждого action
+function isLoginAction(action: Action): action is LoginAction {
+  return action.type === 'USER_LOGIN';
+}
+
+function isLogoutAction(action: Action): action is LogoutAction {
+  return action.type === 'USER_LOGOUT';
+}
+
+function isUpdateProfileAction(action: Action): action is UpdateProfileAction {
+  return action.type === 'PROFILE_UPDATE';
+}
+
+// Generic type guard factory
+function createActionGuard<T extends Action['type']>(
+  type: T
+): (action: Action) => action is Extract<Action, { type: T }> {
+  return (action): action is Extract<Action, { type: T }> => {
+    return action.type === type;
+  };
+}
+
+const isLogin = createActionGuard('USER_LOGIN');
+const isUpdate = createActionGuard('PROFILE_UPDATE');
+
+// Reducer с type guards
+function reducer(state: State, action: Action): State {
+  if (isLoginAction(action)) {
+    // TypeScript знает точный тип payload
+    return { ...state, userId: action.payload.userId };
+  }
+  
+  if (isLogoutAction(action)) {
+    // TypeScript знает, что payload отсутствует
+    return { ...state, userId: null };
+  }
+  
+  if (isUpdateProfileAction(action)) {
+    return { ...state, profile: action.payload };
+  }
+  
+  return state;
+}
+```
+
+### Branded Types с Type Guards
+
+```typescript
+// Создание номинальных типов через branding
+type Brand<K, T> = K & { __brand: T };
+
+type UserId = Brand<string, 'UserId'>;
+type PostId = Brand<string, 'PostId'>;
+
+// Type guards для branded types
+function isUserId(value: string): value is UserId {
+  // Здесь может быть валидация формата
+  return /^user_\d+$/.test(value);
+}
+
+function isPostId(value: string): value is PostId {
+  return /^post_\d+$/.test(value);
+}
+
+// Функции, требующие branded типы
+function getUser(id: UserId): User {
+  // implementation
+}
+
+function getPost(id: PostId): Post {
+  // implementation
+}
+
+// Использование
+const rawId = "user_123";
+
+if (isUserId(rawId)) {
+  // TypeScript знает, что rawId теперь UserId
+  const user = getUser(rawId); // ✓
+}
+
+// const invalid = "post_456";
+// const user = getUser(invalid); // ✗ тип не совпадает
+```
+
+### Control Flow Analysis
+
+```typescript
+// TypeScript анализирует control flow для сужения типов
+function processValue(value: string | null | undefined) {
+  // Проверка на falsy
+  if (!value) {
+    return 'No value';
+  }
+  
+  // TypeScript знает, что value это string (не null и не undefined)
+  return value.toUpperCase();
+}
+
+// Early return pattern
+function divide(a: number, b: number): number {
+  if (b === 0) {
+    throw new Error('Division by zero');
+  }
+  
+  // TypeScript знает, что b !== 0
+  return a / b;
+}
+
+// Exhaustiveness checking
+type Status = 'pending' | 'success' | 'error';
+
+function handleStatus(status: Status): string {
+  if (status === 'pending') return 'Loading...';
+  if (status === 'success') return 'Done!';
+  if (status === 'error') return 'Failed!';
+  
+  // Если добавится новый статус, TypeScript выдаст ошибку здесь
+  const _exhaustive: never = status;
+  return _exhaustive;
+}
+```
+
+### Ключевые моменты
+
+- User-defined type guards используют синтаксис `value is Type`
+- Assertion functions используют `asserts value is Type` и бросают ошибки
+- Оператор `in` проверяет наличие свойств и сужает типы
+- `instanceof` работает с классами, `typeof` - с примитивами
+- TypeScript анализирует control flow для автоматического сужения типов
+- Generic type guards позволяют создавать переиспользуемые проверки
+- Branded types с type guards обеспечивают номинальную типизацию
+- Exhaustiveness checking помогает обрабатывать все возможные варианты
+- Type guards критичны для работы с API, Redux, валидации данных
+- Правильное использование type guards делает код безопаснее и понятнее

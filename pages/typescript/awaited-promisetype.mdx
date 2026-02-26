@@ -1,0 +1,375 @@
+## TypeScript: Броня. Урок 34: Awaited и Promise Types
+
+`Awaited` - это встроенный utility type (TypeScript 4.5+), который рекурсивно unwraps (распаковывает) Promise типы. Это критически важно для работы с async/await и позволяет правильно выводить типы для вложенных Promise.
+
+### Awaited<T>
+
+`Awaited<T>` извлекает тип из Promise, рекурсивно обрабатывая вложенные Promise:
+
+```typescript
+// Определение Awaited (упрощённое)
+type Awaited<T> = T extends null | undefined
+  ? T
+  : T extends object & { then(onfulfilled: infer F): any }
+  ? F extends (value: infer V, ...args: any) => any
+    ? Awaited<V>
+    : never
+  : T;
+
+// Простые примеры
+type A = Awaited<Promise<string>>;  // string
+type B = Awaited<Promise<Promise<number>>>; // number
+type C = Awaited<string>; // string (не Promise)
+
+// Глубокая вложенность
+type DeepPromise = Promise<Promise<Promise<number>>>;
+type Unwrapped = Awaited<DeepPromise>; // number
+
+// С union типами
+type MaybePromise = Promise<string> | number;
+type Result = Awaited<MaybePromise>; // string | number
+```
+
+### Awaited + ReturnType
+
+```typescript
+// Получение типа результата async функции
+async function fetchUser() {
+  return {
+    id: '123',
+    name: 'Alice',
+    email: 'alice@example.com',
+  };
+}
+
+// Без Awaited - получаем Promise
+type FetchUserReturn = ReturnType<typeof fetchUser>;
+// Promise<{ id: string; name: string; email: string }>
+
+// С Awaited - получаем unwrapped тип
+type User = Awaited<ReturnType<typeof fetchUser>>;
+// { id: string; name: string; email: string }
+
+// Короткая версия для async функций
+type AsyncReturnType<T extends (...args: any) => Promise<any>> = 
+  Awaited<ReturnType<T>>;
+
+type UserType = AsyncReturnType<typeof fetchUser>;
+// { id: string; name: string; email: string }
+```
+
+### Promise<T>
+
+`Promise<T>` - встроенный тип для Promise объектов:
+
+```typescript
+// Создание typed Promise
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function fetchData(url: string): Promise<Response> {
+  return fetch(url);
+}
+
+async function getData<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  return response.json();
+}
+
+// Использование
+const data: Promise<User> = getData<User>('/api/user');
+const user: User = await data;
+```
+
+### Практический пример: Type-safe API Client
+
+```typescript
+// API client с правильной типизацией Promise
+interface ApiResponse<T> {
+  data: T;
+  status: number;
+  message: string;
+}
+
+class ApiClient {
+  private baseUrl: string;
+  
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
+  
+  async get<T>(endpoint: string): Promise<ApiResponse<T>> {
+    const response = await fetch(`${this.baseUrl}${endpoint}`);
+    const data = await response.json();
+    
+    return {
+      data,
+      status: response.status,
+      message: 'Success',
+    };
+  }
+  
+  async post<T, D = any>(
+    endpoint: string,
+    body: D
+  ): Promise<ApiResponse<T>> {
+    const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    
+    const data = await response.json();
+    
+    return {
+      data,
+      status: response.status,
+      message: 'Created',
+    };
+  }
+}
+
+// Использование
+const api = new ApiClient('https://api.example.com');
+
+// Promise<ApiResponse<User>>
+const userPromise = api.get<User>('/users/123');
+
+// ApiResponse<User>
+const userResponse = await userPromise;
+
+// User
+const user = userResponse.data;
+
+// Или с Awaited
+type UserResponseType = Awaited<typeof userPromise>;
+// ApiResponse<User>
+
+type UserDataType = Awaited<typeof userPromise>['data'];
+// User
+```
+
+### Promise.all и Awaited
+
+```typescript
+// Type-safe Promise.all
+async function fetchMultiple() {
+  const [users, posts, comments] = await Promise.all([
+    fetch('/api/users').then(r => r.json()) as Promise<User[]>,
+    fetch('/api/posts').then(r => r.json()) as Promise<Post[]>,
+    fetch('/api/comments').then(r => r.json()) as Promise<Comment[]>,
+  ]);
+  
+  return { users, posts, comments };
+}
+
+type MultipleData = Awaited<ReturnType<typeof fetchMultiple>>;
+// { users: User[]; posts: Post[]; comments: Comment[] }
+
+// Generic Promise.all wrapper
+type PromiseValues<T extends readonly unknown[]> = {
+  [K in keyof T]: Awaited<T[K]>;
+};
+
+async function parallelFetch<T extends readonly Promise<any>[]>(
+  ...promises: T
+): Promise<PromiseValues<T>> {
+  const results = await Promise.all(promises);
+  return results as PromiseValues<T>;
+}
+
+// Использование
+const results = await parallelFetch(
+  api.get<User>('/users/1'),
+  api.get<Post>('/posts/1'),
+  api.get<Comment>('/comments/1')
+);
+
+// results: [ApiResponse<User>, ApiResponse<Post>, ApiResponse<Comment>]
+const [userRes, postRes, commentRes] = results;
+```
+
+### Жизненный пример: Async State Management
+
+```typescript
+// Type-safe async state
+type AsyncState<T> =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success'; data: T }
+  | { status: 'error'; error: string };
+
+// Helper для создания async state из Promise
+async function fromPromise<T>(
+  promise: Promise<T>
+): Promise<AsyncState<Awaited<T>>> {
+  try {
+    const data = await promise;
+    return { status: 'success', data };
+  } catch (error) {
+    return {
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+// React hook пример
+class AsyncStateManager<T> {
+  private state: AsyncState<T> = { status: 'idle' };
+  private listeners: Set<(state: AsyncState<T>) => void> = new Set();
+  
+  getState(): AsyncState<T> {
+    return this.state;
+  }
+  
+  subscribe(listener: (state: AsyncState<T>) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  
+  async execute(promise: Promise<T>): Promise<void> {
+    this.setState({ status: 'loading' });
+    
+    try {
+      const data = await promise;
+      this.setState({ status: 'success', data });
+    } catch (error) {
+      this.setState({
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+  
+  private setState(state: AsyncState<T>): void {
+    this.state = state;
+    this.listeners.forEach(listener => listener(state));
+  }
+}
+
+// Использование
+const userManager = new AsyncStateManager<User>();
+
+userManager.subscribe(state => {
+  if (state.status === 'success') {
+    console.log('User loaded:', state.data);
+  } else if (state.status === 'error') {
+    console.error('Error:', state.error);
+  }
+});
+
+userManager.execute(api.get<User>('/users/123').then(r => r.data));
+```
+
+### Conditional Promise Types
+
+```typescript
+// Promise или значение в зависимости от флага
+type MaybePromise<T, Async extends boolean = false> = 
+  Async extends true ? Promise<T> : T;
+
+function getValue<T, A extends boolean = false>(
+  value: T,
+  async: A
+): MaybePromise<T, A> {
+  if (async) {
+    return Promise.resolve(value) as any;
+  }
+  return value as any;
+}
+
+const syncValue = getValue('hello', false);  // string
+const asyncValue = getValue('hello', true);  // Promise<string>
+
+// Awaitable type
+type Awaitable<T> = T | Promise<T>;
+
+async function process<T>(value: Awaitable<T>): Promise<T> {
+  return await value; // Работает и с T, и с Promise<T>
+}
+
+const result1 = await process(42);              // number
+const result2 = await process(Promise.resolve(42)); // number
+```
+
+### PromiseLike<T>
+
+```typescript
+// PromiseLike - для thenable объектов
+interface PromiseLike<T> {
+  then<TResult1 = T, TResult2 = never>(
+    onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null
+  ): PromiseLike<TResult1 | TResult2>;
+}
+
+// Кастомный thenable
+class CustomThenable<T> implements PromiseLike<T> {
+  constructor(private executor: (resolve: (value: T) => void) => void) {}
+  
+  then<TResult1 = T, TResult2 = never>(
+    onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null
+  ): PromiseLike<TResult1 | TResult2> {
+    return new CustomThenable<TResult1 | TResult2>(resolve => {
+      this.executor(value => {
+        if (onfulfilled) {
+          const result = onfulfilled(value);
+          if (result instanceof CustomThenable) {
+            result.then(resolve);
+          } else {
+            resolve(result as TResult1);
+          }
+        }
+      });
+    });
+  }
+}
+
+// Использование с async/await
+const thenable = new CustomThenable<number>(resolve => {
+  setTimeout(() => resolve(42), 100);
+});
+
+const value = await thenable; // number: 42
+```
+
+### Type Guards для Promise
+
+```typescript
+// Type guard для Promise
+function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    'then' in value &&
+    typeof value.then === 'function'
+  );
+}
+
+// Использование
+async function handleValue<T>(value: T | Promise<T>): Promise<T> {
+  if (isPromise(value)) {
+    return await value;
+  }
+  return value;
+}
+
+const result1 = await handleValue(42);              // number
+const result2 = await handleValue(Promise.resolve(42)); // number
+```
+
+### Ключевые моменты
+
+- `Awaited<T>` рекурсивно unwraps Promise типы
+- Критически важен для работы с async функциями и `ReturnType`
+- `Promise<T>` - встроенный generic тип для Promise объектов
+- `PromiseLike<T>` - для thenable объектов
+- `Awaited` работает с вложенными Promise
+- Комбинируется с `ReturnType` для получения типа результата async функций
+- Используется для type-safe API clients и async state management
+- Работает с `Promise.all` для правильного вывода типов массивов
+- Позволяет создавать conditional async/sync типы
+- Доступен с TypeScript 4.5+

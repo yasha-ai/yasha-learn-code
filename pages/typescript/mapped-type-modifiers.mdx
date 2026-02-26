@@ -1,0 +1,456 @@
+## TypeScript: Броня. Урок 37: Модификаторы Mapped Types
+
+Модификаторы в mapped types (`readonly`, `?`, `+`, `-`) позволяют добавлять или удалять свойства типов. Понимание модификаторов критически важно для создания мощных трансформаций типов и utility types.
+
+### Readonly Modifier
+
+```typescript
+// Добавление readonly
+type Readonly<T> = {
+  readonly [P in keyof T]: T[P];
+};
+
+interface User {
+  id: string;
+  name: string;
+  age: number;
+}
+
+type ReadonlyUser = Readonly<User>;
+// {
+//   readonly id: string;
+//   readonly name: string;
+//   readonly age: number;
+// }
+
+// Удаление readonly с помощью '-readonly'
+type Mutable<T> = {
+  -readonly [P in keyof T]: T[P];
+};
+
+interface ImmutableUser {
+  readonly id: string;
+  readonly name: string;
+  readonly age: number;
+}
+
+type MutableUser = Mutable<ImmutableUser>;
+// {
+//   id: string;
+//   name: string;
+//   age: number;
+// }
+```
+
+### Optional Modifier (?)
+
+```typescript
+// Добавление optional (?)
+type Partial<T> = {
+  [P in keyof T]?: T[P];
+};
+
+type PartialUser = Partial<User>;
+// {
+//   id?: string;
+//   name?: string;
+//   age?: number;
+// }
+
+// Удаление optional с помощью '-?'
+type Required<T> = {
+  [P in keyof T]-?: T[P];
+};
+
+interface OptionalUser {
+  id?: string;
+  name?: string;
+  age?: number;
+}
+
+type RequiredUser = Required<OptionalUser>;
+// {
+//   id: string;
+//   name: string;
+//   age: number;
+// }
+```
+
+### Explicit Modifiers (+)
+
+```typescript
+// '+' делает добавление модификатора явным (по умолчанию)
+type ExplicitReadonly<T> = {
+  +readonly [P in keyof T]: T[P];
+};
+
+type ExplicitPartial<T> = {
+  [P in keyof T]+?: T[P];
+};
+
+// '+' обычно не нужен, но может улучшить читаемость
+type Readonly2<T> = {
+  +readonly [P in keyof T]: T[P];
+};
+
+type Partial2<T> = {
+  [P in keyof T]+?: T[P];
+};
+```
+
+### Комбинирование Модификаторов
+
+```typescript
+// Readonly + Optional
+type ReadonlyPartial<T> = {
+  +readonly [P in keyof T]+?: T[P];
+};
+
+type ReadonlyPartialUser = ReadonlyPartial<User>;
+// {
+//   readonly id?: string;
+//   readonly name?: string;
+//   readonly age?: number;
+// }
+
+// Mutable + Required
+type MutableRequired<T> = {
+  -readonly [P in keyof T]-?: T[P];
+};
+
+interface WeirdUser {
+  readonly id?: string;
+  readonly name?: string;
+  readonly age?: number;
+}
+
+type NormalUser = MutableRequired<WeirdUser>;
+// {
+//   id: string;
+//   name: string;
+//   age: number;
+// }
+```
+
+### Практический пример: State Management
+
+```typescript
+// Immutable state с модификаторами
+type ImmutableState<T> = {
+  +readonly [P in keyof T]: T[P] extends object
+    ? ImmutableState<T[P]>
+    : T[P];
+};
+
+interface AppState {
+  user: {
+    id: string;
+    profile: {
+      name: string;
+      email: string;
+    };
+  };
+  settings: {
+    theme: 'light' | 'dark';
+    language: string;
+  };
+}
+
+type ImmutableAppState = ImmutableState<AppState>;
+// Все поля рекурсивно readonly
+
+const state: ImmutableAppState = {
+  user: {
+    id: '123',
+    profile: {
+      name: 'Alice',
+      email: 'alice@example.com',
+    },
+  },
+  settings: {
+    theme: 'dark',
+    language: 'en',
+  },
+};
+
+// state.user.id = '456'; // ✗ readonly
+// state.user.profile.name = 'Bob'; // ✗ readonly
+```
+
+### Conditional Modifiers
+
+```typescript
+// Условное применение модификаторов
+type ReadonlyIf<T, Condition extends boolean> = Condition extends true
+  ? { +readonly [P in keyof T]: T[P] }
+  : T;
+
+type User1 = ReadonlyIf<User, true>;  // Readonly<User>
+type User2 = ReadonlyIf<User, false>; // User
+
+// Partial для определённых типов
+type PartialByType<T, ValueType> = {
+  [P in keyof T as T[P] extends ValueType ? P : never]?: T[P];
+} & {
+  [P in keyof T as T[P] extends ValueType ? never : P]: T[P];
+};
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  stock: number;
+}
+
+type PartialNumbers = PartialByType<Product, number>;
+// {
+//   id: string;
+//   name: string;
+//   price?: number;
+//   stock?: number;
+// }
+```
+
+### Selective Modifiers
+
+```typescript
+// Применение модификаторов к выбранным полям
+type ReadonlyBy<T, K extends keyof T> = Omit<T, K> & {
+  +readonly [P in K]: T[P];
+};
+
+type UserWithReadonlyId = ReadonlyBy<User, 'id'>;
+// {
+//   name: string;
+//   age: number;
+//   readonly id: string;
+// }
+
+type PartialBy<T, K extends keyof T> = Omit<T, K> & {
+  [P in K]+?: T[P];
+};
+
+type UserWithOptionalAge = PartialBy<User, 'age'>;
+// {
+//   id: string;
+//   name: string;
+//   age?: number;
+// }
+
+type RequiredBy<T, K extends keyof T> = T & {
+  [P in K]-?: T[P];
+};
+
+interface Config {
+  host?: string;
+  port?: number;
+  ssl?: boolean;
+}
+
+type ConfigWithRequiredHost = RequiredBy<Config, 'host'>;
+// {
+//   host: string;   // required
+//   port?: number;
+//   ssl?: boolean;
+// }
+```
+
+### Жизненный пример: Form Fields
+
+```typescript
+// Система управления формами с модификаторами
+interface FormField<T> {
+  value: T;
+  defaultValue: T;
+  error: string | null;
+  touched: boolean;
+  required: boolean;
+}
+
+// Все поля readonly после отправки
+type SubmittedForm<T extends Record<string, any>> = {
+  +readonly [K in keyof T]: FormField<T[K]>;
+};
+
+// Поля optional для initial state
+type InitialForm<T extends Record<string, any>> = {
+  [K in keyof T]+?: Partial<FormField<T[K]>>;
+};
+
+// Validated form - все required
+type ValidatedForm<T extends Record<string, any>> = {
+  [K in keyof T]-?: FormField<T[K]>;
+};
+
+// Определение формы
+interface LoginFormData {
+  email: string;
+  password: string;
+}
+
+type LoginFormInitial = InitialForm<LoginFormData>;
+// {
+//   email?: Partial<FormField<string>>;
+//   password?: Partial<FormField<string>>;
+// }
+
+type LoginFormValidated = ValidatedForm<LoginFormData>;
+// {
+//   email: FormField<string>;
+//   password: FormField<string>;
+// }
+
+type LoginFormSubmitted = SubmittedForm<LoginFormData>;
+// {
+//   readonly email: FormField<string>;
+//   readonly password: FormField<string>;
+// }
+```
+
+### Nested Modifiers
+
+```typescript
+// Deep модификаторы
+type DeepReadonly<T> = T extends object
+  ? { +readonly [P in keyof T]: DeepReadonly<T[P]> }
+  : T;
+
+type DeepPartial<T> = T extends object
+  ? { [P in keyof T]+?: DeepPartial<T[P]> }
+  : T;
+
+type DeepRequired<T> = T extends object
+  ? { [P in keyof T]-?: DeepRequired<T[P]> }
+  : T;
+
+type DeepMutable<T> = T extends object
+  ? { -readonly [P in keyof T]: DeepMutable<T[P]> }
+  : T;
+
+// Использование
+interface NestedData {
+  user: {
+    profile: {
+      name: string;
+      age: number;
+    };
+    settings: {
+      theme: string;
+      notifications: boolean;
+    };
+  };
+}
+
+type DeepReadonlyData = DeepReadonly<NestedData>;
+// Все вложенные поля readonly
+
+type DeepPartialData = DeepPartial<NestedData>;
+// Все вложенные поля optional
+```
+
+### Modifier Helpers
+
+```typescript
+// Проверка наличия readonly
+type IsReadonly<T, K extends keyof T> = {
+  readonly [P in K]: T[P];
+} extends { [P in K]: T[P] }
+  ? false
+  : true;
+
+interface TestReadonly {
+  readonly id: string;
+  name: string;
+}
+
+type IdIsReadonly = IsReadonly<TestReadonly, 'id'>;    // true
+type NameIsReadonly = IsReadonly<TestReadonly, 'name'>; // false
+
+// Проверка наличия optional
+type IsOptional<T, K extends keyof T> = {} extends Pick<T, K> ? true : false;
+
+interface TestOptional {
+  id: string;
+  name?: string;
+}
+
+type IdIsOptional = IsOptional<TestOptional, 'id'>;     // false
+type NameIsOptional = IsOptional<TestOptional, 'name'>; // true
+
+// Получение readonly ключей
+type ReadonlyKeys<T> = {
+  [K in keyof T]-?: IsReadonly<T, K> extends true ? K : never;
+}[keyof T];
+
+type ReadonlyTestKeys = ReadonlyKeys<TestReadonly>; // "id"
+
+// Получение optional ключей
+type OptionalKeys<T> = {
+  [K in keyof T]-?: {} extends Pick<T, K> ? K : never;
+}[keyof T];
+
+type OptionalTestKeys = OptionalKeys<TestOptional>; // "name"
+```
+
+### Advanced Patterns
+
+```typescript
+// Conditional модификаторы на основе типа значения
+type ReadonlyIfObject<T> = {
+  [P in keyof T as T[P] extends object ? P : never]+readonly: T[P];
+} & {
+  [P in keyof T as T[P] extends object ? never : P]: T[P];
+};
+
+interface Mixed {
+  id: string;
+  config: {
+    setting: string;
+  };
+  count: number;
+}
+
+type SelectiveReadonly = ReadonlyIfObject<Mixed>;
+// {
+//   id: string;
+//   count: number;
+//   readonly config: { setting: string };
+// }
+
+// Toggle модификаторов
+type ToggleReadonly<T> = {
+  [P in keyof T as IsReadonly<T, P> extends true
+    ? P
+    : never]-readonly: T[P];
+} & {
+  [P in keyof T as IsReadonly<T, P> extends false
+    ? P
+    : never]+readonly: T[P];
+};
+
+interface ToToggle {
+  readonly id: string;
+  name: string;
+}
+
+type Toggled = ToggleReadonly<ToToggle>;
+// {
+//   id: string;         // было readonly, стало mutable
+//   readonly name: string; // было mutable, стало readonly
+// }
+```
+
+### Ключевые моменты
+
+- `readonly` делает свойства неизменяемыми
+- `?` делает свойства optional
+- `+` явно добавляет модификатор (по умолчанию)
+- `-` удаляет модификатор
+- Модификаторы можно комбинировать
+- `-readonly` и `-?` удаляют модификаторы
+- Deep версии рекурсивно применяют модификаторы
+- Можно применять модификаторы селективно к определённым полям
+- Conditional модификаторы зависят от условий
+- Можно проверять наличие модификаторов с helper типами
+- Используются в state management, forms, API DTOs
+- Критически важны для immutability и type safety

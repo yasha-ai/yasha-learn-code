@@ -1,0 +1,390 @@
+## TypeScript: Броня. Урок 19: Оператор satisfies
+
+Оператор `satisfies` (появился в TypeScript 4.9) - это мощный инструмент, который позволяет проверить, что значение соответствует определённому типу, сохраняя при этом более точный выведенный тип. Это решает распространённую проблему, когда аннотация типа слишком широкая и теряется информация о конкретных значениях.
+
+### Проблема без satisfies
+
+До появления `satisfies` приходилось выбирать между type safety и type precision:
+
+```typescript
+type Color = 'red' | 'green' | 'blue';
+
+// Вариант 1: Без аннотации типа
+const colors1 = {
+  primary: 'red',
+  secondary: 'green',
+  accent: 'blue',
+};
+
+// ✓ Точный тип: { primary: 'red', secondary: 'green', accent: 'blue' }
+// ✗ Нет проверки, что значения - валидные Color
+colors1.primary = 'yellow'; // ✗ Никакой ошибки!
+
+// Вариант 2: С аннотацией типа
+const colors2: Record<string, Color> = {
+  primary: 'red',
+  secondary: 'green',
+  accent: 'blue',
+};
+
+// ✓ Проверка типов работает
+// colors2.primary = 'yellow'; // ✓ Ошибка!
+// ✗ Потеряна точность типа
+const p = colors2.primary; // тип: Color (не 'red')
+
+// Вариант 3: С as const
+const colors3 = {
+  primary: 'red',
+  secondary: 'green',
+  accent: 'blue',
+} as const;
+
+// ✓ Точный тип: { readonly primary: 'red', ... }
+// ✗ Нет проверки, что значения - валидные Color
+// ✗ Всё становится readonly
+```
+
+### Решение с satisfies
+
+`satisfies` проверяет тип без его расширения:
+
+```typescript
+type Color = 'red' | 'green' | 'blue';
+
+const colors = {
+  primary: 'red',
+  secondary: 'green',
+  accent: 'blue',
+} satisfies Record<string, Color>;
+
+// ✓ Проверка типов работает (во время компиляции проверено)
+// ✓ Сохранён точный тип
+const p = colors.primary; // тип: 'red' (не Color!)
+
+// ✓ Ошибка при неправильном значении
+// const wrong = {
+//   primary: 'yellow', // ✗ Ошибка компиляции!
+// } satisfies Record<string, Color>;
+
+// ✓ Не readonly по умолчанию
+colors.primary = 'blue'; // ✓ Работает (если нужно)
+
+// Можно комбинировать с as const
+const immutableColors = {
+  primary: 'red',
+  secondary: 'green',
+  accent: 'blue',
+} as const satisfies Record<string, Color>;
+
+// ✓ Точный тип и readonly
+// immutableColors.primary = 'blue'; // ✗ Ошибка: readonly
+```
+
+### Практические примеры
+
+```typescript
+// Пример 1: Конфигурация с разными типами значений
+type Config = {
+  port: number;
+  host: string;
+  ssl: boolean;
+};
+
+const config = {
+  port: 3000,
+  host: 'localhost',
+  ssl: true,
+} satisfies Config;
+
+// ✓ Тип config.port - именно 3000 (не number)
+const port: 3000 = config.port; // ✓ Работает!
+
+// Пример 2: API Routes с разными методами
+type Route = {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  path: string;
+  handler: (req: any) => any;
+};
+
+const routes = [
+  {
+    method: 'GET',
+    path: '/users',
+    handler: (req) => ({ users: [] }),
+  },
+  {
+    method: 'POST',
+    path: '/users',
+    handler: (req) => ({ created: true }),
+  },
+] satisfies Route[];
+
+// ✓ Каждый route имеет точный тип method
+const firstMethod = routes[0].method; // тип: 'GET'
+
+// Пример 3: Event handlers
+type EventMap = {
+  click: { x: number; y: number };
+  focus: { elementId: string };
+  input: { value: string };
+};
+
+const handlers = {
+  click: (data) => {
+    // TypeScript выводит тип data из контекста
+    console.log(data.x, data.y);
+  },
+  focus: (data) => {
+    console.log(data.elementId);
+  },
+  input: (data) => {
+    console.log(data.value);
+  },
+} satisfies {
+  [K in keyof EventMap]: (data: EventMap[K]) => void;
+};
+
+// ✓ Каждый handler имеет правильный тип
+handlers.click({ x: 10, y: 20 });
+```
+
+### Жизненный пример: Form Validation
+
+```typescript
+// Type-safe форма с валидацией
+interface FieldValidator<T> {
+  validate: (value: T) => boolean;
+  errorMessage: string;
+}
+
+type FormFields = {
+  email: string;
+  age: number;
+  username: string;
+};
+
+const validators = {
+  email: {
+    validate: (value) => value.includes('@'),
+    errorMessage: 'Invalid email',
+  },
+  age: {
+    validate: (value) => value >= 18 && value <= 120,
+    errorMessage: 'Age must be between 18 and 120',
+  },
+  username: {
+    validate: (value) => value.length >= 3 && value.length <= 20,
+    errorMessage: 'Username must be 3-20 characters',
+  },
+} satisfies {
+  [K in keyof FormFields]: FieldValidator<FormFields[K]>;
+};
+
+// ✓ TypeScript знает точные типы для каждого валидатора
+validators.email.validate('test@example.com'); // ✓ тип параметра: string
+validators.age.validate(25); // ✓ тип параметра: number
+
+// ✗ Ошибка при неправильном типе
+// validators.age.validate('25'); // ✗ Ошибка: string не number
+
+// Функция валидации с type safety
+function validateForm<T>(
+  data: T,
+  validators: { [K in keyof T]: FieldValidator<T[K]> }
+): boolean {
+  for (const key in data) {
+    const validator = validators[key];
+    if (!validator.validate(data[key])) {
+      console.error(validator.errorMessage);
+      return false;
+    }
+  }
+  return true;
+}
+
+const formData: FormFields = {
+  email: 'user@example.com',
+  age: 25,
+  username: 'john_doe',
+};
+
+validateForm(formData, validators); // ✓ Type-safe!
+```
+
+### С generic типами
+
+```typescript
+// satisfies с generics
+interface Result<T> {
+  success: boolean;
+  data: T;
+}
+
+const userResult = {
+  success: true,
+  data: { id: 1, name: 'Alice' },
+} satisfies Result<{ id: number; name: string }>;
+
+// ✓ Точный тип data.name
+const name: 'Alice' = userResult.data.name; // ✓ Работает!
+
+// Функция-фабрика с satisfies
+function createResult<T>(data: T) {
+  return {
+    success: true,
+    data,
+    timestamp: Date.now(),
+  } satisfies Result<T> & { timestamp: number };
+}
+
+const result = createResult({ userId: 123 });
+// ✓ TypeScript знает про timestamp
+console.log(result.timestamp); // ✓ number
+```
+
+### С discriminated unions
+
+```typescript
+// Type-safe state machine
+type State =
+  | { status: 'idle' }
+  | { status: 'loading'; progress: number }
+  | { status: 'success'; data: string }
+  | { status: 'error'; error: string };
+
+const initialState = {
+  status: 'idle',
+} satisfies State;
+
+// ✓ Точный тип status
+const s: 'idle' = initialState.status; // ✓ Работает!
+
+const loadingState = {
+  status: 'loading',
+  progress: 0.5,
+} satisfies State;
+
+// ✓ TypeScript знает про progress
+const p = loadingState.progress; // ✓ number
+
+// ✗ Ошибка при несоответствии
+// const invalidState = {
+//   status: 'loading',
+//   // progress отсутствует
+// } satisfies State; // ✗ Ошибка!
+```
+
+### Комбинирование с mapped types
+
+```typescript
+// Создание type-safe конфигурации
+type Environment = 'dev' | 'staging' | 'prod';
+
+type EnvConfig = {
+  apiUrl: string;
+  debug: boolean;
+  maxRetries: number;
+};
+
+const configs = {
+  dev: {
+    apiUrl: 'http://localhost:3000',
+    debug: true,
+    maxRetries: 3,
+  },
+  staging: {
+    apiUrl: 'https://staging.api.example.com',
+    debug: true,
+    maxRetries: 5,
+  },
+  prod: {
+    apiUrl: 'https://api.example.com',
+    debug: false,
+    maxRetries: 10,
+  },
+} satisfies Record<Environment, EnvConfig>;
+
+// ✓ Точные типы для каждого значения
+const devUrl: 'http://localhost:3000' = configs.dev.apiUrl;
+
+// ✓ Автодополнение работает
+const env: Environment = 'dev';
+const config = configs[env]; // ✓ EnvConfig
+
+// Type-safe функция
+function getConfig(env: Environment): EnvConfig {
+  return configs[env];
+}
+```
+
+### С template literal types
+
+```typescript
+// Type-safe CSS классы
+type Spacing = 0 | 1 | 2 | 3 | 4 | 5;
+type Direction = 't' | 'r' | 'b' | 'l';
+type MarginClass = `m${Direction}-${Spacing}`;
+
+const margins = {
+  small: 'mt-1',
+  medium: 'mb-3',
+  large: 'ml-5',
+} satisfies Record<string, MarginClass>;
+
+// ✓ Точные строковые литералы
+const small: 'mt-1' = margins.small;
+
+// ✗ Ошибка при неправильном классе
+// const invalid = {
+//   wrong: 'mt-10', // ✗ '10' не в Spacing
+// } satisfies Record<string, MarginClass>;
+```
+
+### Когда использовать satisfies
+
+```typescript
+// ✓ Используйте satisfies когда:
+
+// 1. Нужна проверка типа БЕЗ расширения
+const palette = {
+  red: '#ff0000',
+  green: '#00ff00',
+  blue: '#0000ff',
+} satisfies Record<string, `#${string}`>;
+
+// 2. Нужны точные литеральные типы
+const status = 'success' satisfies 'success' | 'error';
+
+// 3. Работа со сложными объектами
+const api = {
+  get: async () => ({ data: [] }),
+  post: async (body: any) => ({ id: 1 }),
+} satisfies Record<string, (...args: any[]) => Promise<any>>;
+
+// ✗ НЕ используйте satisfies когда:
+
+// 1. Нужно явное расширение типа
+const data: Record<string, unknown> = { key: 'value' };
+
+// 2. Работаете с мутациями типа
+let count: number = 0; // не satisfies number
+
+// 3. Внешние API требуют конкретный тип
+interface Props {
+  color: string; // не литерал
+}
+const props: Props = { color: 'red' };
+```
+
+### Ключевые моменты
+
+- `satisfies` проверяет соответствие типу без расширения
+- Сохраняет точные литеральные типы значений
+- Решает проблему потери type precision при аннотациях
+- Можно комбинировать с `as const` для readonly значений
+- Работает с generic типами, discriminated unions, mapped types
+- Особенно полезен для конфигураций, валидаторов, роутов
+- Улучшает developer experience за счёт точного автодополнения
+- Помогает отлавливать ошибки на этапе компиляции
+- Доступен с TypeScript 4.9+
+- Не добавляет runtime overhead - чисто compile-time проверка
