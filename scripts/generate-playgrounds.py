@@ -13,7 +13,10 @@ from google import genai
 from google.genai import types
 
 # Config
-API_KEY = os.environ.get("GOOGLE_GEMINI_API_KEY", "AIzaSyA23tzAyaxcpkUkJhcpGV8TWIEYezlMr3c")
+API_KEY = os.environ.get("GOOGLE_GEMINI_API_KEY")
+if not API_KEY:
+    print("❌ GOOGLE_GEMINI_API_KEY не задан. Запусти с env переменной.")
+    sys.exit(1)
 REPO = "/home/xopycaku/clawd/yasha-learn-nextra"
 PAGES = os.path.join(REPO, "pages")
 BATCH_SIZE = 10
