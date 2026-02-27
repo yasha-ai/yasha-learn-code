@@ -1,0 +1,278 @@
+import { Sandpack } from '@codesandbox/sandpack-react'
+
+# Observer (Наблюдатель)
+
+Observer — поведенческий паттерн, в котором объект (Subject) ведёт список наблюдателей (Observers) и уведомляет их об изменениях. Это основа для систем событий, реактивного программирования и EventEmitter.
+
+## Базовая реализация
+
+```javascript
+class EventEmitter {
+  #events = new Map()
+
+  on(event, listener) {
+    if (!this.#events.has(event)) {
+      this.#events.set(event, new Set())
+    }
+    this.#events.get(event).add(listener)
+    return () => this.off(event, listener) // возвращаем функцию отписки
+  }
+
+  off(event, listener) {
+    this.#events.get(event)?.delete(listener)
+    return this
+  }
+
+  emit(event, ...args) {
+    this.#events.get(event)?.forEach(listener => listener(...args))
+    return this
+  }
+
+  once(event, listener) {
+    const wrapper = (...args) => {
+      listener(...args)
+      this.off(event, wrapper)
+    }
+    return this.on(event, wrapper)
+  }
+}
+
+// Использование
+const emitter = new EventEmitter()
+
+const unsubscribe = emitter.on('data', (value) => {
+  console.log('Получено:', value)
+})
+
+emitter.emit('data', 42)     // 'Получено: 42'
+emitter.emit('data', 'hello') // 'Получено: hello'
+
+unsubscribe() // отписываемся
+
+emitter.emit('data', 'ещё') // ничего — подписка снята
+```
+
+## Observer с типизированными событиями
+
+```javascript
+class Store extends EventEmitter {
+  #state
+
+  constructor(initialState) {
+    super()
+    this.#state = initialState
+  }
+
+  get state() { return { ...this.#state } }
+
+  setState(updates) {
+    const prevState = this.#state
+    this.#state = { ...this.#state, ...updates }
+
+    // Уведомляем о каждом изменённом поле
+    for (const key in updates) {
+      if (prevState[key] !== this.#state[key]) {
+        this.emit(`change:${key}`, this.#state[key], prevState[key])
+      }
+    }
+    this.emit('change', this.#state, prevState)
+  }
+}
+
+const store = new Store({ count: 0, user: null, theme: 'dark' })
+
+// Подписка на конкретное поле
+store.on('change:count', (newVal, oldVal) => {
+  console.log(`count: ${oldVal} → ${newVal}`)
+})
+
+// Подписка на любое изменение
+store.on('change', (state) => {
+  document.title = `Счёт: ${state.count}` // обновляем заголовок
+})
+
+store.setState({ count: 1 })  // count: 0 → 1
+store.setState({ count: 5 })  // count: 1 → 5
+store.setState({ user: { name: 'Яша' } }) // только 'change' событие
+```
+
+## Subject + Observer: классический GoF
+
+```javascript
+// Интерфейс наблюдателя
+class Observer {
+  update(data) { throw new Error('Не реализовано') }
+}
+
+// Тема (Subject)
+class WeatherStation {
+  #observers = new Set()
+  #temperature = 0
+  #humidity = 0
+
+  subscribe(observer) { this.#observers.add(observer); return this }
+  unsubscribe(observer) { this.#observers.delete(observer); return this }
+
+  #notify() {
+    const data = { temperature: this.#temperature, humidity: this.#humidity }
+    this.#observers.forEach(obs => obs.update(data))
+  }
+
+  setWeather(temp, humidity) {
+    this.#temperature = temp
+    this.#humidity = humidity
+    this.#notify()
+  }
+}
+
+// Конкретные наблюдатели
+class TemperatureDisplay extends Observer {
+  update({ temperature }) {
+    console.log(`🌡️ Температура: ${temperature}°C`)
+  }
+}
+
+class HumidityDisplay extends Observer {
+  update({ humidity }) {
+    console.log(`💧 Влажность: ${humidity}%`)
+  }
+}
+
+class AlertSystem extends Observer {
+  update({ temperature, humidity }) {
+    if (temperature > 35) console.log('🔥 ALERT: Высокая температура!')
+    if (humidity > 80) console.log('💦 ALERT: Высокая влажность!')
+  }
+}
+
+const station = new WeatherStation()
+const tempDisplay = new TemperatureDisplay()
+const humidDisplay = new HumidityDisplay()
+const alerts = new AlertSystem()
+
+station
+  .subscribe(tempDisplay)
+  .subscribe(humidDisplay)
+  .subscribe(alerts)
+
+station.setWeather(25, 60) // Обычная погода
+station.setWeather(37, 85) // ALERT!
+
+station.unsubscribe(humidDisplay)
+station.setWeather(20, 50) // humidDisplay больше не получает обновления
+```
+
+## Реактивное состояние с Proxy
+
+```javascript
+function createReactive(target, onChange) {
+  return new Proxy(target, {
+    set(obj, key, value) {
+      const old = obj[key]
+      obj[key] = value
+      if (old !== value) onChange(key, value, old)
+      return true
+    }
+  })
+}
+
+const state = createReactive({ name: 'Яша', age: 1 }, (key, val, old) => {
+  console.log(`${key}: ${old} → ${val}`)
+  // обновляем DOM или что-то ещё
+})
+
+state.name = 'Алексей' // name: Яша → Алексей
+state.age = 2          // age: 1 → 2
+```
+
+## Когда использовать
+
+**✅ Observer подходит для:**
+- Системы событий / EventBus
+- Реактивные UI фреймворки (React state, Vue reactive)
+- WebSocket уведомления
+- Живые дашборды и real-time данные
+- MVC: Model уведомляет View
+
+## Интерактивный пример
+
+<Sandpack
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Observer Pattern</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <h2>Observer — Метеостанция</h2>
+  <div class="controls">
+    <label>Температура: <input id="temp" type="range" min="-10" max="45" value="20"> <span id="tempVal">20°C</span></label>
+    <label>Влажность: <input id="humidity" type="range" min="0" max="100" value="50"> <span id="humidVal">50%</span></label>
+    <button id="update">Обновить данные</button>
+  </div>
+  <div class="observers">
+    <div class="observer" id="obs1">🌡️ Температура<br><span>—</span></div>
+    <div class="observer" id="obs2">💧 Влажность<br><span>—</span></div>
+    <div class="observer" id="obs3" id="alert">⚠️ Система алертов<br><span>Ожидание...</span></div>
+  </div>
+  <script src="/index.js"></script>
+</body>
+</html>`,
+    "/styles.css": `body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+h2 { color: #89b4fa; }
+.controls { background: #313244; padding: 16px; border-radius: 8px; margin-bottom: 16px; }
+label { display: block; margin: 8px 0; }
+input[type=range] { width: 200px; margin: 0 8px; }
+button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 8px; }
+.observers { display: flex; gap: 12px; flex-wrap: wrap; }
+.observer { background: #313244; border-radius: 8px; padding: 16px; flex: 1; min-width: 140px; text-align: center; border: 2px solid #45475a; font-size: 15px; }
+.observer span { display: block; font-size: 22px; font-weight: bold; color: #a6e3a1; margin-top: 8px; }
+.alert-active { border-color: #f38ba8 !important; }
+.alert-active span { color: #f38ba8 !important; }`,
+    "/index.js": `class EventEmitter {
+  #events = new Map()
+  on(e, fn) { (this.#events.get(e) || this.#events.set(e, new Set()).get(e)).add(fn) }
+  emit(e, ...args) { this.#events.get(e)?.forEach(fn => fn(...args)) }
+}
+
+class WeatherStation extends EventEmitter {
+  update(temp, humidity) {
+    this.emit('weather', { temp, humidity })
+  }
+}
+
+const station = new WeatherStation()
+
+// Наблюдатели обновляют DOM
+station.on('weather', ({ temp }) => {
+  document.querySelector('#obs1 span').textContent = temp + '°C'
+})
+station.on('weather', ({ humidity }) => {
+  document.querySelector('#obs2 span').textContent = humidity + '%'
+})
+station.on('weather', ({ temp, humidity }) => {
+  const el = document.getElementById('obs3')
+  const alerts = []
+  if (temp > 35) alerts.push('🔥 Жара!')
+  if (temp < 0) alerts.push('🧊 Мороз!')
+  if (humidity > 80) alerts.push('💦 Высокая влажность!')
+  el.querySelector('span').textContent = alerts.length ? alerts.join(' ') : '✅ Норма'
+  el.className = 'observer' + (alerts.length ? ' alert-active' : '')
+})
+
+const tempInput = document.getElementById('temp')
+const humidInput = document.getElementById('humidity')
+
+tempInput.addEventListener('input', () => document.getElementById('tempVal').textContent = tempInput.value + '°C')
+humidInput.addEventListener('input', () => document.getElementById('humidVal').textContent = humidInput.value + '%')
+
+document.getElementById('update').addEventListener('click', () => {
+  station.update(+tempInput.value, +humidInput.value)
+})
+`
+  }}
+  options={{ showNavigator: false, showLineNumbers: true, editorHeight: 400 }}
+/>

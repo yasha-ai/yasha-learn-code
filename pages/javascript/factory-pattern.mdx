@@ -1,0 +1,290 @@
+import { Sandpack } from '@codesandbox/sandpack-react'
+
+# Фабричные функции (Factory Pattern)
+
+Фабрика — функция или метод, создающий объекты без указания конкретного класса. Вместо `new SomeClass()` вы вызываете `createSomething()` и получаете готовый объект. Фабрики дают гибкость: один интерфейс — разные реализации.
+
+## Фабричная функция vs Конструктор
+
+```javascript
+// Конструктор — нужен new, this, prototype
+function UserConstructor(name, role) {
+  this.name = name
+  this.role = role
+  this.greet = function() { return `Привет, я ${this.name}!` }
+}
+const u1 = new UserConstructor('Алексей', 'admin')
+
+// Фабричная функция — просто возвращает объект
+function createUser(name, role) {
+  return {
+    name,
+    role,
+    greet() { return `Привет, я ${name}!` },
+    isAdmin() { return role === 'admin' },
+  }
+}
+const u2 = createUser('Алексей', 'admin')
+
+// Оба подхода работают, но фабрика:
+// ✅ Не нужен new
+// ✅ Лёгкий возврат разных типов объектов
+// ✅ Нет проблем с this
+// ✅ Настоящая приватность через замыкание
+```
+
+## Фабрика с приватным состоянием
+
+```javascript
+function createCounter(initial = 0, { min = -Infinity, max = Infinity } = {}) {
+  let count = initial
+
+  const clamp = (val) => Math.min(Math.max(val, min), max)
+
+  return {
+    increment(by = 1) { count = clamp(count + by); return this },
+    decrement(by = 1) { count = clamp(count - by); return this },
+    reset() { count = initial; return this },
+    get value() { return count },
+    toString() { return `Counter(${count})` },
+  }
+}
+
+const c = createCounter(0, { min: 0, max: 10 })
+c.increment(5).increment(3).increment(5) // зажато на 10
+console.log(c.value) // 10
+
+const unlimited = createCounter(100)
+unlimited.decrement(150)
+console.log(unlimited.value) // -50
+```
+
+## Abstract Factory — семейство объектов
+
+Абстрактная фабрика создаёт **семейства связанных объектов**:
+
+```javascript
+// Абстрактная фабрика UI-компонентов
+function createTheme(variant) {
+  const themes = {
+    dark: {
+      button: () => ({
+        render: (text) => `<button style="background:#1a1a2e;color:#e0e0ff">${text}</button>`
+      }),
+      input: () => ({
+        render: (placeholder) => `<input style="background:#16213e;color:#e0e0ff" placeholder="${placeholder}">`
+      }),
+      modal: () => ({
+        render: (content) => `<div style="background:#0f3460;color:white">${content}</div>`
+      }),
+    },
+    light: {
+      button: () => ({
+        render: (text) => `<button style="background:#4361ee;color:white">${text}</button>`
+      }),
+      input: () => ({
+        render: (placeholder) => `<input style="background:#white;border:1px solid #4361ee" placeholder="${placeholder}">`
+      }),
+      modal: () => ({
+        render: (content) => `<div style="background:white;border:1px solid #4361ee">${content}</div>`
+      }),
+    }
+  }
+
+  const theme = themes[variant]
+  if (!theme) throw new Error(`Неизвестная тема: ${variant}`)
+
+  return {
+    createButton: theme.button,
+    createInput: theme.input,
+    createModal: theme.modal,
+  }
+}
+
+// Используем фабрику — не знаем про конкретные реализации
+function renderForm(factory) {
+  const button = factory.createButton()
+  const input = factory.createInput()
+  return input.render('Введите имя') + button.render('Отправить')
+}
+
+console.log(renderForm(createTheme('dark')))
+console.log(renderForm(createTheme('light')))
+```
+
+## Factory Method в классах
+
+```javascript
+class Transport {
+  constructor(speed, fuel) {
+    this.speed = speed
+    this.fuel = fuel
+  }
+
+  describe() {
+    return `${this.constructor.name}: ${this.speed}км/ч, топливо: ${this.fuel}`
+  }
+
+  // Фабричный метод
+  static create(type) {
+    const types = {
+      car:   () => new Car(120, 'бензин'),
+      bike:  () => new Bike(30, 'мышечная сила'),
+      plane: () => new Plane(900, 'керосин'),
+    }
+    const factory = types[type]
+    if (!factory) throw new Error(`Неизвестный тип: ${type}`)
+    return factory()
+  }
+}
+
+class Car extends Transport {
+  honk() { return 'Бип!' }
+}
+
+class Bike extends Transport {
+  ring() { return 'Дзынь!' }
+}
+
+class Plane extends Transport {
+  takeoff() { return 'Взлетаем!' }
+}
+
+const car = Transport.create('car')
+const bike = Transport.create('bike')
+const plane = Transport.create('plane')
+
+console.log(car.describe())   // Car: 120км/ч, топливо: бензин
+console.log(bike.describe())  // Bike: 30км/ч, топливо: мышечная сила
+console.log(plane.takeoff())  // Взлетаем!
+```
+
+## Registry Pattern — реестр фабрик
+
+```javascript
+class PluginRegistry {
+  #factories = new Map()
+
+  register(name, factory) {
+    this.#factories.set(name, factory)
+    return this
+  }
+
+  create(name, ...args) {
+    const factory = this.#factories.get(name)
+    if (!factory) throw new Error(`Плагин "${name}" не найден`)
+    return factory(...args)
+  }
+
+  list() { return [...this.#factories.keys()] }
+}
+
+const registry = new PluginRegistry()
+
+registry
+  .register('json', (data) => ({
+    parse: (str) => JSON.parse(str),
+    stringify: (obj) => JSON.stringify(obj, null, 2),
+  }))
+  .register('csv', (delimiter = ',') => ({
+    parse: (str) => str.split('\n').map(row => row.split(delimiter)),
+    stringify: (data) => data.map(row => row.join(delimiter)).join('\n'),
+  }))
+
+const jsonParser = registry.create('json')
+console.log(jsonParser.parse('{"name":"Яша"}')) // { name: 'Яша' }
+
+const csvParser = registry.create('csv', ';')
+console.log(csvParser.stringify([['a', 'b'], ['1', '2']])) // a;b\n1;2
+```
+
+## Интерактивный пример
+
+<Sandpack
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Factory Pattern</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <h2>Factory Pattern — Создание персонажей</h2>
+  <div class="controls">
+    <select id="type">
+      <option value="warrior">⚔️ Воин</option>
+      <option value="mage">🧙 Маг</option>
+      <option value="archer">🏹 Лучник</option>
+    </select>
+    <input id="name" placeholder="Имя персонажа" value="Герой">
+    <button id="create">Создать</button>
+  </div>
+  <div id="characters"></div>
+  <script src="/index.js"></script>
+</body>
+</html>`,
+    "/styles.css": `body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+h2 { color: #89b4fa; }
+.controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+select, input { background: #313244; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 6px; }
+button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+.character { background: #313244; border-radius: 8px; padding: 16px; margin: 8px 0; display: flex; gap: 16px; align-items: center; border-left: 4px solid #89b4fa; }
+.icon { font-size: 36px; }
+.stats span { display: inline-block; background: #45475a; border-radius: 4px; padding: 2px 8px; margin: 2px; font-size: 13px; font-family: monospace; }`,
+    "/index.js": `function createCharacter(type, name) {
+  const configs = {
+    warrior: {
+      icon: '⚔️',
+      hp: 150, mp: 30, attack: 25, defense: 20,
+      skills: ['Удар щитом', 'Боевой клич'],
+      color: '#f38ba8',
+    },
+    mage: {
+      icon: '🧙',
+      hp: 60, mp: 200, attack: 45, defense: 5,
+      skills: ['Огненный шар', 'Заморозка', 'Телепорт'],
+      color: '#89b4fa',
+    },
+    archer: {
+      icon: '🏹',
+      hp: 90, mp: 80, attack: 35, defense: 10,
+      skills: ['Меткий выстрел', 'Дождь стрел'],
+      color: '#a6e3a1',
+    },
+  }
+
+  const config = configs[type]
+  if (!config) throw new Error('Неизвестный тип')
+  
+  return { name, type, ...config }
+}
+
+document.getElementById('create').addEventListener('click', () => {
+  const type = document.getElementById('type').value
+  const name = document.getElementById('name').value || 'Безымянный'
+  const char = createCharacter(type, name)
+  
+  const el = document.createElement('div')
+  el.className = 'character'
+  el.style.borderColor = char.color
+  el.innerHTML = \`
+    <div class="icon">\${char.icon}</div>
+    <div>
+      <strong style="color:\${char.color}">\${char.name}</strong> (\${char.type})<br>
+      <div class="stats">
+        <span>❤️ \${char.hp}</span>
+        <span>💫 \${char.mp}</span>
+        <span>⚔️ \${char.attack}</span>
+        <span>🛡️ \${char.defense}</span>
+      </div>
+      <div style="margin-top:6px">🎯 \${char.skills.join(', ')}</div>
+    </div>
+  \`
+  document.getElementById('characters').prepend(el)
+})
+`
+  }}
+  options={{ showNavigator: false, showLineNumbers: true, editorHeight: 380 }}
+/>

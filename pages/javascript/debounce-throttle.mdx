@@ -1,0 +1,283 @@
+import { Sandpack } from '@codesandbox/sandpack-react'
+
+# Debounce и Throttle
+
+Debounce и Throttle — техники ограничения частоты вызова функций. Незаменимы при работе с событиями, которые могут срабатывать сотни раз в секунду: `scroll`, `resize`, `input`, `mousemove`.
+
+## Проблема: слишком частые вызовы
+
+```javascript
+// БЕЗ оптимизации — вызов API при каждом нажатии клавиши
+input.addEventListener('input', (e) => {
+  fetch(`/api/search?q=${e.target.value}`) // 💥 запрос на каждый символ!
+})
+
+// Пользователь набирает "JavaScript" (10 символов) → 10 запросов к API
+// Нужно: 1 запрос после паузы в наборе
+```
+
+## Debounce — «откладывает» вызов
+
+Debounce вызывает функцию только после того, как прошло `delay` мс **без новых вызовов**. Идеален для поиска и автосохранения.
+
+```javascript
+function debounce(fn, delay) {
+  let timer
+
+  return function(...args) {
+    clearTimeout(timer) // отменяем предыдущий таймер
+    timer = setTimeout(() => {
+      fn.apply(this, args)
+    }, delay)
+  }
+}
+
+// Поиск — запрос отправится через 300мс после паузы в наборе
+const search = debounce((query) => {
+  console.log(`Поиск: "${query}"`)
+  // fetch(`/api/search?q=${query}`)
+}, 300)
+
+search('J')          // отменён
+search('Ja')         // отменён
+search('Jav')        // отменён
+search('JavaScript') // выполнится через 300мс
+```
+
+### Debounce с immediate (leading edge)
+
+```javascript
+function debounce(fn, delay, immediate = false) {
+  let timer
+
+  return function(...args) {
+    const callNow = immediate && !timer
+
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = null
+      if (!immediate) fn.apply(this, args)
+    }, delay)
+
+    if (callNow) fn.apply(this, args)
+  }
+}
+
+// immediate=true: вызов немедленно, потом пауза
+const saveNow = debounce(save, 1000, true)
+saveNow() // вызов немедленно ✅
+saveNow() // игнорируется (пауза)
+saveNow() // игнорируется
+// Через 1000мс после последнего → следующий saveNow() вызовется снова
+```
+
+### Debounce с отменой
+
+```javascript
+function debounce(fn, delay) {
+  let timer
+
+  function debounced(...args) {
+    clearTimeout(timer)
+    return new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fn.apply(this, args)), delay)
+    })
+  }
+
+  debounced.cancel = () => {
+    clearTimeout(timer)
+    timer = null
+  }
+
+  debounced.flush = function(...args) {
+    clearTimeout(timer)
+    return fn.apply(this, args)
+  }
+
+  return debounced
+}
+
+const debouncedSave = debounce(save, 500)
+
+// При размонтировании компонента
+window.addEventListener('beforeunload', () => {
+  debouncedSave.flush() // сохранить немедленно!
+})
+```
+
+## Throttle — «ограничивает» частоту
+
+Throttle гарантирует, что функция вызовется **не чаще одного раза в `delay` мс**. Идеален для scroll и resize.
+
+```javascript
+function throttle(fn, delay) {
+  let lastCall = 0
+
+  return function(...args) {
+    const now = Date.now()
+    if (now - lastCall >= delay) {
+      lastCall = now
+      return fn.apply(this, args)
+    }
+  }
+}
+
+// Обновляем позицию скролла максимум 10 раз в секунду (каждые 100мс)
+const handleScroll = throttle(() => {
+  console.log('Скролл:', window.scrollY)
+}, 100)
+
+window.addEventListener('scroll', handleScroll)
+```
+
+### Throttle с trailing call (по таймеру)
+
+```javascript
+function throttle(fn, delay) {
+  let lastCall = 0
+  let timer = null
+
+  return function(...args) {
+    const now = Date.now()
+    const remaining = delay - (now - lastCall)
+
+    if (remaining <= 0) {
+      if (timer) { clearTimeout(timer); timer = null }
+      lastCall = now
+      fn.apply(this, args)
+    } else if (!timer) {
+      // Гарантируем последний вызов
+      timer = setTimeout(() => {
+        lastCall = Date.now()
+        timer = null
+        fn.apply(this, args)
+      }, remaining)
+    }
+  }
+}
+```
+
+## Debounce vs Throttle: когда что
+
+| | Debounce | Throttle |
+|--|---------|---------|
+| Поиск/автодополнение | ✅ | ❌ |
+| Автосохранение | ✅ | ❌ |
+| Scroll/resize | ❌ | ✅ |
+| Прогресс-бар загрузки | ❌ | ✅ |
+| Кнопка «Отправить» | ✅ | ✅ |
+| Mousemove/координаты | ❌ | ✅ |
+
+## Практический паттерн: requestAnimationFrame throttle
+
+```javascript
+function rafThrottle(fn) {
+  let scheduled = false
+
+  return function(...args) {
+    if (!scheduled) {
+      scheduled = true
+      requestAnimationFrame(() => {
+        fn.apply(this, args)
+        scheduled = false
+      })
+    }
+  }
+}
+
+// Идеально для анимаций и обновления DOM
+const updatePosition = rafThrottle((x, y) => {
+  cursor.style.transform = `translate(${x}px, ${y}px)`
+})
+
+document.addEventListener('mousemove', (e) => {
+  updatePosition(e.clientX, e.clientY)
+})
+```
+
+## Интерактивный пример
+
+<Sandpack
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Debounce & Throttle</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <h2>Debounce vs Throttle</h2>
+  <div class="section">
+    <h3>🔍 Debounce — поиск (300мс)</h3>
+    <input id="searchInput" placeholder="Начните печатать...">
+    <div class="counters">
+      <span>Нажатий: <strong id="rawCount">0</strong></span>
+      <span>Запросов: <strong id="debounceCount">0</strong></span>
+    </div>
+    <div id="searchResult" class="result">Ожидание...</div>
+  </div>
+  <div class="section">
+    <h3>📜 Throttle — скролл (200мс)</h3>
+    <div id="scrollBox">Прокрутите меня...</div>
+    <div class="counters">
+      <span>Событий scroll: <strong id="scrollRaw">0</strong></span>
+      <span>Обработано: <strong id="scrollThrottle">0</strong></span>
+    </div>
+  </div>
+  <script src="/index.js"></script>
+</body>
+</html>`,
+    "/styles.css": `body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+h2,h3 { color: #89b4fa; }
+.section { background: #313244; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+input { background: #1e1e2e; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 6px; width: 250px; font-size: 15px; }
+.counters { margin: 10px 0; display: flex; gap: 20px; }
+.counters strong { color: #a6e3a1; font-size: 20px; }
+.result { background: #1e1e2e; border-radius: 4px; padding: 8px 12px; font-family: monospace; margin-top: 8px; }
+#scrollBox { height: 120px; overflow-y: scroll; background: #1e1e2e; border-radius: 6px; padding: 12px; }`,
+    "/index.js": `function debounce(fn, delay) {
+  let timer
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), delay) }
+}
+
+function throttle(fn, delay) {
+  let last = 0
+  return (...args) => { const now = Date.now(); if (now - last >= delay) { last = now; fn(...args) } }
+}
+
+// Debounce demo
+let rawCount = 0, debounceCount = 0
+const searchDebounced = debounce((val) => {
+  debounceCount++
+  document.getElementById('debounceCount').textContent = debounceCount
+  document.getElementById('searchResult').textContent = \`🔍 Поиск: "\${val}"\`
+}, 300)
+
+document.getElementById('searchInput').addEventListener('input', (e) => {
+  rawCount++
+  document.getElementById('rawCount').textContent = rawCount
+  searchDebounced(e.target.value)
+})
+
+// Throttle demo
+let scrollRaw = 0, scrollThrottle = 0
+const scrollBox = document.getElementById('scrollBox')
+// Заполним контентом
+scrollBox.innerHTML = Array.from({length: 20}, (_, i) => \`<div>Строка \${i+1}</div>\`).join('')
+
+const onScroll = throttle(() => {
+  scrollThrottle++
+  document.getElementById('scrollThrottle').textContent = scrollThrottle
+}, 200)
+
+scrollBox.addEventListener('scroll', () => {
+  scrollRaw++
+  document.getElementById('scrollRaw').textContent = scrollRaw
+  onScroll()
+})
+`
+  }}
+  options={{ showNavigator: false, showLineNumbers: true, editorHeight: 400 }}
+/>

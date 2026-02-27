@@ -193,18 +193,18 @@
 ### Продвинутые концепции (6)
 - [x] Proxy
 - [x] Reflect
-- [ ] Symbol
-- [ ] Generators и Iterators
-- [ ] Декораторы (stage 3)
-- [ ] WeakRef и FinalizationRegistry
+- [x] Symbol
+- [x] Generators и Iterators
+- [x] Декораторы (stage 3)
+- [x] WeakRef и FinalizationRegistry
 
 ### Паттерны и практики (6)
-- [ ] Модульный паттерн
-- [ ] Singleton
-- [ ] Observer
-- [ ] Factory
-- [ ] Debounce и Throttle
-- [ ] Event Delegation
+- [x] Модульный паттерн
+- [x] Singleton
+- [x] Observer
+- [x] Factory
+- [x] Debounce и Throttle
+- [x] Event Delegation
 
 ---
 

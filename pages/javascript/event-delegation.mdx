@@ -1,0 +1,279 @@
+import { Sandpack } from '@codesandbox/sandpack-react'
+
+# Делегирование событий
+
+Делегирование событий (Event Delegation) — техника, при которой один обработчик устанавливается на **родительский элемент** вместо обработчиков на каждый дочерний. Работает благодаря механизму **всплытия событий** (bubbling).
+
+## Всплытие событий (Event Bubbling)
+
+Когда событие происходит на элементе, оно «всплывает» вверх по DOM-дереву:
+
+```
+span → li → ul → div → body → html → document → window
+```
+
+```javascript
+document.querySelector('ul').addEventListener('click', (e) => {
+  // e.target — элемент на котором произошёл клик
+  // e.currentTarget — элемент на котором висит обработчик (ul)
+  console.log('target:', e.target.tagName)
+  console.log('currentTarget:', e.currentTarget.tagName)
+})
+
+// Клик на li → сработает обработчик ul!
+// Клик на span внутри li → тоже сработает!
+```
+
+## Проблема без делегирования
+
+```javascript
+// ❌ Плохо: обработчик на каждый элемент
+const items = document.querySelectorAll('.item')
+items.forEach(item => {
+  item.addEventListener('click', handleClick) // N обработчиков!
+})
+
+// Проблемы:
+// 1. Много обработчиков = больше памяти
+// 2. Новые элементы нужно обрабатывать вручную
+// 3. Сложная очистка
+
+// ✅ Хорошо: один обработчик на родителе
+document.querySelector('.list').addEventListener('click', handleClick)
+// Работает и для существующих, и для будущих элементов!
+```
+
+## Базовый паттерн делегирования
+
+```javascript
+const list = document.querySelector('#todo-list')
+
+list.addEventListener('click', function(event) {
+  // Ищем нужный элемент через closest()
+  const item = event.target.closest('.todo-item')
+  if (!item) return // клик был не на todo-item
+
+  const deleteBtn = event.target.closest('.delete-btn')
+  const checkbox = event.target.closest('input[type="checkbox"]')
+  
+  if (deleteBtn) {
+    item.remove()
+  } else if (checkbox) {
+    item.classList.toggle('completed', checkbox.checked)
+  }
+})
+```
+
+## event.target.closest() — главный инструмент
+
+`closest(selector)` ищет ближайшего предка (включая сам элемент), соответствующего селектору:
+
+```javascript
+document.addEventListener('click', (e) => {
+  // Обработка кнопок по data-атрибуту
+  const button = e.target.closest('[data-action]')
+  if (!button) return
+
+  const action = button.dataset.action
+  const id = button.dataset.id
+
+  switch (action) {
+    case 'edit':   editItem(id); break
+    case 'delete': deleteItem(id); break
+    case 'toggle': toggleItem(id); break
+  }
+})
+
+// HTML:
+// <button data-action="delete" data-id="42">Удалить</button>
+// <button data-action="edit" data-id="42">Изменить</button>
+```
+
+## Паттерн: data-атрибуты как команды
+
+```javascript
+// Мощный паттерн: обработчик команд через data-action
+const handlers = {
+  'load-more': (btn) => {
+    const page = parseInt(btn.dataset.page) + 1
+    loadPage(page)
+  },
+  'filter': (btn) => {
+    setFilter(btn.dataset.filter)
+  },
+  'sort': (btn) => {
+    setSort(btn.dataset.field, btn.dataset.direction)
+  },
+  'modal-open': (btn) => {
+    openModal(btn.dataset.modal)
+  },
+}
+
+document.addEventListener('click', (e) => {
+  const actionEl = e.target.closest('[data-action]')
+  if (!actionEl) return
+
+  const handler = handlers[actionEl.dataset.action]
+  if (handler) handler(actionEl)
+})
+```
+
+## Делегирование с динамическим контентом
+
+```javascript
+// Список с CRUD — делегирование идеально для динамики
+class TodoList {
+  #container
+  #todos = []
+  #nextId = 1
+
+  constructor(container) {
+    this.#container = container
+    this.#setupDelegation()
+  }
+
+  #setupDelegation() {
+    this.#container.addEventListener('click', (e) => {
+      const id = parseInt(e.target.closest('[data-id]')?.dataset.id)
+      if (!id) return
+
+      if (e.target.closest('.delete-btn')) this.delete(id)
+      if (e.target.closest('.toggle-btn')) this.toggle(id)
+    })
+  }
+
+  add(text) {
+    const todo = { id: this.#nextId++, text, done: false }
+    this.#todos.push(todo)
+    this.#render()
+    return this
+  }
+
+  delete(id) {
+    this.#todos = this.#todos.filter(t => t.id !== id)
+    this.#render()
+  }
+
+  toggle(id) {
+    const todo = this.#todos.find(t => t.id === id)
+    if (todo) { todo.done = !todo.done; this.#render() }
+  }
+
+  #render() {
+    this.#container.innerHTML = this.#todos.map(t => `
+      <li data-id="${t.id}" style="${t.done ? 'opacity:.5;text-decoration:line-through' : ''}">
+        <button class="toggle-btn">✓</button>
+        ${t.text}
+        <button class="delete-btn">✕</button>
+      </li>
+    `).join('')
+  }
+}
+
+const list = new TodoList(document.querySelector('#todos'))
+list.add('Изучить делегирование').add('Практика').add('Написать код')
+// Один обработчик обслуживает все элементы, включая добавленные!
+```
+
+## stopPropagation vs preventDefault
+
+```javascript
+el.addEventListener('click', (e) => {
+  e.stopPropagation()  // ✋ Останавливает всплытие (ломает делегирование!)
+  e.preventDefault()   // 🚫 Отменяет действие браузера (ссылка, форма)
+  e.stopImmediatePropagation() // ✋✋ Также блокирует другие обработчики на элементе
+})
+
+// Правило: не злоупотребляйте stopPropagation — это ломает делегирование!
+// Вместо этого проверяйте e.target в родительском обработчике
+```
+
+## Интерактивный пример
+
+<Sandpack
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Event Delegation</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <h2>Делегирование событий — ToDo</h2>
+  <div class="add-form">
+    <input id="newTask" placeholder="Новая задача...">
+    <button id="addBtn">+ Добавить</button>
+  </div>
+  <ul id="taskList"></ul>
+  <p id="stats"></p>
+  <script src="/index.js"></script>
+</body>
+</html>`,
+    "/styles.css": `body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+h2 { color: #89b4fa; }
+.add-form { display: flex; gap: 8px; margin-bottom: 12px; }
+input { background: #313244; border: 1px solid #45475a; color: #cdd6f4; padding: 8px 12px; border-radius: 6px; flex: 1; font-size: 15px; }
+button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+ul { list-style: none; padding: 0; }
+li { background: #313244; border-radius: 6px; padding: 10px 14px; margin: 6px 0; display: flex; align-items: center; gap: 10px; }
+li.done { opacity: 0.5; }
+li.done .text { text-decoration: line-through; }
+.text { flex: 1; }
+.toggle-btn { background: #a6e3a1; width: 28px; height: 28px; border-radius: 50%; border: none; cursor: pointer; font-size: 16px; }
+.delete-btn { background: #f38ba8; color: #1e1e2e; border: none; border-radius: 4px; padding: 4px 8px; cursor: pointer; }
+#stats { color: #6c7086; font-size: 13px; }`,
+    "/index.js": `const list = document.getElementById('taskList')
+const input = document.getElementById('newTask')
+let nextId = 1
+const tasks = []
+
+// ✅ ОДИН обработчик для всего списка — делегирование!
+list.addEventListener('click', (e) => {
+  const li = e.target.closest('li')
+  if (!li) return
+  const id = +li.dataset.id
+
+  if (e.target.closest('.delete-btn')) {
+    tasks.splice(tasks.findIndex(t => t.id === id), 1)
+    render()
+  } else if (e.target.closest('.toggle-btn')) {
+    const task = tasks.find(t => t.id === id)
+    if (task) { task.done = !task.done; render() }
+  }
+})
+
+document.getElementById('addBtn').addEventListener('click', addTask)
+input.addEventListener('keypress', e => e.key === 'Enter' && addTask())
+
+function addTask() {
+  const text = input.value.trim()
+  if (!text) return
+  tasks.push({ id: nextId++, text, done: false })
+  input.value = ''
+  render()
+}
+
+function render() {
+  list.innerHTML = tasks.map(t => \`
+    <li data-id="\${t.id}" class="\${t.done ? 'done' : ''}">
+      <button class="toggle-btn">\${t.done ? '✓' : '○'}</button>
+      <span class="text">\${t.text}</span>
+      <button class="delete-btn">✕</button>
+    </li>
+  \`).join('')
+  const done = tasks.filter(t => t.done).length
+  document.getElementById('stats').textContent = 
+    \`Всего: \${tasks.length} | Выполнено: \${done} | Осталось: \${tasks.length - done}\`
+}
+
+// Начальные задачи
+['Изучить Event Delegation', 'Практика с closest()', 'Написать своё ToDo'].forEach(t => {
+  tasks.push({ id: nextId++, text: t, done: false })
+})
+render()
+`
+  }}
+  options={{ showNavigator: false, showLineNumbers: true, editorHeight: 420 }}
+/>
