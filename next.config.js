@@ -1,8 +1,12 @@
+const rehypeTransliterateSlugs = require('./plugins/rehype-transliterate-slugs')
+
 const withNextra = require('nextra')({
   theme: 'nextra-theme-docs',
   themeConfig: './theme.config.tsx',
   mdxOptions: {
-    rehypePlugins: [],
+    // Транслитерация русских якорей заголовков в латиницу
+    // Например: id="переменные" → id="peremennye"
+    rehypePlugins: [rehypeTransliterateSlugs],
   },
 })
 
