@@ -17,9 +17,43 @@ module.exports = withNextra({
   compress: true, // Enable gzip compression
   poweredByHeader: false,
   
-  // Отключаем prefetch для предотвращения 503
+  // Оптимизация билда
   experimental: {
     optimisticClientCache: false,
+    // Распараллеливание билда (использовать все ядра)
+    cpus: require('os').cpus().length,
+  },
+  
+  // Ускорение production build
+  productionBrowserSourceMaps: false, // Отключить source maps
+  
+  // Webpack оптимизации
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      // Уменьшить размер client bundle
+      config.optimization.splitChunks = {
+        chunks: 'all',
+        cacheGroups: {
+          default: false,
+          vendors: false,
+          // Разбиваем vendor библиотеки
+          vendor: {
+            name: 'vendor',
+            chunks: 'all',
+            test: /node_modules/,
+            priority: 20,
+          },
+          // Общий код между страницами
+          common: {
+            minChunks: 2,
+            priority: 10,
+            reuseExistingChunk: true,
+            enforce: true,
+          },
+        },
+      }
+    }
+    return config
   },
   
   // Заголовки для агрессивного кеширования статики
