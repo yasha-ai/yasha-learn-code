@@ -23,8 +23,8 @@ PAGES = os.path.join(REPO, "pages")
 BATCH_SIZE = 10
 
 # MODEL: использовать более мощную модель
-# Варианты: gemini-2.5-pro-exp, gemini-exp-1206, gemini-2.0-flash-thinking-exp
-MODEL = "gemini-2.5-pro-exp"  # Больше output tokens
+# Варианты: gemini-3.1-pro-preview, gemini-2.5-pro-exp, gemini-exp-1206
+MODEL = "gemini-3.1-pro-preview"  # Latest pro model
 
 client = genai.Client(api_key=API_KEY)
 
