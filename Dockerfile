@@ -8,7 +8,7 @@ RUN npm ci
 COPY . .
 
 # Increase memory limit for build
-ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV NODE_OPTIONS="--max-old-space-size=8192"
 RUN npm run build
 
 EXPOSE 4010
