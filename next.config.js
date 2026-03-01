@@ -1,4 +1,5 @@
 const rehypeTransliterateSlugs = require('./plugins/rehype-transliterate-slugs')
+const path = require('path')
 
 const withNextra = require('nextra')({
   theme: 'nextra-theme-docs',
@@ -29,6 +30,11 @@ module.exports = withNextra({
   
   // Webpack оптимизации
   webpack: (config, { isServer }) => {
+    // The remark-mermaid plugin injects absolute-path imports into MDX files.
+    // Alias that absolute path to our custom component (forces black text on all nodes).
+    const mermaidOriginalPath = require.resolve('@theguild/remark-mermaid/mermaid')
+    config.resolve.alias[mermaidOriginalPath] = path.resolve(__dirname, 'components/CustomMermaid.tsx')
+
     if (!isServer) {
       // Уменьшить размер client bundle
       config.optimization.splitChunks = {
