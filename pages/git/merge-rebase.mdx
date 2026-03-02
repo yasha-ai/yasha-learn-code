@@ -70,3 +70,382 @@ git merge feature/new-feature
 *   Используйте `rebase` для локальных веток, чтобы поддерживать их в актуальном состоянии и создавать более чистую историю.
 *   Никогда не используйте `rebase` на публичных ветках, так как это может вызвать проблемы для других разработчиков, работающих с этими ветками.
 *   При конфликтах, возникающих при `merge` или `rebase`, необходимо разрешить их вручную.
+
+## Визуализация: Merge vs Rebase
+
+Интерактивное сравнение — как выглядит история коммитов после `merge` и после `rebase`:
+
+<Playground
+  template="static"
+  files={{
+    "/index.html": {
+      code: `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Merge vs Rebase</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="split">
+
+    <!-- MERGE -->
+    <div class="panel">
+      <h3>git merge</h3>
+      <p class="sub">Сохраняет историю, создаёт merge-коммит</p>
+      <canvas id="merge-canvas"></canvas>
+      <div class="timeline" id="merge-timeline"></div>
+      <button class="btn btn-blue" onclick="runMerge()">▶ Запустить merge</button>
+    </div>
+
+    <!-- REBASE -->
+    <div class="panel">
+      <h3>git rebase</h3>
+      <p class="sub">Переписывает историю, линейная ветка</p>
+      <canvas id="rebase-canvas"></canvas>
+      <div class="timeline" id="rebase-timeline"></div>
+      <button class="btn btn-purple" onclick="runRebase()">▶ Запустить rebase</button>
+    </div>
+
+  </div>
+
+  <button class="btn btn-gray" onclick="resetAll()" style="margin-top:16px">Сброс</button>
+
+  <script>
+    const COLORS = { main: '#6366f1', feature: '#a855f7', merge: '#22c55e' };
+    const R = 14, STEP = 70, PAD = 30;
+
+    // Состояние
+    const states = {
+      merge:  { step: 0, animating: false },
+      rebase: { step: 0, animating: false },
+    };
+
+    function getCanvas(type) {
+      return document.getElementById(type + '-canvas');
+    }
+
+    // --- Merge сцены ---
+    const mergeScenes = [
+      { label: 'Начало: main и feature разошлись' },
+      { label: 'git checkout main' },
+      { label: 'git merge feature → создаётся M (merge commit)' },
+      { label: 'Готово: история сохранена, ветки объединены' },
+    ];
+
+    function drawMerge(step) {
+      const canvas = getCanvas('merge');
+      const ctx = canvas.getContext('2d');
+      canvas.width = canvas.offsetWidth;
+      canvas.height = 160;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const mainY = 50, featY = 120;
+
+      // Исходные коммиты main: A, B, C
+      const mainCommits = [
+        { id: 'A', x: PAD,          y: mainY, color: COLORS.main },
+        { id: 'B', x: PAD + STEP,   y: mainY, color: COLORS.main },
+        { id: 'C', x: PAD + STEP*2, y: mainY, color: COLORS.main },
+      ];
+
+      // feature коммиты (ветвятся от B)
+      const featCommits = [
+        { id: 'D', x: PAD + STEP,   y: featY, color: COLORS.feature },
+        { id: 'E', x: PAD + STEP*2, y: featY, color: COLORS.feature },
+      ];
+
+      // Merge коммит (появляется на шаге >= 2)
+      const mergeX = PAD + STEP * 3.5;
+      const mergeCommit = { id: 'M', x: mergeX, y: mainY, color: COLORS.merge, merge: true };
+
+      // Рисуем линии main
+      for (let i = 1; i < mainCommits.length; i++) {
+        line(ctx, mainCommits[i-1], mainCommits[i], COLORS.main);
+      }
+
+      // Линия main до merge
+      if (step >= 2) {
+        line(ctx, mainCommits[2], mergeCommit, COLORS.main);
+      }
+
+      // Линия ветвления от B к D
+      line(ctx, mainCommits[1], featCommits[0], COLORS.feature, true);
+
+      // Линия feature
+      line(ctx, featCommits[0], featCommits[1], COLORS.feature);
+
+      // Линия от E к merge
+      if (step >= 2) {
+        line(ctx, featCommits[1], mergeCommit, COLORS.merge, true);
+      }
+
+      // Коммиты
+      [...mainCommits, ...featCommits].forEach(c => dot(ctx, c));
+      if (step >= 2) dot(ctx, mergeCommit);
+
+      // Метки
+      label(ctx, mainCommits[2].x + 20, mainY, 'main', COLORS.main, step < 2);
+      label(ctx, featCommits[1].x + 20, featY, 'feature', COLORS.feature);
+      if (step >= 2) {
+        label(ctx, mergeX + 20, mainY, 'main', COLORS.merge);
+      }
+    }
+
+    // --- Rebase сцены ---
+    const rebaseScenes = [
+      { label: 'Начало: main и feature разошлись' },
+      { label: 'git checkout feature && git rebase main' },
+      { label: 'Коммиты D, E "переиграны" поверх C → D\', E\'' },
+      { label: 'git checkout main && git merge feature (fast-forward)' },
+    ];
+
+    function drawRebase(step) {
+      const canvas = getCanvas('rebase');
+      const ctx = canvas.getContext('2d');
+      canvas.width = canvas.offsetWidth;
+      canvas.height = 160;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const mainY = 50, featY = 120;
+
+      const mainCommits = [
+        { id: 'A', x: PAD,          y: mainY, color: COLORS.main },
+        { id: 'B', x: PAD + STEP,   y: mainY, color: COLORS.main },
+        { id: 'C', x: PAD + STEP*2, y: mainY, color: COLORS.main },
+      ];
+
+      // feature (оригинальные, показываем до rebase)
+      const featOrig = [
+        { id: 'D', x: PAD + STEP,   y: featY, color: COLORS.feature, faded: step >= 2 },
+        { id: 'E', x: PAD + STEP*2, y: featY, color: COLORS.feature, faded: step >= 2 },
+      ];
+
+      // После rebase — D' E' лежат на main линии
+      const featNew = [
+        { id: "D'", x: PAD + STEP*3,   y: mainY, color: COLORS.feature },
+        { id: "E'", x: PAD + STEP*3.8, y: mainY, color: COLORS.feature },
+      ];
+
+      // Линии main
+      for (let i = 1; i < mainCommits.length; i++) {
+        line(ctx, mainCommits[i-1], mainCommits[i], COLORS.main);
+      }
+
+      // Старая ветка (до rebase)
+      if (step <= 1) {
+        line(ctx, mainCommits[1], featOrig[0], COLORS.feature, true);
+        line(ctx, featOrig[0], featOrig[1], COLORS.feature);
+      }
+
+      // Старые коммиты fade
+      if (step >= 2) {
+        // Рисуем ghostы
+        featOrig.forEach(c => dot(ctx, c));
+        line(ctx, mainCommits[1], featOrig[0], COLORS.feature, true);
+        line(ctx, featOrig[0], featOrig[1], COLORS.feature);
+      }
+
+      // После rebase — новые коммиты на линии main
+      if (step >= 2) {
+        line(ctx, mainCommits[2], featNew[0], COLORS.feature);
+        line(ctx, featNew[0], featNew[1], COLORS.feature);
+        featNew.forEach(c => dot(ctx, c));
+      }
+
+      // Fast-forward merge
+      if (step >= 3) {
+        // main указывает на E'
+      }
+
+      // Коммиты main
+      mainCommits.forEach(c => dot(ctx, c));
+      if (step < 2) featOrig.forEach(c => dot(ctx, c));
+
+      // Метки
+      const mainTip = step >= 3 ? featNew[1] : mainCommits[2];
+      label(ctx, mainTip.x + 20, mainY, 'main', COLORS.main);
+      if (step < 2) {
+        label(ctx, featOrig[1].x + 20, featY, 'feature', COLORS.feature);
+      } else {
+        label(ctx, featNew[1].x + 20, mainY + 20, 'feature', COLORS.feature);
+      }
+    }
+
+    function dot(ctx, c) {
+      const alpha = c.faded ? 0.3 : 1;
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, R, 0, Math.PI * 2);
+      ctx.fillStyle = c.merge ? c.color : '#0f172a';
+      ctx.fill();
+      ctx.strokeStyle = c.color;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      ctx.fillStyle = c.merge ? '#fff' : c.color;
+      ctx.font = 'bold 9px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(c.id, c.x, c.y);
+      ctx.globalAlpha = 1;
+    }
+
+    function line(ctx, from, to, color, dashed) {
+      ctx.beginPath();
+      if (dashed) ctx.setLineDash([5, 4]);
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function label(ctx, x, y, text, color, faded) {
+      ctx.globalAlpha = faded ? 0.35 : 1;
+      ctx.fillStyle = color;
+      ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('← ' + text, x, y);
+      ctx.globalAlpha = 1;
+    }
+
+    function updateTimeline(type, step) {
+      const scenes = type === 'merge' ? mergeScenes : rebaseScenes;
+      const el = document.getElementById(type + '-timeline');
+      el.innerHTML = scenes.map((s, i) =>
+        \`<div class="step \${i === step ? 'active' : ''} \${i < step ? 'done' : ''}">\${s.label}</div>\`
+      ).join('');
+    }
+
+    function runMerge() {
+      if (states.merge.step < mergeScenes.length - 1) {
+        states.merge.step++;
+      } else {
+        states.merge.step = 0;
+      }
+      drawMerge(states.merge.step);
+      updateTimeline('merge', states.merge.step);
+    }
+
+    function runRebase() {
+      if (states.rebase.step < rebaseScenes.length - 1) {
+        states.rebase.step++;
+      } else {
+        states.rebase.step = 0;
+      }
+      drawRebase(states.rebase.step);
+      updateTimeline('rebase', states.rebase.step);
+    }
+
+    function resetAll() {
+      states.merge.step = 0;
+      states.rebase.step = 0;
+      drawMerge(0);
+      drawRebase(0);
+      updateTimeline('merge', 0);
+      updateTimeline('rebase', 0);
+    }
+
+    function initAll() {
+      drawMerge(0);
+      drawRebase(0);
+      updateTimeline('merge', 0);
+      updateTimeline('rebase', 0);
+    }
+
+    window.addEventListener('resize', initAll);
+    initAll();
+  <\/script>
+</body>
+</html>`,
+      active: true,
+    },
+    "/style.css": {
+      code: `* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 16px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 500px) {
+  .split { grid-template-columns: 1fr; }
+}
+
+.panel {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+h3 { font-family: monospace; }
+.sub { color: #64748b; font-size: 0.8em; }
+
+canvas {
+  width: 100%;
+  height: 160px;
+  background: #0f172a;
+  border-radius: 8px;
+}
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.step {
+  font-size: 0.78em;
+  padding: 5px 8px;
+  border-radius: 5px;
+  border-left: 3px solid #334155;
+  color: #64748b;
+  transition: all 0.2s;
+}
+.step.active {
+  border-left-color: #6366f1;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+.step.done {
+  border-left-color: #22c55e;
+  color: #4ade80;
+}
+
+.btn {
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: white;
+  transition: opacity 0.15s;
+  align-self: flex-start;
+}
+.btn:hover { opacity: 0.85; }
+.btn-blue   { background: #6366f1; }
+.btn-purple { background: #a855f7; }
+.btn-gray   { background: #475569; }`,
+    },
+  }}
+/>
