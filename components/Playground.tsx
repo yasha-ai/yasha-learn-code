@@ -48,13 +48,19 @@ export const Playground = ({
   const finalTemplate = (html || css || js) ? 'static' : template;
   const finalFiles = Object.keys(convertedFiles).length > 0 ? convertedFiles : files;
   const [isSecure, setIsSecure] = useState(true);
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    setMounted(true);
     // Sandpack требует Secure Context (HTTPS или localhost) для работы с Service Workers и Web Crypto API
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
       setIsSecure(false);
     }
   }, []);
+
+  if (!mounted) {
+    return <div className="sandpack-container my-6 border border-white/10 rounded-lg overflow-hidden" style={{ height: 452 }} />;
+  }
 
   if (!isSecure) {
     return (
