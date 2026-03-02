@@ -29,30 +29,7 @@ module.exports = withNextra({
   
   // Webpack оптимизации
   webpack: (config, { isServer }) => {
-    if (!isServer) {
-      // Уменьшить размер client bundle
-      config.optimization.splitChunks = {
-        chunks: 'all',
-        cacheGroups: {
-          default: false,
-          vendors: false,
-          // Разбиваем vendor библиотеки
-          vendor: {
-            name: 'vendor',
-            chunks: 'all',
-            test: /node_modules/,
-            priority: 20,
-          },
-          // Общий код между страницами
-          common: {
-            minChunks: 2,
-            priority: 10,
-            reuseExistingChunk: true,
-            enforce: true,
-          },
-        },
-      }
-    }
+    // No alias needed - mermaid text color is patched via patch-package
     return config
   },
   
