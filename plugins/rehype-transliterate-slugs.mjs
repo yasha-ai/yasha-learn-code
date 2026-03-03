@@ -48,7 +48,7 @@ function hasCyrillic(str) {
  * The rehype plugin
  */
 export default function rehypeTransliterateSlugs() {
-  return (tree) => {
+  return (tree, file) => {
     // Collect ID replacements: { oldId → newId }
     const idMap = {}
 
@@ -67,6 +67,16 @@ export default function rehypeTransliterateSlugs() {
     })
 
     if (Object.keys(idMap).length === 0) return
+
+    // nextra@4 stores TOC data in file.data.toc — update it to match renamed IDs
+    if (file?.data?.toc && Array.isArray(file.data.toc)) {
+      file.data.toc = file.data.toc.map((entry) => {
+        if (typeof entry === 'object' && entry.id && idMap[entry.id]) {
+          return { ...entry, id: idMap[entry.id] }
+        }
+        return entry
+      })
+    }
 
     // Pass 2: Update any <a href="#old-id"> links in the document
     visit(tree, 'element', (node) => {
