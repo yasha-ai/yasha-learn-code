@@ -1,0 +1,383 @@
+## 🦥 Lazy Loading в Angular
+
+Lazy Loading (ленивая загрузка) позволяет загружать части приложения **по требованию**, а не при первом открытии. Это резко уменьшает размер начального бандла и ускоряет время первого рендера.
+
+---
+
+### 📦 Зачем нужна ленивая загрузка?
+
+Без lazy loading все модули компилируются в один `main.js`:
+
+```
+main.js  →  2.4 MB  (загружается при открытии приложения)
+```
+
+С lazy loading:
+
+```
+main.js        →  320 KB  (только главная страница)
+admin.chunk.js →  890 KB  (загружается когда пользователь идёт в /admin)
+reports.chunk.js → 450 KB  (только если нужны отчёты)
+```
+
+---
+
+### 🔧 loadChildren с динамическим импортом
+
+Основной способ — `loadChildren` в маршрутах:
+
+```typescript
+// app.routes.ts
+import { Routes } from '@angular/router';
+
+export const routes: Routes = [
+  {
+    path: '',
+    loadComponent: () =>
+      import('./home/home.component').then(m => m.HomeComponent)
+  },
+  {
+    path: 'admin',
+    loadChildren: () =>
+      import('./admin/admin.routes').then(m => m.ADMIN_ROUTES)
+  },
+  {
+    path: 'reports',
+    loadChildren: () =>
+      import('./reports/reports.module').then(m => m.ReportsModule)
+  }
+];
+```
+
+`import()` — это стандартный **динамический импорт** JavaScript. Webpack/esbuild автоматически создаёт отдельный чанк.
+
+---
+
+### 🏛️ Модульная ленивая загрузка (NgModule)
+
+Классический подход с NgModule:
+
+```typescript
+// reports/reports.module.ts
+import { NgModule } from '@angular/core';
+import { RouterModule, Routes } from '@angular/router';
+import { ReportsComponent } from './reports.component';
+import { ChartComponent } from './chart/chart.component';
+
+const routes: Routes = [
+  { path: '', component: ReportsComponent },
+  { path: 'charts', component: ChartComponent }
+];
+
+@NgModule({
+  declarations: [ReportsComponent, ChartComponent],
+  imports: [RouterModule.forChild(routes)]
+})
+export class ReportsModule {}
+```
+
+```typescript
+// app.routes.ts
+{
+  path: 'reports',
+  loadChildren: () =>
+    import('./reports/reports.module').then(m => m.ReportsModule)
+}
+```
+
+---
+
+### ⚡ Standalone Lazy Loading (Angular 14+)
+
+Современный подход — без NgModule вообще:
+
+```typescript
+// admin/admin.routes.ts
+import { Routes } from '@angular/router';
+
+export const ADMIN_ROUTES: Routes = [
+  {
+    path: '',
+    loadComponent: () =>
+      import('./admin-dashboard.component').then(m => m.AdminDashboardComponent)
+  },
+  {
+    path: 'users',
+    loadComponent: () =>
+      import('./admin-users.component').then(m => m.AdminUsersComponent)
+  }
+];
+```
+
+```typescript
+// app.routes.ts
+{
+  path: 'admin',
+  loadChildren: () =>
+    import('./admin/admin.routes').then(m => m.ADMIN_ROUTES)
+}
+```
+
+---
+
+### 🎯 loadComponent — один компонент
+
+Если раздел состоит из одного компонента — `loadComponent` без модуля:
+
+```typescript
+export const routes: Routes = [
+  {
+    path: 'profile',
+    loadComponent: () =>
+      import('./profile/profile.component').then(m => m.ProfileComponent)
+  },
+  {
+    path: 'settings',
+    loadComponent: () =>
+      import('./settings/settings.component').then(m => m.SettingsComponent)
+  }
+];
+```
+
+Standalone компонент сам декларирует свои зависимости:
+
+```typescript
+@Component({
+  standalone: true,
+  imports: [CommonModule, ReactiveFormsModule, ProfileFormComponent],
+  template: `...`
+})
+export class ProfileComponent {}
+```
+
+---
+
+### 🚀 Стратегии предзагрузки (Preloading)
+
+Ленивая загрузка даёт скорость, но при переходе пользователь ждёт. Preloading загружает чанки **в фоне** после загрузки главной страницы:
+
+```typescript
+// main.ts
+import { PreloadAllModules, provideRouter, withPreloading } from '@angular/router';
+
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideRouter(routes, withPreloading(PreloadAllModules))
+  ]
+});
+```
+
+#### Кастомная стратегия предзагрузки:
+
+```typescript
+import { Injectable } from '@angular/core';
+import { PreloadingStrategy, Route } from '@angular/router';
+import { Observable, of } from 'rxjs';
+
+@Injectable({ providedIn: 'root' })
+export class SelectivePreloadingStrategy implements PreloadingStrategy {
+  preload(route: Route, load: () => Observable<unknown>): Observable<unknown> {
+    // Загружаем только маршруты с флагом preload: true
+    return route.data?.['preload'] ? load() : of(null);
+  }
+}
+```
+
+```typescript
+const routes: Routes = [
+  {
+    path: 'admin',
+    loadChildren: () => import('./admin/admin.routes').then(m => m.ADMIN_ROUTES),
+    data: { preload: true }  // этот чанк предзагрузится
+  },
+  {
+    path: 'reports',
+    loadChildren: () => import('./reports/reports.routes').then(m => m.REPORTS_ROUTES),
+    data: { preload: false }  // загружается только по требованию
+  }
+];
+
+// main.ts
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideRouter(routes, withPreloading(SelectivePreloadingStrategy))
+  ]
+});
+```
+
+---
+
+### 📊 Анализ бандла
+
+Для анализа используй `webpack-bundle-analyzer`:
+
+```bash
+ng build --stats-json
+npx webpack-bundle-analyzer dist/my-app/stats.json
+```
+
+Или встроенный source-map-explorer:
+
+```bash
+npm install -g source-map-explorer
+ng build --source-map
+source-map-explorer dist/my-app/*.js
+```
+
+Ключевые метрики:
+
+```
+Initial Bundle:   main.js    — должен быть < 500 KB
+Lazy Chunk:       admin.js   — загружается по требованию
+Vendor Bundle:    vendor.js  — Angular + сторонние библиотеки
+```
+
+---
+
+### 🔑 Guards и Resolvers с lazy routes
+
+Guards работают так же с ленивыми маршрутами:
+
+```typescript
+export const routes: Routes = [
+  {
+    path: 'admin',
+    canActivate: [authGuard],
+    loadChildren: () =>
+      import('./admin/admin.routes').then(m => m.ADMIN_ROUTES)
+  }
+];
+```
+
+Angular сначала проверяет Guard — если он возвращает `false`, чанк **не загружается** вообще. Это дополнительная оптимизация.
+
+---
+
+### ⚠️ Типичные ошибки
+
+```typescript
+// ❌ Неправильно — импортируем сразу, нет ленивой загрузки
+import { AdminModule } from './admin/admin.module';
+{ path: 'admin', loadChildren: () => AdminModule }
+
+// ✅ Правильно — динамический импорт
+{ path: 'admin', loadChildren: () => import('./admin/admin.module').then(m => m.AdminModule) }
+
+// ❌ Неправильно — экспортируем default, теряем named export
+export default class AdminModule {}
+// ✅ Правильно
+export class AdminModule {}
+```
+
+---
+
+```mdx-playground
+export default function LazyLoadingPlayground() {
+  const [loadedModules, setLoadedModules] = React.useState({ home: true });
+  const [loading, setLoading] = React.useState(null);
+  const [activePage, setActivePage] = React.useState('home');
+  const [bundleLog, setBundleLog] = React.useState([]);
+
+  const modules = {
+    home:    { size: '45 KB', color: '#22c55e', chunk: 'main.js' },
+    admin:   { size: '280 KB', color: '#dd0031', chunk: 'admin-chunk.js' },
+    reports: { size: '190 KB', color: '#f59e0b', chunk: 'reports-chunk.js' },
+    profile: { size: '95 KB', color: '#7c3aed', chunk: 'profile-chunk.js' },
+  };
+
+  const navigate = async (page) => {
+    if (loadedModules[page]) {
+      setActivePage(page);
+      setBundleLog(prev => [...prev, `⚡ ${page} уже загружен, из кэша`]);
+      return;
+    }
+    setLoading(page);
+    setBundleLog(prev => [...prev, `📡 GET /${modules[page].chunk}...`]);
+    await new Promise(r => setTimeout(r, 1200));
+    setBundleLog(prev => [...prev, `✅ Загружено ${modules[page].size} — ${modules[page].chunk}`]);
+    setLoadedModules(prev => ({ ...prev, [page]: true }));
+    setActivePage(page);
+    setLoading(null);
+  };
+
+  const totalLoaded = Object.keys(loadedModules).reduce((acc, k) => {
+    const kb = parseInt(modules[k].size);
+    return acc + kb;
+  }, 0);
+
+  const totalAll = Object.values(modules).reduce((acc, m) => acc + parseInt(m.size), 0);
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: 460, padding: 24, borderRadius: 12, fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <span style={{ color: '#dd0031', fontWeight: 700, fontSize: 16 }}>🦥 Lazy Loading симулятор</span>
+        <span style={{ color: '#64748b', fontSize: 12 }}>
+          Загружено: <span style={{ color: '#22c55e' }}>{totalLoaded} KB</span> / {totalAll} KB
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        {Object.entries(modules).map(([page, info]) => (
+          <button
+            key={page}
+            onClick={() => navigate(page)}
+            disabled={loading !== null}
+            style={{
+              background: activePage === page ? info.color : '#1e293b',
+              color: activePage === page ? 'white' : '#94a3b8',
+              border: `1px solid ${loadedModules[page] ? info.color : '#334155'}`,
+              padding: '8px 16px', borderRadius: 8, cursor: loading ? 'not-allowed' : 'pointer',
+              fontSize: 13, position: 'relative'
+            }}
+          >
+            {loading === page ? '⏳' : loadedModules[page] ? '✅' : '📦'} /{page}
+            <span style={{ fontSize: 10, display: 'block', color: loadedModules[page] ? '#64748b' : '#dd0031' }}>
+              {info.size}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, border: '1px solid #334155' }}>
+          <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 8 }}>📊 Bundle состояние</div>
+          {Object.entries(modules).map(([page, info]) => (
+            <div key={page} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <div style={{
+                width: `${(parseInt(info.size) / totalAll) * 100}%`, maxWidth: '60%',
+                height: 8, background: loadedModules[page] ? info.color : '#334155',
+                borderRadius: 4, transition: 'all 0.5s'
+              }} />
+              <span style={{ fontSize: 11, color: loadedModules[page] ? info.color : '#475569' }}>
+                {page} ({info.size})
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, border: '1px solid #334155' }}>
+          <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 8 }}>📋 Network лог</div>
+          {bundleLog.length === 0 && (
+            <div style={{ color: '#475569', fontSize: 12 }}>Нажмите на страницу для навигации...</div>
+          )}
+          {bundleLog.slice(-5).map((log, i) => (
+            <div key={i} style={{ fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>{log}</div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, border: `1px solid ${modules[activePage]?.color || '#334155'}` }}>
+        <div style={{ color: modules[activePage]?.color || '#94a3b8', fontSize: 13, fontWeight: 700 }}>
+          Активная страница: /{activePage}
+        </div>
+        <div style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
+          {activePage === 'home' && 'Главная страница — всегда загружена (main bundle)'}
+          {activePage === 'admin' && 'Admin Dashboard — загружен ленивый чанк admin-chunk.js'}
+          {activePage === 'reports' && 'Reports Page — загружен ленивый чанк reports-chunk.js'}
+          {activePage === 'profile' && 'Profile Page — загружен ленивый чанк profile-chunk.js'}
+        </div>
+      </div>
+    </div>
+  );
+}
+```

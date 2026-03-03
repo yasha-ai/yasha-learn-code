@@ -1,0 +1,795 @@
+## 🌐 HttpClient в Angular
+
+Angular предоставляет мощный `HttpClient` для работы с HTTP-запросами. Он основан на **RxJS Observable** (а не Promise), что даёт отмену запросов, трансформации, retry и многое другое из коробки 🚀
+
+---
+
+### 🔧 Подключение HttpClient
+
+**Standalone приложение (Angular 17+):**
+
+```typescript
+// main.ts
+import { bootstrapApplication } from '@angular/platform-browser';
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
+import { AppComponent } from './app.component';
+
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideHttpClient(
+      withInterceptors([authInterceptor, loggingInterceptor])
+    )
+  ]
+});
+```
+
+**NgModule приложение:**
+
+```typescript
+// app.module.ts
+import { HttpClientModule } from '@angular/common/http';
+
+@NgModule({
+  imports: [
+    BrowserModule,
+    HttpClientModule, // 👈 Добавляем один раз в корневом модуле
+  ],
+  bootstrap: [AppComponent]
+})
+export class AppModule {}
+```
+
+---
+
+### 💉 Внедрение HttpClient в сервис
+
+```typescript
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Observable } from 'rxjs';
+
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  private readonly baseUrl = '/api/users';
+
+  // HttpClient внедряется через DI
+  constructor(private http: HttpClient) {}
+
+  getAll(): Observable<User[]> {
+    return this.http.get<User[]>(this.baseUrl);
+  }
+}
+```
+
+> ⚠️ Никогда не вызывай `new HttpClient()` вручную. Только через DI!
+
+---
+
+### 📡 GET запросы с типизацией
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  private readonly baseUrl = environment.apiUrl + '/users';
+
+  constructor(private http: HttpClient) {}
+
+  // Получить всех пользователей
+  getAll(): Observable<User[]> {
+    return this.http.get<User[]>(this.baseUrl);
+  }
+
+  // Получить конкретного пользователя
+  getById(id: number): Observable<User> {
+    return this.http.get<User>(this.baseUrl + '/' + id);
+  }
+
+  // С query параметрами: /api/users?page=1&limit=10&role=admin
+  getWithParams(page: number, limit: number, role?: string): Observable<PaginatedResponse<User>> {
+    let params = new HttpParams()
+      .set('page', page.toString())
+      .set('limit', limit.toString());
+
+    if (role) {
+      params = params.set('role', role);
+    }
+
+    return this.http.get<PaginatedResponse<User>>(this.baseUrl, { params });
+  }
+
+  // Получить полный ответ (статус, заголовки, тело)
+  getWithFullResponse(id: number): Observable<HttpResponse<User>> {
+    return this.http.get<User>(this.baseUrl + '/' + id, {
+      observe: 'response' // 👈 Возвращает HttpResponse<T>, а не просто T
+    });
+  }
+}
+```
+
+---
+
+### 📤 POST, PUT, PATCH, DELETE
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  private readonly baseUrl = environment.apiUrl + '/users';
+
+  constructor(private http: HttpClient) {}
+
+  // POST — создание ресурса
+  create(data: CreateUserDto): Observable<User> {
+    return this.http.post<User>(this.baseUrl, data);
+  }
+
+  // PUT — полное обновление
+  update(id: number, data: UpdateUserDto): Observable<User> {
+    return this.http.put<User>(this.baseUrl + '/' + id, data);
+  }
+
+  // PATCH — частичное обновление
+  patch(id: number, changes: Partial<User>): Observable<User> {
+    return this.http.patch<User>(this.baseUrl + '/' + id, changes);
+  }
+
+  // DELETE — удаление
+  delete(id: number): Observable<void> {
+    return this.http.delete<void>(this.baseUrl + '/' + id);
+  }
+
+  // Загрузка файла (multipart/form-data)
+  uploadAvatar(userId: number, file: File): Observable<{ url: string }> {
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    return this.http.post<{ url: string }>(
+      this.baseUrl + '/' + userId + '/avatar',
+      formData
+    );
+  }
+}
+```
+
+---
+
+### 🔑 HttpHeaders — заголовки запроса
+
+```typescript
+import { HttpHeaders } from '@angular/common/http';
+
+@Injectable({ providedIn: 'root' })
+export class ApiService {
+  constructor(
+    private http: HttpClient,
+    private auth: AuthService
+  ) {}
+
+  // Установка заголовков вручную
+  getSecureData(): Observable<SecureData> {
+    const headers = new HttpHeaders({
+      'Authorization': 'Bearer ' + this.auth.getToken(),
+      'Content-Type':  'application/json',
+      'X-Request-ID':  crypto.randomUUID(),
+    });
+
+    return this.http.get<SecureData>('/api/secure', { headers });
+  }
+
+  // Цепочечный стиль
+  postWithCustomHeaders(data: unknown): Observable<unknown> {
+    const headers = new HttpHeaders()
+      .set('Authorization', 'Bearer ' + this.auth.getToken())
+      .set('Accept-Language', 'ru-RU')
+      .append('X-Client-Version', '2.0.0'); // append добавляет, set заменяет
+
+    return this.http.post('/api/data', data, { headers });
+  }
+}
+```
+
+> 💡 `HttpHeaders` **иммутабельный** — каждый вызов `.set()` возвращает новый объект. Не забывай сохранять результат!
+
+---
+
+### 🔍 HttpParams — query-параметры
+
+```typescript
+import { HttpParams } from '@angular/common/http';
+
+@Injectable({ providedIn: 'root' })
+export class ProductService {
+  constructor(private http: HttpClient) {}
+
+  search(filters: ProductFilters): Observable<Product[]> {
+    // Строим параметры чисто, без манипуляций со строками
+    let params = new HttpParams();
+
+    if (filters.query)     params = params.set('q',        filters.query);
+    if (filters.category)  params = params.set('category', filters.category);
+    if (filters.minPrice)  params = params.set('minPrice', filters.minPrice.toString());
+    if (filters.maxPrice)  params = params.set('maxPrice', filters.maxPrice.toString());
+    if (filters.inStock)   params = params.set('inStock',  'true');
+    if (filters.sortBy)    params = params.set('sortBy',   filters.sortBy);
+
+    // Результат: /api/products?q=angular&category=books&minPrice=10&sortBy=price
+    return this.http.get<Product[]>('/api/products', { params });
+  }
+}
+```
+
+---
+
+### 🚨 Обработка ошибок
+
+```typescript
+import { catchError, throwError } from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
+
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  constructor(
+    private http: HttpClient,
+    private notifications: NotificationService
+  ) {}
+
+  getAll(): Observable<User[]> {
+    return this.http.get<User[]>('/api/users').pipe(
+      catchError(err => this.handleError(err))
+    );
+  }
+
+  private handleError(error: HttpErrorResponse): Observable<never> {
+    let message: string;
+
+    if (error.status === 0) {
+      // Сетевая ошибка (нет интернета, CORS и т.д.)
+      message = 'Нет подключения к серверу. Проверьте интернет.';
+    } else if (error.status === 401) {
+      message = 'Сессия истекла. Войдите снова.';
+      // Редирект на страницу входа
+    } else if (error.status === 403) {
+      message = 'Недостаточно прав для этого действия.';
+    } else if (error.status === 404) {
+      message = 'Ресурс не найден.';
+    } else if (error.status >= 500) {
+      message = 'Ошибка сервера. Попробуйте позже.';
+    } else {
+      // Парсим ответ сервера если он есть
+      message = error.error?.message ?? 'Неизвестная ошибка.';
+    }
+
+    this.notifications.error(message);
+    return throwError(() => new Error(message));
+  }
+}
+```
+
+---
+
+### ⏳ Паттерн: состояние загрузки
+
+```typescript
+@Component({
+  template: `
+    <div *ngIf="isLoading" class="spinner">Загрузка...</div>
+    <div *ngIf="error" class="error">{{ error }}</div>
+    <ul *ngIf="!isLoading && !error">
+      <li *ngFor="let user of users">{{ user.name }}</li>
+    </ul>
+  `
+})
+export class UsersComponent implements OnInit {
+  users: User[] = [];
+  isLoading = false;
+  error: string | null = null;
+
+  constructor(private userService: UserService) {}
+
+  ngOnInit(): void {
+    this.loadUsers();
+  }
+
+  loadUsers(): void {
+    this.isLoading = true;
+    this.error = null;
+
+    this.userService.getAll().subscribe({
+      next: users => {
+        this.users = users;
+        this.isLoading = false;
+      },
+      error: err => {
+        this.error = err.message;
+        this.isLoading = false;
+      }
+    });
+  }
+}
+```
+
+---
+
+### 🔄 Retry логика
+
+```typescript
+import { retry, retryWhen, delay, take } from 'rxjs/operators';
+
+@Injectable({ providedIn: 'root' })
+export class ResilientApiService {
+  constructor(private http: HttpClient) {}
+
+  // Простой retry — 3 попытки
+  getData(): Observable<Data> {
+    return this.http.get<Data>('/api/data').pipe(
+      retry(3)  // Повторить 3 раза при ошибке
+    );
+  }
+
+  // Retry с задержкой — умнее
+  getDataWithBackoff(): Observable<Data> {
+    return this.http.get<Data>('/api/data').pipe(
+      retryWhen(errors =>
+        errors.pipe(
+          delay(1000),   // Ждём 1 секунду между попытками
+          take(3)        // Максимум 3 попытки
+        )
+      )
+    );
+  }
+
+  // Retry только для сетевых ошибок (статус 0)
+  getDataSmart(): Observable<Data> {
+    return this.http.get<Data>('/api/data').pipe(
+      retry({
+        count: 3,
+        delay: (error, retryCount) => {
+          // Не повторяем при клиентских ошибках (4xx)
+          if (error instanceof HttpErrorResponse && error.status >= 400 && error.status < 500) {
+            throw error;
+          }
+          return timer(retryCount * 1000); // Экспоненциальная задержка
+        }
+      })
+    );
+  }
+}
+```
+
+---
+
+### 🛡️ Interceptors — перехватчики запросов
+
+Interceptors позволяют трансформировать **все** запросы и ответы в одном месте:
+
+```typescript
+import { HttpInterceptorFn } from '@angular/common/http';
+import { inject } from '@angular/core';
+
+// Автоматически добавляет Authorization header ко всем запросам
+export const authInterceptor: HttpInterceptorFn = (req, next) => {
+  const authService = inject(AuthService);
+  const token = authService.getToken();
+
+  if (token) {
+    const authReq = req.clone({
+      headers: req.headers.set('Authorization', 'Bearer ' + token)
+    });
+    return next(authReq);
+  }
+
+  return next(req);
+};
+
+// Логирует все запросы
+export const loggingInterceptor: HttpInterceptorFn = (req, next) => {
+  const logger = inject(LoggingService);
+  const start = Date.now();
+
+  logger.log('→ ' + req.method + ' ' + req.url);
+
+  return next(req).pipe(
+    tap(event => {
+      if (event instanceof HttpResponse) {
+        const duration = Date.now() - start;
+        logger.log('← ' + event.status + ' ' + req.url + ' (' + duration + 'ms)');
+      }
+    }),
+    catchError(err => {
+      logger.error('✗ ' + req.method + ' ' + req.url, err);
+      throw err;
+    })
+  );
+};
+```
+
+---
+
+### 🏗️ Полный CRUD сервис
+
+```typescript
+export interface User {
+  id: number;
+  name: string;
+  email: string;
+  role: 'admin' | 'user' | 'viewer';
+  createdAt: string;
+}
+
+export type CreateUserDto = Omit<User, 'id' | 'createdAt'>;
+export type UpdateUserDto = Partial<CreateUserDto>;
+
+@Injectable({ providedIn: 'root' })
+export class UserCrudService {
+  private readonly url = environment.apiUrl + '/users';
+
+  constructor(private http: HttpClient) {}
+
+  getAll(params?: { page?: number; limit?: number }): Observable<User[]> {
+    const httpParams = new HttpParams({ fromObject: params ?? {} });
+    return this.http.get<User[]>(this.url, { params: httpParams }).pipe(
+      catchError(this.handleError)
+    );
+  }
+
+  getOne(id: number): Observable<User> {
+    return this.http.get<User>(this.url + '/' + id).pipe(
+      catchError(this.handleError)
+    );
+  }
+
+  create(dto: CreateUserDto): Observable<User> {
+    return this.http.post<User>(this.url, dto).pipe(
+      catchError(this.handleError)
+    );
+  }
+
+  update(id: number, dto: UpdateUserDto): Observable<User> {
+    return this.http.patch<User>(this.url + '/' + id, dto).pipe(
+      catchError(this.handleError)
+    );
+  }
+
+  remove(id: number): Observable<void> {
+    return this.http.delete<void>(this.url + '/' + id).pipe(
+      catchError(this.handleError)
+    );
+  }
+
+  private handleError(error: HttpErrorResponse): Observable<never> {
+    const msg = error.error?.message ?? 'Ошибка сервера';
+    return throwError(() => new Error(msg));
+  }
+}
+```
+
+---
+
+### 🌍 Environment URLs
+
+```typescript
+// src/environments/environment.ts (разработка)
+export const environment = {
+  production: false,
+  apiUrl: 'http://localhost:3000/api',
+  wsUrl:  'ws://localhost:3000',
+};
+
+// src/environments/environment.prod.ts (продакшен)
+export const environment = {
+  production: true,
+  apiUrl: 'https://api.myapp.com/v1',
+  wsUrl:  'wss://ws.myapp.com',
+};
+
+// В сервисе — используем environment
+@Injectable({ providedIn: 'root' })
+export class OrderService {
+  private readonly apiUrl = environment.apiUrl + '/orders';
+  // При сборке ng build --configuration=production
+  // Angular автоматически подменит environment.ts на environment.prod.ts
+}
+```
+
+---
+
+### Практика
+
+<Playground template="react" files={{ "/App.tsx": `import { useState, useEffect, useRef } from 'react';
+
+// Симуляция Angular HttpClient — интерактивный API Explorer
+// В Angular это был бы: this.http.get<T>(), this.http.post<T>() и т.д.
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const ERROR = '#ef4444';
+const WARN = '#f59e0b';
+
+// Фейковые данные — имитация базы данных сервера
+let fakeDb = [
+  { id: 1, name: 'Яша Девелопер', email: 'yasha@dev.io', role: 'admin' },
+  { id: 2, name: 'Анна Кодер', email: 'anna@dev.io', role: 'user' },
+  { id: 3, name: 'Миша Фронтенд', email: 'misha@dev.io', role: 'viewer' },
+];
+let nextId = 4;
+
+// Симуляция HTTP запроса с задержкой
+function fakeHttp(method, endpoint, body, simulateError) {
+  return new Promise((resolve, reject) => {
+    const delay = 600 + Math.random() * 400;
+    setTimeout(() => {
+      if (simulateError) {
+        reject({ status: 500, message: 'Internal Server Error', error: 'Симулированная ошибка сервера' });
+        return;
+      }
+      if (method === 'GET' && endpoint === '/users') {
+        resolve({ status: 200, data: [...fakeDb] });
+      } else if (method === 'GET' && endpoint.startsWith('/users/')) {
+        const id = parseInt(endpoint.split('/')[2]);
+        const user = fakeDb.find(u => u.id === id);
+        user ? resolve({ status: 200, data: user }) : reject({ status: 404, message: 'User not found' });
+      } else if (method === 'POST' && endpoint === '/users') {
+        const newUser = { id: nextId++, ...body };
+        fakeDb.push(newUser);
+        resolve({ status: 201, data: newUser });
+      } else if (method === 'PATCH' && endpoint.startsWith('/users/')) {
+        const id = parseInt(endpoint.split('/')[2]);
+        const idx = fakeDb.findIndex(u => u.id === id);
+        if (idx !== -1) {
+          fakeDb[idx] = { ...fakeDb[idx], ...body };
+          resolve({ status: 200, data: fakeDb[idx] });
+        } else {
+          reject({ status: 404, message: 'User not found' });
+        }
+      } else if (method === 'DELETE' && endpoint.startsWith('/users/')) {
+        const id = parseInt(endpoint.split('/')[2]);
+        const idx = fakeDb.findIndex(u => u.id === id);
+        if (idx !== -1) {
+          fakeDb.splice(idx, 1);
+          resolve({ status: 204, data: null });
+        } else {
+          reject({ status: 404, message: 'User not found' });
+        }
+      } else {
+        reject({ status: 400, message: 'Bad Request' });
+      }
+    }, delay);
+  });
+}
+
+const METHOD_COLORS = { GET: '#22c55e', POST: '#f59e0b', PATCH: '#60a5fa', DELETE: '#ef4444' };
+
+export default function App() {
+  const [requests, setRequests] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [simulateError, setSimulateError] = useState(false);
+  const [selectedUserId, setSelectedUserId] = useState('1');
+  const [newUserName, setNewUserName] = useState('Новый Пользователь');
+  const [newUserEmail, setNewUserEmail] = useState('new@example.com');
+  const [newUserRole, setNewUserRole] = useState('user');
+  const [patchField, setPatchField] = useState('role');
+  const [patchValue, setPatchValue] = useState('admin');
+  const [deleteId, setDeleteId] = useState('1');
+  const [activeTab, setActiveTab] = useState('GET');
+  const logsEndRef = useRef(null);
+
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [requests]);
+
+  const addRequest = (method, endpoint, body, status, data, error, durationMs) => {
+    setRequests(prev => [...prev.slice(-6), {
+      id: Date.now(),
+      method,
+      endpoint: '/api' + endpoint,
+      body,
+      status,
+      data,
+      error,
+      duration: durationMs,
+      time: new Date().toLocaleTimeString(),
+    }]);
+  };
+
+  const doRequest = async (method, endpoint, body) => {
+    if (isLoading) return;
+    setIsLoading(true);
+    const start = Date.now();
+    try {
+      // В Angular: this.http.get<User[]>('/api/users').pipe(catchError(...))
+      const result = await fakeHttp(method, endpoint, body, simulateError);
+      const duration = Date.now() - start;
+      addRequest(method, endpoint, body, result.status, result.data, null, duration);
+    } catch (err) {
+      const duration = Date.now() - start;
+      addRequest(method, endpoint, body, err.status || 0, null, err.message || 'Network Error', duration);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const s = {
+    app: { background: BG, minHeight: '100vh', padding: '16px', fontFamily: '"Fira Code", monospace', color: '#e2e8f0', fontSize: '13px' },
+    card: { background: CARD, border: '1px solid ' + BORDER, borderRadius: '8px', padding: '14px 16px', marginBottom: '10px' },
+    label: { color: '#475569', fontSize: '10px', fontWeight: 700, letterSpacing: '0.12em', marginBottom: '8px', display: 'block' },
+    btn: (method) => ({ background: METHOD_COLORS[method] + '20', color: METHOD_COLORS[method], border: '1px solid ' + METHOD_COLORS[method] + '60', borderRadius: '6px', padding: '7px 14px', cursor: isLoading ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 700, opacity: isLoading ? 0.5 : 1 }),
+    input: { background: BG, border: '1px solid ' + BORDER, color: '#e2e8f0', borderRadius: '6px', padding: '6px 10px', fontSize: '12px', outline: 'none' },
+    methodTab: (m) => ({ background: activeTab === m ? METHOD_COLORS[m] + '20' : 'transparent', color: activeTab === m ? METHOD_COLORS[m] : '#475569', border: '1px solid ' + (activeTab === m ? METHOD_COLORS[m] + '60' : BORDER), borderRadius: '6px', padding: '5px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700 }),
+  };
+
+  const lastReq = requests[requests.length - 1];
+  const statusColor = lastReq ? (lastReq.status >= 200 && lastReq.status < 300 ? SUCCESS : lastReq.status >= 400 ? ERROR : WARN) : '#475569';
+
+  return (
+    <div style={s.app}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+        <div style={{ color: RED, fontWeight: 700, fontSize: '16px' }}>🌐 Angular HttpClient Explorer</div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: ERROR, cursor: 'pointer' }}>
+          <input type="checkbox" checked={simulateError} onChange={e => setSimulateError(e.target.checked)} style={{ accentColor: ERROR }} />
+          Simulate 500 Error
+        </label>
+      </div>
+
+      {/* Метод-вкладки */}
+      <div style={{ display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' }}>
+        {['GET', 'POST', 'PATCH', 'DELETE'].map(m => (
+          <button key={m} style={s.methodTab(m)} onClick={() => setActiveTab(m)}>{m}</button>
+        ))}
+      </div>
+
+      {/* Панель запроса */}
+      <div style={s.card}>
+        <span style={s.label}>REQUEST BUILDER</span>
+
+        {activeTab === 'GET' && (
+          <div>
+            <div style={{ color: '#94a3b8', fontSize: '11px', marginBottom: '10px' }}>
+              {/* В Angular: this.http.get&lt;User[]&gt;('/api/users') */}
+              <span style={{ color: '#546e7a' }}>// </span>
+              <span style={{ color: '#c792ea' }}>this</span>.http.<span style={{ color: '#82aaff' }}>get</span>&lt;<span style={{ color: '#ffcb6b' }}>User[]</span>&gt;(<span style={{ color: '#c3e88d' }}>'/api/users'</span>)
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button style={s.btn('GET')} onClick={() => doRequest('GET', '/users', null)}>
+                {isLoading ? '⏳ Loading...' : 'GET /api/users'}
+              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ color: '#475569', fontSize: '11px' }}>by ID:</span>
+                <input style={{ ...s.input, width: '50px' }} value={selectedUserId} onChange={e => setSelectedUserId(e.target.value)} />
+                <button style={s.btn('GET')} onClick={() => doRequest('GET', '/users/' + selectedUserId, null)}>
+                  {isLoading ? '⏳' : 'GET /api/users/' + selectedUserId}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'POST' && (
+          <div>
+            <div style={{ color: '#94a3b8', fontSize: '11px', marginBottom: '10px' }}>
+              <span style={{ color: '#546e7a' }}>// </span>
+              <span style={{ color: '#c792ea' }}>this</span>.http.<span style={{ color: '#ffcb6b' }}>post</span>&lt;<span style={{ color: '#ffcb6b' }}>User</span>&gt;(<span style={{ color: '#c3e88d' }}>'/api/users'</span>, dto)
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <input style={{ ...s.input, flex: 1, minWidth: '120px' }} value={newUserName} onChange={e => setNewUserName(e.target.value)} placeholder="name" />
+                <input style={{ ...s.input, flex: 1, minWidth: '140px' }} value={newUserEmail} onChange={e => setNewUserEmail(e.target.value)} placeholder="email" />
+                <select style={{ ...s.input }} value={newUserRole} onChange={e => setNewUserRole(e.target.value)}>
+                  <option value="admin">admin</option>
+                  <option value="user">user</option>
+                  <option value="viewer">viewer</option>
+                </select>
+              </div>
+              <button style={s.btn('POST')} onClick={() => doRequest('POST', '/users', { name: newUserName, email: newUserEmail, role: newUserRole })}>
+                {isLoading ? '⏳ Sending...' : 'POST /api/users'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'PATCH' && (
+          <div>
+            <div style={{ color: '#94a3b8', fontSize: '11px', marginBottom: '10px' }}>
+              <span style={{ color: '#546e7a' }}>// </span>
+              <span style={{ color: '#c792ea' }}>this</span>.http.<span style={{ color: '#82aaff' }}>patch</span>&lt;<span style={{ color: '#ffcb6b' }}>User</span>&gt;(<span style={{ color: '#c3e88d' }}>'/api/users/' + id</span>, changes)
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ color: '#475569', fontSize: '11px' }}>ID:</span>
+              <input style={{ ...s.input, width: '50px' }} value={selectedUserId} onChange={e => setSelectedUserId(e.target.value)} />
+              <select style={{ ...s.input }} value={patchField} onChange={e => setPatchField(e.target.value)}>
+                <option value="role">role</option>
+                <option value="name">name</option>
+                <option value="email">email</option>
+              </select>
+              <span style={{ color: '#475569', fontSize: '11px' }}>→</span>
+              <input style={{ ...s.input, width: '100px' }} value={patchValue} onChange={e => setPatchValue(e.target.value)} />
+              <button style={s.btn('PATCH')} onClick={() => doRequest('PATCH', '/users/' + selectedUserId, { [patchField]: patchValue })}>
+                {isLoading ? '⏳' : 'PATCH /api/users/' + selectedUserId}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'DELETE' && (
+          <div>
+            <div style={{ color: '#94a3b8', fontSize: '11px', marginBottom: '10px' }}>
+              <span style={{ color: '#546e7a' }}>// </span>
+              <span style={{ color: '#c792ea' }}>this</span>.http.<span style={{ color: '#ef9999' }}>delete</span>&lt;<span style={{ color: '#ffcb6b' }}>void</span>&gt;(<span style={{ color: '#c3e88d' }}>'/api/users/' + id</span>)
+            </div>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <span style={{ color: '#475569', fontSize: '11px' }}>User ID:</span>
+              <input style={{ ...s.input, width: '60px' }} value={deleteId} onChange={e => setDeleteId(e.target.value)} />
+              <button style={s.btn('DELETE')} onClick={() => doRequest('DELETE', '/users/' + deleteId, null)}>
+                {isLoading ? '⏳ Deleting...' : 'DELETE /api/users/' + deleteId}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Loading indicator */}
+      {isLoading && (
+        <div style={{ background: '#0c2340', border: '1px solid #1d4ed8', borderRadius: '8px', padding: '12px 16px', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{ width: '16px', height: '16px', border: '2px solid #1d4ed8', borderTopColor: '#60a5fa', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+          <span style={{ color: '#60a5fa', fontSize: '12px' }}>Ожидание ответа сервера...</span>
+          <style>{"@keyframes spin { to { transform: rotate(360deg); } }"}</style>
+        </div>
+      )}
+
+      {/* Последний ответ */}
+      {lastReq && !isLoading && (
+        <div style={{ ...s.card, border: '1px solid ' + statusColor + '40' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+            <span style={s.label}>LAST RESPONSE</span>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <span style={{ background: METHOD_COLORS[lastReq.method] + '20', color: METHOD_COLORS[lastReq.method], fontSize: '11px', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>{lastReq.method}</span>
+              <span style={{ background: statusColor + '20', color: statusColor, fontSize: '11px', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>{lastReq.status}</span>
+              <span style={{ color: '#475569', fontSize: '11px' }}>{lastReq.duration}ms</span>
+            </div>
+          </div>
+          <div style={{ color: '#64748b', fontSize: '11px', marginBottom: '8px' }}>{lastReq.time} → {lastReq.endpoint}</div>
+          {lastReq.body && (
+            <div style={{ marginBottom: '8px' }}>
+              <div style={{ color: '#475569', fontSize: '10px', marginBottom: '4px' }}>Request Body:</div>
+              <div style={{ background: BG, borderRadius: '6px', padding: '8px', fontFamily: 'monospace', fontSize: '11px', color: '#f1fa8c', border: '1px solid #1e293b' }}>
+                {JSON.stringify(lastReq.body, null, 2)}
+              </div>
+            </div>
+          )}
+          <div>
+            <div style={{ color: '#475569', fontSize: '10px', marginBottom: '4px' }}>{lastReq.error ? 'Error:' : 'Response Body:'}</div>
+            <div style={{ background: BG, borderRadius: '6px', padding: '8px', fontFamily: 'monospace', fontSize: '11px', color: lastReq.error ? ERROR : '#a3e635', border: '1px solid #1e293b', maxHeight: '140px', overflow: 'auto' }}>
+              {lastReq.error
+                ? lastReq.error
+                : lastReq.data === null
+                  ? '(204 No Content)'
+                  : JSON.stringify(lastReq.data, null, 2)
+              }
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* История запросов */}
+      {requests.length > 0 && (
+        <div style={s.card}>
+          <span style={s.label}>REQUEST HISTORY</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {requests.map(req => (
+              <div key={req.id} style={{ display: 'flex', gap: '8px', alignItems: 'center', padding: '4px 8px', background: BG, borderRadius: '4px', fontSize: '11px' }}>
+                <span style={{ color: METHOD_COLORS[req.method], fontWeight: 700, minWidth: '48px' }}>{req.method}</span>
+                <span style={{ color: '#475569', flex: 1 }}>{req.endpoint}</span>
+                <span style={{ color: req.error ? ERROR : SUCCESS, minWidth: '32px' }}>{req.status}</span>
+                <span style={{ color: '#334155', minWidth: '45px', textAlign: 'right' }}>{req.duration}ms</span>
+              </div>
+            ))}
+            <div ref={logsEndRef} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

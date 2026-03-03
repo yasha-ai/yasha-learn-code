@@ -1,0 +1,631 @@
+## 54. Web Workers в Angular 🔧
+
+Привет! Яша здесь. JavaScript — однопоточный язык, и тяжёлые вычисления блокируют UI. Web Workers решают эту проблему: они дают нам второй поток. Сегодня разберём как использовать Web Workers в Angular по-взрослому 💪
+
+---
+
+### Зачем нужны Web Workers
+
+Главный поток браузера занимается:
+- Рендерингом DOM
+- Обработкой событий
+- Выполнением JavaScript
+
+Если JS занимает более **50ms** — браузер начинает «зависать». Примеры тяжёлых задач:
+- Обработка больших массивов данных (>100k элементов)
+- Криптография, хеширование
+- Парсинг/трансформация JSON/CSV
+- Генерация отчётов, PDF
+- Машинное обучение в браузере
+
+```
+Главный поток (UI):  [UI] [UI] [Heavy!!!! блок ] [UI] — пользователь видит зависание
+Web Worker:          [UI] [UI] [────────────────] [UI] — UI не блокируется
+                              ↑ Worker считает отдельно
+```
+
+---
+
+### Создание Web Worker через Angular CLI
+
+```bash
+# Генерация worker (Angular создаст нужные файлы)
+ng generate web-worker app
+
+# Или для конкретного модуля
+ng generate web-worker features/data-processor/data-processor
+```
+
+Angular автоматически создаст два файла:
+
+```typescript
+// src/app/app.worker.ts
+/// <reference lib="webworker" />
+
+addEventListener('message', ({ data }) => {
+  // data — то что пришло из главного потока
+  const result = yourHeavyComputation(data);
+  postMessage(result); // отправить результат обратно
+});
+```
+
+```typescript
+// src/app/app.component.ts — вызов worker
+if (typeof Worker !== 'undefined') {
+  const worker = new Worker(new URL('./app.worker', import.meta.url));
+  worker.onmessage = ({ data }) => {
+    console.log('Результат:', data);
+  };
+  worker.postMessage({ input: 'start' });
+}
+```
+
+---
+
+### Worker Service: обёртка для Angular
+
+```typescript
+// worker.service.ts — абстракция над Workers
+import { Injectable, OnDestroy } from '@angular/core';
+import { Observable, Subject } from 'rxjs';
+
+@Injectable({ providedIn: 'root' })
+export class DataWorkerService implements OnDestroy {
+  private worker: Worker;
+  private responses$ = new Subject<any>();
+
+  constructor() {
+    this.worker = new Worker(
+      new URL('./data.worker', import.meta.url),
+      { type: 'module' }
+    );
+    this.worker.onmessage = ({ data }) => {
+      this.responses$.next(data);
+    };
+    this.worker.onerror = (err) => {
+      this.responses$.error(err);
+    };
+  }
+
+  // Отправить задачу и получить Observable с результатом
+  process<T>(command: string, payload: unknown): Observable<T> {
+    return new Observable<T>(observer => {
+      const subscription = this.responses$.subscribe({
+        next: (data) => {
+          if (data.command === command) {
+            observer.next(data.result as T);
+            observer.complete();
+          }
+        },
+        error: (err) => observer.error(err),
+      });
+
+      this.worker.postMessage({ command, payload });
+
+      return () => subscription.unsubscribe();
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.worker.terminate();
+    this.responses$.complete();
+  }
+}
+```
+
+```typescript
+// data.worker.ts
+/// <reference lib="webworker" />
+
+addEventListener('message', ({ data }) => {
+  const { command, payload } = data;
+
+  switch (command) {
+    case 'sortLargeArray':
+      const sorted = [...payload].sort((a, b) => a - b);
+      postMessage({ command, result: sorted });
+      break;
+
+    case 'calculatePrimes':
+      const primes = findPrimes(payload.limit);
+      postMessage({ command, result: primes });
+      break;
+
+    case 'processCSV':
+      const rows = parseAndTransformCSV(payload.csv);
+      postMessage({ command, result: rows });
+      break;
+  }
+});
+
+function findPrimes(limit: number): number[] {
+  const sieve = new Uint8Array(limit + 1).fill(1);
+  sieve[0] = sieve[1] = 0;
+  for (let i = 2; i * i <= limit; i++) {
+    if (sieve[i]) {
+      for (let j = i * i; j <= limit; j += i) sieve[j] = 0;
+    }
+  }
+  return Array.from(sieve.entries()).filter(([, v]) => v).map(([i]) => i);
+}
+```
+
+---
+
+### Comlink: типобезопасные Workers
+
+[Comlink](https://github.com/GoogleChromeLabs/comlink) от Google — устраняет boilerplate:
+
+```bash
+npm install comlink
+```
+
+```typescript
+// heavy-computation.worker.ts
+import { expose } from 'comlink';
+
+// Экспортируем класс — Comlink создаст прокси
+const api = {
+  async sortArray(arr: number[]): Promise<number[]> {
+    return [...arr].sort((a, b) => a - b);
+  },
+
+  async findPrimes(limit: number): Promise<number[]> {
+    const sieve = new Uint8Array(limit + 1).fill(1);
+    sieve[0] = sieve[1] = 0;
+    for (let i = 2; i * i <= limit; i++) {
+      if (sieve[i]) {
+        for (let j = i * i; j <= limit; j += i) sieve[j] = 0;
+      }
+    }
+    return Array.from(sieve.entries()).filter(([, v]) => v).map(([i]) => i);
+  },
+
+  async hashData(data: string): Promise<string> {
+    const buffer = new TextEncoder().encode(data);
+    const hash = await crypto.subtle.digest('SHA-256', buffer);
+    return Array.from(new Uint8Array(hash))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+};
+
+expose(api);
+export type HeavyComputationWorker = typeof api;
+```
+
+```typescript
+// computation.service.ts
+import { Injectable, OnDestroy } from '@angular/core';
+import { wrap, Remote } from 'comlink';
+import type { HeavyComputationWorker } from './heavy-computation.worker';
+
+@Injectable({ providedIn: 'root' })
+export class ComputationService implements OnDestroy {
+  private worker: Worker;
+  // Remote<T> — типизированный прокси на worker API
+  private api: Remote<HeavyComputationWorker>;
+
+  constructor() {
+    this.worker = new Worker(
+      new URL('./heavy-computation.worker', import.meta.url),
+      { type: 'module' }
+    );
+    this.api = wrap<HeavyComputationWorker>(this.worker);
+  }
+
+  // Полная типизация — TypeScript знает все методы и их сигнатуры!
+  async sortArray(arr: number[]): Promise<number[]> {
+    return this.api.sortArray(arr);
+  }
+
+  async findPrimes(limit: number): Promise<number[]> {
+    return this.api.findPrimes(limit);
+  }
+
+  async hashData(data: string): Promise<string> {
+    return this.api.hashData(data);
+  }
+
+  ngOnDestroy(): void {
+    this.worker.terminate();
+  }
+}
+```
+
+---
+
+### Передача данных: Transferable Objects
+
+По умолчанию данные **копируются** между потоками. Для больших данных используем `Transferable`:
+
+```typescript
+// ❌ Копирование — медленно для больших массивов
+worker.postMessage({ data: hugeArrayBuffer });
+
+// ✅ Transfer — передаём владение без копирования (O(1) по времени!)
+const buffer = new ArrayBuffer(1024 * 1024 * 100); // 100MB
+worker.postMessage({ buffer }, [buffer]); // второй аргумент — список transferable
+
+// После transfer — buffer в главном потоке недоступен!
+console.log(buffer.byteLength); // 0 — передан worker'у
+```
+
+---
+
+### SharedArrayBuffer: общая память
+
+```typescript
+// Требует COOP/COEP заголовков на сервере
+// Cross-Origin-Opener-Policy: same-origin
+// Cross-Origin-Embedder-Policy: require-corp
+
+// Главный поток
+const sharedBuffer = new SharedArrayBuffer(4); // 4 байта
+const sharedArray = new Int32Array(sharedBuffer);
+worker.postMessage({ sharedBuffer }); // передаём без копирования
+
+// Читаем результат через Atomics
+Atomics.wait(sharedArray, 0, 0); // ждём пока worker запишет
+console.log(sharedArray[0]); // читаем результат
+
+// Worker
+self.onmessage = ({ data }) => {
+  const arr = new Int32Array(data.sharedBuffer);
+  // Долгие вычисления...
+  Atomics.store(arr, 0, 42); // записываем результат
+  Atomics.notify(arr, 0); // будим главный поток
+};
+```
+
+---
+
+### Практический пример: обработка CSV
+
+```typescript
+// csv-processor.worker.ts
+/// <reference lib="webworker" />
+
+interface CSVRow {
+  id: number;
+  amount: number;
+  category: string;
+  date: string;
+}
+
+interface ProcessResult {
+  total: number;
+  byCategory: Record<string, number>;
+  topItems: CSVRow[];
+}
+
+addEventListener('message', ({ data }: MessageEvent<string>) => {
+  const rows = parseCSV(data);
+  const result: ProcessResult = {
+    total: rows.reduce((sum, r) => sum + r.amount, 0),
+    byCategory: rows.reduce((acc, r) => ({
+      ...acc,
+      [r.category]: (acc[r.category] || 0) + r.amount
+    }), {}),
+    topItems: [...rows].sort((a, b) => b.amount - a.amount).slice(0, 10),
+  };
+  postMessage(result);
+});
+
+function parseCSV(raw: string): CSVRow[] {
+  return raw.split('\n').slice(1).map(line => {
+    const [id, amount, category, date] = line.split(',');
+    return { id: +id, amount: +amount, category, date };
+  });
+}
+```
+
+```typescript
+// В компоненте
+@Component({
+  template: `
+    <input type="file" (change)="onFile($event)" accept=".csv">
+
+    @if (loading()) {
+      <p>⏳ Обрабатываю в Web Worker...</p>
+    }
+
+    @if (result()) {
+      <p>Итого: {{ result()!.total | currency }}</p>
+    }
+  `
+})
+export class CSVComponent {
+  loading = signal(false);
+  result = signal<ProcessResult | null>(null);
+
+  private worker = new Worker(
+    new URL('./csv-processor.worker', import.meta.url)
+  );
+
+  constructor() {
+    this.worker.onmessage = ({ data }) => {
+      this.result.set(data);
+      this.loading.set(false);
+    };
+  }
+
+  async onFile(event: Event): Promise<void> {
+    const file = (event.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+
+    this.loading.set(true);
+    const text = await file.text();
+    this.worker.postMessage(text);
+  }
+}
+```
+
+---
+
+### Ограничения Web Workers
+
+```typescript
+// ❌ НЕ ДОСТУПНО в Workers:
+// - DOM (document, window)
+// - localStorage/sessionStorage
+// - History API
+// - Alert/confirm/prompt
+// - Angular DI контейнер
+
+// ✅ ДОСТУПНО:
+// - fetch API
+// - WebSockets
+// - IndexedDB
+// - crypto API
+// - Canvas (OffscreenCanvas)
+// - Timers (setTimeout, setInterval)
+// - ArrayBuffer, TypedArrays
+// - WebAssembly
+```
+
+---
+
+## Playground 🎮
+
+Сравнение выполнения тяжёлой задачи в main thread vs Web Worker:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback, useRef } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+// Симулируем тяжёлое вычисление: поиск простых чисел
+function findPrimesSync(limit) {
+  const start = performance.now();
+  const sieve = new Uint8Array(limit + 1).fill(1);
+  sieve[0] = sieve[1] = 0;
+  for (let i = 2; i * i <= limit; i++) {
+    if (sieve[i]) for (let j = i * i; j <= limit; j += i) sieve[j] = 0;
+  }
+  const primes = [];
+  for (let i = 2; i <= limit; i++) if (sieve[i]) primes.push(i);
+  const duration = performance.now() - start;
+  return { count: primes.length, duration };
+}
+
+// Симуляция async Worker через setTimeout+chunks
+function findPrimesAsync(limit, onProgress, onComplete) {
+  const start = performance.now();
+  const sieve = new Uint8Array(limit + 1).fill(1);
+  sieve[0] = sieve[1] = 0;
+  const chunkSize = 5000;
+  let i = 2;
+
+  function processChunk() {
+    const end = Math.min(i + chunkSize, Math.sqrt(limit) + 1);
+    for (; i < end; i++) {
+      if (sieve[i]) for (let j = i * i; j <= limit; j += i) sieve[j] = 0;
+    }
+    onProgress(Math.min(100, Math.round((i / (Math.sqrt(limit) + 1)) * 100)));
+    if (i < Math.sqrt(limit) + 1) {
+      setTimeout(processChunk, 0);
+    } else {
+      const primes = [];
+      for (let k = 2; k <= limit; k++) if (sieve[k]) primes.push(k);
+      onComplete({ count: primes.length, duration: performance.now() - start });
+    }
+  }
+  processChunk();
+}
+
+export default function App() {
+  const [limit, setLimit] = useState(500000);
+  const [mainResult, setMainResult] = useState(null);
+  const [workerResult, setWorkerResult] = useState(null);
+  const [mainRunning, setMainRunning] = useState(false);
+  const [workerRunning, setWorkerRunning] = useState(false);
+  const [uiFrozen, setUiFrozen] = useState(false);
+  const [workerProgress, setWorkerProgress] = useState(0);
+  const [counter, setCounter] = useState(0);
+  const counterRef = useRef(null);
+
+  const startCounter = useCallback(() => {
+    if (counterRef.current) return;
+    counterRef.current = setInterval(() => {
+      setCounter(c => c + 1);
+    }, 16);
+  }, []);
+
+  const stopCounter = useCallback(() => {
+    clearInterval(counterRef.current);
+    counterRef.current = null;
+  }, []);
+
+  const runMainThread = useCallback(() => {
+    setMainRunning(true);
+    setUiFrozen(true);
+    startCounter();
+    // Запускаем синхронно — UI ЗАМОРОЗИТСЯ
+    setTimeout(() => {
+      const result = findPrimesSync(limit);
+      setMainResult(result);
+      setMainRunning(false);
+      setUiFrozen(false);
+      stopCounter();
+    }, 50);
+  }, [limit, startCounter, stopCounter]);
+
+  const runWorker = useCallback(() => {
+    setWorkerRunning(true);
+    setWorkerProgress(0);
+    startCounter();
+    findPrimesAsync(
+      limit,
+      (progress) => setWorkerProgress(progress),
+      (result) => {
+        setWorkerResult(result);
+        setWorkerRunning(false);
+        stopCounter();
+      }
+    );
+  }, [limit, startCounter, stopCounter]);
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '680px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>🔧 Web Worker Simulator</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>Main thread vs Web Worker</div>
+        </div>
+
+        {/* UI Health indicator */}
+        <div style={{
+          background: '#1e293b', borderRadius: '12px', padding: '14px 18px',
+          marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '16px',
+        }}>
+          <div>
+            <div style={{ color: '#94a3b8', fontSize: '11px' }}>АНИМАЦИЯ (UI HEALTH)</div>
+            <div style={{ fontSize: '28px', fontWeight: 'bold', color: uiFrozen ? '#f87171' : '#4ade80' }}>
+              {uiFrozen ? '🔴 ЗАМОРОЖЕН' : '🟢 ' + counter}
+            </div>
+          </div>
+          <div style={{ flex: 1, fontSize: '12px', color: '#64748b' }}>
+            {uiFrozen
+              ? '❌ UI заблокирован — пользователь видит зависание!'
+              : counter > 0
+              ? '✅ UI работает плавно во время вычисления'
+              : 'Счётчик покажет состояние UI во время вычислений'}
+          </div>
+        </div>
+
+        {/* Limit slider */}
+        <div style={{
+          background: '#1e293b', borderRadius: '12px', padding: '14px 18px',
+          marginBottom: '16px',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+            <span style={{ color: '#94a3b8', fontSize: '13px' }}>Лимит простых чисел</span>
+            <span style={{ color: '#f1f5f9', fontWeight: 'bold' }}>{limit.toLocaleString()}</span>
+          </div>
+          <input type="range" min={100000} max={2000000} step={100000} value={limit}
+            onChange={e => setLimit(+e.target.value)}
+            style={{ width: '100%', accentColor: ANGULAR_RED }} />
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
+            <span>100K (быстро)</span><span>2M (медленно)</span>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+          {/* Main thread */}
+          <div style={{
+            background: '#1e293b', borderRadius: '12px', padding: '16px',
+            border: '1px solid #7f1d1d',
+          }}>
+            <div style={{ color: '#f87171', fontWeight: 'bold', marginBottom: '12px', fontSize: '14px' }}>
+              ❌ Main Thread
+            </div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '12px' }}>
+              Блокирует UI пока считает
+            </div>
+            <button onClick={runMainThread} disabled={mainRunning || workerRunning} style={{
+              width: '100%', padding: '10px', borderRadius: '8px',
+              border: 'none', cursor: mainRunning ? 'not-allowed' : 'pointer',
+              background: mainRunning ? '#374151' : '#7f1d1d',
+              color: 'white', fontWeight: 'bold', fontSize: '13px', marginBottom: '12px',
+            }}>
+              {mainRunning ? '⏳ Считает...' : '▶ Запустить'}
+            </button>
+            {mainResult && (
+              <div style={{ background: '#0f172a', borderRadius: '8px', padding: '10px' }}>
+                <div style={{ color: '#f87171', fontSize: '12px' }}>Найдено простых: <strong>{mainResult.count.toLocaleString()}</strong></div>
+                <div style={{ color: '#f87171', fontSize: '12px', marginTop: '4px' }}>Время: <strong>{mainResult.duration.toFixed(0)}мс</strong></div>
+                <div style={{ color: '#f87171', fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>UI был заморожен!</div>
+              </div>
+            )}
+          </div>
+
+          {/* Worker */}
+          <div style={{
+            background: '#1e293b', borderRadius: '12px', padding: '16px',
+            border: '1px solid #14532d',
+          }}>
+            <div style={{ color: '#4ade80', fontWeight: 'bold', marginBottom: '12px', fontSize: '14px' }}>
+              ✅ Web Worker
+            </div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '12px' }}>
+              UI остаётся отзывчивым
+            </div>
+            <button onClick={runWorker} disabled={workerRunning || mainRunning} style={{
+              width: '100%', padding: '10px', borderRadius: '8px',
+              border: 'none', cursor: workerRunning ? 'not-allowed' : 'pointer',
+              background: workerRunning ? '#374151' : '#14532d',
+              color: 'white', fontWeight: 'bold', fontSize: '13px', marginBottom: '12px',
+            }}>
+              {workerRunning ? \`⚙️ \${workerProgress}%\` : '▶ Запустить'}
+            </button>
+            {workerRunning && (
+              <div style={{ background: '#0f172a', borderRadius: '4px', height: '4px', marginBottom: '8px' }}>
+                <div style={{ background: '#4ade80', height: '100%', width: \`\${workerProgress}%\`, transition: 'width 0.1s', borderRadius: '4px' }} />
+              </div>
+            )}
+            {workerResult && (
+              <div style={{ background: '#0f172a', borderRadius: '8px', padding: '10px' }}>
+                <div style={{ color: '#4ade80', fontSize: '12px' }}>Найдено простых: <strong>{workerResult.count.toLocaleString()}</strong></div>
+                <div style={{ color: '#4ade80', fontSize: '12px', marginTop: '4px' }}>Время: <strong>{workerResult.duration.toFixed(0)}мс</strong></div>
+                <div style={{ color: '#4ade80', fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>UI не был заморожен ✓</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Code snippet */}
+        <div style={{
+          background: '#1e293b', borderRadius: '12px', padding: '16px',
+          fontSize: '12px', color: '#94a3b8',
+        }}>
+          <div style={{ color: ANGULAR_RED, fontWeight: 'bold', marginBottom: '8px' }}>
+            ng generate web-worker data-processor
+          </div>
+          <pre style={{ margin: 0, color: '#a78bfa', lineHeight: 1.6 }}>
+{"// data-processor.worker.ts
+addEventListener('message', ({ data }) => {
+  const result = heavyComputation(data);
+  postMessage(result); // ← не блокирует UI!
+});
+
+// Comlink (типобезопасно):
+// const api = wrap<WorkerAPI>(new Worker(...));
+// const result = await api.process(data); // ← Promise!"}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

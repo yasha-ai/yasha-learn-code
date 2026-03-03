@@ -1,0 +1,422 @@
+## 🚀 Signals Advanced: linkedSignal, resource(), untracked
+
+Продвинутые возможности Angular Signals: двунаправленные сигналы, загрузка данных, оптимизация производительности и интеграция с RxJS.
+
+---
+
+### 🔗 linkedSignal() — двунаправленный вычисляемый сигнал (Angular 19)
+
+`linkedSignal` похож на `computed`, но его можно **изменять вручную**. При изменении источника — значение пересчитывается:
+
+```typescript
+import { Component, signal, linkedSignal } from '@angular/core';
+
+@Component({ ... })
+export class ShippingComponent {
+  // Выбранная страна
+  country = signal('RU');
+
+  // linkedSignal — пересчитывается при смене страны, но можно изменить вручную
+  shippingMethod = linkedSignal(() => {
+    // Дефолтное значение зависит от страны
+    return this.country() === 'RU' ? 'courier' : 'post';
+  });
+
+  changeCountry(c: string) {
+    this.country.set(c);
+    // shippingMethod автоматически сбросится к дефолту для новой страны
+  }
+
+  selectMethod(method: string) {
+    this.shippingMethod.set(method); // Пользователь переопределяет
+  }
+}
+```
+
+```html
+<select [(ngModel)]="country" (change)="changeCountry($event.target.value)">
+  <option value="RU">Россия</option>
+  <option value="US">США</option>
+</select>
+
+<label *ngFor="let method of methods">
+  <input
+    type="radio"
+    [value]="method"
+    [checked]="shippingMethod() === method"
+    (change)="selectMethod(method)"
+  />
+  {{ method }}
+</label>
+```
+
+---
+
+### 🌐 resource() API — загрузка данных (Angular 19)
+
+`resource()` — declarative data fetching с встроенными состояниями загрузки:
+
+```typescript
+import { Component, signal, resource } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { firstValueFrom } from 'rxjs';
+
+@Component({
+  selector: 'app-user-profile',
+  standalone: true,
+  template: `
+    <div *ngIf="userResource.isLoading()">⏳ Загружаем...</div>
+    <div *ngIf="userResource.error()">❌ {{ userResource.error() }}</div>
+    <div *ngIf="userResource.value() as user">
+      <h2>{{ user.name }}</h2>
+      <p>{{ user.email }}</p>
+    </div>
+  `
+})
+export class UserProfileComponent {
+  userId = signal(1);
+
+  // resource автоматически перезагружает при изменении userId
+  userResource = resource({
+    request: this.userId,  // сигнал-запрос (перезагрузка при изменении)
+    loader: async ({ request: id }) => {
+      const response = await fetch(`/api/users/${id}`);
+      if (!response.ok) throw new Error('Ошибка загрузки');
+      return response.json();
+    }
+  });
+
+  loadUser(id: number) {
+    this.userId.set(id);  // автоматически перезапустит loader
+  }
+
+  reload() {
+    this.userResource.reload(); // принудительная перезагрузка
+  }
+}
+```
+
+#### Состояния resource():
+
+```typescript
+userResource.status()  // 'idle' | 'loading' | 'refreshing' | 'resolved' | 'error' | 'local'
+userResource.isLoading()  // true при 'loading' | 'refreshing'
+userResource.value()      // данные или undefined
+userResource.error()      // ошибка или undefined
+userResource.reload()     // принудительная перезагрузка
+userResource.set(value)   // локальное обновление (без запроса)
+```
+
+---
+
+### 🔕 untracked() — чтение без зависимости
+
+По умолчанию чтение сигнала внутри `computed`/`effect` создаёт зависимость. `untracked()` позволяет читать **без регистрации зависимости**:
+
+```typescript
+import { Component, signal, computed, effect, untracked } from '@angular/core';
+
+@Component({ ... })
+export class LoggerComponent {
+  count = signal(0);
+  user = signal({ name: 'Яша' });
+
+  // Пересчитывается ТОЛЬКО при изменении count, не user
+  displayText = computed(() => {
+    const c = this.count();  // зависимость на count
+    const userName = untracked(() => this.user().name);  // БЕЗ зависимости!
+    return `${userName}: ${c}`;
+  });
+
+  constructor() {
+    effect(() => {
+      console.log('Счётчик:', this.count());  // зависит от count
+
+      // Читаем user без подписки — effect не перезапустится при смене user
+      const currentUser = untracked(() => this.user());
+      console.log('Текущий пользователь (без отслеживания):', currentUser.name);
+    });
+  }
+}
+```
+
+---
+
+### 📦 Batch-обновления
+
+Несколько изменений сигналов можно объединить в одно обновление DOM:
+
+```typescript
+// Angular автоматически батчит синхронные обновления
+// Но можно явно использовать ngZone.run или просто обновлять в одной функции
+
+updateAll() {
+  // Все три изменения → только ОДИН цикл CD
+  this.name.set('Новое имя');
+  this.age.set(25);
+  this.email.set('new@email.com');
+}
+```
+
+---
+
+### 🔄 Signal-based Components — будущее Angular
+
+```typescript
+// Angular 17+ — компонент без Zone.js
+import { Component, signal, computed, effect, input } from '@angular/core';
+
+@Component({
+  selector: 'app-product-card',
+  standalone: true,
+  // changeDetection: ChangeDetectionStrategy.OnPush  // Не нужен с сигналами
+  template: `
+    <div class="card">
+      <h3>{{ product().name }}</h3>
+      <p class="price">{{ formattedPrice() }}</p>
+      <span [class.in-stock]="inStock()">
+        {{ stockLabel() }}
+      </span>
+      <button (click)="addToCart()">В корзину</button>
+    </div>
+  `
+})
+export class ProductCardComponent {
+  // Signal input
+  product = input.required<Product>();
+
+  // Computed
+  formattedPrice = computed(() =>
+    new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB' })
+      .format(this.product().price)
+  );
+
+  inStock = computed(() => this.product().stock > 0);
+
+  stockLabel = computed(() =>
+    this.product().stock > 10 ? 'В наличии'
+    : this.product().stock > 0 ? `Осталось ${this.product().stock} шт.`
+    : 'Нет в наличии'
+  );
+
+  // Output
+  cartAdd = output<Product>();
+
+  addToCart() {
+    this.cartAdd.emit(this.product());
+  }
+}
+```
+
+---
+
+### 🏆 Signals vs RxJS: когда что использовать
+
+```typescript
+// ✅ Signals — для состояния UI
+const count = signal(0);
+const isOpen = signal(false);
+const selectedTab = signal('overview');
+const userData = signal<User | null>(null);
+
+// ✅ RxJS — для асинхронных потоков
+const users$ = this.http.get<User[]>('/api/users');
+const search$ = searchControl.valueChanges.pipe(
+  debounceTime(300),
+  switchMap(q => this.searchService.search(q))
+);
+
+// ✅ Мост — конвертация в обе стороны
+const users = toSignal(users$, { initialValue: [] });  // RxJS → Signal
+const search$ = toObservable(searchQuery);             // Signal → RxJS
+```
+
+---
+
+### 📊 Effect cleanup
+
+```typescript
+effect((onCleanup) => {
+  const timerId = setInterval(() => {
+    this.ticks.update(t => t + 1);
+  }, 1000);
+
+  // onCleanup вызывается перед каждым перезапуском effect
+  onCleanup(() => {
+    clearInterval(timerId);
+    console.log('Таймер очищен');
+  });
+});
+```
+
+---
+
+```mdx-playground
+export default function SignalsAdvancedPlayground() {
+  const [items, setItems] = React.useState(['Яблоко', 'Банан', 'Вишня']);
+  const [selectedItem, setSelectedItem] = React.useState('Яблоко');
+  const [customLabel, setCustomLabel] = React.useState(null);
+  const [search, setSearch] = React.useState('');
+  const [effects, setEffects] = React.useState([]);
+  const [multiplier, setMultiplier] = React.useState(2);
+  const [base, setBase] = React.useState(5);
+
+  const addEffect = (msg, type = 'effect') => {
+    setEffects(prev => [{ msg, type, id: Date.now() + Math.random() }, ...prev].slice(0, 6));
+  };
+
+  // Simulated linkedSignal behavior
+  const defaultLabel = selectedItem ? `Выбрано: ${selectedItem}` : 'Не выбрано';
+  const displayLabel = customLabel !== null ? customLabel : defaultLabel;
+
+  const changeItem = (item) => {
+    setSelectedItem(item);
+    setCustomLabel(null); // Сброс как linkedSignal при смене источника
+    addEffect(`linkedSignal: источник изменился → "${item}" → сброс к дефолту`, 'linked');
+  };
+
+  const changeLabel = (val) => {
+    setCustomLabel(val);
+    addEffect(`linkedSignal.set("${val}") — ручное переопределение`, 'set');
+  };
+
+  // Simulated computed chain
+  const step1 = base;
+  const step2 = base * multiplier;
+  const step3 = step2 + 10;
+  const step4 = step3 > 20 ? 'большое' : 'малое';
+  const step5 = `${step4} (${step3})`;
+
+  // untracked simulation
+  const [trackedCount, setTrackedCount] = React.useState(0);
+  const [untrackedVal, setUntrackedVal] = React.useState('secret');
+
+  const filteredItems = items.filter(i => i.toLowerCase().includes(search.toLowerCase()));
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: 500, padding: 24, borderRadius: 12, fontFamily: 'system-ui', color: '#e2e8f0' }}>
+      <div style={{ color: '#dd0031', fontWeight: 700, fontSize: 16, marginBottom: 20 }}>
+        🚀 Signals Advanced: linkedSignal, computed chain, untracked
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+        <div>
+          {/* linkedSignal */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #7dd3fc', marginBottom: 16 }}>
+            <div style={{ color: '#7dd3fc', fontSize: 13, fontWeight: 700, marginBottom: 12 }}>🔗 linkedSignal()</div>
+
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>Источник (меняет дефолт):</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {items.map(item => (
+                  <button key={item} onClick={() => changeItem(item)} style={{ background: selectedItem === item ? '#1d4ed8' : '#334155', color: 'white', border: 'none', padding: '4px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+                    {item}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>Ручное переопределение .set():</div>
+              <input
+                value={customLabel || ''}
+                onChange={e => changeLabel(e.target.value)}
+                placeholder="Введи свой текст..."
+                style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', color: '#e2e8f0', padding: '6px 10px', borderRadius: 6, fontSize: 12, boxSizing: 'border-box', outline: 'none' }}
+              />
+            </div>
+
+            <div style={{ background: '#0f172a', borderRadius: 6, padding: 10 }}>
+              <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>shippingLabel() =</div>
+              <div style={{ fontSize: 14, color: customLabel !== null ? '#dd0031' : '#22c55e', fontWeight: 600 }}>
+                {displayLabel}
+              </div>
+              <div style={{ fontSize: 10, color: '#475569', marginTop: 4 }}>
+                {customLabel !== null ? '← вручную переопределено' : '← авто из источника'}
+              </div>
+            </div>
+          </div>
+
+          {/* computed chain */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #a78bfa' }}>
+            <div style={{ color: '#a78bfa', fontSize: 13, fontWeight: 700, marginBottom: 12 }}>🧮 Цепочка computed()</div>
+
+            <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 11, color: '#64748b' }}>base =</div>
+                <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                  {[1, 5, 10].map(v => (
+                    <button key={v} onClick={() => { setBase(v); addEffect(`base.set(${v})`, 'signal'); }} style={{ background: base === v ? '#7c3aed' : '#334155', color: 'white', border: 'none', padding: '3px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+                      {v}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: '#64748b' }}>multiplier =</div>
+                <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                  {[2, 3, 4].map(v => (
+                    <button key={v} onClick={() => { setMultiplier(v); addEffect(`multiplier.set(${v})`, 'signal'); }} style={{ background: multiplier === v ? '#7c3aed' : '#334155', color: 'white', border: 'none', padding: '3px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+                      ×{v}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {[
+              { label: 'base()', value: step1, formula: `= ${base}` },
+              { label: 'doubled = computed()', value: step2, formula: `= ${base} × ${multiplier}` },
+              { label: 'shifted = computed()', value: step3, formula: `= ${step2} + 10` },
+              { label: 'label = computed()', value: step4, formula: `= ${step3} > 20 ? "большое" : "малое"` },
+              { label: 'final = computed()', value: step5, formula: null },
+            ].map(({ label, value, formula }, i, arr) => (
+              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: i < arr.length - 1 ? 4 : 0 }}>
+                <div style={{ flex: 1, background: '#0f172a', borderRadius: 6, padding: '5px 10px', display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 11, color: '#a78bfa' }}>{label}</span>
+                  <span style={{ fontSize: 11, color: '#a3e635' }}>{String(value)}</span>
+                </div>
+                {formula && <div style={{ fontSize: 10, color: '#475569', minWidth: 120 }}>{formula}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          {/* untracked */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #f59e0b', marginBottom: 16 }}>
+            <div style={{ color: '#f59e0b', fontSize: 13, fontWeight: 700, marginBottom: 12 }}>🔕 untracked()</div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+              <button onClick={() => { setTrackedCount(c => c + 1); addEffect(`effect() запустится: trackedCount → ${trackedCount + 1}`, 'tracked'); }} style={{ background: '#dd0031', color: 'white', border: 'none', padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+                trackedCount++
+              </button>
+              <button onClick={() => { setUntrackedVal(v => v === 'secret' ? 'visible' : 'secret'); addEffect(`untracked: НЕ запустит effect`, 'untracked'); }} style={{ background: '#334155', color: '#94a3b8', border: '1px solid #f59e0b', padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+                untrackedVal toggle
+              </button>
+            </div>
+            <div style={{ background: '#0f172a', borderRadius: 6, padding: 10, fontSize: 12 }}>
+              <div style={{ color: '#7dd3fc' }}>trackedCount: <span style={{ color: '#a3e635' }}>{trackedCount}</span> <span style={{ color: '#22c55e', fontSize: 10 }}>← отслеживается</span></div>
+              <div style={{ color: '#7dd3fc' }}>untrackedVal: <span style={{ color: '#a3e635' }}>{untrackedVal}</span> <span style={{ color: '#f87171', fontSize: 10 }}>← untracked()</span></div>
+            </div>
+          </div>
+
+          {/* Effect log */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155' }}>
+            <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 10 }}>📋 Signal события</div>
+            {effects.length === 0 && <div style={{ color: '#475569', fontSize: 12 }}>Взаимодействуй с сигналами...</div>}
+            {effects.map((e, i) => {
+              const colors = { effect: '#f59e0b', linked: '#7dd3fc', set: '#dd0031', signal: '#a78bfa', tracked: '#22c55e', untracked: '#475569' };
+              return (
+                <div key={e.id} style={{ fontSize: 12, color: i === 0 ? colors[e.type] : '#475569', marginBottom: 6, transition: 'color 0.5s' }}>
+                  <span style={{ fontSize: 10, color: colors[e.type], border: `1px solid ${colors[e.type]}`, padding: '1px 5px', borderRadius: 4, marginRight: 6 }}>{e.type}</span>
+                  {e.msg}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```

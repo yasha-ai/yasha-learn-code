@@ -1,0 +1,511 @@
+## 57. Angular Elements (Web Components) 🧩
+
+Привет! Яша здесь. Angular Elements — это способ «запаковать» Angular-компонент в стандартный **Custom Element** (Web Component). Это значит, что твой компонент можно использовать в React, Vue, или даже в обычном HTML без Angular! Разберём как это работает 🚀
+
+---
+
+### Что такое Web Components
+
+Web Components — набор нативных браузерных стандартов:
+- **Custom Elements** — создание кастомных HTML-тегов (`<my-button>`)
+- **Shadow DOM** — инкапсуляция стилей и разметки
+- **HTML Templates** — `<template>` и `<slot>`
+
+```html
+<!-- После упаковки в Angular Elements: -->
+<!-- Используется в любом HTML без Angular! -->
+<script src="my-angular-element.js"></script>
+
+<my-rating-widget value="4" max="5"></my-rating-widget>
+<my-notification type="success" message="Saved!"></my-notification>
+```
+
+---
+
+### Создание Angular Element
+
+```bash
+npm install @angular/elements
+```
+
+```typescript
+// rating.component.ts — обычный Angular компонент
+@Component({
+  selector: 'app-rating',
+  standalone: true,
+  template: `
+    <div style="display: flex; gap: 4px;">
+      @for (star of stars; track star) {
+        <span
+          [style.color]="star <= value ? '#fbbf24' : '#475569'"
+          style="font-size: 24px; cursor: pointer;"
+          (click)="onRate(star)">
+          ★
+        </span>
+      }
+    </div>
+  `,
+})
+export class RatingComponent {
+  @Input() value = 0;
+  @Input() max = 5;
+  @Output() rated = new EventEmitter<number>();
+
+  get stars(): number[] {
+    return Array.from({ length: this.max }, (_, i) => i + 1);
+  }
+
+  onRate(star: number): void {
+    this.value = star;
+    this.rated.emit(star);
+  }
+}
+```
+
+```typescript
+// app.module.ts — регистрация как Custom Element
+import { NgModule, Injector } from '@angular/core';
+import { BrowserModule } from '@angular/platform-browser';
+import { createCustomElement } from '@angular/elements';
+import { RatingComponent } from './rating/rating.component';
+
+@NgModule({
+  imports: [BrowserModule, RatingComponent],
+})
+export class AppModule {
+  constructor(private injector: Injector) {}
+
+  ngDoBootstrap(): void {
+    // createCustomElement — превращает Angular компонент в Web Component
+    const RatingElement = createCustomElement(RatingComponent, {
+      injector: this.injector,
+    });
+
+    // Регистрируем в браузере под своим тегом
+    customElements.define('app-rating', RatingElement);
+  }
+}
+```
+
+---
+
+### Standalone компоненты как Elements (Angular 14+)
+
+```typescript
+// main.ts — без NgModule
+import { createApplication } from '@angular/platform-browser';
+import { createCustomElement } from '@angular/elements';
+import { RatingComponent } from './rating.component';
+import { NotificationComponent } from './notification.component';
+
+(async () => {
+  const app = await createApplication({
+    providers: [/* провайдеры */]
+  });
+
+  const Rating = createCustomElement(RatingComponent, { injector: app.injector });
+  const Notification = createCustomElement(NotificationComponent, { injector: app.injector });
+
+  customElements.define('app-rating', Rating);
+  customElements.define('app-notification', Notification);
+})();
+```
+
+---
+
+### @Input и @Output маппинг
+
+Angular автоматически маппит:
+- `@Input()` → атрибут/свойство Custom Element
+- `@Output()` → CustomEvent
+
+```html
+<!-- В HTML атрибуты — всегда строки -->
+<app-user-card user-id="42" show-avatar="true"></app-user-card>
+
+<!-- В JavaScript можно передавать объекты через свойства -->
+<script>
+  const card = document.querySelector('app-user-card');
+  card.user = { id: 42, name: 'Яша', email: 'yasha@example.com' };
+
+  // Слушаем Angular @Output как DOM событие
+  card.addEventListener('userSelected', (event) => {
+    console.log('Выбран пользователь:', event.detail);
+  });
+</script>
+```
+
+```typescript
+// Angular компонент — без изменений!
+@Component({ selector: 'app-user-card', ... })
+export class UserCardComponent {
+  @Input() userId!: number;
+  @Input() user!: User;
+  @Input() showAvatar = true;
+  @Output() userSelected = new EventEmitter<User>();
+}
+```
+
+---
+
+### Shadow DOM
+
+```typescript
+// Включение Shadow DOM для инкапсуляции стилей
+@Component({
+  selector: 'app-isolated-widget',
+  encapsulation: ViewEncapsulation.ShadowDom, // ← Shadow DOM!
+  template: `
+    <div class="widget">
+      <h2>Изолированный виджет</h2>
+      <slot></slot> <!-- слот для контента от родителя -->
+    </div>
+  `,
+  styles: [`
+    /* Эти стили НЕ утекут за пределы Shadow DOM */
+    .widget { background: #1e293b; padding: 16px; border-radius: 8px; }
+    h2 { color: #dd0031; margin: 0 0 8px; }
+  `]
+})
+export class IsolatedWidgetComponent {}
+```
+
+---
+
+### Сборка Angular Element в один файл
+
+```json
+// angular.json — конфигурация для сборки элемента
+{
+  "projects": {
+    "elements": {
+      "architect": {
+        "build": {
+          "options": {
+            "outputPath": "dist/elements",
+            "main": "projects/elements/src/main.ts",
+            "polyfills": [],
+            "optimization": true
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+```bash
+# Сборка
+ng build elements --configuration=production
+
+# Объединить в один файл (устаревший способ)
+cat dist/elements/runtime.js dist/elements/polyfills.js dist/elements/main.js > elements.js
+
+# Современный способ — один бандл через esbuild
+ng build --single-bundle true
+```
+
+---
+
+### Использование в React
+
+```tsx
+// react-app/src/AngularWidget.tsx
+import { useEffect, useRef } from 'react';
+
+// Декларация для TypeScript
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      'app-rating': {
+        value?: number;
+        max?: number;
+        onRated?: (event: CustomEvent<number>) => void;
+      };
+    }
+  }
+}
+
+function AngularRating({ value, max, onRate }: Props) {
+  const ref = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const handler = (e: Event) => onRate?.((e as CustomEvent).detail);
+    el.addEventListener('rated', handler);
+    return () => el.removeEventListener('rated', handler);
+  }, [onRate]);
+
+  return <app-rating ref={ref} value={value} max={max} />;
+}
+```
+
+---
+
+### NgElement: типизированный API
+
+```typescript
+import { NgElement, WithProperties } from '@angular/elements';
+import { RatingComponent } from './rating.component';
+
+// Типизированный элемент
+type RatingElement = NgElement & WithProperties<RatingComponent>;
+
+// Программное создание
+const rating = document.createElement('app-rating') as RatingElement;
+rating.value = 3;   // TypeScript знает тип!
+rating.max = 5;
+document.body.appendChild(rating);
+
+// Получение существующего элемента
+const el = document.querySelector('app-rating') as RatingElement;
+el.value = 5; // полная типизация
+```
+
+---
+
+### Micro-frontend с Angular Elements
+
+```typescript
+// shell/main.ts — загрузка Angular Elements динамически
+async function loadMicroFrontend(url: string, elementName: string): Promise<void> {
+  // Проверяем, не загружен ли уже элемент
+  if (customElements.get(elementName)) {
+    return;
+  }
+
+  // Динамическая загрузка скрипта
+  await new Promise<void>((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = url;
+    script.onload = () => resolve();
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+}
+
+// Использование
+await loadMicroFrontend('https://team-a.example.com/elements.js', 'team-a-widget');
+// Теперь <team-a-widget> работает везде!
+```
+
+---
+
+## Playground 🎮
+
+Симуляция Custom Element в не-Angular окружении:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+// Симуляция Angular Element: RatingComponent
+function AngularRatingElement({ value = 0, max = 5, onRated, disabled = false }) {
+  const [hovered, setHovered] = useState(0);
+  const [internalValue, setInternalValue] = useState(value);
+
+  const handleClick = (star) => {
+    if (disabled) return;
+    const newVal = internalValue === star ? 0 : star;
+    setInternalValue(newVal);
+    onRated?.(newVal);
+  };
+
+  return (
+    <div style={{ display: 'flex', gap: '4px', padding: '8px' }}>
+      {Array.from({ length: max }, (_, i) => i + 1).map(star => (
+        <span key={star}
+          onClick={() => handleClick(star)}
+          onMouseEnter={() => !disabled && setHovered(star)}
+          onMouseLeave={() => setHovered(0)}
+          style={{
+            fontSize: '28px', cursor: disabled ? 'default' : 'pointer',
+            color: star <= (hovered || internalValue) ? '#fbbf24' : '#475569',
+            transition: 'color 0.15s, transform 0.1s',
+            transform: star <= hovered && !disabled ? 'scale(1.2)' : 'scale(1)',
+            display: 'inline-block',
+            opacity: disabled ? 0.5 : 1,
+          }}>★</span>
+      ))}
+      {internalValue > 0 && (
+        <span style={{ color: '#94a3b8', fontSize: '14px', marginLeft: '8px', alignSelf: 'center' }}>
+          {internalValue}/{max}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Симуляция Angular Element: NotificationComponent
+function AngularNotificationElement({ type = 'info', message, onClose }) {
+  const colors = {
+    success: { bg: '#14532d20', border: '#4ade80', text: '#4ade80', icon: '✅' },
+    error: { bg: '#7f1d1d20', border: '#f87171', text: '#f87171', icon: '❌' },
+    warning: { bg: '#78350f20', border: '#fbbf24', text: '#fbbf24', icon: '⚠️' },
+    info: { bg: '#1d3a7a20', border: '#60a5fa', text: '#60a5fa', icon: 'ℹ️' },
+  };
+  const c = colors[type] || colors.info;
+
+  return (
+    <div style={{
+      background: c.bg, border: \`1px solid \${c.border}\`, borderRadius: '8px',
+      padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    }}>
+      <span style={{ color: c.text, fontSize: '14px' }}>{c.icon} {message}</span>
+      <button onClick={onClose} style={{ background: 'none', border: 'none', color: c.border, cursor: 'pointer', fontSize: '16px' }}>×</button>
+    </div>
+  );
+}
+
+// Симуляция Angular Element: UserBadgeComponent  
+function AngularUserBadgeElement({ name, role, avatar }) {
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', gap: '10px',
+      background: '#1e293b', borderRadius: '24px', padding: '8px 16px 8px 8px',
+      border: '1px solid #334155',
+    }}>
+      <div style={{
+        width: '36px', height: '36px', borderRadius: '50%',
+        background: ANGULAR_RED, display: 'flex', alignItems: 'center',
+        justifyContent: 'center', fontSize: '18px', flexShrink: 0,
+      }}>{avatar || '👤'}</div>
+      <div>
+        <div style={{ color: '#f1f5f9', fontWeight: 'bold', fontSize: '14px' }}>{name}</div>
+        <div style={{ color: '#94a3b8', fontSize: '12px' }}>{role}</div>
+      </div>
+    </div>
+  );
+}
+
+const FRAMEWORKS = ['React', 'Vue', 'Svelte', 'Vanilla HTML'];
+
+export default function App() {
+  const [framework, setFramework] = useState('React');
+  const [ratingValue, setRatingValue] = useState(3);
+  const [notifications, setNotifications] = useState([
+    { id: 1, type: 'success', message: 'Angular Element загружен успешно!' },
+  ]);
+  const [notifType, setNotifType] = useState('info');
+  const [notifMsg, setNotifMsg] = useState('Тест уведомления');
+
+  const addNotification = useCallback(() => {
+    setNotifications(prev => [...prev, { id: Date.now(), type: notifType, message: notifMsg }]);
+  }, [notifType, notifMsg]);
+
+  const removeNotification = useCallback((id) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  }, []);
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '680px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>🧩 Angular Elements Demo</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>Angular компоненты как Web Components</div>
+        </div>
+
+        {/* Framework switcher */}
+        <div style={{
+          background: '#1e293b', borderRadius: '12px', padding: '14px 16px',
+          marginBottom: '20px',
+        }}>
+          <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px' }}>
+            🌐 Используется в:
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {FRAMEWORKS.map(f => (
+              <button key={f} onClick={() => setFramework(f)} style={{
+                padding: '6px 14px', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                background: framework === f ? '#3b82f6' : '#334155',
+                color: 'white', fontSize: '13px', fontWeight: framework === f ? 'bold' : 'normal',
+              }}>{f}</button>
+            ))}
+          </div>
+          <div style={{ marginTop: '10px', fontSize: '12px', fontFamily: 'monospace', color: '#a78bfa' }}>
+            {framework === 'Vanilla HTML'
+              ? "<app-rating value=\"3\" max=\"5\"></app-rating>"
+              : framework === 'Vue'
+              ? '<AngularRating :value="rating" @rated="onRated" />'
+              : framework === 'Svelte'
+              ? '<app-rating value={rating} on:rated={onRated} />'
+              : '<AngularRating value={rating} onRated={handleRated} />'}
+          </div>
+        </div>
+
+        {/* Rating Element */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+          <div style={{ color: ANGULAR_RED, fontWeight: 'bold', fontSize: '13px', marginBottom: '12px' }}>
+            {'<app-rating>'}  — RatingComponent
+          </div>
+          <AngularRatingElement value={ratingValue} max={5} onRated={setRatingValue} />
+          <div style={{ color: '#64748b', fontSize: '12px', marginTop: '8px' }}>
+            @Output() rated event: detail = {ratingValue} (слушается через addEventListener)
+          </div>
+        </div>
+
+        {/* User Badge Element */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+          <div style={{ color: ANGULAR_RED, fontWeight: 'bold', fontSize: '13px', marginBottom: '12px' }}>
+            {'<app-user-badge>'} — UserBadgeComponent
+          </div>
+          <AngularUserBadgeElement name="Яша Петров" role="Angular Developer" avatar="🧑‍💻" />
+        </div>
+
+        {/* Notification Element */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+          <div style={{ color: ANGULAR_RED, fontWeight: 'bold', fontSize: '13px', marginBottom: '12px' }}>
+            {'<app-notification>'} — NotificationComponent
+          </div>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+            {['success', 'error', 'warning', 'info'].map(t => (
+              <button key={t} onClick={() => setNotifType(t)} style={{
+                padding: '4px 10px', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                background: notifType === t ? ANGULAR_RED : '#334155', color: 'white', fontSize: '12px',
+              }}>{t}</button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+            <input value={notifMsg} onChange={e => setNotifMsg(e.target.value)} style={{
+              flex: 1, padding: '8px', borderRadius: '6px', background: '#0f172a',
+              border: '1px solid #334155', color: 'white', fontSize: '13px',
+            }} />
+            <button onClick={addNotification} style={{
+              padding: '8px 16px', borderRadius: '6px', border: 'none',
+              background: ANGULAR_RED, color: 'white', cursor: 'pointer', fontWeight: 'bold',
+            }}>+</button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {notifications.map(n => (
+              <AngularNotificationElement key={n.id} type={n.type} message={n.message} onClose={() => removeNotification(n.id)} />
+            ))}
+          </div>
+        </div>
+
+        {/* Code snippet */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', fontSize: '12px' }}>
+          <div style={{ color: ANGULAR_RED, fontWeight: 'bold', marginBottom: '8px' }}>
+            Регистрация Angular Element:
+          </div>
+          <pre style={{ margin: 0, color: '#a78bfa', lineHeight: 1.6 }}>
+{"const RatingEl = createCustomElement(\n  RatingComponent, { injector }\n);\ncustomElements.define('app-rating', RatingEl);\n\n// Теперь работает в любом фреймворке!\n// <app-rating value=\"4\" max=\"5\"></app-rating>"}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

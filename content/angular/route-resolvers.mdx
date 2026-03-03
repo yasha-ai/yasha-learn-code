@@ -1,0 +1,369 @@
+## 🔀 Route Resolvers в Angular
+
+Route Resolver — это сервис или функция, которая **предзагружает данные** перед тем, как пользователь попадает на страницу. Без резолвера компонент рендерится мгновенно, но данные приходят позже — появляется мигание контента. Резолвер решает эту проблему.
+
+---
+
+### ⚙️ Интерфейс Resolve
+
+До Angular 15 резолвер реализовывал интерфейс `Resolve<T>`:
+
+```typescript
+import { Injectable } from '@angular/core';
+import { Resolve, ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
+import { Observable } from 'rxjs';
+import { UserService } from './user.service';
+import { User } from './user.model';
+
+@Injectable({ providedIn: 'root' })
+export class UserResolver implements Resolve<User> {
+  constructor(private userService: UserService) {}
+
+  resolve(
+    route: ActivatedRouteSnapshot,
+    state: RouterStateSnapshot
+  ): Observable<User> {
+    const id = route.paramMap.get('id')!;
+    return this.userService.getUser(id);
+  }
+}
+```
+
+Резолвер возвращает `Observable`, `Promise` или синхронное значение — Angular сам разберётся.
+
+---
+
+### 🧩 Регистрация в маршрутах
+
+```typescript
+// app.routes.ts
+import { Routes } from '@angular/router';
+import { UserResolver } from './user.resolver';
+import { UserComponent } from './user.component';
+
+export const routes: Routes = [
+  {
+    path: 'users/:id',
+    component: UserComponent,
+    resolve: {
+      user: UserResolver,        // ключ → значение в snapshot.data
+    }
+  }
+];
+```
+
+---
+
+### 📥 Получение данных в компоненте
+
+```typescript
+import { Component, OnInit } from '@angular/core';
+import { ActivatedRoute } from '@angular/router';
+import { User } from './user.model';
+
+@Component({
+  selector: 'app-user',
+  template: `
+    <div *ngIf="user">
+      <h2>{{ user.name }}</h2>
+      <p>{{ user.email }}</p>
+    </div>
+  `
+})
+export class UserComponent implements OnInit {
+  user!: User;
+
+  constructor(private route: ActivatedRoute) {}
+
+  ngOnInit() {
+    // данные уже загружены, нет нужды в Observable
+    this.user = this.route.snapshot.data['user'];
+  }
+}
+```
+
+Или реактивно через `route.data`:
+
+```typescript
+ngOnInit() {
+  this.route.data.subscribe(data => {
+    this.user = data['user'];
+  });
+}
+```
+
+---
+
+### ⚡ Функциональный резолвер (Angular 14+)
+
+Современный подход — **функция** вместо класса. Проще, без декоратора:
+
+```typescript
+import { inject } from '@angular/core';
+import { ResolveFn, ActivatedRouteSnapshot } from '@angular/router';
+import { UserService } from './user.service';
+import { User } from './user.model';
+
+export const userResolver: ResolveFn<User> = (route: ActivatedRouteSnapshot) => {
+  return inject(UserService).getUser(route.paramMap.get('id')!);
+};
+```
+
+Регистрация точно такая же:
+
+```typescript
+{
+  path: 'users/:id',
+  component: UserComponent,
+  resolve: { user: userResolver }
+}
+```
+
+`inject()` работает потому, что функция вызывается **в контексте инжектора** Angular.
+
+---
+
+### 🔗 inject(ActivatedRoute) внутри резолвера
+
+Иногда резолверу нужен доступ к текущему маршруту изнутри вложенных вызовов:
+
+```typescript
+export const postWithAuthorResolver: ResolveFn<PostWithAuthor> = (route) => {
+  const postService = inject(PostService);
+  const userService = inject(UserService);
+
+  return postService.getPost(route.params['id']).pipe(
+    switchMap(post =>
+      userService.getUser(post.authorId).pipe(
+        map(author => ({ ...post, author }))
+      )
+    )
+  );
+};
+```
+
+---
+
+### 🎯 Комбинирование нескольких резолверов
+
+Можно использовать несколько резолверов на одном маршруте:
+
+```typescript
+export const routes: Routes = [
+  {
+    path: 'posts/:id',
+    component: PostDetailComponent,
+    resolve: {
+      post: postResolver,
+      author: authorResolver,
+      comments: commentsResolver,
+    }
+  }
+];
+```
+
+Angular запускает их **параллельно** (через `forkJoin`) и ждёт завершения всех.
+
+```typescript
+// PostDetailComponent
+ngOnInit() {
+  const { post, author, comments } = this.route.snapshot.data;
+  this.post = post;
+  this.author = author;
+  this.comments = comments;
+}
+```
+
+---
+
+### 🛡️ Обработка ошибок в резолвере
+
+Если резолвер падает с ошибкой — навигация блокируется. Нужно обрабатывать:
+
+```typescript
+export const safeUserResolver: ResolveFn<User | null> = (route) => {
+  return inject(UserService).getUser(route.paramMap.get('id')!).pipe(
+    catchError(err => {
+      inject(Router).navigate(['/not-found']);
+      return of(null);
+    })
+  );
+};
+```
+
+---
+
+### 🔄 Резолвер с индикатором загрузки
+
+Можно интегрировать глобальный лоадер:
+
+```typescript
+export const userWithLoadingResolver: ResolveFn<User> = (route) => {
+  const loadingService = inject(LoadingService);
+  const userService = inject(UserService);
+
+  loadingService.show();
+
+  return userService.getUser(route.paramMap.get('id')!).pipe(
+    finalize(() => loadingService.hide())
+  );
+};
+```
+
+---
+
+### 🏗️ Резолвер для вложенных маршрутов
+
+```typescript
+export const routes: Routes = [
+  {
+    path: 'dashboard',
+    component: DashboardComponent,
+    resolve: { stats: dashboardStatsResolver },
+    children: [
+      {
+        path: 'users',
+        component: UsersListComponent,
+        resolve: { users: usersListResolver }
+      }
+    ]
+  }
+];
+```
+
+Дочерний компонент имеет доступ к обоим наборам данных через родительский `ActivatedRoute`.
+
+---
+
+### 📊 Когда использовать резолверы
+
+| Сценарий | Подход |
+|----------|--------|
+| Критичные данные (страница не имеет смысла без них) | ✅ Resolver |
+| Данные могут загружаться параллельно с рендером | ❌ Лучше в компоненте |
+| SEO-критичный контент | ✅ Resolver |
+| Большой объём данных с долгой загрузкой | ⚠️ Осторожно — блокирует навигацию |
+
+---
+
+### 🔑 withComponentInputBinding() — Angular 16+
+
+Начиная с Angular 16, данные резолвера можно получать прямо через `@Input()`:
+
+```typescript
+// main.ts
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideRouter(routes, withComponentInputBinding())
+  ]
+});
+
+// user.component.ts
+@Component({ ... })
+export class UserComponent {
+  @Input() user!: User;  // автоматически из resolve: { user: ... }
+}
+```
+
+Это убирает необходимость инжектировать `ActivatedRoute` совсем!
+
+---
+
+```mdx-playground
+export default function RouteResolverPlayground() {
+  const [page, setPage] = React.useState('home');
+  const [loading, setLoading] = React.useState(false);
+  const [resolvedData, setResolvedData] = React.useState(null);
+  const [log, setLog] = React.useState([]);
+
+  const addLog = (msg) => setLog(prev => [...prev, { msg, time: Date.now() }]);
+
+  const navigate = async (targetPage) => {
+    setLoading(true);
+    setResolvedData(null);
+    setLog([]);
+    addLog('🔀 Начинаем навигацию...');
+
+    await new Promise(r => setTimeout(r, 300));
+    addLog('⚡ Запускаем резолвер userResolver...');
+
+    await new Promise(r => setTimeout(r, 800));
+    addLog('📡 HTTP GET /api/users/42');
+
+    await new Promise(r => setTimeout(r, 600));
+    const data = { id: 42, name: 'Яша Смирнов', email: 'yasha@example.com', role: 'Developer' };
+    addLog('✅ Данные получены от сервера');
+
+    await new Promise(r => setTimeout(r, 200));
+    addLog('🎯 Резолвер завершён — активируем маршрут');
+
+    setResolvedData(data);
+    setPage(targetPage);
+    setLoading(false);
+  };
+
+  const goHome = () => { setPage('home'); setResolvedData(null); setLog([]); };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: 420, padding: 24, borderRadius: 12, fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ display: 'flex', gap: 12, marginBottom: 20, alignItems: 'center' }}>
+        <span style={{ color: '#dd0031', fontWeight: 700, fontSize: 16 }}>Angular Route Resolver</span>
+        <span style={{ color: '#475569', fontSize: 12 }}>симуляция</span>
+      </div>
+
+      {page === 'home' && !loading && (
+        <div>
+          <p style={{ color: '#94a3b8', marginBottom: 16 }}>Текущая страница: <strong style={{ color: '#e2e8f0' }}>/home</strong></p>
+          <button
+            onClick={() => navigate('user')}
+            style={{ background: '#dd0031', color: 'white', border: 'none', padding: '10px 20px', borderRadius: 8, cursor: 'pointer', fontSize: 14 }}
+          >
+            Перейти на /users/42 →
+          </button>
+          <p style={{ color: '#475569', fontSize: 12, marginTop: 12 }}>
+            Резолвер предзагрузит данные перед навигацией
+          </p>
+        </div>
+      )}
+
+      {loading && (
+        <div>
+          <p style={{ color: '#94a3b8', marginBottom: 12 }}>⏳ Навигация заблокирована — резолвер работает...</p>
+          <div style={{ background: '#1e293b', borderRadius: 8, padding: 16, marginBottom: 12 }}>
+            {log.map((l, i) => (
+              <div key={i} style={{ color: i === log.length - 1 ? '#dd0031' : '#64748b', fontSize: 13, marginBottom: 4 }}>
+                {l.msg}
+              </div>
+            ))}
+            <span style={{ display: 'inline-block', animation: 'pulse 1s infinite', color: '#dd0031' }}>▌</span>
+          </div>
+          <div style={{ background: '#dd003120', border: '1px solid #dd0031', borderRadius: 6, padding: '8px 14px', fontSize: 12, color: '#dd0031' }}>
+            URL ещё не изменился — пользователь остаётся на текущей странице
+          </div>
+        </div>
+      )}
+
+      {page === 'user' && resolvedData && (
+        <div>
+          <button onClick={goHome} style={{ background: 'transparent', color: '#64748b', border: '1px solid #334155', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, marginBottom: 16 }}>
+            ← Назад
+          </button>
+          <p style={{ color: '#94a3b8', marginBottom: 12 }}>Текущая страница: <strong style={{ color: '#22c55e' }}>/users/42</strong></p>
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 20, border: '1px solid #334155' }}>
+            <div style={{ color: '#dd0031', fontWeight: 700, marginBottom: 12, fontSize: 13 }}>route.snapshot.data['user']</div>
+            {Object.entries(resolvedData).map(([k, v]) => (
+              <div key={k} style={{ display: 'flex', gap: 12, marginBottom: 8, fontSize: 13 }}>
+                <span style={{ color: '#7dd3fc', width: 60 }}>{k}:</span>
+                <span style={{ color: '#a3e635' }}>{String(v)}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ background: '#15803d20', border: '1px solid #22c55e', borderRadius: 6, padding: '8px 14px', fontSize: 12, color: '#22c55e', marginTop: 12 }}>
+            ✅ Данные доступны с первого рендера — нет мигания!
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+```
