@@ -1,0 +1,499 @@
+## RxJS + MobX: Две реактивности 🔄
+
+Яша здесь. Оба инструмента — реактивные. Оба отслеживают изменения и уведомляют зависимости. Но они разные по природе: MobX — это реактивная **объектная модель** (observables как свойства объектов), RxJS — это реактивные **потоки** (observable как цепочки событий). Разберём разницу и научимся их комбинировать.
+
+---
+
+### 1. 🧬 MobX vs RxJS: в чём разница?
+
+MobX превращает обычные JavaScript-объекты в реактивные. Ты меняешь свойство — всё что от него зависит пересчитывается автоматически:
+
+```typescript
+// ── MobX (концептуально) ──────────────────────────────────────
+import { makeObservable, observable, computed, action } from 'mobx';
+
+class CartStore {
+  items: CartItem[] = [];      // observable — MobX отслеживает
+
+  constructor() {
+    makeObservable(this, {
+      items:     observable,
+      total:     computed,
+      addItem:   action,
+    });
+  }
+
+  get total() {                // computed — пересчитывается автоматически
+    return this.items.reduce((s, i) => s + i.price * i.qty, 0);
+  }
+
+  addItem(item: CartItem) {    // action — единственный способ мутировать
+    this.items.push(item);
+  }
+}
+```
+
+```typescript
+// ── RxJS (тот же результат) ────────────────────────────────────
+import { BehaviorSubject } from 'rxjs';
+import { map, distinctUntilChanged, shareReplay } from 'rxjs/operators';
+
+class CartStore {
+  private state$ = new BehaviorSubject<CartItem[]>([]);
+
+  // "computed" — это просто pipe()
+  readonly total$ = this.state$.pipe(
+    map(items => items.reduce((s, i) => s + i.price * i.qty, 0)),
+    distinctUntilChanged(),
+    shareReplay(1) // кэш последнего значения
+  );
+
+  // "action" — это next()
+  addItem(item: CartItem) {
+    this.state$.next([...this.state$.getValue(), item]);
+  }
+
+  // Доступ к Observable для подписок
+  get items$() {
+    return this.state$.asObservable();
+  }
+}
+```
+
+Ключевая разница: MobX мутирует, RxJS заменяет. MobX работает с объектами, RxJS — с потоками.
+
+---
+
+### 2. 🔌 from(mobxObservable): MobX → RxJS
+
+Можно подключить MobX-стор к RxJS-потокам. Это полезно, когда нужны сложные операторы над MobX-данными:
+
+```typescript
+import { from } from 'rxjs';
+import { debounceTime, distinctUntilChanged, switchMap } from 'rxjs/operators';
+import { reaction, autorun } from 'mobx';
+import { observable, makeAutoObservable } from 'mobx';
+
+class SearchStore {
+  query = '';
+  results: string[] = [];
+
+  constructor() {
+    makeAutoObservable(this);
+  }
+}
+
+const searchStore = new SearchStore();
+
+// Конвертируем MobX observable в RxJS Observable
+function fromMobX<T>(fn: () => T): Observable<T> {
+  return new Observable<T>(subscriber => {
+    // reaction запускается при каждом изменении
+    const disposer = reaction(
+      fn,
+      value => subscriber.next(value),
+      { fireImmediately: true }
+    );
+    // Функция очистки — отключаем MobX reaction
+    return () => disposer();
+  });
+}
+
+// Теперь можем использовать все RxJS операторы!
+const query$ = fromMobX(() => searchStore.query);
+
+query$.pipe(
+  debounceTime(300),
+  distinctUntilChanged(),
+  switchMap(query =>
+    from(fetch(\`/api/search?q=\${query}\`).then(r => r.json()))
+  )
+).subscribe(results => {
+  searchStore.results = results; // записываем обратно в MobX
+});
+```
+
+---
+
+### 3. 🚀 RxJS потоки питают MobX стор
+
+Паттерн: RxJS обрабатывает сложную логику, MobX хранит состояние и предоставляет реактивность для UI:
+
+```typescript
+import { Subject, interval, merge } from 'rxjs';
+import { map, scan, bufferTime, filter } from 'rxjs/operators';
+import { makeAutoObservable, action } from 'mobx';
+
+interface LogEntry {
+  timestamp: number;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+}
+
+class LogStore {
+  entries: LogEntry[] = [];
+  stats = { info: 0, warn: 0, error: 0 };
+
+  constructor() {
+    makeAutoObservable(this);
+  }
+
+  // action — единственный способ мутировать в MobX
+  addEntries = action((newEntries: LogEntry[]) => {
+    this.entries.push(...newEntries);
+    // Обновляем статистику
+    newEntries.forEach(e => this.stats[e.level]++);
+    // Ограничиваем размер лога
+    if (this.entries.length > 1000) {
+      this.entries = this.entries.slice(-500);
+    }
+  });
+
+  get errorEntries() {
+    return this.entries.filter(e => e.level === 'error');
+  }
+}
+
+const logStore = new LogStore();
+
+// RxJS обрабатывает поток логов: буферизует, батчит → передаёт в MobX
+const rawLog$ = new Subject<LogEntry>();
+
+rawLog$.pipe(
+  bufferTime(500),    // собираем записи каждые 500ms
+  filter(batch => batch.length > 0), // пропускаем пустые батчи
+).subscribe(batch => logStore.addEntries(batch));
+
+// Использование: просто пушим события в Subject
+rawLog$.next({ timestamp: Date.now(), level: 'info', message: 'Пользователь вошёл' });
+rawLog$.next({ timestamp: Date.now(), level: 'error', message: 'Ошибка API' });
+```
+
+---
+
+### 4. 🧮 Вычисляемые значения (Computed) через RxJS
+
+Паттерн MobX `computed` можно воспроизвести через `pipe(map(...), distinctUntilChanged(), shareReplay(1))`:
+
+```typescript
+import { BehaviorSubject, combineLatest } from 'rxjs';
+import { map, distinctUntilChanged, shareReplay } from 'rxjs/operators';
+
+interface AppState {
+  products: Product[];
+  cartIds: number[];
+  discount: number;
+}
+
+const state$ = new BehaviorSubject<AppState>({
+  products: [],
+  cartIds: [],
+  discount: 0,
+});
+
+// Derived observables — аналог MobX @computed
+const cartItems$ = state$.pipe(
+  map(s => s.products.filter(p => s.cartIds.includes(p.id))),
+  distinctUntilChanged((a, b) => JSON.stringify(a) === JSON.stringify(b)),
+  shareReplay(1)  // MobX-like кэширование последнего значения
+);
+
+const subtotal$ = cartItems$.pipe(
+  map(items => items.reduce((s, i) => s + i.price, 0)),
+  distinctUntilChanged(),
+  shareReplay(1)
+);
+
+// combineLatest — аналог MobX reaction на несколько сторов
+const finalPrice$ = combineLatest([subtotal$, state$.pipe(map(s => s.discount))]).pipe(
+  map(([subtotal, discount]) => subtotal * (1 - discount / 100)),
+  distinctUntilChanged(),
+  shareReplay(1)
+);
+
+// Автоматически обновляется при любом изменении зависимостей
+finalPrice$.subscribe(price => console.log('Итого:', price));
+```
+
+---
+
+### ⚠️ Типичные ошибки
+
+**Ошибка 1: Подписываться на MobX внутри RxJS без очистки**
+
+```typescript
+// ❌ MobX reaction не удаляется
+fromMobX(() => store.count).subscribe(console.log);
+
+// ✅ Храни disposer и отписывайся
+const sub = fromMobX(() => store.count).subscribe(console.log);
+// При размонтировании:
+sub.unsubscribe(); // вызывает disposer внутри Observable
+```
+
+**Ошибка 2: Мутировать MobX снаружи action**
+
+```typescript
+// ❌ MobX ругается в strict mode
+fromRxJS$.subscribe(data => {
+  store.items = data; // прямая мутация!
+});
+
+// ✅ Через action
+fromRxJS$.subscribe(action(data => {
+  store.items = data;
+}));
+```
+
+**Ошибка 3: Дублировать реактивность**
+
+```typescript
+// ❌ Зачем MobX если уже BehaviorSubject?
+const mobxStore = makeAutoObservable({ count: 0 });
+const rxStore   = new BehaviorSubject(0);
+// Синхронизировать их — боль
+
+// ✅ Выбери одно: либо MobX хранит стейт, либо BehaviorSubject
+```
+
+---
+
+### 🔗 Смотри также
+
+- [3. Subjects: горячие потоки](/rxjs/subjects) — BehaviorSubject подробно
+- [9. combineLatest и forkJoin](/rxjs/combineLatest-forkJoin) — комбинирование потоков
+- [19. RxJS как стейт-менеджер](/rxjs/react-state) — чистый RxJS стор
+- [20. RxJS vs Effector](/rxjs/rxjs-effector) — ещё одно сравнение
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground
+  template="react"
+  files={{
+    "/mobx-sim.ts": `// Симуляция MobX-паттернов через RxJS BehaviorSubject
+import { BehaviorSubject, Observable } from 'rxjs';
+import { map, distinctUntilChanged, shareReplay, combineLatest } from 'rxjs/operators';
+import { map as rxMap } from 'rxjs/operators';
+
+// "observable" property → BehaviorSubject
+// "computed"   property → pipe(map, distinctUntilChanged, shareReplay)
+// "action"              → метод, вызывающий .next()
+
+export interface Product { id: number; name: string; price: number; emoji: string; }
+export interface CartItem { product: Product; qty: number; }
+
+export interface StoreState {
+  products: Product[];
+  cart: CartItem[];
+  coupon: number; // процент скидки
+}
+
+const initial: StoreState = {
+  products: [
+    { id: 1, name: 'Курс RxJS',    price: 990,  emoji: '🦀' },
+    { id: 2, name: 'Курс React',   price: 1490, emoji: '⚛️' },
+    { id: 3, name: 'Курс Node.js', price: 790,  emoji: '📦' },
+    { id: 4, name: 'Курс TypeScript', price: 890, emoji: '💎' },
+  ],
+  cart: [],
+  coupon: 0,
+};
+
+// ── "Observable" стор (как @observable в MobX) ─────────────────
+const state$ = new BehaviorSubject<StoreState>(initial);
+
+// ── "Computed" значения (как @computed в MobX) ─────────────────
+export const cart$ = state$.pipe(
+  map(s => s.cart),
+  distinctUntilChanged(),
+  shareReplay(1) // кэш — как MobX computed не пересчитывается без изменений
+);
+
+export const subtotal$ = cart$.pipe(
+  map(cart => cart.reduce((s, i) => s + i.product.price * i.qty, 0)),
+  distinctUntilChanged(),
+  shareReplay(1)
+);
+
+export const coupon$ = state$.pipe(map(s => s.coupon), distinctUntilChanged());
+
+// combineLatest = MobX reaction на несколько зависимостей
+export const total$ = combineLatest([subtotal$, coupon$]).pipe(
+  map(([sub, coup]) => Math.round(sub * (1 - coup / 100))),
+  distinctUntilChanged(),
+  shareReplay(1)
+);
+
+export const itemCount$ = cart$.pipe(
+  map(c => c.reduce((s, i) => s + i.qty, 0)),
+  distinctUntilChanged()
+);
+
+// ── "Actions" (как @action в MobX) ────────────────────────────
+export const actions = {
+  addToCart(product: Product) {
+    const s = state$.getValue();
+    const existing = s.cart.find(i => i.product.id === product.id);
+    if (existing) {
+      state$.next({
+        ...s,
+        cart: s.cart.map(i => i.product.id === product.id
+          ? { ...i, qty: i.qty + 1 } : i
+        ),
+      });
+    } else {
+      state$.next({ ...s, cart: [...s.cart, { product, qty: 1 }] });
+    }
+  },
+
+  removeFromCart(productId: number) {
+    const s = state$.getValue();
+    state$.next({ ...s, cart: s.cart.filter(i => i.product.id !== productId) });
+  },
+
+  applyCoupon(discount: number) {
+    state$.next({ ...state$.getValue(), coupon: Math.min(100, Math.max(0, discount)) });
+  },
+
+  clearCart() {
+    state$.next({ ...state$.getValue(), cart: [], coupon: 0 });
+  },
+};
+
+export const products = initial.products;
+`,
+    "/App.tsx": `import { useState, useEffect } from 'react';
+import { Observable } from 'rxjs';
+import { products, cart$, subtotal$, total$, itemCount$, coupon$, actions, CartItem } from './mobx-sim';
+
+// ── Хелпер ────────────────────────────────────────────────────
+function use$<T>(obs$: Observable<T>, init: T): T {
+  const [v, set] = useState<T>(init);
+  useEffect(() => {
+    const sub = obs$.subscribe(set as any);
+    return () => sub.unsubscribe();
+  }, []);
+  return v;
+}
+
+// ── UI ────────────────────────────────────────────────────────
+export default function App() {
+  const cart      = use$(cart$,      []);
+  const subtotal  = use$(subtotal$,  0);
+  const total     = use$(total$,     0);
+  const count     = use$(itemCount$, 0);
+  const coupon    = use$(coupon$,    0);
+
+  const [couponInput, setCouponInput] = useState('');
+
+  const inCart = (id: number) => cart.find(i => i.product.id === id);
+
+  return (
+    <div style={{ background: '#0d0d1a', minHeight: '100vh', padding: 24,
+      fontFamily: 'system-ui, sans-serif', color: '#e0e0e0' }}>
+      <h2 style={{ color: '#e94560', marginBottom: 4 }}>🔄 MobX-паттерны через RxJS</h2>
+      <p style={{ color: '#888', fontSize: 12, marginBottom: 20 }}>
+        observable → BehaviorSubject • computed → shareReplay(1) • action → .next()
+      </p>
+
+      {/* Каталог */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>📦 Каталог:</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {products.map(p => {
+            const item = inCart(p.id);
+            return (
+              <div key={p.id} style={{
+                background: '#1a1a2e', padding: '10px 12px', borderRadius: 8,
+                border: item ? '1px solid #00ff88' : '1px solid #333'
+              }}>
+                <div style={{ fontSize: 20 }}>{p.emoji}</div>
+                <div style={{ fontSize: 13, marginTop: 4 }}>{p.name}</div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, alignItems: 'center' }}>
+                  <span style={{ color: '#f39c12', fontSize: 13 }}>{p.price}₽</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {item && (
+                      <>
+                        <span style={{ color: '#aaa', fontSize: 12 }}>×{item.qty}</span>
+                        <button onClick={() => actions.removeFromCart(p.id)}
+                          style={{ background: 'none', border: 'none', color: '#e94560', cursor: 'pointer', fontSize: 14, padding: 0 }}>×</button>
+                      </>
+                    )}
+                    <button onClick={() => actions.addToCart(p)}
+                      style={{ background: '#e94560', border: 'none', color: '#fff',
+                        padding: '3px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+                      {item ? '+1' : 'В корзину'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Корзина и итоги */}
+      {cart.length > 0 && (
+        <div style={{ background: '#1a1a2e', padding: 14, borderRadius: 8, marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>
+            🛒 Корзина ({count} товаров):
+          </div>
+          {cart.map(item => (
+            <div key={item.product.id} style={{
+              display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4
+            }}>
+              <span>{item.product.emoji} {item.product.name} × {item.qty}</span>
+              <span style={{ color: '#aaa' }}>{item.product.price * item.qty}₽</span>
+            </div>
+          ))}
+          <div style={{ borderTop: '1px solid #333', marginTop: 8, paddingTop: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#888' }}>
+              <span>Подытог (computed):</span>
+              <span>{subtotal}₽</span>
+            </div>
+            {coupon > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#00ff88' }}>
+                <span>Скидка {coupon}%:</span>
+                <span>−{subtotal - total}₽</span>
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', marginTop: 4 }}>
+              <span>Итого (combineLatest):</span>
+              <span style={{ color: '#00ff88', fontSize: 16 }}>{total}₽</span>
+            </div>
+          </div>
+          {/* Купон */}
+          <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+            <input value={couponInput} onChange={e => setCouponInput(e.target.value)}
+              placeholder="Скидка %"
+              style={{ flex: 1, background: '#0d0d1a', border: '1px solid #333',
+                color: '#fff', padding: '5px 8px', borderRadius: 4, fontSize: 12 }} />
+            <button onClick={() => { actions.applyCoupon(Number(couponInput)); setCouponInput(''); }}
+              style={{ background: '#0f3460', border: 'none', color: '#fff',
+                padding: '5px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+              Применить
+            </button>
+            <button onClick={actions.clearCart}
+              style={{ background: '#e94560', border: 'none', color: '#fff',
+                padding: '5px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+              Очистить
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ padding: 12, background: '#1a1a2e', borderRadius: 8, fontSize: 12, color: '#666' }}>
+        💡 <code style={{ color: '#00ff88' }}>shareReplay(1)</code> кэширует последнее значение как MobX @computed.{' '}
+        <code style={{ color: '#f39c12' }}>combineLatest</code> реагирует на изменение любой зависимости.
+        <br />Попробуй добавить товары и применить скидку — total$ пересчитается автоматически!
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

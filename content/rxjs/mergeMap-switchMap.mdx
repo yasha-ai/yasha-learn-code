@@ -1,0 +1,484 @@
+## 🔀 mergeMap и switchMap — укрощение вложенных потоков
+
+Яша, это один из самых важных уроков! 🚀 Если освоишь `mergeMap` и `switchMap` — ты поймёшь 80% реального кода на RxJS. Погнали!
+
+---
+
+### 🧠 Проблема: Observable внутри Observable
+
+Представь, что у тебя есть поток кликов. Каждый клик должен запускать HTTP-запрос. HTTP-запрос — это тоже Observable. Как объединить поток кликов с потоком ответов?
+
+Наивное решение (и почему оно плохое):
+
+```typescript
+import { fromEvent, from } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+const click$ = fromEvent(document, 'click');
+
+// ❌ ПЛОХО: получаем Observable<Observable<Response>>
+const broken$ = click$.pipe(
+  map(() => from(fetch('/api/data')))
+  // Здесь тип: Observable<Observable<Response>>
+  // Нам нужно: Observable<Response>
+);
+```
+
+Вот где приходят на помощь **higher-order операторы**! Они "разворачивают" внутренний Observable. 🎁
+
+---
+
+### 🌊 mergeMap — все запросы параллельно
+
+`mergeMap` (он же `flatMap`) подписывается на КАЖДЫЙ внутренний Observable и объединяет все их результаты. Ни один запрос не отменяется!
+
+**Мраморная диаграмма:**
+```
+Клики:         --C1----C2----C3-->
+Каждый клик порождает запрос (---R-->):
+C1:            -----R1-->
+C2:                  -----R2-->
+C3:                        -----R3-->
+mergeMap:
+Результат:     ------R1----R2----R3-->
+```
+
+```typescript
+import { fromEvent, from, of } from 'rxjs';
+import { mergeMap, map, delay } from 'rxjs/operators';
+
+// Симуляция API-запроса
+const fetchUser = (id: number) =>
+  from(fetch(`/api/users/${id}`).then(r => r.json()));
+
+// Поток ID пользователей
+import { Subject } from 'rxjs';
+const userId$ = new Subject<number>();
+
+userId$.pipe(
+  mergeMap(id => fetchUser(id))
+).subscribe(user => {
+  console.log('Получен пользователь:', user);
+});
+
+// Все три запроса летят параллельно!
+userId$.next(1);
+userId$.next(2);
+userId$.next(3);
+```
+
+**Идеальный случай для mergeMap — загрузка файлов:**
+
+```typescript
+import { from, Subject } from 'rxjs';
+import { mergeMap, map, catchError } from 'rxjs/operators';
+import { of } from 'rxjs';
+
+interface FileUpload {
+  file: File;
+  uploadId: string;
+}
+
+const uploadQueue$ = new Subject<FileUpload>();
+
+const uploadFile = (upload: FileUpload) =>
+  // Симулируем загрузку файла
+  new Observable<{ uploadId: string; url: string }>(observer => {
+    const formData = new FormData();
+    formData.append('file', upload.file);
+
+    fetch('/api/upload', { method: 'POST', body: formData })
+      .then(r => r.json())
+      .then(data => {
+        observer.next({ uploadId: upload.uploadId, url: data.url });
+        observer.complete();
+      })
+      .catch(err => observer.error(err));
+  });
+
+// Все файлы загружаются ПАРАЛЛЕЛЬНО — mergeMap не ждёт!
+uploadQueue$.pipe(
+  mergeMap(upload =>
+    uploadFile(upload).pipe(
+      catchError(err => of({ uploadId: upload.uploadId, url: null, error: err.message }))
+    )
+  )
+).subscribe(result => {
+  console.log(`Файл ${result.uploadId}:`, result.url ?? result.error);
+});
+
+// Добавляем файлы в очередь — все начнут загружаться сразу
+uploadQueue$.next({ file: bigFile1, uploadId: 'file-1' });
+uploadQueue$.next({ file: bigFile2, uploadId: 'file-2' });
+uploadQueue$.next({ file: bigFile3, uploadId: 'file-3' });
+```
+
+> 💡 **Когда использовать mergeMap:** когда каждая операция независима и её нельзя отменять. Загрузка файлов, отправка аналитики, независимые API-запросы.
+
+---
+
+### ❌ switchMap — отменяй предыдущий, бери новый
+
+`switchMap` — это как переключатель телевизора. Когда ты переключаешь канал — старый канал ОТМЕНЯЕТСЯ. Только последний запрос имеет значение!
+
+**Мраморная диаграмма:**
+```
+Поиск:         --"r"------"re"----"rea"-->
+Каждый запрос:
+"r":           ----[r запрос]--⚡ ОТМЕНЁН
+"re":                  ----[re запрос]--⚡ ОТМЕНЁН
+"rea":                          ----[rea запрос]--✅ Результат-->
+switchMap:
+Результат:     ----------------------------[результат для "rea"]-->
+```
+
+```typescript
+import { fromEvent } from 'rxjs';
+import { switchMap, map, debounceTime, distinctUntilChanged } from 'rxjs/operators';
+import { from } from 'rxjs';
+
+// 🔍 Автодополнение — классический пример switchMap
+const searchInput = document.getElementById('search') as HTMLInputElement;
+
+fromEvent(searchInput, 'input').pipe(
+  map(e => (e.target as HTMLInputElement).value),
+  debounceTime(300),          // ждём паузы в печатании
+  distinctUntilChanged(),      // игнорируем одинаковые значения
+  switchMap(query =>           // switchMap ОТМЕНЯЕТ предыдущий запрос!
+    from(
+      fetch(`/api/search?q=${query}`).then(r => r.json())
+    )
+  )
+).subscribe(results => {
+  renderResults(results);
+});
+```
+
+**Почему это важно? Гонка запросов:**
+
+```typescript
+// ❌ ПРОБЛЕМА без switchMap (с mergeMap):
+// Запрос "r" летит 500ms
+// Запрос "react" летит 100ms
+// Ответ "react" приходит первым → рендерим результаты для "react"
+// Потом приходит ответ "r" → рендерим УСТАРЕВШИЕ результаты!
+// Это называется "race condition" (гонка запросов)
+
+// ✅ РЕШЕНИЕ с switchMap:
+// Запрос "r" летит 500ms
+// Пользователь продолжает печатать → запрос "r" ОТМЕНЯЕТСЯ
+// Запрос "react" летит 100ms → приходит ответ → рендерим
+// Никакой гонки! 🎉
+```
+
+---
+
+### 🔄 switchMap в навигации и роутинге
+
+```typescript
+import { Subject } from 'rxjs';
+import { switchMap, tap } from 'rxjs/operators';
+import { from } from 'rxjs';
+
+interface Route {
+  path: string;
+  params: Record<string, string>;
+}
+
+const navigation$ = new Subject<Route>();
+
+navigation$.pipe(
+  tap(route => console.log('Навигация к:', route.path)),
+  switchMap(route =>
+    // При навигации на новую страницу — загрузка данных старой ОТМЕНЯЕТСЯ
+    from(loadPageData(route))
+  )
+).subscribe(pageData => {
+  renderPage(pageData);
+});
+
+function loadPageData(route: Route) {
+  return fetch(`/api/pages${route.path}`, {
+    signal: AbortController.prototype, // добавляем abort signal для реальной отмены
+  }).then(r => r.json());
+}
+```
+
+---
+
+### ⚖️ mergeMap vs switchMap — когда что?
+
+```typescript
+// 👍 mergeMap — независимые параллельные операции
+const like$ = new Subject<number>(); // ID поста
+
+like$.pipe(
+  mergeMap(postId =>
+    from(fetch(`/api/posts/${postId}/like`, { method: 'POST' }))
+    // Каждый лайк независим — не хотим отменять предыдущие!
+  )
+).subscribe();
+
+// 👍 switchMap — только последнее значение важно
+const searchQuery$ = new Subject<string>();
+
+searchQuery$.pipe(
+  switchMap(query =>
+    from(fetch(`/api/search?q=${query}`).then(r => r.json()))
+    // Предыдущие поиски устарели — отменяем!
+  )
+).subscribe(results => renderResults(results));
+```
+
+| | mergeMap | switchMap |
+|---|---|---|
+| **Стратегия** | Все параллельно | Только последний |
+| **Отменяет ли?** | ❌ Нет | ✅ Да |
+| **Используй для** | Загрузка файлов, лайки | Поиск, навигация |
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground
+  template="react-ts"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from "react";
+import { Subject } from "rxjs";
+import { switchMap, map, debounceTime, distinctUntilChanged } from "rxjs/operators";
+import { of } from "rxjs";
+import { delay } from "rxjs/operators";
+
+// Симуляция API-поиска с задержкой
+function fakeSearch(query: string) {
+  const results: Record<string, string[]> = {
+    "r":       ["React", "Redux", "RxJS", "Router"],
+    "re":      ["React", "Redux", "Remix"],
+    "rea":     ["React", "React Native", "Readme"],
+    "reac":    ["React", "React Native"],
+    "react":   ["React 18", "React Native", "React Query"],
+    "rx":      ["RxJS", "RxPY"],
+    "rxj":     ["RxJS"],
+    "rxjs":    ["RxJS 7.x", "RxJS Docs", "RxJS Operators"],
+  };
+  // Задержка 600-1200мс (симулируем медленный сервер)
+  const responseTime = 600 + Math.random() * 600;
+  const found = results[query.toLowerCase()] ?? [\`Нет результатов для "\${query}"\`];
+  return of({ query, results: found, responseTime: Math.round(responseTime) }).pipe(
+    delay(responseTime)
+  );
+}
+
+interface SearchEvent {
+  id: number;
+  type: "input" | "cancelled" | "received";
+  query: string;
+  message: string;
+  color: string;
+}
+
+export default function App() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<string[]>([]);
+  const [events, setEvents] = useState<SearchEvent[]>([]);
+  const [requestCount, setRequestCount] = useState(0);
+  const [cancelCount, setCancelCount] = useState(0);
+  const subject$ = useRef(new Subject<string>());
+  const reqId = useRef(0);
+
+  useEffect(() => {
+    const sub = subject$.current.pipe(
+      debounceTime(300),
+      distinctUntilChanged(),
+      switchMap(q => {
+        const id = ++reqId.current;
+        setRequestCount(c => c + 1);
+
+        // Логируем отправку запроса
+        setEvents(prev => {
+          // Помечаем предыдущие незавершённые как отменённые
+          const updated = prev.map(e =>
+            e.type === "input" ? { ...e, type: "cancelled" as const, color: "#f87171", message: e.message + " ⚡ ОТМЕНЁН" } : e
+          );
+          return [...updated, {
+            id,
+            type: "input" as const,
+            query: q,
+            message: \`🔍 Запрос #\${id}: "\${q}"\`,
+            color: "#fbbf24",
+          }];
+        });
+
+        return fakeSearch(q).pipe(
+          map(data => ({ ...data, reqId: id }))
+        );
+      })
+    ).subscribe(({ query: q, results: r, responseTime, reqId: id }) => {
+      setResults(r);
+      setEvents(prev =>
+        prev.map(e =>
+          e.id === id
+            ? { ...e, type: "received" as const, color: "#34d399", message: \`✅ Ответ #\${id}: "\${q}" (\${responseTime}мс)\` }
+            : e
+        )
+      );
+    });
+
+    return () => sub.unsubscribe();
+  }, []);
+
+  const handleInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setQuery(val);
+    if (val) subject$.current.next(val);
+    else {
+      setResults([]);
+      setEvents([]);
+    }
+  };
+
+  const cancelledCount = events.filter(e => e.type === "cancelled").length;
+
+  return (
+    <div style={{
+      background: "#0f172a",
+      minHeight: "100vh",
+      padding: "2rem",
+      fontFamily: "monospace",
+      color: "#e2e8f0",
+    }}>
+      <h2 style={{ color: "#38bdf8", marginBottom: "0.5rem" }}>
+        ⚡ switchMap — умная отмена запросов
+      </h2>
+      <p style={{ color: "#94a3b8", marginBottom: "1.5rem", fontSize: "0.875rem" }}>
+        Печатайте быстро — посмотрите как старые запросы отменяются!
+        <br />
+        Попробуй: "react", "rxjs", "redux"
+      </p>
+
+      <input
+        value={query}
+        onChange={handleInput}
+        placeholder="Поиск библиотек..."
+        style={{
+          width: "100%",
+          padding: "0.75rem 1rem",
+          background: "#1e293b",
+          border: "1px solid #334155",
+          borderRadius: "8px",
+          color: "#e2e8f0",
+          fontSize: "1rem",
+          outline: "none",
+          boxSizing: "border-box",
+          marginBottom: "1.5rem",
+        }}
+      />
+
+      {/* Статистика */}
+      <div style={{ display: "flex", gap: "1rem", marginBottom: "1.5rem" }}>
+        {[
+          { label: "Запросов отправлено", value: requestCount, color: "#fbbf24" },
+          { label: "Отменено (switchMap)", value: cancelledCount, color: "#f87171" },
+          { label: "Получено ответов", value: requestCount - cancelledCount, color: "#34d399" },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{
+            flex: 1,
+            padding: "0.75rem",
+            background: "#1e293b",
+            borderRadius: "8px",
+            border: \`1px solid \${color}33\`,
+            textAlign: "center",
+          }}>
+            <div style={{ fontSize: "1.5rem", fontWeight: "bold", color }}>{value}</div>
+            <div style={{ fontSize: "0.7rem", color: "#64748b", marginTop: "0.25rem" }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+        {/* Результаты */}
+        <div>
+          <h3 style={{ color: "#94a3b8", fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.75rem" }}>
+            Результаты поиска:
+          </h3>
+          <div style={{
+            background: "#1e293b",
+            borderRadius: "8px",
+            padding: "1rem",
+            minHeight: "120px",
+            border: "1px solid #334155",
+          }}>
+            {results.length === 0 ? (
+              <p style={{ color: "#475569", fontSize: "0.8rem" }}>Начните вводить...</p>
+            ) : (
+              results.map((r, i) => (
+                <div key={i} style={{
+                  padding: "0.4rem 0.6rem",
+                  marginBottom: "0.3rem",
+                  background: "#0f172a",
+                  borderRadius: "4px",
+                  color: "#34d399",
+                  fontSize: "0.85rem",
+                }}>
+                  {r}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Лог запросов */}
+        <div>
+          <h3 style={{ color: "#94a3b8", fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.75rem" }}>
+            Лог запросов:
+          </h3>
+          <div style={{
+            background: "#1e293b",
+            borderRadius: "8px",
+            padding: "0.75rem",
+            minHeight: "120px",
+            maxHeight: "250px",
+            overflowY: "auto",
+            border: "1px solid #334155",
+          }}>
+            {events.length === 0 ? (
+              <p style={{ color: "#475569", fontSize: "0.8rem" }}>Пусто...</p>
+            ) : (
+              events.map((e, i) => (
+                <div key={i} style={{
+                  fontSize: "0.75rem",
+                  padding: "0.25rem 0",
+                  color: e.color,
+                  borderBottom: "1px solid #1e293b",
+                }}>
+                  {e.message}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div style={{
+        marginTop: "1.5rem",
+        padding: "1rem",
+        background: "#1e293b",
+        borderRadius: "8px",
+        border: "1px solid #334155",
+        fontSize: "0.8rem",
+        color: "#64748b",
+      }}>
+        <strong style={{ color: "#38bdf8" }}>switchMap</strong> отменяет предыдущий запрос при каждом новом значении.
+        Никакой гонки запросов (race condition)! 🏆
+        <br />
+        Сравни: с <strong style={{ color: "#f87171" }}>mergeMap</strong> все запросы летели бы параллельно
+        и результаты появлялись бы в произвольном порядке.
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>
