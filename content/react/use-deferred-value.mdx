@@ -1,0 +1,333 @@
+## TypeScript: useDeferredValue – Когда UI дышит полной грудью
+
+Привет, кодеры! Яша снова на связи, и сегодня мы погрузимся в одну из самых крутых (и пока ещё немного магических) фич React Concurrent Mode – хук `useDeferredValue`. Представьте, что ваш пользовательский интерфейс – это дорога с интенсивным движением. Иногда на этой дороге случаются пробки из-за тяжёлых вычислений или отрисовки больших списков. `useDeferredValue` – это как будто вы прокладываете выделенную полосу для самого важного "транспорта" – отзывчивости пользовательского ввода, позволяя менее срочным "машинам" ехать по обычной полосе, даже если там пробка.
+
+### Что такое `useDeferredValue` и зачем он нужен?
+
+В мире React, когда вы обновляете состояние, это обычно вызывает синхронный ре-рендер компонента и всех его потомков. Если этот ре-рендер тяжёлый, UI может "подвисать" или "фризить", создавая неприятные ощущения для пользователя.
+
+`useDeferredValue` позволяет нам "отложить" обновление определённой части UI. Он принимает значение и возвращает его "отложенную" версию. React будет пытаться обновить UI, использующий отложенное значение, *после* того, как он справится с более приоритетными обновлениями (например, обновлением текста в инпуте, который не отложен). Это делает основной поток ввода более отзывчивым.
+
+**Как это работает (метафора):**
+
+Представьте, что у вас есть текстовое поле для поиска и огромный список результатов. Когда пользователь вводит текст, вы хотите, чтобы текст в поле обновлялся *мгновенно*. Но перерисовка 10000 элементов списка с фильтрацией может занять время. Если вы просто привяжете список к вводу, каждый символ будет вызывать задержку.
+
+С `useDeferredValue` вы говорите React: "Эй, React, вот актуальный текст из инпута. Обнови его немедленно. А вот его 'отложенная' версия – используй её для фильтрации списка, но можешь подождать, пока все срочные дела не сделаешь". Таким образом, инпут остаётся плавным, а список обновляется, как только появляется возможность, не блокируя основной ввод.
+
+### Синтаксис
+
+```typescript
+const deferredValue = React.useDeferredValue(value);
+```
+
+Где `value` – это любое значение (строка, число, объект и т.д.), которое вы хотите отложить. `deferredValue` будет возвращать последнее *стабильное* значение, а затем, когда React сможет, он обновит его до актуального `value`.
+
+### Базовый пример: Отложенный поиск
+
+Давайте создадим компонент, который имитирует тяжелую работу при фильтрации списка.
+
+```typescript
+import React from 'react';
+
+// Имитация тяжелого компонента, который долго рендерится
+interface ExpensiveListProps {
+  items: string[];
+  filter: string;
+}
+
+function ExpensiveList({ items, filter }: ExpensiveListProps) {
+  const [filteredItems, setFilteredItems] = React.useState<string[]>([]);
+  const filterId = React.useId(); // Хук для генерации уникальных ID, полезно для ключей
+
+  // Имитируем тяжелую фильтрацию/рендеринг
+  React.useEffect(() => {
+    const startTime = performance.now();
+    let result: string[] = [];
+    if (filter) {
+      result = items.filter(item => item.toLowerCase().includes(filter.toLowerCase()));
+    } else {
+      result = items;
+    }
+    
+    // Искусственная задержка для демонстрации "тяжелой работы"
+    while (performance.now() - startTime < 150) {
+      // Блокируем основной поток на 150мс
+    }
+    setFilteredItems(result);
+  }, [items, filter]);
+
+  if (!filteredItems.length && filter) {
+      return <p>Ничего не найдено для "{filter}"...</p>;
+  }
+
+  return (
+    <div style={{ border: '1px solid #ccc', padding: '10px', marginTop: '10px' }}>
+      <h3>Результаты для "{filter}" ({filteredItems.length} шт.):</h3>
+      {filteredItems.map((item, index) => (
+        <p key={`${filterId}-${index}`}>{item}</p>
+      ))}
+    </div>
+  );
+}
+
+// Главный компонент страницы с поиском
+function SearchPage({ allItems }: { allItems: string[] }) {
+  const [inputValue, setInputValue] = React.useState<string>(''); // Значение из инпута, обновляется мгновенно
+  const deferredInputValue = React.useDeferredValue(inputValue); // Отложенное значение для тяжелой части
+
+  // Флаг для индикации, что отложенное значение отстает от актуального
+  const isPending = inputValue !== deferredInputValue;
+
+  return (
+    <div>
+      <h2>Отложенный поиск</h2>
+      <input
+        type="text"
+        value={inputValue}
+        onChange={(e) => setInputValue(e.target.value)}
+        placeholder="Ищи что-нибудь..."
+        style={{ width: '300px', padding: '8px' }}
+      />
+      {/* Индикатор загрузки, который появляется, когда актуальное значение уже обновилось,
+          но отложенное еще нет (т.е., тяжелая работа еще в процессе) */}
+      {isPending && <p style={{ color: 'orange', margin: '5px 0' }}>Обновление результатов...</p>}
+      
+      {/* ExpensiveList получает отложенное значение filter, позволяя инпуту обновляться плавно */}
+      <ExpensiveList items={allItems} filter={deferredInputValue} />
+    </div>
+  );
+}
+
+// Пример использования:
+const largeDataSet = Array.from({ length: 5000 }, (_, i) => `Элемент списка ${i + 1}`);
+
+// ReactDOM.render(<SearchPage allItems={largeDataSet} />, document.getElementById('root'));
+```
+
+Попробуйте запустить этот код и быстро печатать в инпуте. Вы заметите, что текст в инпуте обновляется мгновенно, а список результатов (и индикатор "Обновление результатов...") обновляется с небольшой задержкой, не блокируя ввод.
+
+### Продвинутый пример: Интеграция с [Suspense](/react/lazy-suspense)
+
+`useDeferredValue` прекрасно работает с `Suspense`, особенно когда дело доходит до отложенной загрузки данных. Он может помочь отложить показ fallback'а `Suspense` до тех пор, пока пользователь не закончит вводить запрос.
+
+```typescript
+import React, { Suspense, useState, useDeferredValue } from 'react';
+
+// Вспомогательная функция для создания "Suspender'а" (Promise, который бросается)
+// Это стандартный паттерн для работы с Suspense для данных
+function createSuspender<T>(promise: Promise<T>): { read: () => T } {
+  let status: "pending" | "success" | "error" = "pending";
+  let result: T;
+  let suspender = promise.then(
+    (r) => {
+      status = "success";
+      result = r;
+    },
+    (e) => {
+      status = "error";
+      result = e;
+    }
+  );
+  return {
+    read() {
+      if (status === "pending") {
+        throw suspender;
+      } else if (status === "error") {
+        throw result;
+      }
+      return result;
+    },
+  };
+}
+
+// Глобальный кэш для наших suspender'ов, чтобы избежать повторных запросов
+const dataCache = new Map<string, ReturnType<typeof createSuspender<string[]>>>();
+
+interface DeferredDataFetcherProps {
+  query: string;
+}
+
+function DeferredDataFetcher({ query }: DeferredDataFetcherProps) {
+  // Функция для получения данных, которая может "suspense"
+  const getSuspendedData = (q: string) => {
+    // Если запрос пустой, просто возвращаем пустой массив без задержки
+    if (!q) return [];
+    
+    // Если данных нет в кэше, создаем новый suspender
+    if (!dataCache.has(q)) {
+      const promise = new Promise<string[]>((resolve) => {
+        setTimeout(() => {
+          console.log(`Загружаю данные для: "${q}"`);
+          // Имитация асинхронной загрузки данных
+          const result = Array.from({ length: 5 }, (_, i) => `Элемент ${i + 1} для "${q}"`);
+          resolve(result);
+        }, 1000); // Имитация задержки в 1 секунду
+      });
+      dataCache.set(q, createSuspender(promise));
+    }
+    return dataCache.get(q)!.read(); // Читаем данные (может бросить промис)
+  };
+
+  // Данные, которые могут привести к Suspense
+  const data = getSuspendedData(query);
+
+  if (!data.length && query) {
+      return <p>По вашему запросу "{query}" данных нет.</p>
+  }
+
+  return (
+    <div style={{ border: '1px dashed #007bff', padding: '10px', marginTop: '10px' }}>
+      <h4>Результаты загрузки для "{query}":</h4>
+      <ul>
+        {data.map((item, index) => (
+          <li key={index}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function DeferredSuspensePage() {
+  const [inputValue, setInputValue] = useState('');
+  const deferredQuery = useDeferredValue(inputValue); // Отложенное значение для запроса
+  
+  // Флаг, указывающий, что актуальное значение уже есть, но отложенное ещё нет
+  const isDeferredPending = inputValue !== deferredQuery;
+
+  return (
+    <div>
+      <h2>Отложенная загрузка данных с Suspense</h2>
+      <input
+        type="text"
+        value={inputValue}
+        onChange={(e) => setInputValue(e.target.value)}
+        placeholder="Введите запрос для асинхронной загрузки..."
+        style={{ width: '300px', padding: '8px' }}
+      />
+      {/* Пока отложенное значение отличается от актуального, показываем индикатор */}
+      {isDeferredPending && <p style={{ color: 'blue', margin: '5px 0' }}>Формирую запрос...</p>}
+      
+      <Suspense fallback={<div>Загрузка данных...</div>}>
+        {/* DeferredDataFetcher получает отложенное значение.
+            Это означает, что fallback "Загрузка данных..." не будет показан
+            сразу при каждом вводе, а лишь когда React решит обновить deferredQuery */}
+        <DeferredDataFetcher query={deferredQuery} />
+      </Suspense>
+    </div>
+  );
+}
+
+// ReactDOM.render(<DeferredSuspensePage />, document.getElementById('root'));
+```
+
+В этом примере, когда вы начинаете печатать, `inputValue` обновляется мгновенно. Но `deferredQuery`, который передаётся в `DeferredDataFetcher`, обновляется с задержкой. Это позволяет избежать немедленного появления `fallback` от `Suspense` при каждом нажатии клавиши, делая UI более плавным. `fallback` появится только после паузы в вводе, когда `deferredQuery` догонит `inputValue` и произойдёт фактический запрос данных.
+
+### Типичные ошибки и подводные камни
+
+1.  **Использование `useDeferredValue` для всего подряд**: Это не панацея от всех проблем производительности. Он предназначен для *отложенных, неблокирующих* обновлений. Если у вас есть фундаментальные проблемы с производительностью (например, слишком много ненужных рендеров), сначала решайте их с помощью `React.memo`, `useCallback`, `useMemo` или архитектурных изменений.
+2.  **Ожидание, что `useDeferredValue` предотвращает ре-рендер**: Он *не* предотвращает ре-рендер. Он лишь откладывает его для "deferred" ветви, позволяя другим частям UI обновиться раньше. Компонент, использующий `deferredValue`, всё равно будет перерисовываться, просто это произойдёт в "фоновом" или "менее приоритетном" режиме.
+3.  **Путаница с `debounce`**:
+    *   `debounce` задерживает *вызов* функции (например, API-запроса) до тех пор, пока не пройдёт определённое время без новых вызовов. Он уменьшает количество вызовов.
+    *   `useDeferredValue` задерживает *обновление состояния* в дочерних компонентах, позволяя родительскому компоненту и основным элементам UI (вроде инпута) обновляться сразу. Он улучшает *отзывчивость UI*, даже если фактическое количество ре-рендеров может быть таким же.
+
+    Они могут дополнять друг друга: `debounce` для сокращения количества запросов к API, `useDeferredValue` для плавности UI при отображении *результатов* этих запросов.
+
+### ### 🎯 Практика
+
+Время применить полученные знания, Яша-стажёр!
+
+1.  **Задание 1: "Живой" редактор Markdown с предпросмотром.**
+    *   Создайте главный компонент `MarkdownEditor`.
+    *   В нём должны быть `textarea` для ввода Markdown и компонент `MarkdownPreview` для его отображения.
+    *   `textarea` должен обновляться мгновенно.
+    *   `MarkdownPreview` должен имитировать тяжелую работу (например, искусственную задержку в 200мс) и отображать отложенную версию содержимого `textarea`, используя `useDeferredValue`.
+    *   Добавьте индикатор "Обновление предпросмотра...", который появляется, когда предпросмотр отстаёт.
+
+2.  **Задание 2: Кастомный хук `useDelayedValue` (аналог `useDeferredValue`).**
+    *   Напишите кастомный хук `useDelayedValue<T>(value: T)` который является обёрткой для `useDeferredValue`.
+    *   Хук должен возвращать кортеж `[currentValue: T, delayedValue: T, isPending: boolean]`, где `currentValue` – это исходное `value`, `delayedValue` – результат `useDeferredValue(value)`, а `isPending` – флаг `currentValue !== delayedValue`.
+    *   Используйте этот хук в простом компоненте с полем ввода и отображением `currentValue` и `delayedValue`, чтобы увидеть его работу.
+
+3.  **Задание 3: Отложенный список товаров с фильтрацией и добавлением в корзину.**
+    *   Создайте компонент `ProductList` (принимает `products` и `filterQuery`).
+    *   Каждый товар в списке должен иметь кнопку "Добавить в корзину". Добавление в корзину должно быть мгновенным и вызывать обычное состояние (например, счетчик товаров в корзине в шапке).
+    *   Фильтрация списка по `filterQuery` должна быть "тяжелой" (имитируйте задержку) и использовать `useDeferredValue`, чтобы не блокировать ввод в поле поиска.
+    *   Поле ввода для фильтрации товаров должно обновляться мгновенно.
+
+### ### 💡 Совет
+
+`useDeferredValue` – это мощный инструмент для улучшения *восприятия производительности* в React-приложениях. Он не решает проблемы с изначальной низкой производительностью, а скорее помогает "сгладить" её эффекты для пользователя, позволяя ему взаимодействовать с UI без ощущения задержек. Всегда сначала оптимизируйте чистые функции и мемоизируйте компоненты там, где это уместно, и только потом используйте `useDeferredValue` для тонкой настройки UX в интерактивных сценариях с интенсивными обновлениями.
+
+---
+
+## 🔗 Полезные ссылки
+- [Lazy Suspense](/react/lazy-suspense)
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground template="react" files={{ "/App.tsx": `import { useState, useDeferredValue, useMemo } from 'react';
+
+// Тяжёлая фильтрация с искусственной CPU-нагрузкой
+function buildFiltered(all: string[], query: string): string[] {
+  const start = Date.now();
+  while (Date.now() - start < 40) {} // имитация нагрузки
+  if (!query) return all;
+  return all.filter(item => item.toLowerCase().includes(query.toLowerCase()));
+}
+
+const DATA = Array.from({ length: 2000 }, (_, i) => {
+  const words = ['яблоко', 'банан', 'апельсин', 'манго', 'груша', 'киви', 'слива', 'персик'];
+  return words[i % 8] + ' №' + (i + 1);
+});
+
+export default function App() {
+  const [query, setQuery] = useState('');
+  // Отложенная копия — обновляется не спеша, когда React освободится
+  const deferredQuery = useDeferredValue(query);
+
+  // Тяжёлое вычисление — только когда deferredQuery изменится
+  const filtered = useMemo(() => buildFiltered(DATA, deferredQuery), [deferredQuery]);
+
+  const isStale = query !== deferredQuery; // список "устарел"
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#0f172a', padding: 24, fontFamily: 'sans-serif' }}>
+      <h2 style={{ color: '#38bdf8', marginTop: 0, marginBottom: 4 }}>useDeferredValue</h2>
+      <p style={{ color: '#94a3b8', fontSize: 14, marginBottom: 16 }}>
+        Поле ввода обновляется сразу. Список — когда React освободится. Без блокировки UI.
+      </p>
+      <input
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        placeholder="Поиск по фруктам..."
+        style={{ width: '100%', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', fontSize: 14, outline: 'none', marginBottom: 12 }}
+      />
+      <div style={{ display: 'flex', gap: 16, marginBottom: 10, fontSize: 13 }}>
+        <div style={{ background: '#1e293b', borderRadius: 6, padding: '4px 10px' }}>
+          <span style={{ color: '#64748b' }}>query: </span>
+          <span style={{ color: '#e2e8f0' }}>{query || '—'}</span>
+        </div>
+        <div style={{ background: '#1e293b', borderRadius: 6, padding: '4px 10px' }}>
+          <span style={{ color: '#64748b' }}>deferredQuery: </span>
+          {/* Жёлтый когда отстаёт от актуального значения */}
+          <span style={{ color: isStale ? '#f59e0b' : '#10b981' }}>{deferredQuery || '—'}</span>
+        </div>
+      </div>
+      {isStale && (
+        <div style={{ color: '#f59e0b', fontSize: 13, marginBottom: 8 }}>⏳ список устарел — обновляется в фоне...</div>
+      )}
+      <div style={{ opacity: isStale ? 0.5 : 1, transition: 'opacity 0.3s', maxHeight: 230, overflowY: 'auto', background: '#1e293b', borderRadius: 8, padding: 12 }}>
+        <div style={{ color: '#64748b', fontSize: 12, marginBottom: 6 }}>{'Найдено: ' + filtered.length}</div>
+        {filtered.slice(0, 30).map((item, i) => (
+          <div key={i} style={{ color: '#e2e8f0', padding: '3px 0', borderBottom: '1px solid #0f172a', fontSize: 13 }}>{item}</div>
+        ))}
+        {filtered.length > 30 && (
+          <div style={{ color: '#64748b', fontSize: 12, paddingTop: 6 }}>{'...ещё ' + (filtered.length - 30)}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,460 @@
+## 🛡️ HTTP Interceptors в Angular
+
+Interceptors — это мидлвары для HTTP запросов. Они перехватывают **каждый** запрос/ответ и позволяют добавлять заголовки, трансформировать данные, обрабатывать ошибки.
+
+---
+
+### 🔧 HttpInterceptorFn — функциональный перехватчик (Angular 15+)
+
+Современный подход — функция вместо класса:
+
+```typescript
+import { HttpInterceptorFn, HttpRequest, HttpHandlerFn, HttpEvent } from '@angular/common/http';
+import { Observable } from 'rxjs';
+
+export const loggingInterceptor: HttpInterceptorFn = (
+  req: HttpRequest<unknown>,
+  next: HttpHandlerFn
+): Observable<HttpEvent<unknown>> => {
+  console.log(`[HTTP] ${req.method} ${req.url}`);
+  return next(req);
+};
+```
+
+Регистрация:
+
+```typescript
+// main.ts
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
+
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideHttpClient(
+      withInterceptors([
+        loggingInterceptor,
+        authInterceptor,
+        errorInterceptor,
+      ])
+    )
+  ]
+});
+```
+
+---
+
+### 🔑 Auth Interceptor — добавление заголовка
+
+```typescript
+import { HttpInterceptorFn } from '@angular/common/http';
+import { inject } from '@angular/core';
+import { AuthService } from './auth.service';
+
+export const authInterceptor: HttpInterceptorFn = (req, next) => {
+  const authService = inject(AuthService);
+  const token = authService.getToken();
+
+  if (!token) {
+    return next(req);  // Без токена — запрос без изменений
+  }
+
+  // clone() — создаём копию запроса (запросы иммутабельны)
+  const authReq = req.clone({
+    headers: req.headers.set('Authorization', `Bearer ${token}`)
+  });
+
+  return next(authReq);
+};
+```
+
+---
+
+### 🔄 Трансформация запроса
+
+```typescript
+export const apiPrefixInterceptor: HttpInterceptorFn = (req, next) => {
+  const BASE_URL = inject(API_URL_TOKEN);
+
+  // Добавляем базовый URL только для относительных путей
+  if (req.url.startsWith('http')) {
+    return next(req);
+  }
+
+  const fullReq = req.clone({
+    url: `${BASE_URL}${req.url}`,
+    headers: req.headers
+      .set('Content-Type', 'application/json')
+      .set('Accept', 'application/json')
+  });
+
+  return next(fullReq);
+};
+```
+
+---
+
+### 📊 Loading Indicator Interceptor
+
+```typescript
+import { HttpInterceptorFn } from '@angular/common/http';
+import { inject } from '@angular/core';
+import { finalize } from 'rxjs/operators';
+import { LoadingService } from './loading.service';
+
+export const loadingInterceptor: HttpInterceptorFn = (req, next) => {
+  const loadingService = inject(LoadingService);
+
+  // Игнорируем фоновые запросы
+  if (req.headers.has('X-Skip-Loading')) {
+    return next(req.clone({ headers: req.headers.delete('X-Skip-Loading') }));
+  }
+
+  loadingService.show();
+
+  return next(req).pipe(
+    finalize(() => loadingService.hide())
+    // finalize вызывается и при успехе, и при ошибке
+  );
+};
+```
+
+```typescript
+// Использование — пропустить индикатор
+this.http.get('/api/silent', {
+  headers: { 'X-Skip-Loading': 'true' }
+}).subscribe();
+```
+
+---
+
+### ❌ Error Handling Interceptor
+
+```typescript
+import { HttpInterceptorFn, HttpErrorResponse } from '@angular/common/http';
+import { inject } from '@angular/core';
+import { catchError, throwError } from 'rxjs';
+import { Router } from '@angular/router';
+import { AuthService } from './auth.service';
+import { NotificationService } from './notification.service';
+
+export const errorInterceptor: HttpInterceptorFn = (req, next) => {
+  const router = inject(Router);
+  const authService = inject(AuthService);
+  const notifications = inject(NotificationService);
+
+  return next(req).pipe(
+    catchError((error: HttpErrorResponse) => {
+      switch (error.status) {
+        case 401:
+          // Не авторизован — редиректим на логин
+          authService.logout();
+          router.navigate(['/login'], {
+            queryParams: { returnUrl: router.url }
+          });
+          break;
+
+        case 403:
+          notifications.error('Нет доступа к этому ресурсу');
+          router.navigate(['/forbidden']);
+          break;
+
+        case 404:
+          notifications.error('Ресурс не найден');
+          break;
+
+        case 422:
+          // Ошибки валидации с сервера
+          const validationErrors = error.error?.errors;
+          notifications.error(`Ошибка валидации: ${JSON.stringify(validationErrors)}`);
+          break;
+
+        case 500:
+          notifications.error('Ошибка сервера. Попробуйте позже.');
+          break;
+
+        default:
+          notifications.error(`Неизвестная ошибка: ${error.message}`);
+      }
+
+      return throwError(() => error);  // Пробрасываем ошибку дальше
+    })
+  );
+};
+```
+
+---
+
+### 🔁 Retry Interceptor — повторные попытки
+
+```typescript
+import { HttpInterceptorFn, HttpErrorResponse } from '@angular/common/http';
+import { inject } from '@angular/core';
+import { retry, catchError, throwError } from 'rxjs';
+
+export const retryInterceptor: HttpInterceptorFn = (req, next) => {
+  // Повторяем только GET запросы
+  if (req.method !== 'GET') {
+    return next(req);
+  }
+
+  return next(req).pipe(
+    retry({
+      count: 3,                   // Максимум 3 попытки
+      delay: (error, attempt) => {
+        // Повторяем только при сетевых ошибках (5xx), не при 4xx
+        if (error instanceof HttpErrorResponse && error.status < 500) {
+          return throwError(() => error);
+        }
+        // Экспоненциальная задержка: 1с, 2с, 4с
+        return new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+      }
+    }),
+    catchError(error => throwError(() => error))
+  );
+};
+```
+
+---
+
+### 🗜️ Request/Response Трансформация
+
+```typescript
+import { HttpInterceptorFn, HttpResponse } from '@angular/common/http';
+import { map } from 'rxjs/operators';
+
+// Трансформация snake_case → camelCase
+export const caseTransformInterceptor: HttpInterceptorFn = (req, next) => {
+  // Трансформируем тело запроса camelCase → snake_case
+  const transformedReq = req.body
+    ? req.clone({ body: toSnakeCase(req.body) })
+    : req;
+
+  return next(transformedReq).pipe(
+    map(event => {
+      if (event instanceof HttpResponse) {
+        return event.clone({ body: toCamelCase(event.body) });
+      }
+      return event;
+    })
+  );
+};
+
+function toSnakeCase(obj: any): any {
+  if (Array.isArray(obj)) return obj.map(toSnakeCase);
+  if (obj !== null && typeof obj === 'object') {
+    return Object.fromEntries(
+      Object.entries(obj).map(([k, v]) => [
+        k.replace(/[A-Z]/g, l => `_${l.toLowerCase()}`),
+        toSnakeCase(v)
+      ])
+    );
+  }
+  return obj;
+}
+```
+
+---
+
+### 🏛️ Классовый перехватчик (Legacy — до Angular 15)
+
+```typescript
+import { Injectable } from '@angular/core';
+import {
+  HttpRequest, HttpHandler, HttpEvent,
+  HttpInterceptor, HTTP_INTERCEPTORS
+} from '@angular/common/http';
+import { Observable } from 'rxjs';
+
+@Injectable()
+export class AuthInterceptorClass implements HttpInterceptor {
+  constructor(private authService: AuthService) {}
+
+  intercept(req: HttpRequest<unknown>, next: HttpHandler): Observable<HttpEvent<unknown>> {
+    const token = this.authService.getToken();
+    if (!token) return next.handle(req);
+
+    return next.handle(req.clone({
+      setHeaders: { Authorization: `Bearer ${token}` }
+    }));
+  }
+}
+
+// Регистрация в NgModule
+@NgModule({
+  providers: [
+    { provide: HTTP_INTERCEPTORS, useClass: AuthInterceptorClass, multi: true }
+  ]
+})
+export class AppModule {}
+```
+
+---
+
+### 📋 Порядок выполнения
+
+```
+Запрос:  Interceptor 1 → Interceptor 2 → Interceptor 3 → HTTP
+Ответ:   HTTP → Interceptor 3 → Interceptor 2 → Interceptor 1
+```
+
+```typescript
+// Порядок важен!
+provideHttpClient(
+  withInterceptors([
+    loggingInterceptor,   // Первый — логирует всё
+    authInterceptor,      // Второй — добавляет токен
+    loadingInterceptor,   // Третий — показывает лоадер
+    errorInterceptor,     // Четвёртый — обрабатывает ошибки
+  ])
+)
+```
+
+---
+
+```mdx-playground
+export default function InterceptorsPlayground() {
+  const [interceptors, setInterceptors] = React.useState({
+    auth: true,
+    logging: true,
+    loading: true,
+    retry: false,
+    error: true,
+  });
+
+  const [requests, setRequests] = React.useState([]);
+  const [activeRequest, setActiveRequest] = React.useState(null);
+  const [forceFail, setForceFail] = React.useState(false);
+
+  const toggle = (key) => setInterceptors(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const simulateRequest = async (endpoint, method = 'GET') => {
+    const requestId = Date.now();
+    const chain = [];
+
+    // Build chain based on enabled interceptors
+    if (interceptors.logging) chain.push({ name: 'LoggingInterceptor', color: '#7dd3fc', msg: `${method} ${endpoint}` });
+    if (interceptors.auth) chain.push({ name: 'AuthInterceptor', color: '#a78bfa', msg: 'Добавлен Authorization: Bearer ***' });
+    if (interceptors.loading) chain.push({ name: 'LoadingInterceptor', color: '#f59e0b', msg: 'loadingService.show()' });
+    chain.push({ name: '🌐 HTTP', color: '#22c55e', msg: `${method} ${endpoint}` });
+
+    const newRequest = { id: requestId, endpoint, method, status: 'pending', chain, phase: -1 };
+    setRequests(prev => [newRequest, ...prev].slice(0, 5));
+    setActiveRequest(requestId);
+
+    for (let i = 0; i < chain.length; i++) {
+      await new Promise(r => setTimeout(r, 300));
+      setRequests(prev => prev.map(r => r.id === requestId ? { ...r, phase: i } : r));
+    }
+
+    // Response or error
+    await new Promise(r => setTimeout(r, 400));
+
+    if (forceFail) {
+      const errorChain = [];
+      if (interceptors.error) errorChain.push({ name: 'ErrorInterceptor', color: '#f87171', msg: '401 Unauthorized → router.navigate([/login])' });
+      if (interceptors.loading) errorChain.push({ name: 'LoadingInterceptor', color: '#f59e0b', msg: 'finalize() → loadingService.hide()' });
+      if (interceptors.logging) errorChain.push({ name: 'LoggingInterceptor', color: '#7dd3fc', msg: 'Ошибка залогирована' });
+
+      for (let i = 0; i < errorChain.length; i++) {
+        await new Promise(r => setTimeout(r, 250));
+        setRequests(prev => prev.map(r => r.id === requestId ? { ...r, responseChain: errorChain, responsePhase: i, status: 'error' } : r));
+      }
+      setRequests(prev => prev.map(r => r.id === requestId ? { ...r, status: 'error' } : r));
+    } else {
+      const responseChain = [];
+      if (interceptors.loading) responseChain.push({ name: 'LoadingInterceptor', color: '#f59e0b', msg: 'finalize() → loadingService.hide()' });
+      if (interceptors.logging) responseChain.push({ name: 'LoggingInterceptor', color: '#7dd3fc', msg: '200 OK залогировано' });
+
+      for (let i = 0; i < responseChain.length; i++) {
+        await new Promise(r => setTimeout(r, 250));
+        setRequests(prev => prev.map(r => r.id === requestId ? { ...r, responseChain, responsePhase: i } : r));
+      }
+      setRequests(prev => prev.map(r => r.id === requestId ? { ...r, status: 'success' } : r));
+    }
+
+    setActiveRequest(null);
+  };
+
+  const interceptorList = [
+    { key: 'logging', label: 'LoggingInterceptor', color: '#7dd3fc', desc: 'Логирует все запросы' },
+    { key: 'auth', label: 'AuthInterceptor', color: '#a78bfa', desc: 'Добавляет JWT токен' },
+    { key: 'loading', label: 'LoadingInterceptor', color: '#f59e0b', desc: 'Показывает лоадер' },
+    { key: 'retry', label: 'RetryInterceptor', color: '#22c55e', desc: 'Повторяет при 5xx ошибках' },
+    { key: 'error', label: 'ErrorInterceptor', color: '#f87171', desc: 'Обрабатывает ошибки' },
+  ];
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: 520, padding: 24, borderRadius: 12, fontFamily: 'system-ui', color: '#e2e8f0' }}>
+      <div style={{ color: '#dd0031', fontWeight: 700, fontSize: 16, marginBottom: 20 }}>
+        🛡️ HTTP Interceptor Chain
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+        <div>
+          {/* Chain config */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155', marginBottom: 16 }}>
+            <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 12 }}>withInterceptors([...]):</div>
+            {interceptorList.map(({ key, label, color, desc }) => (
+              <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, padding: '6px 10px', background: interceptors[key] ? '#0f172a' : '#0f172a80', borderRadius: 6, border: `1px solid ${interceptors[key] ? color : '#334155'}`, cursor: 'pointer', transition: 'all 0.2s' }} onClick={() => toggle(key)}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: interceptors[key] ? color : '#334155', transition: 'background 0.2s' }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, color: interceptors[key] ? color : '#475569' }}>{label}</div>
+                  <div style={{ fontSize: 10, color: '#475569' }}>{desc}</div>
+                </div>
+                <div style={{ fontSize: 11, color: interceptors[key] ? '#22c55e' : '#f87171' }}>
+                  {interceptors[key] ? 'ON' : 'OFF'}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Controls */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            <button onClick={() => simulateRequest('/api/users')} disabled={activeRequest !== null} style={{ background: '#dd0031', color: 'white', border: 'none', padding: '7px 14px', borderRadius: 8, cursor: activeRequest ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+              GET /api/users
+            </button>
+            <button onClick={() => simulateRequest('/api/posts', 'POST')} disabled={activeRequest !== null} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '7px 14px', borderRadius: 8, cursor: activeRequest ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+              POST /api/posts
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input type="checkbox" checked={forceFail} onChange={e => setForceFail(e.target.checked)} style={{ accentColor: '#f87171' }} />
+            <label style={{ fontSize: 12, color: '#94a3b8' }}>Симулировать 401 ошибку</label>
+          </div>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155' }}>
+          <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 12 }}>📋 Запросы через цепочку</div>
+          {requests.length === 0 && <div style={{ color: '#475569', fontSize: 12 }}>Нажми кнопку запроса...</div>}
+          {requests.map(req => (
+            <div key={req.id} style={{ marginBottom: 16, padding: 12, background: '#0f172a', borderRadius: 8, border: `1px solid ${req.status === 'error' ? '#f87171' : req.status === 'success' ? '#22c55e' : '#334155'}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#e2e8f0' }}>{req.method} {req.endpoint}</span>
+                <span style={{ fontSize: 11, color: req.status === 'error' ? '#f87171' : req.status === 'success' ? '#22c55e' : '#f59e0b' }}>
+                  {req.status === 'pending' ? '⏳' : req.status === 'error' ? '❌ 401' : '✅ 200'}
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                {req.chain.map((step, i) => (
+                  <div key={i} style={{ fontSize: 11, color: req.phase >= i ? step.color : '#334155', transition: 'color 0.3s', paddingLeft: i * 8 }}>
+                    {req.phase >= i ? '→' : '·'} <span style={{ fontFamily: 'monospace' }}>{step.name}</span>
+                    {req.phase >= i && <span style={{ color: '#475569' }}> — {step.msg}</span>}
+                  </div>
+                ))}
+
+                {req.responseChain && req.responseChain.map((step, i) => (
+                  <div key={`r${i}`} style={{ fontSize: 11, color: req.responsePhase >= i ? step.color : '#334155', transition: 'color 0.3s', paddingLeft: (req.chain.length - i - 1) * 8 }}>
+                    {req.responsePhase >= i ? '←' : '·'} <span style={{ fontFamily: 'monospace' }}>{step.name}</span>
+                    {req.responsePhase >= i && <span style={{ color: '#475569' }}> — {step.msg}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+```

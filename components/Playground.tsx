@@ -1,3 +1,4 @@
+'use client'
 import { Sandpack } from "@codesandbox/sandpack-react";
 import { useEffect, useState } from "react";
 
@@ -45,7 +46,12 @@ export const Playground = ({
     ...(js ? { '/index.js': js } : {}),
   } : files;
   
-  const finalTemplate = (html || css || js) ? 'static' : template;
+  // Auto-upgrade to TypeScript template when .tsx/.ts files are provided
+  const hasTsFiles = Object.keys(convertedFiles).some(f => f.endsWith('.tsx') || f.endsWith('.ts'));
+  const autoTemplate = hasTsFiles && template === 'react' ? 'react-ts'
+    : hasTsFiles && template === 'vite-react' ? 'vite-react-ts'
+    : template;
+  const finalTemplate = (html || css || js) ? 'static' : autoTemplate;
   const finalFiles = Object.keys(convertedFiles).length > 0 ? convertedFiles : files;
   const [isSecure, setIsSecure] = useState(true);
   const [mounted, setMounted] = useState(false);

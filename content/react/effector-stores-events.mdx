@@ -1,0 +1,431 @@
+## Effector: Stores и Events — строительные блоки
+
+Если Effector — это LEGO, то **Store** и **Event** — это самые главные кубики 🧩. Из них строится любая бизнес-логика: от простого счётчика до сложного мультишагового процесса. Давай разберём их досконально!
+
+### createStore() — создаём хранилище
+
+```typescript
+import { createStore } from 'effector';
+
+// Примитивные сторы
+const $count = createStore(0);
+const $name  = createStore('');
+const $flag  = createStore(false);
+
+// Стор с объектом
+const $user = createStore<User | null>(null);
+
+// Стор с массивом
+const $todos = createStore<Todo[]>([]);
+
+// С опциями
+const $config = createStore(
+  { theme: 'dark', lang: 'ru' },
+  {
+    name: '$config',       // имя для DevTools
+    skipVoid: false,       // пропускать ли undefined
+  }
+);
+```
+
+### createEvent() — создаём событие
+
+Events — это не просто уведомления, это **функции**, которые несут данные (payload) и запускают изменения.
+
+```typescript
+import { createEvent } from 'effector';
+
+// Событие без данных
+const buttonClicked = createEvent();
+
+// Событие с типизированным payload
+const nameUpdated    = createEvent<string>();
+const todoAdded      = createEvent<{ id: number; text: string; done: boolean }>();
+const filterChanged  = createEvent<'all' | 'active' | 'done'>();
+const itemRemoved    = createEvent<number>(); // передаём id
+
+// Event — это просто функция! Вызываем её напрямую:
+nameUpdated('Яша');
+todoAdded({ id: 1, text: 'Учить Effector', done: false });
+buttonClicked();
+```
+
+### store.on() — подписка на события
+
+`.on()` — главный способ обновлять стор. Он принимает событие и **чистую функцию** `(currentState, payload) => newState`.
+
+```typescript
+import { createStore, createEvent } from 'effector';
+
+const incremented    = createEvent<number>();
+const nameChanged    = createEvent<string>();
+const userLoaded     = createEvent<User>();
+const errorsCleared  = createEvent();
+
+const $count = createStore(0)
+  .on(incremented, (state, delta) => state + delta);
+
+const $name = createStore('')
+  .on(nameChanged, (_, newName) => newName); // _ — игнорируем старое значение
+
+const $user = createStore<User | null>(null)
+  .on(userLoaded, (_, user) => user);
+
+const $errors = createStore<string[]>([])
+  .on(errorsCleared, () => []); // возвращаем новый пустой массив
+
+// Несколько событий на одном сторе
+const $form = createStore({ name: '', email: '', age: 0 })
+  .on(nameChanged,  (state, name)  => ({ ...state, name }))
+  .on(emailChanged, (state, email) => ({ ...state, email }))
+  .on(ageChanged,   (state, age)   => ({ ...state, age }));
+```
+
+### store.reset() — сброс к начальному значению
+
+```typescript
+import { createStore, createEvent } from 'effector';
+
+const formSubmitted = createEvent();
+const formReset     = createEvent();
+
+const $form = createStore({ name: '', email: '' })
+  .on(formSubmitted, (state) => state) // обычно здесь сабмит через effect
+  .reset(formReset); // сбрасывает к { name: '', email: '' }
+
+// Можно сбрасывать несколько сторов одним событием:
+const $errors = createStore<string[]>([]).reset(formReset);
+const $status = createStore<'idle' | 'sending'>('idle').reset(formReset);
+```
+
+### combine() — объединяем сторы
+
+`combine()` создаёт новый стор, значение которого вычисляется из нескольких других. Аналог `useMemo` для сторов!
+
+```typescript
+import { createStore, combine } from 'effector';
+
+const $firstName = createStore('Яша');
+const $lastName  = createStore('Иванов');
+const $age       = createStore(25);
+
+// Объединяем в объект
+const $fullUser = combine({
+  firstName: $firstName,
+  lastName:  $lastName,
+  age:       $age,
+});
+// $fullUser.getState() => { firstName: 'Яша', lastName: 'Иванов', age: 25 }
+
+// Объединяем с трансформацией
+const $fullName = combine(
+  $firstName,
+  $lastName,
+  (first, last) => \`\${first} \${last}\`
+);
+// $fullName.getState() => 'Яша Иванов'
+
+// Derived store (производный): аналог useSelector с мемоизацией
+const $isAdult = $age.map((age) => age >= 18);
+const $greeting = $fullName.map((name) => \`Привет, \${name}!\`);
+```
+
+### store.map() — трансформируем значение
+
+```typescript
+const $todos = createStore<Todo[]>([]);
+
+// Производные сторы — обновляются автоматически!
+const $doneTodos    = $todos.map((todos) => todos.filter((t) => t.done));
+const $activeTodos  = $todos.map((todos) => todos.filter((t) => !t.done));
+const $totalCount   = $todos.map((todos) => todos.length);
+const $doneCount    = $doneTodos.map((todos) => todos.length);
+const $hasCompleted = $doneCount.map((count) => count > 0);
+```
+
+### split() — разветвляем события
+
+`split()` позволяет разбить один поток событий на несколько по условию:
+
+```typescript
+import { createEvent, split } from 'effector';
+
+const messageReceived = createEvent<{ type: 'info' | 'error' | 'warn'; text: string }>();
+
+// Разделяем поток по типу сообщения
+const { infoReceived, errorReceived, warnReceived } = split(messageReceived, {
+  infoReceived:  ({ type }) => type === 'info',
+  errorReceived: ({ type }) => type === 'error',
+  warnReceived:  ({ type }) => type === 'warn',
+});
+
+// Теперь подписываемся на каждый случай отдельно
+$infoLog.on(infoReceived, (log, msg) => [...log, msg.text]);
+$errorLog.on(errorReceived, (log, msg) => [...log, msg.text]);
+```
+
+### Реальный пример: менеджер задач
+
+```typescript
+import { createStore, createEvent, combine } from 'effector';
+
+// --- Types ---
+interface Todo {
+  id: number;
+  text: string;
+  done: boolean;
+}
+type Filter = 'all' | 'active' | 'done';
+
+// --- Events ---
+const todoAdded     = createEvent<string>();          // payload: текст задачи
+const todoToggled   = createEvent<number>();          // payload: id задачи
+const todoRemoved   = createEvent<number>();          // payload: id задачи
+const filterChanged = createEvent<Filter>();
+const allCompleted  = createEvent();
+const clearedDone   = createEvent();
+
+// --- Stores ---
+let nextId = 1;
+
+const $todos = createStore<Todo[]>([])
+  .on(todoAdded,   (todos, text) => [
+    ...todos,
+    { id: nextId++, text, done: false }
+  ])
+  .on(todoToggled, (todos, id) =>
+    todos.map((t) => t.id === id ? { ...t, done: !t.done } : t)
+  )
+  .on(todoRemoved, (todos, id) =>
+    todos.filter((t) => t.id !== id)
+  )
+  .on(allCompleted, (todos) =>
+    todos.map((t) => ({ ...t, done: true }))
+  )
+  .on(clearedDone, (todos) =>
+    todos.filter((t) => !t.done)
+  );
+
+const $filter = createStore<Filter>('all')
+  .on(filterChanged, (_, filter) => filter);
+
+// --- Derived stores ---
+const $filteredTodos = combine($todos, $filter, (todos, filter) => {
+  if (filter === 'active') return todos.filter((t) => !t.done);
+  if (filter === 'done')   return todos.filter((t) => t.done);
+  return todos;
+});
+
+const $stats = combine($todos, (todos) => ({
+  total:  todos.length,
+  done:   todos.filter((t) => t.done).length,
+  active: todos.filter((t) => !t.done).length,
+}));
+```
+
+### Читаем состояние вне компонентов
+
+```typescript
+// Получить текущее значение (не реактивно)
+const currentTodos = $todos.getState();
+const currentFilter = $filter.getState();
+
+// Подписаться на изменения (вне React)
+const unsubscribe = $todos.watch((todos) => {
+  console.log('Задачи обновились:', todos);
+});
+
+// Отписаться
+unsubscribe();
+```
+
+---
+
+## 🔗 Полезные ссылки
+- [Effector: Введение](/react/effector-intro)
+- [Effector: Effects](/react/effector-effects)
+- [Effector + React](/react/effector-react)
+- [Effector: Продвинутый уровень](/react/effector-advanced)
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground template="react" files={{ "/App.tsx": `import { useReducer, useCallback, useMemo, useState } from "react";
+
+// 🎯 Симуляция Effector Stores + Events через useReducer + custom hook
+//
+// Реальный Effector код выглядел бы так:
+//   const todoAdded   = createEvent<string>();
+//   const todoToggled = createEvent<number>();
+//   const todoRemoved = createEvent<number>();
+//   const $todos = createStore<Todo[]>([])
+//     .on(todoAdded,   (todos, text) => [...todos, {id: nextId++, text, done: false}])
+//     .on(todoToggled, (todos, id)   => todos.map(t => t.id===id ? {...t,done:!t.done} : t))
+//     .on(todoRemoved, (todos, id)   => todos.filter(t => t.id !== id));
+//   const $filter = createStore<Filter>('all').on(filterChanged, (_, f) => f);
+//   const $filtered = combine($todos, $filter, (todos, f) => ...);
+
+interface Todo { id: number; text: string; done: boolean; }
+type Filter = "all" | "active" | "done";
+
+// Events (actions)
+type TodoEvent =
+  | { type: "TODO_ADDED";   payload: string }
+  | { type: "TODO_TOGGLED"; payload: number }
+  | { type: "TODO_REMOVED"; payload: number }
+  | { type: "FILTER_CHANGED"; payload: Filter }
+  | { type: "ALL_COMPLETED" }
+  | { type: "DONE_CLEARED" };
+
+// Store (state)
+interface AppState { todos: Todo[]; filter: Filter; nextId: number; }
+
+const initialState: AppState = { todos: [], filter: "all", nextId: 1 };
+
+// Reducer = .on() handlers
+function reducer(state: AppState, event: TodoEvent): AppState {
+  switch (event.type) {
+    case "TODO_ADDED":
+      return { ...state, nextId: state.nextId + 1, todos: [...state.todos, { id: state.nextId, text: event.payload, done: false }] };
+    case "TODO_TOGGLED":
+      return { ...state, todos: state.todos.map(t => t.id === event.payload ? { ...t, done: !t.done } : t) };
+    case "TODO_REMOVED":
+      return { ...state, todos: state.todos.filter(t => t.id !== event.payload) };
+    case "FILTER_CHANGED":
+      return { ...state, filter: event.payload };
+    case "ALL_COMPLETED":
+      return { ...state, todos: state.todos.map(t => ({ ...t, done: true })) };
+    case "DONE_CLEARED":
+      return { ...state, todos: state.todos.filter(t => !t.done) };
+    default: return state;
+  }
+}
+
+// Custom hook — аналог useUnit/useStore из effector-react
+function useEffectorTodos() {
+  const [state, dispatch] = useReducer(reducer, initialState);
+
+  // Derived stores — combine($todos, $filter, ...)
+  const filteredTodos = useMemo(() => {
+    if (state.filter === "active") return state.todos.filter(t => !t.done);
+    if (state.filter === "done")   return state.todos.filter(t => t.done);
+    return state.todos;
+  }, [state.todos, state.filter]);
+
+  // Stats = $todos.map(todos => ({...}))
+  const stats = useMemo(() => ({
+    total:  state.todos.length,
+    done:   state.todos.filter(t => t.done).length,
+    active: state.todos.filter(t => !t.done).length,
+  }), [state.todos]);
+
+  // Events (dispatchers)
+  const todoAdded    = useCallback((text: string) => dispatch({ type: "TODO_ADDED",    payload: text }), []);
+  const todoToggled  = useCallback((id: number)   => dispatch({ type: "TODO_TOGGLED",  payload: id  }), []);
+  const todoRemoved  = useCallback((id: number)   => dispatch({ type: "TODO_REMOVED",  payload: id  }), []);
+  const filterChanged= useCallback((f: Filter)    => dispatch({ type: "FILTER_CHANGED",payload: f   }), []);
+  const allCompleted = useCallback(()             => dispatch({ type: "ALL_COMPLETED" }),                []);
+  const doneCleared  = useCallback(()             => dispatch({ type: "DONE_CLEARED"  }),                []);
+
+  return { filter: state.filter, filteredTodos, stats, todoAdded, todoToggled, todoRemoved, filterChanged, allCompleted, doneCleared };
+}
+
+const btn = (bg: string, active = true) => ({
+  padding: "6px 14px", background: active ? bg : "#1e293b",
+  color: active ? "#fff" : "#64748b", border: active ? "none" : "1px solid #334155",
+  borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 12,
+});
+
+export default function App() {
+  const { filter, filteredTodos, stats, todoAdded, todoToggled, todoRemoved, filterChanged, allCompleted, doneCleared } = useEffectorTodos();
+  const [input, setInput] = useState("");
+
+  const handleAdd = () => {
+    if (input.trim()) { todoAdded(input.trim()); setInput(""); }
+  };
+
+  const FILTERS: Filter[] = ["all", "active", "done"];
+  const filterLabels: Record<Filter, string> = { all: "Все", active: "Активные", done: "Выполнено" };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "sans-serif", padding: 16 }}>
+      <div style={{ background: "#1e293b", borderRadius: 16, padding: 28, width: 440, boxShadow: "0 8px 32px rgba(0,0,0,.5)" }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <span style={{ background: "#7c3aed", color: "#fff", borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px" }}>Effector</span>
+          <span style={{ background: "#1e3a5f", color: "#60a5fa", borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px" }}>createStore + createEvent</span>
+        </div>
+        <h2 style={{ color: "#f8fafc", margin: "0 0 4px", fontSize: 18 }}>Todo Manager</h2>
+        <p style={{ color: "#64748b", fontSize: 11, marginBottom: 20 }}>
+          $todos.on(todoAdded, ...) · combine($todos, $filter)
+        </p>
+
+        {/* Stats — $stats derived store */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          {[
+            { label: "Всего",     value: stats.total,  color: "#94a3b8" },
+            { label: "Активных",  value: stats.active, color: "#60a5fa" },
+            { label: "Готово",    value: stats.done,   color: "#22c55e" },
+          ].map(({ label, value, color }) => (
+            <div key={label} style={{ flex: 1, background: "#0f172a", borderRadius: 8, padding: "8px 0", textAlign: "center" }}>
+              <div style={{ color, fontSize: 22, fontWeight: 700 }}>{value}</div>
+              <div style={{ color: "#475569", fontSize: 10 }}>{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Input */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleAdd()}
+            placeholder="Новая задача..."
+            style={{ flex: 1, padding: "8px 12px", background: "#0f172a", border: "1px solid #334155", borderRadius: 8, color: "#f8fafc", fontSize: 13, outline: "none" }}
+          />
+          <button style={btn("#7c3aed")} onClick={handleAdd}>+ Добавить</button>
+        </div>
+
+        {/* Filters — $filter store + filterChanged event */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {FILTERS.map(f => (
+            <button key={f} style={btn(f === filter ? "#7c3aed" : "#1e293b", f === filter)} onClick={() => filterChanged(f)}>
+              {filterLabels[f]}
+            </button>
+          ))}
+          <button style={{ ...btn("#334155", true), marginLeft: "auto" }} onClick={allCompleted} title="Завершить все">✓✓</button>
+          <button style={btn("#334155", true)} onClick={doneCleared} title="Удалить выполненные">🗑</button>
+        </div>
+
+        {/* Todo list — $filteredTodos */}
+        <div style={{ maxHeight: 280, overflowY: "auto" }}>
+          {filteredTodos.length === 0 && (
+            <div style={{ color: "#475569", textAlign: "center", padding: 24, fontSize: 13 }}>
+              {filter === "done" ? "Нет выполненных задач 🎯" : "Список пуст — добавьте задачу!"}
+            </div>
+          )}
+          {filteredTodos.map(todo => (
+            <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: "#0f172a", borderRadius: 8, marginBottom: 6, border: "1px solid #1e293b" }}>
+              <button
+                onClick={() => todoToggled(todo.id)}
+                style={{ width: 20, height: 20, borderRadius: "50%", border: \`2px solid \${todo.done ? "#22c55e" : "#475569"}\`, background: todo.done ? "#22c55e" : "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+              >
+                {todo.done && <span style={{ color: "#fff", fontSize: 10 }}>✓</span>}
+              </button>
+              <span style={{ flex: 1, color: todo.done ? "#475569" : "#e2e8f0", fontSize: 13, textDecoration: todo.done ? "line-through" : "none" }}>
+                {todo.text}
+              </span>
+              <button onClick={() => todoRemoved(todo.id)} style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 16, padding: "0 2px" }}>×</button>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background: "#0f172a", borderRadius: 8, padding: "10px 14px", marginTop: 16, fontSize: 10, color: "#475569", lineHeight: 1.8 }}>
+          // $filteredTodos = combine($todos, $filter, (todos, f) =&gt; ...)<br/>
+          // Обновляется автоматически при изменении любого из сторов
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

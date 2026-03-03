@@ -1,3 +1,4 @@
+'use client'
 import { jsx } from 'react/jsx-runtime'
 import { useEffect, useId, useState } from 'react'
 import mermaid from 'mermaid'

@@ -1,0 +1,372 @@
+## TypeScript: Паттерны оптимизации
+
+Привет, мой дорогой друг, разработчик с большой буквы! Яша снова здесь, и сегодня мы нырнем в мир, где код не просто работает, а работает *быстро* и *эффективно*. Мы поговорим о паттернах оптимизации в TypeScript. Но не спеши думать, что мы будем заниматься микрооптимизациями или ковыряться в байт-коде. Нет! В TypeScript оптимизация — это не только про runtime производительность, но и про ускорение работы компилятора, улучшение DX (Developer Experience) и, конечно же, про написание более поддерживаемого и предсказуемого кода.
+
+Представь, что твой код — это роскошный спортивный автомобиль. TypeScript помогает тебе не только собрать его по чертежам, но и убедиться, что все детали на своих местах, а двигатель работает без перебоев. Паттерны оптимизации — это тюнинг, который делает этот автомобиль не просто красивым, но и невероятно мощным.
+
+### 🚗 Оптимизация на уровне типов (Compile-Time)
+
+Да-да, TypeScript умеет оптимизировать даже на этапе компиляции! Это не про выполнение кода, а про скорость работы самого компилятора и про то, как он обрабатывает сложные типы. Чрезмерно сложные или рекурсивные типы могут замедлять компиляцию, и тут нам на помощь приходят техники "мемоизации" типов.
+
+#### Мемоизация типов с помощью условных типов
+
+Идея проста: если мы уже вычислили сложный тип, зачем вычислять его снова? TypeScript не предоставляет явного механизма кэширования результатов вычисления типов, но мы можем использовать условные типы (`A extends B ? X : Y`) и `infer` для имитации этого поведения, переиспользуя результаты внутри более сложных структур.
+
+Представь, что у нас есть сложный тип, который "глубоко читает" структуру объекта.
+
+```typescript
+// Определим некий сложный тип, который что-то делает с вложенными свойствами
+type DeepExtractProperty<T, K extends keyof T> = T[K] extends object
+  ? { [P in keyof T[K]]: T[K][P] }
+  : T[K];
+
+// А теперь представим, что мы хотим "кэшировать" результат для конкретного T и K
+// Это не настоящая мемоизация компилятора, но хороший паттерн для переиспользования
+// промежуточных результатов в сложных типах.
+type MemoizedResult<T, K extends keyof T, Result = DeepExtractProperty<T, K>> = Result;
+
+interface UserProfile {
+  id: number;
+  details: {
+    name: string;
+    email: string;
+    address: {
+      city: string;
+      zip: number;
+    };
+  };
+  isActive: boolean;
+}
+
+// Теперь мы используем MemoizedResult, чтобы указать, что мы ожидаем определенный тип
+// Это не ускоряет компиляцию напрямую, но помогает структурировать сложные типы
+// и предотвратить повторные "дорогие" вычисления в рамках одной цепочки типов.
+type UserDetailsType = MemoizedResult<UserProfile, 'details'>;
+
+const userDetails: UserDetailsType = {
+  name: "Яша",
+  email: "yasha@learncode.com",
+  address: { city: "TypeScriptville", zip: 12345 }
+};
+
+console.log(userDetails);
+
+// Пример использования "infer" для извлечения и переиспользования типа
+type GetArrayElementType<T> = T extends (infer ElementType)[] ? ElementType : never;
+
+type StringArray = string[];
+type Element = GetArrayElementType<StringArray>; // Element будет 'string'
+```
+
+Этот подход не "кэширует" сам процесс вычисления типа компилятором, но позволяет тебе один раз определить сложный промежуточный тип и затем переиспользовать его по имени (`MemoizedResult` или `ElementType`), что улучшает читаемость и консистентность, а в некоторых случаях может помочь компилятору избегать повторных обходов AST, если он сможет разрешить тип быстрее по имени.
+
+### 🚀 Оптимизация на уровне выполнения (Runtime)
+
+Теперь переходим к классической оптимизации — как сделать наш код быстрее, когда он уже запущен. TypeScript здесь выступает как наш надежный помощник, который следит за типами и позволяет нам строить более эффективные и безопасные паттерны.
+
+#### 1. Type Guards для узких мест производительности
+
+Type Guards (защитники типов) — это не только про безопасность, но и про потенциальную оптимизацию. Когда компилятор сужает тип внутри блока `if` (например, `if (typeof value === 'string')`), это помогает ему "знать" больше о данных. На runtime это может позволить избежать лишних проверок или вызовов функций, которые не применимы к текущему типу.
+
+```typescript
+interface ApiResponse {
+  status: 'success' | 'error';
+  data?: unknown; // data может быть чем угодно
+  message?: string;
+}
+
+interface SuccessData {
+  id: string;
+  payload: string;
+}
+
+function isSuccessData(data: unknown): data is SuccessData {
+  return typeof data === 'object' && data !== null && 'id' in data && 'payload' in data;
+}
+
+function processResponse(response: ApiResponse) {
+  if (response.status === 'success' && response.data) {
+    // Здесь response.data все еще unknown. Нужен Type Guard!
+    if (isSuccessData(response.data)) {
+      // TypeScript теперь знает, что response.data это SuccessData
+      console.log(`Успешно обработаны данные: ID=${response.data.id}, Payload=${response.data.payload}`);
+      // Здесь мы избежали ошибок на runtime и обеспечили безопасность
+      // Если бы мы не использовали Type Guard, пришлось бы делать приведения типов (as),
+      // что небезопасно и не даёт никаких гарантий.
+    } else {
+      console.warn("Получены успешные данные, но в неожиданном формате.");
+    }
+  } else if (response.status === 'error' && response.message) {
+    console.error(`Ошибка: ${response.message}`);
+  } else {
+    console.warn("Неизвестный статус ответа или отсутствуют данные.");
+  }
+}
+
+processResponse({ status: 'success', data: { id: 'abc-123', payload: 'Some valuable info' } });
+processResponse({ status: 'error', message: 'Something went wrong' });
+processResponse({ status: 'success', data: 'malformed data' }); // Отработает через else ветку внутри
+```
+
+#### 2. Мемоизация функций/методов с декораторами или HOCs
+
+Мемоизация (caching) результатов дорогих вычислений — классический паттерн оптимизации runtime. TypeScript, благодаря декораторам и строгой типизации, делает этот паттерн очень элегантным.
+
+```typescript
+// Простая функция мемоизации, кэширует результат по аргументам
+function memoize<T extends (...args: any[]) => any>(
+  fn: T,
+  cache: Map<string, ReturnType<T>> = new Map()
+): T {
+  return function (...args: Parameters<T>): ReturnType<T> {
+    const key = JSON.stringify(args); // Простой ключ, можно сделать более сложный
+    if (cache.has(key)) {
+      console.log(`CACHE HIT for ${fn.name || 'anonymous'} with args: ${key}`);
+      return cache.get(key)!;
+    }
+    console.log(`CACHE MISS for ${fn.name || 'anonymous'} with args: ${key}`);
+    const result = fn(...args);
+    cache.set(key, result);
+    return result;
+  } as T;
+}
+
+// Применяем мемоизацию к "дорогой" функции
+const expensiveCalculation = memoize(function calculateFactorial(n: number): number {
+  if (n <= 1) return 1;
+  let result = 1;
+  for (let i = 2; i <= n; i++) {
+    result *= i;
+  }
+  return result;
+});
+
+console.log(expensiveCalculation(5)); // Вычисление, CACHE MISS
+console.log(expensiveCalculation(5)); // Из кэша, CACHE HIT
+console.log(expensiveCalculation(7)); // Вычисление, CACHE MISS
+console.log(expensiveCalculation(5)); // Из кэша, CACHE HIT
+```
+
+Декоратор для мемоизации методов:
+
+```typescript
+// Декоратор для мемоизации метода
+function MemoizeMethod() {
+  const cache = new Map<string, any>(); // Кэш для результатов
+
+  return function (target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+    const originalMethod = descriptor.value;
+
+    descriptor.value = function (...args: any[]) {
+      const key = JSON.stringify(args); // Ключ для кэша
+      if (cache.has(key)) {
+        console.log(`[DECORATOR] CACHE HIT for method ${propertyKey} with args: ${key}`);
+        return cache.get(key);
+      }
+      console.log(`[DECORATOR] CACHE MISS for method ${propertyKey} with args: ${key}`);
+      const result = originalMethod.apply(this, args);
+      cache.set(key, result);
+      return result;
+    };
+
+    return descriptor;
+  };
+}
+
+class Calculator {
+  @MemoizeMethod()
+  add(a: number, b: number): number {
+    console.log(`Performing heavy addition: ${a} + ${b}`);
+    return a + b;
+  }
+
+  @MemoizeMethod()
+  multiply(a: number, b: number): number {
+    console.log(`Performing heavy multiplication: ${a} * ${b}`);
+    // Имитация дорогой операции
+    for (let i = 0; i < 1000000; i++) {}
+    return a * b;
+  }
+}
+
+const calc = new Calculator();
+console.log(calc.add(1, 2)); // Вычисление
+console.log(calc.add(1, 2)); // Из кэша
+console.log(calc.multiply(3, 4)); // Вычисление
+console.log(calc.multiply(3, 4)); // Из кэша
+```
+
+#### 3. Иммутабельность и `readonly`
+
+Использование иммутабельных структур данных упрощает отладку, предотвращает нежелательные побочные эффекты и может косвенно улучшить производительность за счет более простых механизмов сравнения (ссылки вместо глубоких сравнений). TypeScript помогает обеспечить иммутабельность через модификатор `readonly`.
+
+```typescript
+interface Task {
+  readonly id: string; // ID нельзя изменить
+  readonly title: string;
+  readonly completed: boolean;
+  readonly assignedTo?: readonly string[]; // Массив строк, которые нельзя изменить
+}
+
+const myTask: Task = {
+  id: "task-1",
+  title: "Написать статью",
+  completed: false,
+  assignedTo: ["Яша", "Коллега"],
+};
+
+// myTask.id = "new-id"; // Ошибка: Cannot assign to 'id' because it is a read-only property.
+// myTask.assignedTo.push("Еще кто-то"); // Ошибка: Property 'push' does not exist on type 'readonly string[]'.
+
+// Для изменения задачи нужно создать новую
+const updatedTask: Task = {
+  ...myTask, // Копируем все свойства
+  completed: true, // Изменяем только нужные
+  assignedTo: myTask.assignedTo ? [...myTask.assignedTo, "Новый человек"] : ["Новый человек"], // Обновляем массив
+};
+
+console.log(myTask);
+console.log(updatedTask);
+```
+
+### 😩 Типичные ошибки при оптимизации
+
+1.  **Преждевременная оптимизация (Premature Optimization):** Самая большая ошибка. Не оптимизируй то, что не является узким местом. Измеряй производительность (профилируй!) перед тем, как что-то менять.
+2.  **Игнорирование `readonly`:** Если данные не должны изменяться, используй `readonly`. Это улучшает читаемость, безопасность и дает компилятору больше информации.
+3.  **Слишком сложные типы:** Избегай глубоко рекурсивных или слишком сложных условных типов, если они значительно замедляют компиляцию. Иногда простота важнее типовой "точности".
+4.  **Слепое использование `any`:** `any` убивает всю типобезопасность и, как следствие, потенциальные оптимизации и проверки, которые мог бы выполнить TypeScript.
+
+---
+
+### ### 🎯 Практика
+
+Время показать, что ты не просто слушаешь, а понимаешь!
+
+1.  **Создай декоратор `Debounce`**: Напиши декоратор для методов класса, который будет "откладывать" выполнение метода, пока не пройдет определенное время без новых вызовов. Типизируй его так, чтобы он работал с любыми аргументами и возвращаемыми значениями метода.
+    *   `@Debounce(500)` должен откладывать вызов на 500мс.
+2.  **Утилита типа `DeepImmutable<T>`**: Создай утилиту типа, которая рекурсивно делает все свойства объекта и элементы массивов `readonly`.
+    *   Пример использования: `type ImmutableConfig = DeepImmutable<MyConfig>;`
+3.  **Оптимизация обработки событий с Type Guard**: Предположим, у тебя есть общий обработчик событий `handleEvent(event: Event | CustomAPIEvent)`. `CustomAPIEvent` имеет поле `detail: { type: 'login' | 'logout', data: any }`. Напиши `Type Guard` для `CustomAPIEvent` и используй его в `handleEvent` для безопасной обработки.
+
+---
+
+### ### 💡 Совет
+
+Помни, Яша всегда говорит: "Сначала сделай, чтобы работало. Потом сделай, чтобы было понятно. И только потом (если нужно) сделай, чтобы было быстро." Оптимизация — это мощный инструмент, но его нужно применять с умом. TypeScript здесь не просто помогает писать код без ошибок, но и является ценным союзником в создании высокопроизводительных и поддерживаемых приложений.
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground template="react" files={{ "/App.tsx": `import { useState, useMemo, useCallback, memo, useRef } from 'react';
+
+function useRenderCount() {
+  const ref = useRef(0);
+  ref.current += 1;
+  return ref.current;
+}
+
+const DATA = Array.from({ length: 8000 }, (_, i) => ({ id: i, value: (i * 7) % 100 }));
+
+const MemoButton = memo(function MemoButton({
+  label,
+  onClick,
+}: {
+  label: string;
+  onClick: () => void;
+}) {
+  const renders = useRenderCount();
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: '#0f172a',
+        color: '#94a3b8',
+        border: '1px solid #334155',
+        borderRadius: 6,
+        padding: '8px 14px',
+        cursor: 'pointer',
+        fontSize: 12,
+        display: 'block',
+        width: '100%',
+        marginBottom: 6,
+        textAlign: 'left',
+      }}
+    >
+      {label}
+      <span style={{ color: '#475569', marginLeft: 8, fontSize: 11 }}>
+        (renders: {renders})
+      </span>
+    </button>
+  );
+});
+
+export default function App() {
+  const [min, setMin] = useState(50);
+  const [count, setCount] = useState(0);
+  const [tick, setTick] = useState(0);
+
+  const memoizedResult = useMemo(() => DATA.filter(x => x.value >= min), [min]);
+  const plainResult = DATA.filter(x => x.value >= min);
+
+  const handleIncrement = useCallback(() => setCount(c => c + 1), []);
+  const handleIncrementNew = () => setCount(c => c + 1);
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: 24, fontFamily: 'monospace', color: 'white' }}>
+      <h2 style={{ color: '#38bdf8', margin: '0 0 4px' }}>Optimization Patterns</h2>
+      <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 20px' }}>
+        useMemo, useCallback, and React.memo working together
+      </p>
+
+      <button
+        onClick={() => setTick(t => t + 1)}
+        style={{ background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontSize: 13, marginBottom: 16 }}
+      >
+        Re-render parent (tick: {tick})
+      </button>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 16 }}>
+          <div style={{ color: '#38bdf8', fontSize: 13, fontWeight: 700, marginBottom: 12 }}>useMemo</div>
+          <label style={{ color: '#94a3b8', fontSize: 12, display: 'block', marginBottom: 6 }}>
+            Min value: {min}
+          </label>
+          <input
+            type="range" min={0} max={90} step={10} value={min}
+            onChange={e => setMin(Number(e.target.value))}
+            style={{ width: '100%', accentColor: '#38bdf8', marginBottom: 10 }}
+          />
+          <div style={{ color: '#4ade80', fontSize: 12, marginBottom: 4 }}>
+            Memoized: {memoizedResult.length} items (cached)
+          </div>
+          <div style={{ color: '#f87171', fontSize: 12 }}>
+            Plain: {plainResult.length} items (recalculated every render)
+          </div>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 16 }}>
+          <div style={{ color: '#a78bfa', fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
+            useCallback + React.memo — counter: {count}
+          </div>
+          <div style={{ color: '#4ade80', fontSize: 12, marginBottom: 4 }}>
+            Stable ref (useCallback):
+          </div>
+          <MemoButton label="Increment" onClick={handleIncrement} />
+          <div style={{ color: '#f87171', fontSize: 12, marginTop: 8, marginBottom: 4 }}>
+            New ref each render (no useCallback):
+          </div>
+          <MemoButton label="Increment" onClick={handleIncrementNew} />
+          <div style={{ color: '#475569', fontSize: 11, marginTop: 8 }}>
+            The 2nd button re-renders MemoButton on every parent render because
+            the function reference changes each time.
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, background: '#1e293b', borderRadius: 8, padding: 12, fontSize: 12, color: '#64748b', lineHeight: 1.6 }}>
+        Click "Re-render parent" and watch the render counters. Only the button with the unstable ref re-renders unnecessarily.
+      </div>
+    </div>
+  );
+}
+` }} />

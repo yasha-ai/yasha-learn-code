@@ -1,0 +1,424 @@
+## 13. Higher-Order Observables: потоки потоков 🌊
+
+Привет! Яша снова здесь. Сегодня — одна из самых мощных концепций RxJS: **Higher-Order Observables**. Когда ты понимаешь их, реактивное программирование превращается в суперсилу.
+
+### Что такое Higher-Order Observable?
+
+Обычный Observable испускает **значения** (числа, строки, объекты).
+Higher-Order Observable испускает **другие Observable-ы**.
+
+```typescript
+import { of, fromEvent, interval } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+// Обычный Observable
+const numbers$ = of(1, 2, 3); // испускает: 1, 2, 3
+
+// Higher-Order Observable — испускает Observable-ы!
+const observables$ = of(1, 2, 3).pipe(
+  map(n => interval(n * 1000)) // каждое число → новый interval Observable
+);
+// испускает: Observable, Observable, Observable
+
+// Нужен оператор "выравнивания" (flattening), чтобы получить реальные значения
+```
+
+Чтобы работать с Higher-Order Observables, используют **операторы выравнивания** (flattening operators). Их четыре: `mergeMap`, `switchMap`, `concatMap`, `exhaustMap`.
+
+---
+
+### Таблица сравнения стратегий
+
+| Оператор | Параллельность | Отменяет предыдущий? | Игнорирует новые? | Типичный сценарий |
+|---|---|---|---|---|
+| `mergeMap` | ✅ Все одновременно | ❌ Нет | ❌ Нет | Параллельные запросы |
+| `switchMap` | ❌ Только последний | ✅ Да | ❌ Нет | Поиск при вводе |
+| `concatMap` | ❌ Последовательно | ❌ Нет | ❌ Нет (ставит в очередь) | Анимации, заказы |
+| `exhaustMap` | ❌ Только первый | ❌ Нет | ✅ Да | Форма отправки |
+
+---
+
+### mergeMap — все параллельно
+
+`mergeMap` (он же `flatMap`) подписывается на **каждый** внутренний Observable одновременно. Результаты приходят вперемешку по мере готовности.
+
+```typescript
+import { of, timer } from 'rxjs';
+import { mergeMap, map } from 'rxjs/operators';
+
+of('A', 'B', 'C').pipe(
+  mergeMap(letter =>
+    // Каждый запрос — разное время ответа
+    timer(Math.random() * 2000).pipe(map(() => `Ответ ${letter}`))
+  )
+).subscribe(console.log);
+// Ответ B (через 300мс)
+// Ответ C (через 700мс)
+// Ответ A (через 1500мс)
+
+// ⚠️ Порядок НЕ гарантирован — кто быстрее, тот первый
+```
+
+**Ограничение параллельности:**
+
+```typescript
+// Не более 2 параллельных запросов
+of('A', 'B', 'C', 'D', 'E').pipe(
+  mergeMap(letter => fetchData(letter), 2) // второй аргумент — concurrent
+).subscribe(console.log);
+```
+
+---
+
+### switchMap — только последний
+
+`switchMap` **отменяет** предыдущий внутренний Observable при появлении нового. Идеален для поиска — зачем нам старые результаты?
+
+```typescript
+import { fromEvent } from 'rxjs';
+import { switchMap, debounceTime, map } from 'rxjs/operators';
+
+const searchInput = document.getElementById('search') as HTMLInputElement;
+
+fromEvent(searchInput, 'input').pipe(
+  map(e => (e.target as HTMLInputElement).value),
+  debounceTime(300),
+  switchMap(query => from(fetch(`/api/search?q=${query}`))) // старый запрос отменяется
+).subscribe(results => renderResults(results));
+// Пользователь напечатал "rea" → запрос улетел
+// Сразу напечатал "react" → старый запрос ОТМЕНЯЕТСЯ, новый запрос улетает
+```
+
+```typescript
+// Мраморная диаграмма switchMap:
+// источник:    --1-----2--3------4-|
+// switchMap → timer(1000):
+// подписка 1:  ----1|  (отменяется при 2)
+// подписка 2:  ------2| (отменяется при 3)
+// подписка 3:  -------3---| (выживает, т.к. 4 приходит позже)
+// результат:   -----------3---4---|
+```
+
+---
+
+### concatMap — очередь
+
+`concatMap` ставит внутренние Observables в **очередь** — следующий запускается только после завершения предыдущего. Порядок гарантирован.
+
+```typescript
+import { of, delay } from 'rxjs';
+import { concatMap, map } from 'rxjs/operators';
+
+// Анимации должны идти строго последовательно
+const steps$ = of('шаг 1', 'шаг 2', 'шаг 3');
+
+steps$.pipe(
+  concatMap(step =>
+    of(`Выполняю ${step}`).pipe(delay(1000)) // каждый шаг — 1 секунда
+  )
+).subscribe(console.log);
+// (0с) ... (1с) Выполняю шаг 1 ... (2с) Выполняю шаг 2 ... (3с) Выполняю шаг 3
+```
+
+---
+
+### exhaustMap — игнорируем пока занят
+
+`exhaustMap` **игнорирует** новые значения пока текущий внутренний Observable ещё не завершился. Идеален для кнопки «Сохранить» — не отправлять повторный запрос пока предыдущий в процессе.
+
+```typescript
+import { fromEvent, from } from 'rxjs';
+import { exhaustMap } from 'rxjs/operators';
+
+const saveButton = document.getElementById('save')!;
+
+fromEvent(saveButton, 'click').pipe(
+  exhaustMap(() => from(saveToServer())) // повторные клики ИГНОРИРУЮТСЯ во время сохранения
+).subscribe(() => console.log('Сохранено!'));
+// Клик → запрос пошёл
+// Клик, клик, клик → игнорируются (запрос ещё в процессе)
+// Запрос завершился → Сохранено!
+// Клик → следующий запрос пошёл
+```
+
+---
+
+### Дерево решений: что выбрать?
+
+```
+Нужно обработать Higher-Order Observable?
+│
+├─ Важен ПОРЯДОК результатов?
+│   ├─ Да → concatMap (очередь, последовательно)
+│   └─ Нет ↓
+│
+├─ Нужно ОТМЕНЯТЬ предыдущее при новом значении?
+│   ├─ Да → switchMap (поиск, навигация)
+│   └─ Нет ↓
+│
+├─ Нужно ИГНОРИРОВАТЬ новые пока занят?
+│   ├─ Да → exhaustMap (кнопки, формы)
+│   └─ Нет ↓
+│
+└─ Нужны ВСЕ результаты параллельно?
+    └─ Да → mergeMap (параллельные запросы)
+```
+
+---
+
+### Продвинутые паттерны
+
+```typescript
+import { interval, Subject } from 'rxjs';
+import { mergeMap, take, groupBy, toArray } from 'rxjs/operators';
+
+// groupBy — группировка Higher-Order Observable
+const clicks$ = new Subject<{ userId: string; action: string }>();
+
+clicks$.pipe(
+  groupBy(click => click.userId), // создаёт Observable для каждого userId
+  mergeMap(group$ =>               // обрабатываем каждую группу
+    group$.pipe(
+      toArray()                    // собираем все клики пользователя
+    )
+  )
+).subscribe(userClicks => console.log('Клики пользователя:', userClicks));
+```
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef, useCallback } from 'react';
+import { Subject, of, timer } from 'rxjs';
+import { mergeMap, switchMap, concatMap, exhaustMap, map, tap } from 'rxjs/operators';
+
+type Strategy = 'mergeMap' | 'switchMap' | 'concatMap' | 'exhaustMap';
+
+interface Event {
+  id: number;
+  strategy: Strategy;
+  clickId: number;
+  status: 'pending' | 'done' | 'cancelled';
+  startedAt: number;
+}
+
+// Симулируем асинхронную операцию (1.5 секунды)
+function simulateAsync(clickId: number, strategy: Strategy) {
+  return timer(1500).pipe(
+    map(() => ({ clickId, strategy }))
+  );
+}
+
+const STRATEGIES: Strategy[] = ['mergeMap', 'switchMap', 'concatMap', 'exhaustMap'];
+
+const DESCRIPTIONS: Record<Strategy, string> = {
+  mergeMap:   '⚡ Все параллельно, порядок случайный',
+  switchMap:  '🔄 Отменяет предыдущий при новом клике',
+  concatMap:  '📋 Очередь — строго последовательно',
+  exhaustMap: '🚫 Игнорирует клики пока занят',
+};
+
+const COLORS: Record<Strategy, string> = {
+  mergeMap:   '#60a5fa',
+  switchMap:  '#f472b6',
+  concatMap:  '#4ade80',
+  exhaustMap: '#fbbf24',
+};
+
+export default function App() {
+  const [events, setEvents] = useState<Record<Strategy, Event[]>>({
+    mergeMap: [], switchMap: [], concatMap: [], exhaustMap: [],
+  });
+  const [busy, setBusy] = useState<Record<Strategy, boolean>>({
+    mergeMap: false, switchMap: false, concatMap: false, exhaustMap: false,
+  });
+
+  const subjects = useRef<Record<Strategy, Subject<number>>>({
+    mergeMap:   new Subject(),
+    switchMap:  new Subject(),
+    concatMap:  new Subject(),
+    exhaustMap: new Subject(),
+  });
+
+  const clickIdRef = useRef(0);
+  const eventIdRef = useRef(0);
+
+  useEffect(() => {
+    const subs = STRATEGIES.map(strategy => {
+      const subject$ = subjects.current[strategy];
+      const flattenOp = {
+        mergeMap:   (src: any) => src.pipe(mergeMap((clickId: number) => simulateAsync(clickId, strategy))),
+        switchMap:  (src: any) => src.pipe(switchMap((clickId: number) => simulateAsync(clickId, strategy))),
+        concatMap:  (src: any) => src.pipe(concatMap((clickId: number) => simulateAsync(clickId, strategy))),
+        exhaustMap: (src: any) => src.pipe(exhaustMap((clickId: number) => simulateAsync(clickId, strategy))),
+      }[strategy];
+
+      return flattenOp(subject$).subscribe(({ clickId }: { clickId: number }) => {
+        setEvents(prev => ({
+          ...prev,
+          [strategy]: prev[strategy].map(e =>
+            e.clickId === clickId ? { ...e, status: 'done' } : e
+          ),
+        }));
+        setBusy(prev => ({ ...prev, [strategy]: false }));
+      });
+    });
+
+    return () => subs.forEach(s => s.unsubscribe());
+  }, []);
+
+  const handleClick = useCallback((strategy: Strategy) => {
+    const clickId = ++clickIdRef.current;
+    const eventId = eventIdRef.current++;
+
+    // Для switchMap помечаем предыдущие pending как cancelled
+    if (strategy === 'switchMap') {
+      setEvents(prev => ({
+        ...prev,
+        [strategy]: prev[strategy].map(e =>
+          e.status === 'pending' ? { ...e, status: 'cancelled' } : e
+        ),
+      }));
+    }
+
+    // exhaustMap — не добавляем если уже занят
+    if (strategy === 'exhaustMap') {
+      setBusy(prev => {
+        if (prev[strategy]) return prev; // уже занят — ignoring
+        // не занят — добавляем
+        setEvents(p => ({
+          ...p,
+          [strategy]: [...p[strategy].slice(-4), {
+            id: eventId, strategy, clickId, status: 'pending', startedAt: Date.now(),
+          }],
+        }));
+        subjects.current[strategy].next(clickId);
+        return { ...prev, [strategy]: true };
+      });
+      return;
+    }
+
+    setEvents(prev => ({
+      ...prev,
+      [strategy]: [...prev[strategy].slice(-4), {
+        id: eventId, strategy, clickId, status: 'pending', startedAt: Date.now(),
+      }],
+    }));
+    setBusy(prev => ({ ...prev, [strategy]: true }));
+    subjects.current[strategy].next(clickId);
+  }, []);
+
+  const clearAll = () => {
+    setEvents({ mergeMap: [], switchMap: [], concatMap: [], exhaustMap: [] });
+  };
+
+  return (
+    <div style={{
+      background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace',
+      minHeight: '100vh', padding: '20px',
+    }}>
+      <h2 style={{ color: '#818cf8', margin: '0 0 6px', fontSize: '18px' }}>
+        🌊 Стратегии выравнивания потоков
+      </h2>
+      <p style={{ color: '#94a3b8', margin: '0 0 16px', fontSize: '12px' }}>
+        Кликай на кнопки — каждый click = 1.5с асинхронная операция. Смотри разницу!
+      </p>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '12px' }}>
+        <button onClick={clearAll} style={{
+          background: 'transparent', color: '#64748b', border: '1px solid #334155',
+          padding: '6px 14px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px',
+        }}>
+          Очистить всё
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+        {STRATEGIES.map(strategy => {
+          const color = COLORS[strategy];
+          const evts = events[strategy];
+          const isBusy = busy[strategy];
+
+          return (
+            <div key={strategy} style={{
+              background: '#1e293b', borderRadius: '12px', padding: '16px',
+              border: \`1px solid \${isBusy ? color : 'transparent'}\`,
+              transition: 'border-color 0.3s',
+            }}>
+              <div style={{ marginBottom: '10px' }}>
+                <span style={{ color, fontWeight: 'bold', fontSize: '14px' }}>
+                  {strategy}
+                </span>
+                <span style={{
+                  marginLeft: '8px', fontSize: '10px', color: '#64748b',
+                }}>
+                  {isBusy ? '⏳' : '✅'}
+                </span>
+              </div>
+              <p style={{ margin: '0 0 10px', fontSize: '11px', color: '#64748b', lineHeight: 1.4 }}>
+                {DESCRIPTIONS[strategy]}
+              </p>
+
+              <button
+                onClick={() => handleClick(strategy)}
+                style={{
+                  background: color + '22', border: \`1px solid \${color}\`,
+                  color, padding: '8px 16px', borderRadius: '8px',
+                  cursor: 'pointer', fontSize: '13px', fontWeight: 'bold',
+                  width: '100%', marginBottom: '12px',
+                }}
+              >
+                👆 Кликнуть
+              </button>
+
+              <div style={{ minHeight: '80px' }}>
+                {evts.length === 0 && (
+                  <p style={{ color: '#334155', fontSize: '11px', textAlign: 'center' }}>
+                    кликни выше...
+                  </p>
+                )}
+                {evts.map(e => (
+                  <div key={e.id} style={{
+                    display: 'flex', alignItems: 'center', gap: '8px',
+                    padding: '4px 0', fontSize: '11px',
+                  }}>
+                    <span style={{
+                      width: '10px', height: '10px', borderRadius: '50%',
+                      background: e.status === 'done' ? '#4ade80'
+                        : e.status === 'cancelled' ? '#475569' : color,
+                      flexShrink: 0,
+                      animation: e.status === 'pending' ? 'pulse 1s infinite' : 'none',
+                    }} />
+                    <span style={{
+                      color: e.status === 'done' ? '#4ade80'
+                        : e.status === 'cancelled' ? '#475569' : '#94a3b8',
+                      textDecoration: e.status === 'cancelled' ? 'line-through' : 'none',
+                    }}>
+                      клик #{e.clickId} — {e.status === 'done' ? '✅ готово' : e.status === 'cancelled' ? '❌ отменён' : '⏳ в процессе'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <style>{\`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.4; }
+        }
+      \`}</style>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,574 @@
+## 🌊 RxJS в Angular
+
+RxJS — это библиотека реактивного программирования, которая встроена в Angular "из коробки". Представь, что обычный JavaScript — это один кран с водой (синхронный код), а RxJS — это целая система водопровода: трубы, клапаны, фильтры, смесители 🪣. Данные текут как поток воды, и ты можешь управлять этим потоком.
+
+---
+
+### 🤔 Зачем Angular использует RxJS?
+
+Angular использует RxJS везде:
+
+- **HttpClient** — каждый HTTP-запрос возвращает `Observable`
+- **Router** — события навигации (`router.events`) — это `Observable`
+- **Reactive Forms** — `valueChanges`, `statusChanges` — это `Observable`
+- **EventEmitter** — на самом деле расширяет `Subject`
+
+```typescript
+// HttpClient возвращает Observable, не Promise
+this.http.get<User[]>('/api/users').subscribe(users => {
+  this.users = users;
+});
+
+// Router events
+this.router.events.pipe(
+  filter(e => e instanceof NavigationEnd)
+).subscribe(e => console.log('Навигация завершена:', e));
+
+// Reactive Forms
+this.searchForm.get('query')!.valueChanges.pipe(
+  debounceTime(300)
+).subscribe(value => this.search(value));
+```
+
+---
+
+### ⚡ Observable vs Promise: главные отличия
+
+Promise — это как курьер: один раз привёз посылку, и всё. Observable — это как подписка на газету: получаешь новые выпуски, пока не отпишешься 📰.
+
+| Характеристика | Promise | Observable |
+|---|---|---|
+| Значений | Одно | Множество (поток) |
+| Ленивость | Сразу выполняется | Только при подписке |
+| Отмена | Нельзя | `unsubscribe()` |
+| Операторы | `.then()`, `.catch()` | Десятки операторов RxJS |
+
+```typescript
+// Promise — один результат
+fetch('/api/users')
+  .then(res => res.json())
+  .then(users => console.log(users));
+
+// Observable — поток значений, можно отменить
+const sub = interval(1000).subscribe(n => console.log(n));
+setTimeout(() => sub.unsubscribe(), 5000); // отменяем через 5 сек
+
+// Observable ленивый — без subscribe ничего не происходит!
+const obs$ = new Observable(observer => {
+  console.log('Этот код выполнится только при подписке');
+  observer.next(42);
+  observer.complete();
+});
+// obs$; // <- ничего не произошло
+obs$.subscribe(v => console.log(v)); // <- теперь выполняется
+```
+
+---
+
+### 🪄 async pipe: магия шаблонов
+
+`async pipe` — это самый правильный способ работать с Observable в шаблонах Angular. Он автоматически подписывается И отписывается при уничтожении компонента. Забудь про утечки памяти! 🎉
+
+```typescript
+// component.ts
+@Component({
+  template: `
+    <!-- Простое использование -->
+    <div>Счётчик: {{ counter$ | async }}</div>
+
+    <!-- С проверкой на null -->
+    <div *ngIf="user$ | async as user">
+      Привет, {{ user.name }}!
+    </div>
+
+    <!-- Несколько подписок с одним запросом (shareReplay!) -->
+    <div *ngIf="data$ | async as data">
+      <h2>{{ data.title }}</h2>
+      <p>{{ data.description }}</p>
+    </div>
+  `
+})
+export class MyComponent {
+  counter$ = interval(1000);
+  user$ = this.http.get<User>('/api/user');
+
+  // Без shareReplay — два отдельных HTTP запроса!
+  data$ = this.http.get<Data>('/api/data').pipe(
+    shareReplay(1) // кешируем последнее значение
+  );
+}
+```
+
+Паттерн `as` позволяет не дублировать подписку:
+
+```html
+<!-- ❌ Плохо — два запроса к API! -->
+<div>{{ data$ | async | json }}</div>
+<div>{{ (data$ | async)?.title }}</div>
+
+<!-- ✅ Хорошо — один запрос, результат в переменной -->
+<ng-container *ngIf="data$ | async as data">
+  <div>{{ data | json }}</div>
+  <div>{{ data.title }}</div>
+</ng-container>
+```
+
+---
+
+### 🧹 takeUntilDestroyed: Angular 16+
+
+До Angular 16 приходилось вручную управлять отпиской через `Subject` и `takeUntil`. Теперь есть элегантное решение:
+
+```typescript
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+
+@Component({...})
+export class MyComponent {
+  // DestroyRef внедряется автоматически из контекста компонента
+  constructor() {
+    interval(1000).pipe(
+      takeUntilDestroyed() // автоматически отписывается при destroy
+    ).subscribe(n => console.log(n));
+  }
+
+  // Или явно через inject
+  private destroyRef = inject(DestroyRef);
+
+  ngOnInit() {
+    this.someService.data$.pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(data => this.data = data);
+  }
+}
+
+// Старый способ (Angular < 16)
+export class OldComponent implements OnInit, OnDestroy {
+  private destroy$ = new Subject<void>();
+
+  ngOnInit() {
+    interval(1000).pipe(
+      takeUntil(this.destroy$)
+    ).subscribe(n => console.log(n));
+  }
+
+  ngOnDestroy() {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+}
+```
+
+---
+
+### 📡 Типы Subject
+
+Subject — это одновременно Observable (можно подписаться) и Observer (можно отправлять значения). Как радиостанция: вещает всем подписчикам одновременно 📻.
+
+```typescript
+// 1️⃣ Subject — базовый multicast
+const subject = new Subject<number>();
+subject.subscribe(v => console.log('A:', v));
+subject.subscribe(v => console.log('B:', v));
+subject.next(1); // A: 1, B: 1
+subject.next(2); // A: 2, B: 2
+// ⚠️ Новый подписчик НЕ получает прошлые значения
+
+// 2️⃣ BehaviorSubject — хранит текущее значение (идеален для стора!)
+const bs = new BehaviorSubject<number>(0); // начальное значение
+bs.subscribe(v => console.log('C:', v)); // C: 0 (сразу!)
+bs.next(1); // C: 1
+bs.next(2); // C: 2
+const newSub = bs.subscribe(v => console.log('D:', v)); // D: 2 (получает текущее!)
+console.log(bs.getValue()); // 2 — синхронное получение
+
+// 3️⃣ ReplaySubject — воспроизводит N последних значений
+const rs = new ReplaySubject<number>(3); // буфер из 3 значений
+rs.next(1);
+rs.next(2);
+rs.next(3);
+rs.next(4);
+rs.subscribe(v => console.log('E:', v)); // E: 2, E: 3, E: 4 (последние 3)
+
+// 4️⃣ AsyncSubject — только последнее значение при complete()
+const as = new AsyncSubject<number>();
+as.subscribe(v => console.log('F:', v));
+as.next(1); // ничего
+as.next(2); // ничего
+as.next(3); // ничего
+as.complete(); // F: 3 (только последнее!)
+```
+
+---
+
+### 🔧 Популярные операторы RxJS в Angular
+
+```typescript
+import { map, filter, tap, switchMap, mergeMap, concatMap,
+         exhaustMap, debounceTime, distinctUntilChanged,
+         combineLatest, forkJoin, startWith, catchError } from 'rxjs/operators';
+
+// map — трансформация данных
+users$.pipe(
+  map(users => users.filter(u => u.active))
+)
+
+// tap — side effects без изменения потока (логирование)
+http.get('/api/data').pipe(
+  tap(data => console.log('Получили:', data)),
+  map(data => data.items)
+)
+
+// switchMap — отменяет предыдущий запрос (для поиска!)
+searchInput$.pipe(
+  debounceTime(300),
+  switchMap(query => http.get('/api/search?q=' + query))
+)
+
+// mergeMap — параллельные запросы (все выполняются)
+ids$.pipe(mergeMap(id => http.get('/api/users/' + id)))
+
+// concatMap — последовательные запросы (по очереди)
+ids$.pipe(concatMap(id => http.get('/api/users/' + id)))
+
+// exhaustMap — игнорирует новые пока текущий не завершён (для submit)
+submitBtn$.pipe(exhaustMap(() => http.post('/api/submit', data)))
+
+// combineLatest — объединяет несколько потоков (каждый раз при обновлении любого)
+combineLatest([users$, roles$]).pipe(
+  map(([users, roles]) => users.map(u => ({ ...u, role: roles[u.id] })))
+)
+
+// forkJoin — параллельные запросы, ждёт завершения ВСЕХ
+forkJoin({
+  users: http.get('/api/users'),
+  products: http.get('/api/products'),
+  config: http.get('/api/config'),
+}).subscribe(({ users, products, config }) => {
+  // Все три ответа получены
+})
+
+// startWith — начальное значение (для loading state)
+data$ = http.get('/api/data').pipe(
+  startWith(null) // сначала null, потом данные
+)
+```
+
+---
+
+### 🏪 BehaviorSubject как простой стор состояния
+
+```typescript
+// user.service.ts
+@Injectable({ providedIn: 'root' })
+export class UserStore {
+  private state = new BehaviorSubject<UserState>({
+    users: [],
+    loading: false,
+    error: null
+  });
+
+  // Публичные Observable для чтения (readonly!)
+  users$ = this.state.pipe(map(s => s.users));
+  loading$ = this.state.pipe(map(s => s.loading));
+  error$ = this.state.pipe(map(s => s.error));
+
+  private setState(patch: Partial<UserState>) {
+    this.state.next({ ...this.state.getValue(), ...patch });
+  }
+
+  loadUsers() {
+    this.setState({ loading: true, error: null });
+    return this.http.get<User[]>('/api/users').pipe(
+      tap(users => this.setState({ users, loading: false })),
+      catchError(err => {
+        this.setState({ loading: false, error: err.message });
+        return EMPTY;
+      })
+    );
+  }
+}
+
+// В компоненте — только читаем через async pipe
+@Component({
+  template: `
+    <div *ngIf="store.loading$ | async">Загрузка...</div>
+    <div *ngIf="store.error$ | async as err" class="error">{{ err }}</div>
+    <ul>
+      <li *ngFor="let user of store.users$ | async">{{ user.name }}</li>
+    </ul>
+  `
+})
+export class UsersComponent {
+  constructor(public store: UserStore) {
+    store.loadUsers().subscribe();
+  }
+}
+```
+
+---
+
+### 🔍 Поиск с debounce: полный пример
+
+```typescript
+@Component({
+  template: `
+    <input [formControl]="searchCtrl" placeholder="Поиск...">
+    <div *ngIf="loading$ | async">🔄 Ищем...</div>
+    <ul>
+      <li *ngFor="let result of results$ | async">{{ result.name }}</li>
+    </ul>
+  `
+})
+export class SearchComponent {
+  searchCtrl = new FormControl('');
+  loading$ = new BehaviorSubject(false);
+
+  results$ = this.searchCtrl.valueChanges.pipe(
+    debounceTime(300),         // ждём 300ms после последнего символа
+    distinctUntilChanged(),    // игнорируем одинаковые запросы
+    filter(q => q!.length >= 2), // минимум 2 символа
+    tap(() => this.loading$.next(true)),
+    switchMap(query =>         // отменяем предыдущий запрос!
+      this.http.get<Result[]>('/api/search', { params: { q: query! } }).pipe(
+        catchError(() => of([])) // при ошибке возвращаем пустой массив
+      )
+    ),
+    tap(() => this.loading$.next(false)),
+    startWith([]) // начальное значение
+  );
+}
+```
+
+---
+
+### 💀 Состояние загрузки и ошибки
+
+```typescript
+// Паттерн: data / loading / error через один Observable
+interface LoadingState<T> {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+}
+
+data$ = this.http.get<Product[]>('/api/products').pipe(
+  map(data => ({ data, loading: false, error: null })),
+  startWith({ data: null, loading: true, error: null }),
+  catchError(err => of({ data: null, loading: false, error: err.message }))
+);
+
+// В шаблоне
+// <ng-container *ngIf="data$ | async as state">
+//   <div *ngIf="state.loading">Загрузка...</div>
+//   <div *ngIf="state.error" class="error">{{ state.error }}</div>
+//   <ul *ngIf="state.data">
+//     <li *ngFor="let item of state.data">{{ item.name }}</li>
+//   </ul>
+// </ng-container>
+```
+
+---
+
+### Практика
+
+Попробуйте концепцию в интерактивном редакторе:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from 'react';
+
+// В Angular: это симуляция Observable (interval) и двух подходов к подписке
+// subscribe() вручную vs async pipe (авто-управление)
+
+export default function App() {
+  // === Subscribe подход ===
+  const [subVisible, setSubVisible] = useState(true);
+  const [subCount, setSubCount] = useState(0);
+  const [leakCount, setLeakCount] = useState(0);
+  const [isLeaking, setIsLeaking] = useState(false);
+
+  // === Async pipe подход ===
+  const [asyncVisible, setAsyncVisible] = useState(true);
+  const [asyncCount, setAsyncCount] = useState(0);
+  const [asyncStoppedAt, setAsyncStoppedAt] = useState(null);
+
+  const subIntervalRef = useRef(null);
+  const asyncIntervalRef = useRef(null);
+  const leakIntervalRef = useRef(null);
+
+  // В Angular: interval(1000) — это Observable, тикающий каждую секунду
+  useEffect(() => {
+    let n = 0;
+    subIntervalRef.current = setInterval(() => {
+      n += 1;
+      setSubCount(n);
+    }, 1000);
+    return () => clearInterval(subIntervalRef.current);
+  }, []);
+
+  // async pipe approach: useEffect cleanup = авто-отписка при destroy
+  useEffect(() => {
+    if (!asyncVisible) return;
+    let n = 0;
+    asyncIntervalRef.current = setInterval(() => {
+      n += 1;
+      setAsyncCount(n);
+    }, 1000);
+    return () => {
+      // В Angular: async pipe вызывает unsubscribe() здесь автоматически!
+      clearInterval(asyncIntervalRef.current);
+    };
+  }, [asyncVisible]);
+
+  const handleSubscribeUnmount = () => {
+    setSubVisible(false);
+    // В Angular без ngOnDestroy: интервал продолжает работать в памяти!
+    // Симулируем утечку: interval продолжает обновлять leakCount
+    let leakN = 0;
+    if (leakIntervalRef.current) clearInterval(leakIntervalRef.current);
+    leakIntervalRef.current = setInterval(() => {
+      leakN += 1;
+      setLeakCount(leakN);
+    }, 1000);
+    setIsLeaking(true);
+  };
+
+  const handleSubscribeMount = () => {
+    setSubVisible(true);
+    setSubCount(0);
+    setIsLeaking(false);
+    setLeakCount(0);
+    clearInterval(leakIntervalRef.current);
+    let n = 0;
+    subIntervalRef.current = setInterval(() => {
+      n += 1;
+      setSubCount(n);
+    }, 1000);
+  };
+
+  const handleAsyncUnmount = () => {
+    setAsyncStoppedAt(asyncCount);
+    setAsyncVisible(false);
+    // useEffect cleanup автоматически вызовется!
+  };
+
+  const handleAsyncMount = () => {
+    setAsyncVisible(true);
+    setAsyncCount(0);
+    setAsyncStoppedAt(null);
+  };
+
+  const btnStyle = (bg) => ({
+    padding: '8px 12px', borderRadius: 6, border: 'none',
+    background: bg, color: 'white', cursor: 'pointer',
+    fontSize: 12, fontWeight: 700, width: '100%', marginTop: 8,
+  });
+
+  const codeBox = {
+    background: '#020617', borderRadius: 6, padding: '8px 10px',
+    fontSize: 11, color: '#64748b', lineHeight: 1.7,
+    marginBottom: 12, fontFamily: 'monospace',
+  };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: 20, fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ color: '#dd0031', fontWeight: 700, fontSize: 17, textAlign: 'center', marginBottom: 8 }}>
+        🌊 RxJS: subscribe() vs async pipe
+      </div>
+      <div style={{ textAlign: 'center', color: '#475569', fontSize: 12, marginBottom: 20 }}>
+        Уничтожьте компоненты и посмотрите разницу в управлении памятью
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        {/* LEFT: Subscribe approach */}
+        <div style={{ background: '#1e293b', borderRadius: 10, padding: 14, border: '1px solid #334155' }}>
+          <div style={{ color: '#f87171', fontWeight: 700, fontSize: 13, marginBottom: 10 }}>
+            ❌ subscribe() вручную
+          </div>
+          <div style={codeBox}>
+            // ngOnInit() {'{'}<br />
+            //   this.sub = interval(1000)<br />
+            //     .subscribe(v ={'>'} this.n = v);<br />
+            // {'}'}  // нет ngOnDestroy!
+          </div>
+
+          {subVisible ? (
+            <div style={{ textAlign: 'center', padding: '10px 0' }}>
+              <div style={{ fontSize: 56, color: '#f87171', fontWeight: 700, lineHeight: 1 }}>{subCount}</div>
+              <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 6 }}>✓ компонент смонтирован</div>
+            </div>
+          ) : (
+            <div style={{ background: '#450a0a', borderRadius: 8, padding: 12, textAlign: 'center' }}>
+              <div style={{ color: '#f87171', fontSize: 12, marginBottom: 6 }}>💀 компонент уничтожен</div>
+              <div style={{ fontSize: 40, color: '#ef4444', fontWeight: 700, lineHeight: 1 }}>{leakCount}</div>
+              {isLeaking && (
+                <div style={{ color: '#fca5a5', fontSize: 11, marginTop: 6 }}>
+                  ☠️ интервал тикает в фоне... утечка!
+                </div>
+              )}
+            </div>
+          )}
+
+          <button
+            onClick={subVisible ? handleSubscribeUnmount : handleSubscribeMount}
+            style={btnStyle(subVisible ? '#dc2626' : '#16a34a')}
+          >
+            {subVisible ? '💥 Уничтожить (без unsubscribe)' : '♻️ Пересоздать компонент'}
+          </button>
+        </div>
+
+        {/* RIGHT: Async pipe approach */}
+        <div style={{ background: '#1e293b', borderRadius: 10, padding: 14, border: '1px solid #334155' }}>
+          <div style={{ color: '#4ade80', fontWeight: 700, fontSize: 13, marginBottom: 10 }}>
+            ✅ async pipe
+          </div>
+          <div style={codeBox}>
+            // counter$ = interval(1000);<br />
+            // В шаблоне Angular:<br />
+            // {'{{ counter$ | async }}'}<br />
+            // ✅ авто-отписка при destroy!
+          </div>
+
+          {asyncVisible ? (
+            <div style={{ textAlign: 'center', padding: '10px 0' }}>
+              <div style={{ fontSize: 56, color: '#4ade80', fontWeight: 700, lineHeight: 1 }}>{asyncCount}</div>
+              <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 6 }}>✓ компонент смонтирован</div>
+            </div>
+          ) : (
+            <div style={{ background: '#052e16', borderRadius: 8, padding: 12, textAlign: 'center' }}>
+              <div style={{ color: '#4ade80', fontSize: 12, marginBottom: 6 }}>✅ компонент уничтожен</div>
+              <div style={{ fontSize: 40, color: '#86efac', fontWeight: 700, lineHeight: 1 }}>🛑</div>
+              <div style={{ color: '#86efac', fontSize: 11, marginTop: 6 }}>
+                Отписка на значении {asyncStoppedAt}. Нет утечки!
+              </div>
+            </div>
+          )}
+
+          <button
+            onClick={() => asyncVisible ? handleAsyncUnmount() : handleAsyncMount()}
+            style={btnStyle(asyncVisible ? '#dc2626' : '#16a34a')}
+          >
+            {asyncVisible ? '💥 Уничтожить (async pipe)' : '♻️ Пересоздать компонент'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 12, border: '1px solid #334155', fontSize: 11, color: '#64748b', lineHeight: 1.8 }}>
+          <span style={{ color: '#f87171', fontWeight: 700 }}>Паттерн subscribe():</span><br />
+          Нужен ngOnDestroy + unsubscribe().<br />
+          Забыл — утечка памяти 😱
+        </div>
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 12, border: '1px solid #334155', fontSize: 11, color: '#64748b', lineHeight: 1.8 }}>
+          <span style={{ color: '#4ade80', fontWeight: 700 }}>Паттерн async pipe:</span><br />
+          Нулевой бойлерплейт. Angular сам<br />
+          управляет подпиской ✅
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,484 @@
+## 👁️ Observers и Subscriptions — Подписки и утечки памяти
+
+Привет, Яша! 🎉 В прошлом уроке мы разобрались что такое Observable. Теперь поговорим о том, **кто получает данные** и как **правильно управлять подписками** (иначе будут проблемы! 😱)
+
+---
+
+## Observer — получатель данных 📬
+
+**Observer** — это объект с тремя колбэк-функциями:
+
+```typescript
+const myObserver = {
+  next: (value) => { /* получаем следующее значение */ },
+  error: (err) => { /* получаем ошибку — поток завершается */ },
+  complete: () => { /* поток завершён без ошибок */ }
+};
+```
+
+```typescript
+import { Observable } from 'rxjs';
+
+const data$ = new Observable(subscriber => {
+  subscriber.next(1);
+  subscriber.next(2);
+  subscriber.error(new Error('Что-то пошло не так!')); // ❌ Ошибка!
+  subscriber.next(3); // Это уже не придёт — после error поток мёртв
+});
+
+data$.subscribe({
+  next: v => console.log('📦 Значение:', v),
+  error: e => console.log('❌ Ошибка:', e.message),
+  complete: () => console.log('✅ Завершено!') // Не вызовется — была ошибка
+});
+// 📦 Значение: 1
+// 📦 Значение: 2
+// ❌ Ошибка: Что-то пошло не так!
+```
+
+### Частичный Observer — не все колбэки обязательны!
+
+```typescript
+import { of } from 'rxjs';
+
+// Можно передать только next
+of(1, 2, 3).subscribe(v => console.log(v)); // Просто функция!
+
+// Или объект с нужными полями
+of(1, 2, 3).subscribe({
+  next: v => console.log(v),
+  // error и complete — опциональны
+});
+```
+
+---
+
+## Subscription — объект подписки 📋
+
+Когда вызываешь `.subscribe()`, ты получаешь объект **Subscription**:
+
+```typescript
+import { interval } from 'rxjs';
+
+// subscribe() возвращает Subscription
+const subscription = interval(1000).subscribe(n => console.log(n));
+
+console.log(subscription.closed); // false — подписка активна
+
+// Через 3 секунды отписываемся
+setTimeout(() => {
+  subscription.unsubscribe(); // 🛑 Остановить поток!
+  console.log(subscription.closed); // true — подписка закрыта
+}, 3000);
+```
+
+---
+
+## Составные подписки — `add()` 🔗
+
+Можно объединять несколько подписок в одну для удобной очистки:
+
+```typescript
+import { interval, timer } from 'rxjs';
+
+const mainSub = new Subscription();
+
+// Добавляем дочерние подписки
+mainSub.add(
+  interval(500).subscribe(n => console.log('Быстрый:', n))
+);
+mainSub.add(
+  interval(1000).subscribe(n => console.log('Медленный:', n))
+);
+
+// Одним вызовом отменяем ВСЕ подписки!
+setTimeout(() => mainSub.unsubscribe(), 3000);
+```
+
+---
+
+## ⚠️ Утечки памяти — главная опасность!
+
+Вот типичная ошибка в React-приложениях:
+
+```typescript
+// ❌ ПЛОХО — утечка памяти!
+function BadComponent() {
+  useEffect(() => {
+    interval(1000).subscribe(n => {
+      setCount(n);
+      // Компонент может размонтироваться, но подписка продолжает работать!
+      // React выдаст ошибку: "Can't perform a state update on unmounted component"
+    });
+    // Нет очистки!
+  }, []);
+  
+  return <div>{count}</div>;
+}
+```
+
+```typescript
+// ✅ ХОРОШО — правильная очистка
+function GoodComponent() {
+  useEffect(() => {
+    const sub = interval(1000).subscribe(n => setCount(n));
+    
+    // Возвращаем функцию очистки — React вызовет её при unmount
+    return () => sub.unsubscribe(); // 🧹 Чистота!
+  }, []);
+  
+  return <div>{count}</div>;
+}
+```
+
+---
+
+## Когда Observable завершается автоматически? ✅
+
+Некоторые Observable завершаются сами — тогда утечки нет:
+
+```typescript
+import { of, from, timer } from 'rxjs';
+import { take } from 'rxjs/operators';
+
+// of() — завершается после всех значений
+of(1, 2, 3).subscribe({ 
+  next: v => console.log(v),
+  complete: () => console.log('Автоматически завершился!')
+});
+
+// from(promise) — завершается после resolve/reject
+from(fetch('/api/data')).subscribe(...);
+
+// take(N) — завершается после N значений
+interval(1000).pipe(take(3)).subscribe(...); // 0, 1, 2 — стоп
+
+// timer(N) — одно значение и complete
+timer(1000).subscribe(v => console.log(v)); // Один раз и всё
+```
+
+> 🔑 **Правило**: если Observable бесконечный (`interval`, `fromEvent`, Subject), **всегда** сохраняй `unsubscribe` или используй операторы завершения (`take`, `takeUntil`, `takeWhile`).
+
+---
+
+## `takeUntil` — элегантная отписка 🎯
+
+```typescript
+import { interval, Subject } from 'rxjs';
+import { takeUntil } from 'rxjs/operators';
+
+// Создаём "сигнальный" Subject
+const destroy$ = new Subject<void>();
+
+// Поток будет работать пока destroy$ не эмитит
+interval(500).pipe(
+  takeUntil(destroy$) // остановись когда destroy$ выстрелит
+).subscribe(n => console.log(n));
+
+// Через 3 секунды — отправляем сигнал завершения
+setTimeout(() => {
+  destroy$.next();    // посылаем сигнал
+  destroy$.complete(); // закрываем Subject
+}, 3000);
+```
+
+В Angular это стандартный паттерн для компонентов!
+
+---
+
+## Жизненный цикл Subscription 🔄
+
+```
+subscribe()  →  [active]  →  unsubscribe() или complete()/error()  →  [closed]
+                  ↓                                                         ↓
+            next() events                                          нет больше событий
+```
+
+```typescript
+import { Subject } from 'rxjs';
+
+const sub$ = new Subject<number>();
+
+const subscription = sub$.subscribe({
+  next: v => console.log('Получили:', v),
+  error: e => console.log('Ошибка:', e),
+  complete: () => console.log('Завершено!')
+});
+
+console.log('Закрыта?', subscription.closed); // false
+
+sub$.next(1); // Получили: 1
+sub$.next(2); // Получили: 2
+
+subscription.unsubscribe();
+console.log('Закрыта?', subscription.closed); // true
+
+sub$.next(3); // Тишина — подписка закрыта!
+```
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from 'react';
+import { interval, Subscription } from 'rxjs';
+import { map, take } from 'rxjs/operators';
+
+// Информация об одной подписке
+interface SubInfo {
+  id: number;
+  label: string;
+  count: number;
+  active: boolean;
+  intervalMs: number;
+}
+
+let nextId = 1;
+
+export default function App() {
+  const [subs, setSubs] = useState<SubInfo[]>([]);
+  const subsRef = useRef<Map<number, Subscription>>(new Map());
+
+  // Обновляем счётчик для конкретной подписки
+  const tick = (id: number) => {
+    setSubs(prev =>
+      prev.map(s => s.id === id ? { ...s, count: s.count + 1 } : s)
+    );
+  };
+
+  // Создаём новую подписку
+  const createSub = (intervalMs: number, limited: boolean) => {
+    const id = nextId++;
+    const label = limited
+      ? \`#\${id} — каждые \${intervalMs}мс, take(5)\`
+      : \`#\${id} — каждые \${intervalMs}мс (бесконечный ⚠️)\`;
+
+    const info: SubInfo = { id, label, count: 0, active: true, intervalMs };
+    setSubs(prev => [...prev, info]);
+
+    let stream = interval(intervalMs).pipe(map(n => n));
+    if (limited) stream = stream.pipe(take(5)) as any;
+
+    const rxSub = stream.subscribe({
+      next: () => tick(id),
+      complete: () => {
+        // Автоматически завершился (take)
+        setSubs(prev =>
+          prev.map(s => s.id === id ? { ...s, active: false } : s)
+        );
+        subsRef.current.delete(id);
+      }
+    });
+
+    subsRef.current.set(id, rxSub);
+  };
+
+  // Отписываемся от конкретной
+  const unsubFrom = (id: number) => {
+    const rxSub = subsRef.current.get(id);
+    if (rxSub) {
+      rxSub.unsubscribe();
+      subsRef.current.delete(id);
+    }
+    setSubs(prev =>
+      prev.map(s => s.id === id ? { ...s, active: false } : s)
+    );
+  };
+
+  // Удаляем из списка
+  const remove = (id: number) => {
+    unsubFrom(id);
+    setSubs(prev => prev.filter(s => s.id !== id));
+  };
+
+  // 🧹 Очистка при unmount
+  useEffect(() => {
+    return () => {
+      subsRef.current.forEach(sub => sub.unsubscribe());
+    };
+  }, []);
+
+  const activeCount = subs.filter(s => s.active).length;
+
+  return (
+    <div style={{
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '24px',
+      fontFamily: 'monospace',
+      color: '#e2e8f0'
+    }}>
+      <h2 style={{ color: '#38bdf8', marginBottom: 4 }}>
+        👁️ Observers & Subscriptions
+      </h2>
+      <p style={{ color: '#94a3b8', marginBottom: 20, fontSize: 13 }}>
+        Создавай подписки и наблюдай за их жизненным циклом
+      </p>
+
+      {/* Статус */}
+      <div style={{
+        display: 'flex',
+        gap: 12,
+        marginBottom: 20,
+        padding: '12px 16px',
+        background: '#1e293b',
+        borderRadius: 10,
+        alignItems: 'center'
+      }}>
+        <div style={{ fontSize: 24 }}>{activeCount > 0 ? '🟢' : '⚫'}</div>
+        <div>
+          <div style={{ color: '#e2e8f0', fontWeight: 'bold' }}>
+            Активных подписок: {activeCount}
+          </div>
+          <div style={{ color: '#64748b', fontSize: 12 }}>
+            Всего создано: {subs.length}
+          </div>
+        </div>
+        {activeCount >= 3 && (
+          <div style={{
+            marginLeft: 'auto',
+            color: '#fbbf24',
+            fontSize: 12,
+            padding: '4px 10px',
+            background: '#451a03',
+            borderRadius: 6
+          }}>
+            ⚠️ Много активных — возможна утечка памяти!
+          </div>
+        )}
+      </div>
+
+      {/* Кнопки создания */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+        <button onClick={() => createSub(500, false)} style={btnStyle('#0ea5e9')}>
+          ➕ 500мс (∞)
+        </button>
+        <button onClick={() => createSub(1000, false)} style={btnStyle('#0ea5e9')}>
+          ➕ 1000мс (∞)
+        </button>
+        <button onClick={() => createSub(700, true)} style={btnStyle('#7c3aed')}>
+          ➕ 700мс take(5)
+        </button>
+        <button
+          onClick={() => subs.filter(s => s.active).forEach(s => unsubFrom(s.id))}
+          disabled={activeCount === 0}
+          style={btnStyle(activeCount === 0 ? '#334155' : '#ef4444')}
+        >
+          🧹 Отписаться от всех
+        </button>
+      </div>
+
+      {/* Список подписок */}
+      {subs.length === 0 ? (
+        <div style={{
+          textAlign: 'center',
+          color: '#475569',
+          padding: '40px',
+          background: '#1e293b',
+          borderRadius: 12
+        }}>
+          Нажми кнопку чтобы создать подписку 👆
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {subs.map(sub => (
+            <div key={sub.id} style={{
+              background: '#1e293b',
+              borderRadius: 10,
+              padding: '12px 16px',
+              border: \`1px solid \${sub.active ? '#1d4ed8' : '#374151'}\`,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              opacity: sub.active ? 1 : 0.5,
+              transition: 'all 0.3s'
+            }}>
+              <div style={{ fontSize: 18 }}>{sub.active ? '🟢' : '🔴'}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: sub.active ? '#e2e8f0' : '#64748b' }}>
+                  {sub.label}
+                </div>
+                <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                  {sub.active ? 'активна' : 'закрыта (closed: true)'}
+                </div>
+              </div>
+              <div style={{
+                background: sub.active ? '#0c2a4a' : '#1a1a2e',
+                borderRadius: 8,
+                padding: '4px 12px',
+                minWidth: 60,
+                textAlign: 'center'
+              }}>
+                <div style={{
+                  fontSize: 22,
+                  fontWeight: 'bold',
+                  color: sub.active ? '#38bdf8' : '#475569'
+                }}>
+                  {sub.count}
+                </div>
+                <div style={{ fontSize: 10, color: '#64748b' }}>тиков</div>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {sub.active && (
+                  <button
+                    onClick={() => unsubFrom(sub.id)}
+                    style={btnStyle('#ef4444', '8px 12px', 12)}
+                  >
+                    unsubscribe()
+                  </button>
+                )}
+                <button
+                  onClick={() => remove(sub.id)}
+                  style={btnStyle('#334155', '8px 12px', 12)}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Подсказка */}
+      <div style={{
+        marginTop: 20,
+        padding: '12px 16px',
+        background: '#0c1a2e',
+        borderRadius: 8,
+        borderLeft: '3px solid #fbbf24',
+        fontSize: 12,
+        color: '#94a3b8',
+        lineHeight: 1.6
+      }}>
+        ⚠️ <strong style={{ color: '#fbbf24' }}>Утечка памяти</strong>: создай несколько
+        бесконечных подписок и НЕ отписывайся от них. Они будут работать в фоне,
+        расходуя ресурсы. Кнопка <strong>take(5)</strong> показывает как Observable
+        может завершиться сам, не требуя ручной отписки.
+      </div>
+    </div>
+  );
+}
+
+// Вспомогательная функция стилей для кнопок
+function btnStyle(bg: string, padding = '8px 14px', fontSize = 13): React.CSSProperties {
+  return {
+    padding,
+    background: bg,
+    color: bg === '#334155' ? '#94a3b8' : 'white',
+    border: 'none',
+    borderRadius: 8,
+    cursor: 'pointer',
+    fontSize,
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
+    whiteSpace: 'nowrap'
+  };
+}
+`
+  }}
+/>

@@ -1,0 +1,437 @@
+## Effector: Effects — асинхронность без боли
+
+Асинхронность — это боль в большинстве state managers. Redux требует thunk/saga. MobX требует flow или action-декораторов. А в Effector есть **Effect** — первоклассный гражданин, который берёт всю async-логику на себя! 🚀
+
+Представь Effect как «умный кнопочный выключатель»: нажал → он сам отслеживает, идёт ли ток (pending), пришло ли питание (done) или произошло короткое замыкание (fail).
+
+### createEffect() — создаём эффект
+
+```typescript
+import { createEffect } from 'effector';
+
+// Базовый синтаксис: createEffect<Params, Result, Error>
+const fetchUserFx = createEffect<number, User, Error>(async (userId) => {
+  const res = await fetch(\`/api/users/\${userId}\`);
+  if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
+  return res.json() as Promise<User>;
+});
+
+// Вызов эффекта — просто функция!
+fetchUserFx(42); // запускаем с userId = 42
+```
+
+### Производные события и сторы эффекта
+
+Каждый эффект автоматически создаёт набор **производных юнитов**:
+
+```typescript
+const fetchUserFx = createEffect(async (id: number) => {
+  return await api.getUser(id);
+});
+
+// 📊 Stores (реактивные значения):
+fetchUserFx.pending;     // Store<boolean> — true пока выполняется
+fetchUserFx.inFlight;    // Store<number>  — количество активных вызовов
+
+// 🎯 Events (срабатывают при завершении):
+fetchUserFx.done;        // Event<{ params: number, result: User }>
+fetchUserFx.fail;        // Event<{ params: number, error: Error }>
+fetchUserFx.finally;     // Event<{ params, status: 'done'|'fail', ... }>
+
+// 🔗 Shorthand events (только данные, без params):
+fetchUserFx.doneData;    // Event<User>   — только результат
+fetchUserFx.failData;    // Event<Error>  — только ошибка
+```
+
+### Полный паттерн: загрузка данных
+
+```typescript
+import { createStore, createEffect, combine } from 'effector';
+
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+// Effect
+const fetchUserFx = createEffect(async (id: number): Promise<User> => {
+  const res = await fetch(\`/api/users/\${id}\`);
+  if (!res.ok) throw new Error(\`Ошибка \${res.status}\`);
+  return res.json();
+});
+
+// Stores
+const $user    = createStore<User | null>(null);
+const $error   = createStore<string | null>(null);
+
+// Подписки: обновляем сторы при завершении эффекта
+$user
+  .on(fetchUserFx.doneData, (_, user) => user) // успех → сохраняем
+  .reset(fetchUserFx);                          // сбрасываем при новом запросе
+
+$error
+  .on(fetchUserFx.failData, (_, err) => err.message) // ошибка → сохраняем
+  .reset(fetchUserFx);                               // сбрасываем при новом запросе
+
+// Готовый combined store
+const $pageState = combine({
+  user:      $user,
+  error:     $error,
+  isLoading: fetchUserFx.pending,
+});
+
+// Вызов
+fetchUserFx(1);
+// fetchUserFx.pending => true
+// ... (ждём)
+// fetchUserFx.doneData => { id: 1, name: 'Яша', email: '...' }
+// fetchUserFx.pending => false
+```
+
+### Обработка множественных запросов: inFlight
+
+```typescript
+const loadItemFx = createEffect(async (id: number) => {
+  await delay(1000);
+  return { id, data: 'result' };
+});
+
+// inFlight считает активные вызовы
+loadItemFx.inFlight.watch((count) => {
+  console.log(\`Активных запросов: \${count}\`);
+});
+
+// Запускаем несколько параллельно
+loadItemFx(1);
+loadItemFx(2);
+loadItemFx(3);
+// inFlight => 3
+// После завершения всех => 0
+```
+
+### sample() — оркестрация событий
+
+`sample` — один из самых важных операторов Effector. Он позволяет «забрать» значение стора в момент срабатывания события:
+
+```typescript
+import { createStore, createEvent, createEffect, sample } from 'effector';
+
+const searchClicked = createEvent();
+const $query = createStore('');
+
+const searchFx = createEffect(async (query: string) => {
+  const res = await fetch(\`/api/search?q=\${query}\`);
+  return res.json();
+});
+
+// sample: когда searchClicked → взять $query → запустить searchFx
+sample({
+  clock:  searchClicked,  // триггер
+  source: $query,         // откуда берём данные
+  target: searchFx,       // куда отправляем
+});
+
+// Теперь при searchClicked() автоматически вызовется searchFx с текущим значением $query!
+```
+
+### guard() / filter — условное выполнение
+
+```typescript
+import { guard, sample } from 'effector';
+
+const $isLoggedIn = createStore(false);
+const profileClicked = createEvent();
+
+// Устаревший способ (guard):
+guard({
+  source: profileClicked,
+  filter: $isLoggedIn,    // выполнять только если $isLoggedIn === true
+  target: fetchProfileFx,
+});
+
+// Современный способ (sample с filter):
+sample({
+  clock:  profileClicked,
+  filter: $isLoggedIn,
+  target: fetchProfileFx,
+});
+```
+
+### forward() — перенаправление потоков
+
+```typescript
+import { forward } from 'effector';
+
+// Устаревший способ:
+forward({
+  from: buttonClicked,
+  to:   someEffect,
+});
+
+// Современный способ (sample без source):
+sample({
+  clock:  buttonClicked,
+  target: someEffect,
+});
+```
+
+### Реальный пример: поиск с дебаунсом
+
+```typescript
+import { createStore, createEvent, createEffect, sample, restore } from 'effector';
+import { debounce } from 'patronum'; // утилиты для Effector
+
+interface SearchResult { id: number; title: string; }
+
+// Events и Effects
+const queryChanged  = createEvent<string>();
+const searchFx      = createEffect(async (query: string): Promise<SearchResult[]> => {
+  if (!query.trim()) return [];
+  const res = await fetch(\`/api/search?q=\${encodeURIComponent(query)}\`);
+  return res.json();
+});
+
+// Stores
+const $query   = restore(queryChanged, '');   // createStore + .on в одну строку
+const $results = createStore<SearchResult[]>([]);
+const $error   = createStore<string | null>(null);
+
+// Дебаунс 300ms перед запросом
+const debouncedQuery = debounce({ source: queryChanged, timeout: 300 });
+
+// Логика: при изменении query (с дебаунсом) → запускаем поиск
+sample({ clock: debouncedQuery, target: searchFx });
+
+// Обновление сторов
+$results.on(searchFx.doneData, (_, results) => results).reset(queryChanged);
+$error.on(searchFx.failData, (_, err) => err.message).reset(queryChanged);
+```
+
+### Параллельные и последовательные эффекты
+
+```typescript
+// Параллельно: запускаем оба эффекта одновременно
+sample({ clock: pageOpened, target: [fetchUserFx, fetchSettingsFx] });
+
+// Последовательно: после успеха первого запускаем второй
+sample({
+  clock:  fetchUserFx.doneData,
+  fn:     (user) => user.id,
+  target: fetchUserPostsFx,
+});
+```
+
+---
+
+## 🔗 Полезные ссылки
+- [Effector: Введение](/react/effector-intro)
+- [Effector: Stores и Events](/react/effector-stores-events)
+- [Effector + React](/react/effector-react)
+- [Effector: Продвинутый уровень](/react/effector-advanced)
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground template="react" files={{ "/App.tsx": `import { useReducer, useCallback, useEffect, useRef } from "react";
+
+// 🎯 Симуляция createEffect() через useReducer
+//
+// Реальный Effector:
+//   const fetchUserFx = createEffect(async (id: number) => {
+//     const res = await fetch(\`https://jsonplaceholder.typicode.com/users/\${id}\`);
+//     return res.json();
+//   });
+//   $user.on(fetchUserFx.doneData, (_, user) => user);
+//   $error.on(fetchUserFx.failData, (_, err) => err.message);
+//   // fetchUserFx.pending — автоматически!
+
+interface User { id: number; name: string; email: string; phone: string; }
+
+type Status = "idle" | "pending" | "done" | "fail";
+
+interface State {
+  user: User | null;
+  error: string | null;
+  status: Status;
+  selectedId: number;
+}
+
+// Events (actions)
+type Event =
+  | { type: "FETCH_STARTED" }                     // fetchUserFx triggered
+  | { type: "FETCH_DONE"; payload: User }          // fetchUserFx.doneData
+  | { type: "FETCH_FAIL"; payload: string }        // fetchUserFx.failData
+  | { type: "USER_SELECTED"; payload: number }     // userSelected event
+  | { type: "RESET" };
+
+const initialState: State = { user: null, error: null, status: "idle", selectedId: 1 };
+
+// Reducer = .on() handlers
+function reducer(state: State, event: Event): State {
+  switch (event.type) {
+    case "FETCH_STARTED":
+      return { ...state, status: "pending", error: null };
+    case "FETCH_DONE":
+      return { ...state, status: "done", user: event.payload, error: null };
+    case "FETCH_FAIL":
+      return { ...state, status: "fail", error: event.payload, user: null };
+    case "USER_SELECTED":
+      return { ...state, selectedId: event.payload, user: null, status: "idle" };
+    case "RESET":
+      return initialState;
+    default: return state;
+  }
+}
+
+// Симуляция createEffect() — хук с pending/done/fail
+function useEffect_Effector<P, R>(
+  effectFn: (params: P) => Promise<R>,
+  options: {
+    onDone?: (result: R) => void;
+    onFail?: (error: string) => void;
+    onPending?: () => void;
+  } = {}
+) {
+  const inFlight = useRef(0);
+  const run = useCallback(async (params: P) => {
+    inFlight.current++;
+    options.onPending?.();
+    try {
+      const result = await effectFn(params);
+      options.onDone?.(result);
+    } catch (err) {
+      options.onFail?.(err instanceof Error ? err.message : "Неизвестная ошибка");
+    } finally {
+      inFlight.current--;
+    }
+  }, []);
+  return { run, inFlight };
+}
+
+const USER_IDS = [1, 2, 3, 4, 5, 6, 7, 8];
+
+const statusColors: Record<Status, string> = {
+  idle:    "#64748b",
+  pending: "#f59e0b",
+  done:    "#22c55e",
+  fail:    "#ef4444",
+};
+const statusLabels: Record<Status, string> = {
+  idle:    "⏸ idle",
+  pending: "⏳ pending",
+  done:    "✅ done",
+  fail:    "❌ fail",
+};
+
+export default function App() {
+  const [state, dispatch] = useReducer(reducer, initialState);
+
+  // createEffect(async (id) => fetch(...))
+  const { run: fetchUser } = useEffect_Effector(
+    async (id: number) => {
+      const res = await fetch(\`https://jsonplaceholder.typicode.com/users/\${id}\`);
+      if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
+      return res.json() as Promise<User>;
+    },
+    {
+      onPending: ()    => dispatch({ type: "FETCH_STARTED" }),
+      onDone:    user  => dispatch({ type: "FETCH_DONE", payload: user }),
+      onFail:    error => dispatch({ type: "FETCH_FAIL", payload: error }),
+    }
+  );
+
+  // sample({ clock: userSelected, fn: id => id, target: fetchUserFx })
+  const selectUser = useCallback((id: number) => {
+    dispatch({ type: "USER_SELECTED", payload: id });
+    fetchUser(id);
+  }, [fetchUser]);
+
+  // Загружаем первого пользователя при монтировании
+  useEffect(() => { fetchUser(1); }, []);
+
+  const { user, error, status, selectedId } = state;
+  const isLoading = status === "pending";
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "sans-serif", padding: 16 }}>
+      <div style={{ background: "#1e293b", borderRadius: 16, padding: 28, width: 440, boxShadow: "0 8px 32px rgba(0,0,0,.5)" }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          <span style={{ background: "#7c3aed", color: "#fff", borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px" }}>Effector</span>
+          <span style={{ background: "#1e3a5f", color: "#60a5fa", borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px" }}>createEffect</span>
+          <span style={{ background: "#1e293b", color: statusColors[status], borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px", border: \`1px solid \${statusColors[status]}44\` }}>
+            {statusLabels[status]}
+          </span>
+        </div>
+
+        <h2 style={{ color: "#f8fafc", margin: "0 0 4px", fontSize: 18 }}>Загрузка пользователя</h2>
+        <p style={{ color: "#64748b", fontSize: 11, marginBottom: 20 }}>fetchUserFx.pending · .doneData · .failData</p>
+
+        {/* User selector */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+          {USER_IDS.map(id => (
+            <button
+              key={id}
+              onClick={() => selectUser(id)}
+              disabled={isLoading}
+              style={{ padding: "6px 12px", background: selectedId === id ? "#7c3aed" : "#0f172a", color: selectedId === id ? "#fff" : "#94a3b8", border: \`1px solid \${selectedId === id ? "#7c3aed" : "#334155"}\`, borderRadius: 8, cursor: isLoading ? "wait" : "pointer", fontWeight: 700, fontSize: 12 }}
+            >
+              #{id}
+            </button>
+          ))}
+        </div>
+
+        {/* Effect state visualization */}
+        <div style={{ background: "#0f172a", borderRadius: 12, padding: 20, marginBottom: 16, minHeight: 160 }}>
+          {isLoading && (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 120, gap: 12 }}>
+              <div style={{ width: 40, height: 40, borderRadius: "50%", border: "3px solid #334155", borderTopColor: "#7c3aed", animation: "spin 0.8s linear infinite" }} />
+              <div style={{ color: "#7c3aed", fontSize: 13 }}>fetchUserFx.pending = true</div>
+              <style>{\`@keyframes spin { to { transform: rotate(360deg) } }\`}</style>
+            </div>
+          )}
+
+          {!isLoading && error && (
+            <div style={{ textAlign: "center", padding: 20 }}>
+              <div style={{ fontSize: 36, marginBottom: 8 }}>❌</div>
+              <div style={{ color: "#ef4444", fontWeight: 700, fontSize: 13, marginBottom: 4 }}>fetchUserFx.failData</div>
+              <div style={{ color: "#f87171", fontSize: 12, background: "#1e293b", padding: "8px 12px", borderRadius: 8 }}>{error}</div>
+            </div>
+          )}
+
+          {!isLoading && user && (
+            <div>
+              <div style={{ color: "#22c55e", fontSize: 11, marginBottom: 12 }}>✅ fetchUserFx.doneData</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {[
+                  { label: "👤 Имя",    value: user.name,  color: "#f8fafc" },
+                  { label: "📧 Email",  value: user.email, color: "#60a5fa" },
+                  { label: "📱 Телефон",value: user.phone, color: "#a78bfa" },
+                ].map(({ label, value, color }) => (
+                  <div key={label} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                    <span style={{ color: "#475569", fontSize: 11, width: 80, flexShrink: 0 }}>{label}</span>
+                    <span style={{ color, fontSize: 13, fontWeight: 500 }}>{value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {status === "idle" && !user && (
+            <div style={{ color: "#475569", textAlign: "center", padding: 20, fontSize: 12 }}>
+              Выберите пользователя выше
+            </div>
+          )}
+        </div>
+
+        {/* Effect units diagram */}
+        <div style={{ background: "#0f172a", borderRadius: 8, padding: 12, fontSize: 10, color: "#475569", lineHeight: 1.9 }}>
+          <div style={{ color: "#7c3aed", fontWeight: 700, marginBottom: 4 }}>fetchUserFx юниты:</div>
+          <div><span style={{ color: "#f59e0b" }}>.pending</span> = {String(isLoading)} &nbsp;|&nbsp; <span style={{ color: "#22c55e" }}>.doneData</span> {user ? "→ User" : "—"} &nbsp;|&nbsp; <span style={{ color: "#ef4444" }}>.failData</span> {error ? "→ Error" : "—"}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

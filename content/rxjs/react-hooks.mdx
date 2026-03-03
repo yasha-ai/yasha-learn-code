@@ -1,0 +1,444 @@
+## Кастомные React-хуки с RxJS 🎣
+
+Яша снова здесь! В прошлом уроке мы подключали RxJS прямо в компонентах. Но это быстро превращается в лапшу. Решение — кастомные хуки. Они инкапсулируют подписочную логику, дают переиспользуемые кирпичики и делают компоненты чистыми и декларативными. Строим хуки как Lego!
+
+---
+
+### 1. 🔩 Базовый хук: useObservable
+
+Самый универсальный хук — принимает любой Observable и возвращает его последнее значение:
+
+```typescript
+import { useState, useEffect } from 'react';
+import { Observable } from 'rxjs';
+
+// T — тип значений из потока
+// I — тип начального значения (может отличаться от T | undefined)
+function useObservable<T>(
+  observable$: Observable<T>,
+  initialValue?: T
+): T | undefined {
+  const [value, setValue] = useState<T | undefined>(initialValue);
+
+  useEffect(() => {
+    const subscription = observable$.subscribe({
+      next: setValue,
+      error: (err) => console.error('[useObservable]', err),
+    });
+
+    return () => subscription.unsubscribe();
+  }, [observable$]); // зависимость: если поток меняется — перезапускаемся
+
+  return value;
+}
+
+// Использование:
+const count = useObservable(counter$, 0);
+const windowSize = useObservable(resize$);
+```
+
+> ⚠️ Важно: если `observable$` — это новый объект при каждом рендере, эффект будет срабатывать бесконечно. Создавай стримы вне компонента или оборачивай в `useRef`/`useMemo`.
+
+---
+
+### 2. 🎯 useSubject: двустороннее управление потоком
+
+Хук для работы с `Subject` — позволяет и читать, и писать в поток:
+
+```typescript
+import { useRef, useCallback, useEffect, useState } from 'react';
+import { Subject, Observable } from 'rxjs';
+
+interface UseSubjectResult<T> {
+  value: T | undefined;
+  next: (value: T) => void;
+  observable$: Observable<T>;
+  complete: () => void;
+}
+
+function useSubject<T>(initialValue?: T): UseSubjectResult<T> {
+  // useRef гарантирует, что Subject создаётся один раз
+  const subjectRef = useRef(new Subject<T>());
+  const [value, setValue] = useState<T | undefined>(initialValue);
+
+  useEffect(() => {
+    const sub = subjectRef.current.subscribe(setValue);
+    return () => sub.unsubscribe();
+  }, []);
+
+  const next = useCallback((val: T) => {
+    subjectRef.current.next(val);
+  }, []);
+
+  const complete = useCallback(() => {
+    subjectRef.current.complete();
+  }, []);
+
+  return {
+    value,
+    next,
+    observable$: subjectRef.current.asObservable(),
+    complete,
+  };
+}
+
+// Использование:
+function SearchBox() {
+  const { value: query, next: setQuery } = useSubject<string>('');
+  const results = useObservable(
+    useMemo(() => search$(query ?? ''), [query])
+  );
+  return <input value={query} onChange={e => setQuery(e.target.value)} />;
+}
+```
+
+---
+
+### 3. 🏪 useBehaviorSubject: реактивный стейт с историей
+
+`BehaviorSubject` всегда хранит последнее значение и отдаёт его новым подписчикам. Идеален для состояния:
+
+```typescript
+import { useRef, useState, useEffect, useCallback } from 'react';
+import { BehaviorSubject } from 'rxjs';
+import { distinctUntilChanged, map } from 'rxjs/operators';
+
+function useBehaviorSubject<T>(initialValue: T) {
+  const subjectRef = useRef(new BehaviorSubject<T>(initialValue));
+  const [state, setState] = useState<T>(initialValue);
+
+  useEffect(() => {
+    const sub = subjectRef.current
+      .pipe(distinctUntilChanged()) // не рендерим если значение не изменилось
+      .subscribe(setState);
+
+    return () => sub.unsubscribe();
+  }, []);
+
+  const setValue = useCallback((next: T | ((prev: T) => T)) => {
+    const current = subjectRef.current.getValue();
+    const nextValue = typeof next === 'function'
+      ? (next as (prev: T) => T)(current)
+      : next;
+    subjectRef.current.next(nextValue);
+  }, []);
+
+  // Доступ к сырому Subject для pipe()-цепочек в других местах
+  const getSubject = useCallback(() => subjectRef.current, []);
+
+  return [state, setValue, getSubject] as const;
+}
+
+// Использование:
+const [count, setCount, getCount$] = useBehaviorSubject(0);
+// Производный поток:
+const doubled$ = getCount$().pipe(map(n => n * 2));
+```
+
+---
+
+### 4. 🔗 TypeScript типизация хуков
+
+Строгая типизация делает хуки безопасными:
+
+```typescript
+import { Observable, BehaviorSubject, Subject } from 'rxjs';
+
+// Тип для результата useObservable
+type UseObservableState<T> = {
+  value: T | undefined;
+  loading: boolean;
+  error: Error | null;
+};
+
+// Продвинутая версия с loading/error состояниями
+function useObservableWithStatus<T>(
+  factory: () => Observable<T>,
+  deps: React.DependencyList = []
+): UseObservableState<T> {
+  const [state, setState] = useState<UseObservableState<T>>({
+    value: undefined,
+    loading: true,
+    error: null,
+  });
+
+  useEffect(() => {
+    setState(prev => ({ ...prev, loading: true, error: null }));
+
+    const sub = factory().subscribe({
+      next: value => setState({ value, loading: false, error: null }),
+      error: error => setState(prev => ({ ...prev, loading: false, error })),
+      complete: () => setState(prev => ({ ...prev, loading: false })),
+    });
+
+    return () => sub.unsubscribe();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  return state;
+}
+
+// Пример с типобезопасным хуком для API-запросов
+interface User { id: number; name: string; }
+
+function useUser(userId: number): UseObservableState<User> {
+  return useObservableWithStatus<User>(
+    () => fetchUser$(userId),
+    [userId]
+  );
+}
+
+// В компоненте:
+const { value: user, loading, error } = useUser(42);
+```
+
+---
+
+### ⚠️ Типичные ошибки
+
+**Ошибка 1: Observable в зависимостях — бесконечный цикл**
+
+```typescript
+// ❌ pipe() создаёт новый Observable на каждом рендере
+function BadHook({ userId }: { userId: number }) {
+  const user$ = userStore$.pipe(map(state => state.users[userId]));
+  const user = useObservable(user$); // Бесконечный цикл!
+}
+
+// ✅ useMemo стабилизирует ссылку
+function GoodHook({ userId }: { userId: number }) {
+  const user$ = useMemo(
+    () => userStore$.pipe(map(state => state.users[userId])),
+    [userId]
+  );
+  const user = useObservable(user$);
+}
+```
+
+**Ошибка 2: Subject снаружи компонента = один на всех**
+
+```typescript
+// ❌ Все экземпляры компонента шарят один Subject
+const sharedSubject$ = new Subject<number>(); // Глобальный!
+
+// ✅ useRef создаёт отдельный Subject для каждого экземпляра
+function SafeComponent() {
+  const subject$ = useRef(new Subject<number>()).current;
+}
+```
+
+---
+
+### 🔗 Смотри также
+
+- [17. RxJS + React](/rxjs/react-integration) — базовая интеграция
+- [19. RxJS как стейт-менеджер](/rxjs/react-state) — паттерн BehaviorSubject store
+- [3. Subjects: горячие потоки](/rxjs/subjects) — Subject и BehaviorSubject подробнее
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground
+  template="react"
+  files={{
+    "/hooks.ts": `import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Observable, Subject, BehaviorSubject } from 'rxjs';
+import { distinctUntilChanged, map, debounceTime } from 'rxjs/operators';
+
+// ── Хук 1: useObservable ───────────────────────────────────────
+export function useObservable<T>(observable$: Observable<T>, initial?: T): T | undefined {
+  const [value, setValue] = useState<T | undefined>(initial);
+  useEffect(() => {
+    const sub = observable$.subscribe({ next: setValue });
+    return () => sub.unsubscribe();
+  }, [observable$]);
+  return value;
+}
+
+// ── Хук 2: useBehaviorSubject ──────────────────────────────────
+export function useBehaviorSubject<T>(initial: T) {
+  const subjectRef = useRef(new BehaviorSubject<T>(initial));
+  const [state, setState] = useState<T>(initial);
+
+  useEffect(() => {
+    const sub = subjectRef.current
+      .pipe(distinctUntilChanged())
+      .subscribe(setState);
+    return () => sub.unsubscribe();
+  }, []);
+
+  const setValue = useCallback((next: T | ((prev: T) => T)) => {
+    const cur = subjectRef.current.getValue();
+    subjectRef.current.next(typeof next === 'function' ? (next as any)(cur) : next);
+  }, []);
+
+  const getSubject = useCallback(() => subjectRef.current, []);
+  return [state, setValue, getSubject] as const;
+}
+
+// ── Хук 3: useSubject (поток событий) ─────────────────────────
+export function useSubject<T>() {
+  const subjectRef = useRef(new Subject<T>());
+  const [last, setLast] = useState<T | undefined>(undefined);
+
+  useEffect(() => {
+    const sub = subjectRef.current.subscribe(setLast);
+    return () => sub.unsubscribe();
+  }, []);
+
+  const emit = useCallback((val: T) => subjectRef.current.next(val), []);
+  const observable$ = useMemo(() => subjectRef.current.asObservable(), []);
+
+  return { last, emit, observable$ };
+}
+`,
+    "/App.tsx": `import { useMemo } from 'react';
+import { map, scan, debounceTime, startWith } from 'rxjs/operators';
+import { interval } from 'rxjs';
+import { useObservable, useBehaviorSubject, useSubject } from './hooks';
+
+// ── Данные ────────────────────────────────────────────────────
+interface CartItem { id: number; name: string; price: number; qty: number; }
+interface Notification { id: number; text: string; type: 'info' | 'success' | 'error'; }
+
+const PRODUCTS = [
+  { id: 1, name: '🦀 Курс RxJS',    price: 990  },
+  { id: 2, name: '⚛️ Курс React',   price: 1490 },
+  { id: 3, name: '📦 Курс Node.js', price: 790  },
+];
+
+// ── Живой таймер на хуке useObservable ────────────────────────
+function LiveTimer() {
+  const tick$ = useMemo(() => interval(1000).pipe(
+    map(() => new Date().toLocaleTimeString('ru'))
+  ), []);
+  const time = useObservable(tick$, new Date().toLocaleTimeString('ru'));
+
+  return (
+    <div style={{ color: '#00ff88', fontSize: 13, marginBottom: 12, fontFamily: 'monospace' }}>
+      ⏱ {time}
+    </div>
+  );
+}
+
+// ── Корзина на useBehaviorSubject ─────────────────────────────
+function Cart({ onNotify }: { onNotify: (text: string, type: 'success' | 'error') => void }) {
+  const [items, setItems, getItems$] = useBehaviorSubject<CartItem[]>([]);
+
+  const total$ = useMemo(
+    () => getItems$().pipe(map(its => its.reduce((s, i) => s + i.price * i.qty, 0))),
+    [getItems$]
+  );
+  const total = useObservable(total$, 0);
+
+  const addItem = (p: typeof PRODUCTS[0]) => {
+    setItems(prev => {
+      const existing = prev.find(i => i.id === p.id);
+      if (existing) return prev.map(i => i.id === p.id ? { ...i, qty: i.qty + 1 } : i);
+      return [...prev, { ...p, qty: 1 }];
+    });
+    onNotify(\`\${p.name} добавлен в корзину\`, 'success');
+  };
+
+  const removeItem = (id: number) => {
+    setItems(prev => prev.filter(i => i.id !== id));
+    onNotify('Товар удалён', 'error');
+  };
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>
+        useBehaviorSubject → корзина ({items.length} поз.)
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        {PRODUCTS.map(p => (
+          <button key={p.id} onClick={() => addItem(p)} style={{
+            background: '#1a1a2e', border: '1px solid #e94560', color: '#e94560',
+            padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12
+          }}>
+            + {p.name} ({p.price}₽)
+          </button>
+        ))}
+      </div>
+      {items.map(item => (
+        <div key={item.id} style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          background: '#0f3460', padding: '6px 12px', borderRadius: 6, marginBottom: 4, fontSize: 13
+        }}>
+          <span>{item.name} × {item.qty}</span>
+          <span style={{ color: '#00ff88' }}>{item.price * item.qty}₽</span>
+          <button onClick={() => removeItem(item.id)} style={{
+            background: 'none', border: 'none', color: '#e94560', cursor: 'pointer', fontSize: 16
+          }}>×</button>
+        </div>
+      ))}
+      {items.length > 0 && (
+        <div style={{ textAlign: 'right', color: '#fff', fontWeight: 'bold', marginTop: 8 }}>
+          Итого (live): <span style={{ color: '#00ff88' }}>{total}₽</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Уведомления на useSubject ─────────────────────────────────
+function Notifications() {
+  const { last: notification } = useSubject<Notification>();
+  if (!notification) return null;
+  const colors = { info: '#0f3460', success: '#00ff88', error: '#e94560' };
+  return (
+    <div style={{
+      background: '#1a1a2e',
+      borderLeft: \`3px solid \${colors[notification.type]}\`,
+      padding: '8px 12px', borderRadius: 4, fontSize: 13, marginTop: 8
+    }}>
+      {notification.text}
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────
+let notifId = 0;
+export default function App() {
+  const { emit: sendNotif, last: notif } = useSubject<Notification>();
+
+  const handleNotify = (text: string, type: 'success' | 'error') => {
+    sendNotif({ id: ++notifId, text, type });
+  };
+
+  return (
+    <div style={{
+      background: '#0d0d1a', minHeight: '100vh', padding: 24,
+      fontFamily: 'system-ui, sans-serif', color: '#e0e0e0'
+    }}>
+      <h2 style={{ color: '#e94560', marginBottom: 4 }}>🎣 Кастомные хуки с RxJS</h2>
+      <p style={{ color: '#888', fontSize: 12, marginBottom: 20 }}>
+        useObservable • useBehaviorSubject • useSubject — все вместе
+      </p>
+
+      <LiveTimer />
+      <Cart onNotify={handleNotify} />
+      {notif && (
+        <div style={{
+          background: '#1a1a2e',
+          borderLeft: \`3px solid \${notif.type === 'success' ? '#00ff88' : '#e94560'}\`,
+          padding: '8px 12px', borderRadius: 4, fontSize: 13, marginTop: 8
+        }}>
+          {notif.type === 'success' ? '✅' : '🗑'} {notif.text}
+        </div>
+      )}
+      <div style={{ marginTop: 20, padding: 12, background: '#1a1a2e', borderRadius: 8, fontSize: 12, color: '#666' }}>
+        💡 Три хука в связке: таймер через{' '}
+        <code style={{ color: '#00ff88' }}>useObservable</code>, корзина через{' '}
+        <code style={{ color: '#f39c12' }}>useBehaviorSubject</code>, уведомления через{' '}
+        <code style={{ color: '#e94560' }}>useSubject</code>.
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

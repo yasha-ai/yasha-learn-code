@@ -1,0 +1,594 @@
+## 🛡️ Route Guards в Angular
+
+Route Guards — это охранники маршрутов. Представь, что маршруты в твоём приложении — это двери в здании 🏢. Guards — это охрана: они проверяют, есть ли у пользователя пропуск, прежде чем пустить его. И не только "пустить", но и "выпустить" (CanDeactivate) 🚪.
+
+---
+
+### 🤔 Зачем нужны Guards?
+
+```
+Пользователь хочет зайти на /admin/dashboard
+         ↓
+[CanActivate: authGuard]    ← авторизован?
+         ↓
+[CanActivate: roleGuard]    ← есть роль admin?
+         ↓
+[Resolve: dashboardData]    ← загружаем данные
+         ↓
+Компонент отображается ✅
+```
+
+Guards позволяют:
+- **Защитить маршруты** от неавторизованных пользователей
+- **Запросить подтверждение** при уходе со страницы (несохранённые данные)
+- **Загрузить данные** до отображения компонента (Resolver)
+- **Перенаправить** пользователя на нужную страницу
+
+---
+
+### 🔐 CanActivate: блокируем вход
+
+**Функциональный Guard (Angular 15+, рекомендуется):**
+
+```typescript
+// auth.guard.ts
+import { inject } from '@angular/core';
+import { CanActivateFn, Router } from '@angular/router';
+import { AuthService } from './auth.service';
+
+export const authGuard: CanActivateFn = (route, state) => {
+  const auth = inject(AuthService);
+  const router = inject(Router);
+
+  if (auth.isLoggedIn()) {
+    return true; // ✅ разрешаем навигацию
+  }
+
+  // Сохраняем URL для редиректа после логина
+  router.navigate(['/login'], {
+    queryParams: { returnUrl: state.url }
+  });
+  return false; // ❌ блокируем навигацию
+};
+
+// Или возвращаем UrlTree (более элегантно!)
+export const authGuard: CanActivateFn = (route, state) => {
+  const auth = inject(AuthService);
+  const router = inject(Router);
+
+  return auth.isLoggedIn()
+    ? true
+    : router.createUrlTree(['/login'], { queryParams: { returnUrl: state.url } });
+};
+
+// Подключение в маршруте
+{ path: 'dashboard', component: DashboardComponent, canActivate: [authGuard] }
+```
+
+**Классовый Guard (устарел, но встречается в старых проектах):**
+
+```typescript
+// ❌ Устаревший подход (Angular < 15)
+@Injectable({ providedIn: 'root' })
+export class AuthGuard implements CanActivate {
+  constructor(private auth: AuthService, private router: Router) {}
+
+  canActivate(route: ActivatedRouteSnapshot, state: RouterStateSnapshot) {
+    if (this.auth.isLoggedIn()) return true;
+    this.router.navigate(['/login']);
+    return false;
+  }
+}
+```
+
+**Guard с проверкой роли:**
+
+```typescript
+// role.guard.ts
+export const roleGuard = (requiredRole: string): CanActivateFn => {
+  return () => {
+    const auth = inject(AuthService);
+    const router = inject(Router);
+    const user = auth.currentUser();
+
+    if (!user) return router.createUrlTree(['/login']);
+    if (user.role !== requiredRole) return router.createUrlTree(['/forbidden']);
+    return true;
+  };
+};
+
+// Использование
+{ path: 'admin', component: AdminComponent, canActivate: [authGuard, roleGuard('admin')] }
+```
+
+---
+
+### 🚪 CanDeactivate: блокируем выход
+
+Идеально для форм с несохранёнными данными. Guard спрашивает пользователя перед уходом:
+
+```typescript
+// unsaved-changes.guard.ts
+export interface HasUnsavedChanges {
+  hasUnsavedChanges(): boolean;
+}
+
+export const unsavedChangesGuard: CanDeactivateFn<HasUnsavedChanges> = (component) => {
+  if (!component.hasUnsavedChanges()) return true;
+
+  return confirm('У вас есть несохранённые изменения. Уйти?');
+  // В реальном приложении лучше использовать Modal Dialog
+};
+
+// Компонент реализует интерфейс
+@Component({...})
+export class EditProfileComponent implements HasUnsavedChanges {
+  form = this.fb.group({ name: [''], email: [''] });
+  private savedValue = this.form.value;
+
+  hasUnsavedChanges(): boolean {
+    return JSON.stringify(this.form.value) !== JSON.stringify(this.savedValue);
+  }
+
+  save() {
+    this.savedValue = this.form.value;
+    this.http.put('/api/profile', this.form.value).subscribe();
+  }
+}
+
+// В маршруте
+{
+  path: 'profile/edit',
+  component: EditProfileComponent,
+  canDeactivate: [unsavedChangesGuard]
+}
+```
+
+---
+
+### 👨‍👩‍👧 CanActivateChild: защита дочерних маршрутов
+
+Защищает сразу все дочерние маршруты родителя — не нужно добавлять guard к каждому:
+
+```typescript
+export const adminGuard: CanActivateChildFn = (childRoute, state) => {
+  return inject(AuthService).hasAdminAccess()
+    ? true
+    : inject(Router).createUrlTree(['/forbidden']);
+};
+
+// Применяется ко ВСЕМ children
+{
+  path: 'admin',
+  component: AdminLayoutComponent,
+  canActivateChild: [adminGuard], // Защищает /admin/*, /admin/*/*, etc.
+  children: [
+    { path: 'dashboard', component: DashboardComponent },
+    { path: 'users', component: UsersComponent },
+    { path: 'settings', component: SettingsComponent },
+    // ^ Все они защищены adminGuard!
+  ]
+}
+```
+
+---
+
+### 🎯 CanMatch: фильтрация маршрутов
+
+`CanMatch` заменяет устаревший `CanLoad`. Он запрещает **совпадение** маршрута — если guard возвращает `false`, Angular переходит к следующему маршруту в конфигурации:
+
+```typescript
+export const premiumGuard: CanMatchFn = () => {
+  return inject(UserService).isPremium();
+};
+
+// Конфигурация маршрутов
+const routes: Routes = [
+  // Для premium пользователей — расширенный компонент
+  {
+    path: 'dashboard',
+    component: PremiumDashboardComponent,
+    canMatch: [premiumGuard]
+  },
+  // Для обычных пользователей — базовый компонент (URL тот же!)
+  {
+    path: 'dashboard',
+    component: BasicDashboardComponent
+  }
+];
+```
+
+---
+
+### 🗄️ Resolve: данные до активации
+
+Resolve загружает данные ДО навигации — компонент уже получает готовые данные:
+
+```typescript
+// user.resolver.ts
+export const userResolver: ResolveFn<User> = (route) => {
+  const id = route.paramMap.get('id')!;
+  const service = inject(UserService);
+  const router = inject(Router);
+
+  return service.getUser(id).pipe(
+    catchError(() => {
+      router.navigate(['/not-found']);
+      return EMPTY;
+    })
+  );
+};
+
+{ path: 'users/:id', component: UserComponent, resolve: { user: userResolver } }
+
+// Компонент — данные уже есть!
+export class UserComponent {
+  user = inject(ActivatedRoute).snapshot.data['user'] as User;
+}
+```
+
+---
+
+### 🏗️ Полный пример: AuthService + authGuard
+
+```typescript
+// auth.service.ts
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  private currentUser$ = new BehaviorSubject<User | null>(null);
+
+  isLoggedIn(): boolean {
+    return this.currentUser$.getValue() !== null;
+  }
+
+  currentUser(): User | null {
+    return this.currentUser$.getValue();
+  }
+
+  login(username: string, password: string): Observable<User> {
+    return this.http.post<User>('/api/login', { username, password }).pipe(
+      tap(user => {
+        this.currentUser$.next(user);
+        localStorage.setItem('token', user.token);
+      })
+    );
+  }
+
+  logout() {
+    this.currentUser$.next(null);
+    localStorage.removeItem('token');
+    this.router.navigate(['/login']);
+  }
+}
+
+// auth.guard.ts
+export const authGuard: CanActivateFn = (route, state) => {
+  const auth = inject(AuthService);
+  const router = inject(Router);
+
+  if (auth.isLoggedIn()) return true;
+
+  // Запоминаем куда хотел попасть пользователь
+  return router.createUrlTree(['/login'], {
+    queryParams: { returnUrl: state.url }
+  });
+};
+
+// login.component.ts — редирект после логина
+@Component({...})
+export class LoginComponent {
+  private returnUrl = inject(ActivatedRoute).snapshot.queryParams['returnUrl'] ?? '/';
+
+  login() {
+    this.auth.login(this.form.value).subscribe(() => {
+      this.router.navigateByUrl(this.returnUrl);
+    });
+  }
+}
+```
+
+---
+
+### ⚖️ Порядок выполнения Guards
+
+```
+Навигация: /dashboard
+    ↓
+1. CanDeactivate (текущего компонента)  ← "Можно уйти?"
+    ↓
+2. CanMatch (нового маршрута)           ← "Маршрут совпадает?"
+    ↓
+3. CanActivateChild (родителя)          ← "Дочерний маршрут доступен?"
+    ↓
+4. CanActivate (нового компонента)      ← "Компонент доступен?"
+    ↓
+5. Resolve (загрузка данных)            ← "Данные готовы?"
+    ↓
+6. Компонент активируется ✅
+
+⚠️ Если несколько CanActivate:
+canActivate: [authGuard, roleGuard('admin')]
+→ Выполняются параллельно (если не зависят друг от друга)
+→ Если любой вернёт false — навигация отменяется
+```
+
+---
+
+### Практика
+
+Попробуйте концепцию в интерактивном редакторе:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState } from 'react';
+
+// В Angular: симуляция Route Guards с AuthService
+// authGuard: CanActivateFn = () => inject(AuthService).isLoggedIn()
+// roleGuard: CanActivateFn = () => inject(AuthService).hasRole('admin')
+
+const USERS_DB = {
+  user: { password: '123', role: 'user', name: 'User Петров' },
+  admin: { password: 'admin', role: 'admin', name: 'Admin Иванов' },
+};
+
+const ROUTES = [
+  { path: '/', label: '🏠 Home', guard: null },
+  { path: '/dashboard', label: '📊 Dashboard', guard: 'auth' },
+  { path: '/profile', label: '👤 Profile', guard: 'auth' },
+  { path: '/admin', label: '🔧 Admin', guard: 'admin' },
+];
+
+const PAGE_CONTENT = {
+  '/': {
+    title: '🏠 Главная',
+    desc: 'Публичная страница — доступна без авторизации.',
+    code: '// { path: "", component: HomeComponent }\n// Нет canActivate — открыта для всех!',
+  },
+  '/dashboard': {
+    title: '📊 Dashboard',
+    desc: 'Только для авторизованных пользователей.',
+    code: '// canActivate: [authGuard]\n// authGuard = () =>\n//   inject(AuthService).isLoggedIn()',
+  },
+  '/profile': {
+    title: '👤 Профиль',
+    desc: 'Личная страница авторизованного пользователя.',
+    code: '// canActivate: [authGuard]\n// Guard читает currentUser из BehaviorSubject',
+  },
+  '/admin': {
+    title: '🔧 Admin Panel',
+    desc: 'Только для роли "admin". Обычный user не попадёт!',
+    code: '// canActivate: [authGuard, roleGuard("admin")]\n// Guards выполняются последовательно',
+  },
+};
+
+export default function App() {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [currentPath, setCurrentPath] = useState('/');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [showLogin, setShowLogin] = useState(false);
+  const [guardMsg, setGuardMsg] = useState(null);
+
+  // В Angular: это логика authGuard + roleGuard
+  const navigate = (path) => {
+    const route = ROUTES.find(r => r.path === path);
+
+    // canActivate: [authGuard]
+    if (route.guard === 'auth' && !currentUser) {
+      setGuardMsg({ type: 'error', text: '🚫 authGuard: пользователь не авторизован! Редирект → /login' });
+      setShowLogin(true);
+      return;
+    }
+
+    // canActivate: [roleGuard('admin')]
+    if (route.guard === 'admin') {
+      if (!currentUser) {
+        setGuardMsg({ type: 'error', text: '🚫 authGuard: не авторизован! Редирект → /login' });
+        setShowLogin(true);
+        return;
+      }
+      if (currentUser.role !== 'admin') {
+        setGuardMsg({ type: 'error', text: '🚫 roleGuard("admin"): роль "' + currentUser.role + '" не имеет доступа!' });
+        return;
+      }
+    }
+
+    setGuardMsg({ type: 'success', text: '✅ Guard прошёл! NavigationEnd → компонент активирован.' });
+    setCurrentPath(path);
+  };
+
+  const login = () => {
+    const user = USERS_DB[username];
+    if (!user || user.password !== password) {
+      setLoginError('❌ Неверный логин или пароль. Попробуй user/123 или admin/admin');
+      return;
+    }
+    const loggedIn = { ...user, username };
+    setCurrentUser(loggedIn);
+    setShowLogin(false);
+    setLoginError('');
+    setUsername('');
+    setPassword('');
+    setGuardMsg({ type: 'success', text: '✅ Авторизован как ' + user.name + ' (роль: ' + user.role + ')' });
+    setCurrentPath('/dashboard');
+  };
+
+  const logout = () => {
+    setCurrentUser(null);
+    setCurrentPath('/');
+    setGuardMsg({ type: 'info', text: 'ℹ️ Выход выполнен. Сессия очищена.' });
+  };
+
+  const page = PAGE_CONTENT[currentPath];
+
+  const navBtnStyle = (path) => ({
+    padding: '8px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+    fontSize: 12, fontWeight: currentPath === path ? 700 : 400,
+    background: currentPath === path ? '#dd0031' : '#1e293b',
+    color: currentPath === path ? 'white' : '#94a3b8',
+    position: 'relative',
+  });
+
+  const inputStyle = {
+    width: '100%', padding: '8px 10px', borderRadius: 6,
+    border: '1px solid #334155', background: '#0f172a', color: '#e2e8f0',
+    fontSize: 12, marginBottom: 8, boxSizing: 'border-box',
+    fontFamily: 'monospace',
+  };
+
+  const guardMsgBg = {
+    error: '#450a0a',
+    success: '#052e16',
+    info: '#0c1a2e',
+  };
+
+  const guardMsgColor = {
+    error: '#f87171',
+    success: '#4ade80',
+    info: '#7dd3fc',
+  };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0', display: 'flex', flexDirection: 'column' }}>
+      {/* Top bar */}
+      <div style={{ background: '#020617', padding: '10px 16px', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ color: '#dd0031', fontWeight: 700, fontSize: 14 }}>⚡ Angular Guards Demo</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+          {currentUser ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{
+                background: currentUser.role === 'admin' ? '#4c1d95' : '#1e3a8a',
+                padding: '3px 10px', borderRadius: 12, fontSize: 11, fontWeight: 700,
+              }}>
+                {currentUser.role === 'admin' ? '👑' : '👤'} {currentUser.username} ({currentUser.role})
+              </span>
+              <button
+                onClick={logout}
+                style={{ padding: '4px 10px', background: '#dc2626', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11 }}
+              >
+                Logout
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { setShowLogin(true); setGuardMsg(null); }}
+              style={{ padding: '5px 14px', background: '#dd0031', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}
+            >
+              Войти
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Navigation */}
+      <nav style={{ background: '#0f172a', padding: '10px 14px', borderBottom: '1px solid #1e293b', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {ROUTES.map(route => (
+          <button key={route.path} onClick={() => navigate(route.path)} style={navBtnStyle(route.path)}>
+            {route.label}
+            {route.guard === 'auth' && (
+              <span style={{ fontSize: 9, marginLeft: 4, color: '#f59e0b' }}>🔒</span>
+            )}
+            {route.guard === 'admin' && (
+              <span style={{ fontSize: 9, marginLeft: 4, color: '#c084fc' }}>★</span>
+            )}
+          </button>
+        ))}
+        <div style={{ marginLeft: 'auto', fontSize: 10, color: '#334155', alignSelf: 'center' }}>
+          🔒 = authGuard &nbsp; ★ = roleGuard(admin)
+        </div>
+      </nav>
+
+      {/* Guard message */}
+      {guardMsg && (
+        <div style={{
+          margin: '10px 14px', padding: '10px 14px', borderRadius: 8,
+          background: guardMsgBg[guardMsg.type],
+          color: guardMsgColor[guardMsg.type],
+          fontSize: 12, border: '1px solid ' + guardMsgColor[guardMsg.type] + '33',
+        }}>
+          {guardMsg.text}
+        </div>
+      )}
+
+      {/* Login form */}
+      {showLogin && (
+        <div style={{ margin: '0 14px 10px', background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155' }}>
+          <div style={{ color: '#dd0031', fontWeight: 700, marginBottom: 8, fontSize: 14 }}>🔐 Вход в систему</div>
+          <div style={{ fontSize: 11, color: '#475569', marginBottom: 12, lineHeight: 1.7 }}>
+            Попробуй: <span style={{ color: '#94a3b8' }}>user / 123</span> или{' '}
+            <span style={{ color: '#c084fc' }}>admin / admin</span>
+          </div>
+          {loginError && (
+            <div style={{ color: '#f87171', fontSize: 12, marginBottom: 8 }}>{loginError}</div>
+          )}
+          <input
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            placeholder="Логин"
+            style={inputStyle}
+          />
+          <input
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="Пароль"
+            onKeyDown={e => e.key === 'Enter' && login()}
+            style={inputStyle}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button
+              onClick={login}
+              style={{ flex: 1, padding: '9px', background: '#dd0031', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 700, fontSize: 13 }}
+            >
+              Войти
+            </button>
+            <button
+              onClick={() => { setShowLogin(false); setLoginError(''); setUsername(''); setPassword(''); }}
+              style={{ padding: '9px 14px', background: '#334155', color: '#94a3b8', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
+            >
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Page content */}
+      <main style={{ padding: '16px 14px', flex: 1 }}>
+        {page && (
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#e2e8f0', marginBottom: 10 }}>{page.title}</div>
+            <div style={{ color: '#94a3b8', marginBottom: 16, lineHeight: 1.7, fontSize: 13 }}>{page.desc}</div>
+            {currentUser && (currentPath === '/profile' || currentPath === '/dashboard') && (
+              <div style={{ background: '#1e293b', borderRadius: 8, padding: 12, marginBottom: 16, border: '1px solid #334155' }}>
+                <div style={{ color: '#4ade80', fontSize: 13, fontWeight: 700, marginBottom: 4 }}>
+                  Добро пожаловать, {currentUser.name}! 👋
+                </div>
+                <div style={{ color: '#64748b', fontSize: 12 }}>
+                  Роль: {currentUser.role} | Username: {currentUser.username}
+                </div>
+              </div>
+            )}
+            {currentPath === '/admin' && currentUser?.role === 'admin' && (
+              <div style={{ background: '#2e1065', borderRadius: 8, padding: 12, marginBottom: 16, border: '1px solid #7c3aed' }}>
+                <div style={{ color: '#c084fc', fontSize: 13, fontWeight: 700 }}>
+                  👑 Admin режим активен
+                </div>
+                <div style={{ color: '#a78bfa', fontSize: 12, marginTop: 4 }}>
+                  roleGuard('admin') вернул true — оба guard прошли!
+                </div>
+              </div>
+            )}
+            <div style={{ background: '#020617', borderRadius: 8, padding: 12, fontSize: 11, color: '#475569', lineHeight: 1.8, whiteSpace: 'pre' }}>
+              {page.code}
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+`
+  }}
+/>

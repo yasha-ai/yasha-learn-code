@@ -1,0 +1,421 @@
+## 🔄 Lifecycle Hooks в Angular
+
+Angular вызывает lifecycle hooks в строго определённом порядке. Понимание этого порядка критично для правильной инициализации, управления ресурсами и предотвращения утечек памяти.
+
+---
+
+### 📋 Все 8 хуков в порядке вызова
+
+```
+Constructor
+     ↓
+ngOnChanges    ← вызывается при каждом изменении @Input
+     ↓
+ngOnInit       ← один раз после первого ngOnChanges
+     ↓
+ngDoCheck      ← при каждой проверке изменений
+     ↓
+ngAfterContentInit   ← после проекции ng-content (один раз)
+     ↓
+ngAfterContentChecked ← после каждой проверки контента
+     ↓
+ngAfterViewInit      ← после рендера шаблона (один раз)
+     ↓
+ngAfterViewChecked   ← после каждой проверки вида
+     ↓
+ngOnDestroy          ← перед уничтожением компонента
+```
+
+---
+
+### 1️⃣ ngOnChanges — реакция на @Input
+
+Вызывается **до ngOnInit** и при каждом изменении `@Input`:
+
+```typescript
+import { Component, Input, OnChanges, SimpleChanges } from '@angular/core';
+
+@Component({ selector: 'app-user-profile', template: `...` })
+export class UserProfileComponent implements OnChanges {
+  @Input() userId!: number;
+  @Input() role!: string;
+
+  ngOnChanges(changes: SimpleChanges) {
+    // changes — объект с информацией об изменившихся Input
+    if (changes['userId']) {
+      const { previousValue, currentValue, firstChange } = changes['userId'];
+      console.log(`userId: ${previousValue} → ${currentValue}`);
+
+      if (!firstChange) {
+        // Перезагружаем данные при смене userId
+        this.loadUser(currentValue);
+      }
+    }
+
+    if (changes['role']?.currentValue === 'admin') {
+      this.loadAdminPermissions();
+    }
+  }
+
+  private loadUser(id: number) { /* ... */ }
+  private loadAdminPermissions() { /* ... */ }
+}
+```
+
+> ⚠️ `ngOnChanges` **не вызывается** если компонент не имеет `@Input` полей.
+
+---
+
+### 2️⃣ ngOnInit — инициализация
+
+Вызывается **один раз** после первого `ngOnChanges`. Самый популярный хук:
+
+```typescript
+import { Component, OnInit, inject } from '@angular/core';
+import { UserService } from './user.service';
+
+@Component({ selector: 'app-dashboard', template: `...` })
+export class DashboardComponent implements OnInit {
+  users: User[] = [];
+  loading = false;
+
+  private userService = inject(UserService);
+
+  ngOnInit() {
+    // ✅ Здесь: HTTP запросы, подписки, инициализация
+    this.loading = true;
+    this.userService.getUsers().subscribe(users => {
+      this.users = users;
+      this.loading = false;
+    });
+  }
+}
+```
+
+> **Почему не constructor?** В constructor ещё нет `@Input` значений и DI не полностью инициализирован для тестов.
+
+---
+
+### 3️⃣ ngDoCheck — ручная проверка
+
+Вызывается при **каждом** цикле Change Detection — очень часто. Используй осторожно:
+
+```typescript
+import { Component, DoCheck, Input } from '@angular/core';
+
+@Component({ selector: 'app-deep-watch', template: `...` })
+export class DeepWatchComponent implements DoCheck {
+  @Input() config: Record<string, unknown> = {};
+  private previousConfigJson = '';
+
+  ngDoCheck() {
+    // Angular не видит изменения внутри объекта — делаем вручную
+    const currentJson = JSON.stringify(this.config);
+    if (currentJson !== this.previousConfigJson) {
+      this.previousConfigJson = currentJson;
+      console.log('Глубокое изменение объекта detected!');
+      this.onConfigChange();
+    }
+  }
+
+  private onConfigChange() { /* ... */ }
+}
+```
+
+> 🚨 Избегай тяжёлых операций в `ngDoCheck` — он вызывается очень часто.
+
+---
+
+### 4️⃣ ngAfterContentInit — контент спроецирован
+
+Вызывается **один раз** после того, как Angular спроецировал контент через `ng-content`:
+
+```typescript
+import { Component, ContentChild, AfterContentInit } from '@angular/core';
+
+@Component({
+  selector: 'app-tabs',
+  template: `<ng-content />`
+})
+export class TabsComponent implements AfterContentInit {
+  @ContentChild(TabHeaderComponent) header!: TabHeaderComponent;
+
+  ngAfterContentInit() {
+    // ContentChild доступен здесь!
+    if (this.header) {
+      this.header.setActive(0);
+    }
+  }
+}
+```
+
+---
+
+### 5️⃣ ngAfterContentChecked — проверка контента
+
+Вызывается после каждой проверки проецированного контента:
+
+```typescript
+export class AccordionComponent implements AfterContentChecked {
+  @ContentChildren(AccordionItemComponent) items!: QueryList<AccordionItemComponent>;
+
+  ngAfterContentChecked() {
+    // Синхронизируем стиль всех items после каждой проверки
+    this.items?.forEach(item => item.updateStyles());
+  }
+}
+```
+
+---
+
+### 6️⃣ ngAfterViewInit — шаблон отрендерен
+
+Вызывается **один раз** после рендера всего шаблона компонента:
+
+```typescript
+import { Component, ViewChild, AfterViewInit, ElementRef } from '@angular/core';
+
+@Component({ selector: 'app-canvas-chart', template: `<canvas #chart></canvas>` })
+export class CanvasChartComponent implements AfterViewInit {
+  @ViewChild('chart') canvasRef!: ElementRef<HTMLCanvasElement>;
+
+  ngAfterViewInit() {
+    // ViewChild доступен здесь!
+    const ctx = this.canvasRef.nativeElement.getContext('2d');
+    this.renderChart(ctx);
+  }
+
+  private renderChart(ctx: CanvasRenderingContext2D | null) { /* ... */ }
+}
+```
+
+---
+
+### 7️⃣ ngAfterViewChecked — проверка вида
+
+```typescript
+export class FormComponent implements AfterViewChecked {
+  @ViewChild('submitButton') submitBtn!: ElementRef;
+  private wasValid = false;
+
+  ngAfterViewChecked() {
+    // Обновляем состояние кнопки после каждой проверки
+    const isValid = this.form.valid;
+    if (isValid !== this.wasValid) {
+      this.wasValid = isValid;
+      this.submitBtn.nativeElement.disabled = !isValid;
+    }
+  }
+}
+```
+
+> ⚠️ Избегай изменений данных в `ngAfterViewChecked` — вызовет ExpressionChangedAfterItHasBeenCheckedError.
+
+---
+
+### 8️⃣ ngOnDestroy — очистка ресурсов 🧹
+
+**Самый важный хук для предотвращения утечек памяти:**
+
+```typescript
+import { Component, OnInit, OnDestroy } from '@angular/core';
+import { Subject } from 'rxjs';
+import { takeUntil } from 'rxjs/operators';
+
+@Component({ selector: 'app-data-feed', template: `...` })
+export class DataFeedComponent implements OnInit, OnDestroy {
+  private destroy$ = new Subject<void>();
+
+  ngOnInit() {
+    // Паттерн takeUntil — отписка при уничтожении
+    this.dataService.stream$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(data => { /* ... */ });
+
+    this.interval = setInterval(() => this.tick(), 1000);
+
+    window.addEventListener('resize', this.onResize.bind(this));
+  }
+
+  ngOnDestroy() {
+    // Завершаем Subject — автоматически отписывает все takeUntil
+    this.destroy$.next();
+    this.destroy$.complete();
+
+    // Очищаем timers
+    clearInterval(this.interval);
+
+    // Удаляем event listeners
+    window.removeEventListener('resize', this.onResize.bind(this));
+  }
+
+  private onResize = () => { /* ... */ };
+  private interval: any;
+}
+```
+
+#### Современный паттерн — `takeUntilDestroyed` (Angular 16+):
+
+```typescript
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { DestroyRef, inject } from '@angular/core';
+
+@Component({ ... })
+export class ModernComponent implements OnInit {
+  private destroyRef = inject(DestroyRef);
+
+  ngOnInit() {
+    this.service.data$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(data => { /* ... */ });
+  }
+}
+```
+
+---
+
+### 📊 Сравнение хуков
+
+| Хук | Вызовов | Доступно |
+|-----|---------|---------|
+| `ngOnChanges` | N (при изменениях Input) | @Input значения |
+| `ngOnInit` | 1 | @Input значения |
+| `ngDoCheck` | Много | Всё |
+| `ngAfterContentInit` | 1 | ContentChild |
+| `ngAfterContentChecked` | N | ContentChild |
+| `ngAfterViewInit` | 1 | ViewChild |
+| `ngAfterViewChecked` | N | ViewChild |
+| `ngOnDestroy` | 1 | Всё |
+
+---
+
+```mdx-playground
+export default function LifecyclePlayground() {
+  const [hooks, setHooks] = React.useState([]);
+  const [inputValue, setInputValue] = React.useState('Яша');
+  const [componentMounted, setComponentMounted] = React.useState(false);
+  const [pendingInput, setPendingInput] = React.useState('Яша');
+
+  const addHook = (name, desc, color) => {
+    setHooks(prev => [...prev, { name, desc, color, id: Date.now() + Math.random() }]);
+  };
+
+  // Simulate lifecycle
+  const mountComponent = () => {
+    setHooks([]);
+    setComponentMounted(true);
+    const sequence = [
+      { name: 'constructor', desc: 'DI инъекции, начальные значения', color: '#64748b', delay: 0 },
+      { name: 'ngOnChanges', desc: `@Input() value = "${pendingInput}" (firstChange: true)`, color: '#7dd3fc', delay: 200 },
+      { name: 'ngOnInit', desc: 'HTTP запросы, подписки, инициализация', color: '#22c55e', delay: 400 },
+      { name: 'ngDoCheck', desc: 'CD цикл #1 — проверка изменений', color: '#f59e0b', delay: 600 },
+      { name: 'ngAfterContentInit', desc: 'ng-content спроецирован, ContentChild доступен', color: '#a78bfa', delay: 800 },
+      { name: 'ngAfterContentChecked', desc: 'Проверка контента завершена', color: '#c4b5fd', delay: 1000 },
+      { name: 'ngAfterViewInit', desc: 'Шаблон отрендерен, ViewChild доступен', color: '#dd0031', delay: 1200 },
+      { name: 'ngAfterViewChecked', desc: 'Проверка вида завершена — компонент готов', color: '#fca5a5', delay: 1400 },
+    ];
+    sequence.forEach(({ name, desc, color, delay }) => {
+      setTimeout(() => addHook(name, desc, color), delay);
+    });
+    setInputValue(pendingInput);
+  };
+
+  const changeInput = () => {
+    const newVal = pendingInput + '!';
+    setPendingInput(newVal);
+    setInputValue(newVal);
+    const sequence = [
+      { name: 'ngOnChanges', desc: `@Input() value "${inputValue}" → "${newVal}"`, color: '#7dd3fc', delay: 0 },
+      { name: 'ngDoCheck', desc: 'CD цикл — обнаружено изменение @Input', color: '#f59e0b', delay: 200 },
+      { name: 'ngAfterContentChecked', desc: 'Контент перепроверен', color: '#c4b5fd', delay: 400 },
+      { name: 'ngAfterViewChecked', desc: 'Вид перепроверен и обновлён', color: '#fca5a5', delay: 600 },
+    ];
+    sequence.forEach(({ name, desc, color, delay }) => {
+      setTimeout(() => addHook(name, desc, color), delay);
+    });
+  };
+
+  const destroyComponent = () => {
+    setTimeout(() => addHook('ngOnDestroy', 'Очистка: отписки, таймеры, event listeners', '#475569'), 0);
+    setTimeout(() => setComponentMounted(false), 800);
+  };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: 500, padding: 24, borderRadius: 12, fontFamily: 'system-ui', color: '#e2e8f0' }}>
+      <div style={{ color: '#dd0031', fontWeight: 700, fontSize: 16, marginBottom: 20 }}>
+        🔄 Lifecycle Hooks визуализатор
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        <button
+          onClick={mountComponent}
+          disabled={componentMounted}
+          style={{ background: componentMounted ? '#334155' : '#15803d', color: 'white', border: 'none', padding: '8px 16px', borderRadius: 8, cursor: componentMounted ? 'not-allowed' : 'pointer', fontSize: 13 }}
+        >
+          🔧 Создать компонент
+        </button>
+        <button
+          onClick={changeInput}
+          disabled={!componentMounted}
+          style={{ background: !componentMounted ? '#334155' : '#1d4ed8', color: 'white', border: 'none', padding: '8px 16px', borderRadius: 8, cursor: !componentMounted ? 'not-allowed' : 'pointer', fontSize: 13 }}
+        >
+          📝 Изменить @Input
+        </button>
+        <button
+          onClick={destroyComponent}
+          disabled={!componentMounted}
+          style={{ background: !componentMounted ? '#334155' : '#7f1d1d', color: 'white', border: 'none', padding: '8px 16px', borderRadius: 8, cursor: !componentMounted ? 'not-allowed' : 'pointer', fontSize: 13 }}
+        >
+          💥 Уничтожить
+        </button>
+        <button onClick={() => setHooks([])} style={{ background: 'transparent', color: '#64748b', border: '1px solid #334155', padding: '8px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 13 }}>
+          Очистить лог
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 20 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+          {[
+            { name: 'constructor', color: '#64748b' },
+            { name: 'ngOnChanges', color: '#7dd3fc' },
+            { name: 'ngOnInit', color: '#22c55e' },
+            { name: 'ngDoCheck', color: '#f59e0b' },
+            { name: 'ngAfterContentInit', color: '#a78bfa' },
+            { name: 'ngAfterContentChecked', color: '#c4b5fd' },
+            { name: 'ngAfterViewInit', color: '#dd0031' },
+            { name: 'ngAfterViewChecked', color: '#fca5a5' },
+            { name: 'ngOnDestroy', color: '#475569' },
+          ].map((h, i, arr) => (
+            <React.Fragment key={h.name}>
+              <div style={{
+                padding: '4px 10px', borderRadius: 6, fontSize: 11, fontFamily: 'monospace',
+                background: hooks.some(lh => lh.name === h.name) ? h.color + '30' : '#1e293b',
+                color: hooks.some(lh => lh.name === h.name) ? h.color : '#475569',
+                border: `1px solid ${hooks.some(lh => lh.name === h.name) ? h.color : '#334155'}`,
+                transition: 'all 0.3s', whiteSpace: 'nowrap'
+              }}>
+                {h.name}
+              </div>
+              {i < arr.length - 1 && <div style={{ width: 1, height: 8, background: '#334155' }} />}
+            </React.Fragment>
+          ))}
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 12, border: '1px solid #334155', maxHeight: 380, overflowY: 'auto' }}>
+          <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 8 }}>📋 Лог вызовов (хронологически)</div>
+          {hooks.length === 0 && <div style={{ color: '#475569', fontSize: 12 }}>Нажмите "Создать компонент"...</div>}
+          {hooks.map((h, i) => (
+            <div key={h.id} style={{ display: 'flex', gap: 10, marginBottom: 8, alignItems: 'flex-start' }}>
+              <span style={{ fontSize: 10, color: '#475569', minWidth: 24, textAlign: 'right', marginTop: 2 }}>{i + 1}.</span>
+              <div>
+                <span style={{ fontSize: 12, fontWeight: 700, color: h.color, fontFamily: 'monospace' }}>{h.name}</span>
+                <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>{h.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+```

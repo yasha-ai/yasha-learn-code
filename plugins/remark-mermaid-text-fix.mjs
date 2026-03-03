@@ -1,15 +1,13 @@
-import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { visit } from 'unist-util-visit'
 
-const require2 = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-// The absolute path that @theguild/remark-mermaid injects into MDX imports
-const MERMAID_ORIGINAL_PATH = require2.resolve('@theguild/remark-mermaid/mermaid')
+// The import string that @theguild/remark-mermaid@0.3.0 injects into the MDX AST
+const MERMAID_ORIGINAL_PATH = '@theguild/remark-mermaid/mermaid'
 
-// Our custom component that forces black text for all node fills
+// Our custom component that forces correct text colors
 const MERMAID_CUSTOM_PATH = path.resolve(__dirname, '../components/CustomMermaid.tsx')
 
 /**

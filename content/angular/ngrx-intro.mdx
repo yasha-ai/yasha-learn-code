@@ -1,0 +1,542 @@
+## 🏪 NgRx — Введение. Redux-паттерн в Angular
+
+NgRx — это реализация Redux-паттерна для Angular на базе RxJS. Это не просто библиотека, это архитектурное решение для управления состоянием крупных Angular-приложений. Когда данные текут через всё приложение, и ты уже запутался — кто их обновляет и откуда — NgRx приходит на помощь 🏛️
+
+---
+
+## Проблема: почему нужен NgRx?
+
+Представь приложение с 50+ компонентами. Данные о текущем пользователе нужны в хедере, в боковом меню, в настройках профиля и ещё в 10 местах. Без централизованного состояния это превращается в ад:
+
+```typescript
+// Без NgRx — данные передаются через @Input/@Output цепочки
+// или через сервисы с BehaviorSubject
+// Это работает, но становится неуправляемым при росте
+
+@Component({}) // Header
+export class HeaderComponent {
+  user$ = this.userService.user$; // Каждый компонент подписывается сам
+}
+
+@Component({}) // Sidebar
+export class SidebarComponent {
+  user$ = this.userService.user$; // И изменяет состояние сам
+  updatePermissions() {
+    this.userService.updateUser(...); // Кто вызвал это? Когда? Зачем?
+  }
+}
+```
+
+**Главные проблемы:**
+- 🔀 Изменения состояния происходят в разных местах — сложно отследить
+- 🐛 Баги сложно воспроизвести — нет истории изменений
+- 🧪 Компоненты со сложной логикой сложно тестировать
+- 🔄 Синхронизация состояния между компонентами — головная боль
+
+---
+
+## Redux-паттерн: идея в трёх словах
+
+Redux — это паттерн: **одно состояние → чистые функции → неизменяемость**
+
+```
+UI (Component)
+    ↓ dispatch(Action)
+Actions (Что произошло?)
+    ↓
+Reducers (Как изменить состояние?)
+    ↓
+Store (Единственный источник правды)
+    ↓ select(Selector)
+UI (Component) ← получает новое состояние
+```
+
+---
+
+## Три закона Redux
+
+1. **Единственный источник правды** — всё состояние приложения в одном Store
+2. **Состояние только для чтения** — изменить состояние можно только через dispatch(Action)
+3. **Чистые функции** — Reducers — это `(state, action) => newState` без побочных эффектов
+
+---
+
+## Ключевые концепции NgRx
+
+### Store — хранилище состояния
+
+```typescript
+// Весь AppState выглядит так:
+interface AppState {
+  users: UsersState;
+  auth: AuthState;
+  router: RouterReducerState;
+  ui: UiState;
+}
+
+// Это объект в памяти, доступный из любого места через inject(Store)
+```
+
+### Actions — события
+
+```typescript
+// Action — это просто объект с полем type
+// NgRx: createAction создаёт type-safe action creator
+import { createAction, props } from '@ngrx/store';
+
+// Без данных
+export const loadUsers = createAction('[Users] Load Users');
+
+// С данными
+export const loadUsersSuccess = createAction(
+  '[Users] Load Users Success',
+  props<{ users: User[] }>()
+);
+
+export const loadUsersFailure = createAction(
+  '[Users] Load Users Failure',
+  props<{ error: string }>()
+);
+```
+
+**Соглашение по именованию Action:**
+```
+[Источник] Описание события
+[Users Page] Load Users
+[Auth API] Login Success
+[Router] Navigation End
+```
+
+### Reducers — функции изменения состояния
+
+```typescript
+import { createReducer, on } from '@ngrx/store';
+
+interface UsersState {
+  users: User[];
+  loading: boolean;
+  error: string | null;
+}
+
+const initialState: UsersState = {
+  users: [],
+  loading: false,
+  error: null,
+};
+
+export const usersReducer = createReducer(
+  initialState,
+  on(loadUsers, state => ({ ...state, loading: true, error: null })),
+  on(loadUsersSuccess, (state, { users }) => ({
+    ...state,
+    users,
+    loading: false,
+  })),
+  on(loadUsersFailure, (state, { error }) => ({
+    ...state,
+    error,
+    loading: false,
+  }))
+);
+```
+
+### Selectors — запросы к состоянию
+
+```typescript
+import { createFeatureSelector, createSelector } from '@ngrx/store';
+
+// Выбираем кусок состояния
+const selectUsersState = createFeatureSelector<UsersState>('users');
+
+// Делаем производный селектор
+export const selectAllUsers = createSelector(
+  selectUsersState,
+  state => state.users
+);
+
+export const selectUsersLoading = createSelector(
+  selectUsersState,
+  state => state.loading
+);
+```
+
+### Effects — побочные эффекты
+
+```typescript
+import { Injectable } from '@angular/core';
+import { Actions, createEffect, ofType } from '@ngrx/effects';
+import { switchMap, map, catchError } from 'rxjs/operators';
+import { of } from 'rxjs';
+
+@Injectable()
+export class UsersEffects {
+  loadUsers$ = createEffect(() =>
+    this.actions$.pipe(
+      ofType(loadUsers),
+      switchMap(() =>
+        this.userService.getAll().pipe(
+          map(users => loadUsersSuccess({ users })),
+          catchError(error => of(loadUsersFailure({ error: error.message })))
+        )
+      )
+    )
+  );
+
+  constructor(
+    private actions$: Actions,
+    private userService: UserService
+  ) {}
+}
+```
+
+---
+
+## NgRx DevTools
+
+NgRx DevTools — это расширение для Chrome, которое позволяет:
+- Видеть все dispatched actions в реальном времени
+- Путешествовать во времени (time-travel debugging)
+- Отслеживать изменения состояния
+- Импортировать/экспортировать состояние
+
+```typescript
+// app.config.ts
+import { provideStoreDevtools } from '@ngrx/store-devtools';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideStore(reducers),
+    provideStoreDevtools({
+      maxAge: 25,
+      logOnly: environment.production, // В продакшене только логирование
+      autoPause: true,
+    })
+  ]
+};
+```
+
+---
+
+## Когда использовать NgRx? 🤔
+
+NgRx — мощный инструмент, но он добавляет сложность. Используй правило **SHARI**:
+
+| Буква | Принцип | Пример |
+|-------|---------|--------|
+| **S**hared | Состояние используется в нескольких несвязанных компонентах | Данные пользователя |
+| **H**ydrated | Состояние нужно сохранить при навигации | Фильтры таблицы |
+| **A**vailable | Состояние доступно при входе в приложение | Конфигурация |
+| **R**etrieved | Состояние загружается с сервера | Список продуктов |
+| **I**mpacted | Состояние влияет на другие части приложения | Корзина покупок |
+
+**НЕ используй NgRx, если:**
+- Состояние используется только в одном компоненте → `signal()` или локальный state
+- Маленькое приложение → сервис с `BehaviorSubject`
+- Данные не нужно синхронизировать между страницами → `ComponentStore`
+
+---
+
+## "Письмо команде" 📨
+
+```
+Привет, команда!
+
+NgRx — это как строгий бухгалтер в офисе.
+
+Раньше каждый мог взять деньги из кассы (изменить состояние)
+когда хотел и как хотел. Было удобно, но никто не знал,
+сколько денег осталось и куда они делись.
+
+Теперь:
+1. Ты хочешь взять деньги? Заполни заявку (dispatch Action)
+2. Бухгалтер проверяет заявку по правилам (Reducer)
+3. Деньги выдаются строго по регламенту (новый State)
+4. Всё записывается в журнал (DevTools)
+5. Если нужно перевести деньги из банка — есть отдел
+   по работе с банками (Effects)
+
+Да, немного бюрократии. Но зато:
+— Всегда знаешь, что происходит
+— Можно откатиться назад
+— Легко находить баги
+
+С уважением,
+NgRx архитектура
+```
+
+---
+
+### Практика
+
+<Playground template="react" files={{ "/App.tsx": `import { useState, useCallback } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+
+type ActionType =
+  | 'LOAD_USERS'
+  | 'LOAD_USERS_SUCCESS'
+  | 'LOAD_USERS_FAILURE'
+  | 'ADD_USER'
+  | 'DELETE_USER'
+  | 'SET_FILTER';
+
+interface User { id: number; name: string; role: string; }
+interface AppState {
+  users: User[];
+  loading: boolean;
+  error: string | null;
+  filter: string;
+}
+
+interface Action {
+  id: number;
+  type: ActionType;
+  payload?: any;
+  timestamp: string;
+}
+
+const initialState: AppState = {
+  users: [],
+  loading: false,
+  error: null,
+  filter: '',
+};
+
+// Pure reducer
+function reducer(state: AppState, action: { type: ActionType; payload?: any }): AppState {
+  switch (action.type) {
+    case 'LOAD_USERS':
+      return { ...state, loading: true, error: null };
+    case 'LOAD_USERS_SUCCESS':
+      return { ...state, users: action.payload, loading: false };
+    case 'LOAD_USERS_FAILURE':
+      return { ...state, error: action.payload, loading: false };
+    case 'ADD_USER':
+      return { ...state, users: [...state.users, action.payload] };
+    case 'DELETE_USER':
+      return { ...state, users: state.users.filter(u => u.id !== action.payload) };
+    case 'SET_FILTER':
+      return { ...state, filter: action.payload };
+    default:
+      return state;
+  }
+}
+
+let actionId = 0;
+const sampleUsers: User[] = [
+  { id: 1, name: 'Яша', role: 'Developer' },
+  { id: 2, name: 'Алиса', role: 'Designer' },
+  { id: 3, name: 'Боб', role: 'DevOps' },
+];
+
+export default function App() {
+  const [state, setState] = useState<AppState>(initialState);
+  const [history, setHistory] = useState<Action[]>([]);
+  const [activeStep, setActiveStep] = useState<'action'|'reducer'|'store'|'view'|null>(null);
+  const [newUserName, setNewUserName] = useState('');
+  const [historyIndex, setHistoryIndex] = useState(-1);
+
+  const stateHistory = useState<AppState[]>([initialState])[0];
+  const [allStates, setAllStates] = useState<AppState[]>([initialState]);
+
+  const dispatch = useCallback((type: ActionType, payload?: any) => {
+    const action: Action = {
+      id: ++actionId,
+      type,
+      payload,
+      timestamp: new Date().toLocaleTimeString(),
+    };
+
+    setHistory(prev => [action, ...prev.slice(0, 14)]);
+
+    // Animate pipeline
+    setActiveStep('action');
+    setTimeout(() => setActiveStep('reducer'), 300);
+    setTimeout(() => {
+      setState(prev => {
+        const next = reducer(prev, { type, payload });
+        setAllStates(s => [...s, next]);
+        setHistoryIndex(-1);
+        return next;
+      });
+      setActiveStep('store');
+    }, 600);
+    setTimeout(() => setActiveStep('view'), 900);
+    setTimeout(() => setActiveStep(null), 1400);
+  }, []);
+
+  const loadUsers = () => {
+    dispatch('LOAD_USERS');
+    setTimeout(() => dispatch('LOAD_USERS_SUCCESS', sampleUsers), 800);
+  };
+
+  const addUser = () => {
+    if (!newUserName.trim()) return;
+    dispatch('ADD_USER', { id: Date.now(), name: newUserName, role: 'Guest' });
+    setNewUserName('');
+  };
+
+  const viewedState = historyIndex >= 0 ? allStates[allStates.length - 1 - historyIndex] : state;
+  const filteredUsers = viewedState.users.filter(u =>
+    !viewedState.filter || u.name.toLowerCase().includes(viewedState.filter.toLowerCase())
+  );
+
+  const stepActive = (s: string) => activeStep === s;
+  const pipelineColor = (s: string) => stepActive(s) ? RED : '#334155';
+  const pipelineTextColor = (s: string) => stepActive(s) ? '#fff' : '#64748b';
+
+  const actionColors: Partial<Record<ActionType, string>> = {
+    LOAD_USERS: WARN,
+    LOAD_USERS_SUCCESS: SUCCESS,
+    LOAD_USERS_FAILURE: RED,
+    ADD_USER: '#3b82f6',
+    DELETE_USER: RED,
+    SET_FILTER: '#8b5cf6',
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🏪 NgRx Redux Visualizer</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+        dispatch → Actions → Reducers → Store → View
+      </p>
+
+      {/* Pipeline */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+          {[
+            ['action', '⚡ Action'],
+            ['reducer', '⚙️ Reducer'],
+            ['store', '🏪 Store'],
+            ['view', '👁️ View'],
+          ].map(([key, label], i) => (
+            <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <div style={{
+                padding: '0.4rem 0.75rem',
+                background: pipelineColor(key),
+                border: \`1px solid \${stepActive(key) ? RED : BORDER}\`,
+                borderRadius: '6px',
+                color: pipelineTextColor(key),
+                fontSize: '0.8rem',
+                fontWeight: stepActive(key) ? 700 : 400,
+                transition: 'all 0.3s',
+                transform: stepActive(key) ? 'scale(1.05)' : 'scale(1)',
+              }}>{label}</div>
+              {i < 3 && <span style={{ color: stepActive(key) ? RED : BORDER, fontWeight: 700, fontSize: '1.1rem', transition: 'color 0.3s' }}>→</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        {/* Dispatch panel */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>dispatch()</div>
+          <button onClick={loadUsers} style={btn('#22c55e', BG)}>⚡ loadUsers()</button>
+          <div style={{ display: 'flex', gap: '0.4rem', margin: '0.4rem 0' }}>
+            <input
+              placeholder="Имя пользователя"
+              value={newUserName}
+              onChange={e => setNewUserName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addUser()}
+              style={{ flex: 1, padding: '0.4rem 0.6rem', background: BG, border: \`1px solid \${BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.78rem', outline: 'none' }}
+            />
+            <button onClick={addUser} style={{ ...btn('#3b82f6'), padding: '0.4rem 0.75rem', marginBottom: 0 }}>+ Add</button>
+          </div>
+          <button onClick={() => dispatch('SET_FILTER', viewedState.filter === 'я' ? '' : 'я')} style={btn('#8b5cf6')}>
+            🔍 setFilter("{viewedState.filter || ''}")
+          </button>
+          {viewedState.users.length > 0 && (
+            <button onClick={() => dispatch('DELETE_USER', viewedState.users[0].id)} style={btn(RED)}>
+              🗑️ deleteUser(first)
+            </button>
+          )}
+        </div>
+
+        {/* Store state */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <span style={{ color: '#64748b', fontSize: '0.72rem', textTransform: 'uppercase' }}>
+              🏪 Store State {historyIndex >= 0 ? \`(t-\${historyIndex})\` : '(current)'}
+            </span>
+            <div style={{ display: 'flex', gap: '0.25rem' }}>
+              <button onClick={() => setHistoryIndex(i => Math.min(i + 1, allStates.length - 2))} style={tinyBtn}>◀</button>
+              <button onClick={() => setHistoryIndex(i => Math.max(i - 1, -1))} style={tinyBtn}>▶</button>
+            </div>
+          </div>
+          <pre style={{ margin: 0, fontSize: '0.72rem', color: '#94a3b8', overflowX: 'auto' }}>
+{JSON.stringify({
+  users: \`[\${viewedState.users.length} items]\`,
+  loading: viewedState.loading,
+  error: viewedState.error,
+  filter: viewedState.filter || '""',
+}, null, 2)}
+          </pre>
+          {historyIndex >= 0 && (
+            <div style={{ marginTop: '0.5rem', padding: '0.25rem 0.5rem', background: 'rgba(251,191,36,0.1)', border: '1px solid #f59e0b', borderRadius: '4px', fontSize: '0.72rem', color: '#f59e0b' }}>
+              ⏰ Time-travel: viewing past state
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* View (selector result) */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
+        <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+          👁️ View — select(selectFilteredUsers)
+        </div>
+        {viewedState.loading && <div style={{ color: WARN, fontSize: '0.82rem' }}>⏳ Загрузка...</div>}
+        {viewedState.error && <div style={{ color: RED, fontSize: '0.82rem' }}>❌ {viewedState.error}</div>}
+        {!viewedState.loading && filteredUsers.length === 0 && (
+          <div style={{ color: '#334155', fontSize: '0.82rem' }}>Нет данных. Нажми loadUsers()</div>
+        )}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+          {filteredUsers.map(u => (
+            <div key={u.id} style={{
+              padding: '0.35rem 0.6rem',
+              background: BG,
+              border: \`1px solid \${BORDER}\`,
+              borderRadius: '6px',
+              fontSize: '0.78rem',
+            }}>
+              <span style={{ color: RED }}>{u.name}</span>
+              <span style={{ color: '#475569' }}> / {u.role}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Action log */}
+      <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', maxHeight: '150px', overflowY: 'auto' }}>
+        <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.4rem' }}>Action Log</div>
+        {history.length === 0
+          ? <div style={{ color: '#334155', fontSize: '0.78rem' }}>// dispatch an action...</div>
+          : history.map(a => (
+            <div key={a.id} style={{ fontSize: '0.75rem', marginBottom: '0.15rem', display: 'flex', gap: '0.5rem' }}>
+              <span style={{ color: '#334155' }}>{a.timestamp}</span>
+              <span style={{ color: actionColors[a.type] || '#94a3b8', fontWeight: 600 }}>{a.type}</span>
+              {a.payload && <span style={{ color: '#475569' }}>{typeof a.payload === 'object' ? JSON.stringify(a.payload).slice(0, 40) : a.payload}</span>}
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
+
+const btn = (bg: string, color = '#fff'): React.CSSProperties => ({
+  display: 'block', width: '100%', padding: '0.4rem 0.75rem',
+  background: bg, color, border: 'none', borderRadius: '4px',
+  cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600, marginBottom: '0.4rem', textAlign: 'left',
+});
+
+const tinyBtn: React.CSSProperties = {
+  padding: '0.1rem 0.4rem', background: '#334155', color: '#94a3b8',
+  border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '0.75rem',
+};
+` }} />

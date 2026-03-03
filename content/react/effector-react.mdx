@@ -1,0 +1,469 @@
+## Effector + React — связываем логику с интерфейсом
+
+В Effector логика живёт **снаружи React** в чистых юнитах (сторах, событиях, эффектах). А пакет **effector-react** предоставляет хуки для их подключения к компонентам. Это как розетка в стене 🔌: розетка — это компонент, проводка — это Effector.
+
+### Установка
+
+```bash
+npm install effector effector-react
+```
+
+### useStore() — читаем стор в компоненте
+
+```tsx
+import { createStore } from 'effector';
+import { useStore } from 'effector-react';
+
+const $count = createStore(0);
+const $user  = createStore<User | null>(null);
+
+function Counter() {
+  // Компонент перерендерится только при изменении $count
+  const count = useStore($count);
+  return <span>{count}</span>;
+}
+
+function UserGreeting() {
+  const user = useStore($user);
+  if (!user) return <span>Гость</span>;
+  return <span>Привет, {user.name}!</span>;
+}
+```
+
+### useEvent() — вызываем события из компонентов
+
+```tsx
+import { createEvent } from 'effector';
+import { useEvent } from 'effector-react';
+
+const incremented = createEvent();
+const nameChanged = createEvent<string>();
+
+function Controls() {
+  // useEvent оборачивает событие для безопасного вызова внутри React
+  const increment  = useEvent(incremented);
+  const changeName = useEvent(nameChanged);
+
+  return (
+    <div>
+      <button onClick={increment}>+1</button>
+      <input onChange={e => changeName(e.target.value)} />
+    </div>
+  );
+}
+```
+
+### useUnit() — современный API (Effector 23+)
+
+`useUnit` — новый универсальный хук, заменяющий `useStore` + `useEvent`:
+
+```tsx
+import { useUnit } from 'effector-react';
+
+function TodoApp() {
+  // Передаём объект с юнитами — получаем объект с результатами
+  const {
+    todos,       // из $todos (Store)
+    isLoading,   // из fetchTodosFx.pending (Store)
+    addTodo,     // из todoAdded (Event)
+    removeTodo,  // из todoRemoved (Event)
+    fetchTodos,  // из fetchTodosFx (Effect)
+  } = useUnit({
+    todos:      $todos,
+    isLoading:  fetchTodosFx.pending,
+    addTodo:    todoAdded,
+    removeTodo: todoRemoved,
+    fetchTodos: fetchTodosFx,
+  });
+
+  return (
+    <div>
+      {isLoading ? <Spinner /> : <TodoList todos={todos} onRemove={removeTodo} />}
+      <button onClick={() => addTodo('Новая задача')}>Добавить</button>
+    </div>
+  );
+}
+```
+
+### Gate — жизненный цикл страницы
+
+Gate — это специальный компонент, который позволяет синхронизировать монтирование/размонтирование React-компонента с Effector. Очень удобно для загрузки данных при открытии страницы!
+
+```tsx
+import { createGate } from 'effector-react';
+import { sample } from 'effector';
+
+// Создаём Gate с опциональным типом пропсов
+const UserPageGate = createGate<{ userId: number }>();
+
+// Реагируем на открытие страницы
+sample({
+  clock:  UserPageGate.open,           // когда компонент монтируется
+  source: UserPageGate.state,          // берём props из Gate
+  fn:     ({ userId }) => userId,
+  target: fetchUserFx,
+});
+
+// Реагируем на закрытие страницы
+sample({
+  clock: UserPageGate.close,
+  target: resetUserData,
+});
+```
+
+```tsx
+// Использование в компоненте
+function UserPage({ userId }: { userId: number }) {
+  // Gate автоматически откроется при монтировании и закроется при размонтировании
+  return (
+    <>
+      <UserPageGate userId={userId} />
+      <UserContent />
+    </>
+  );
+}
+
+// Можно читать состояние Gate через хук
+function UserContent() {
+  const { isOpen } = useGate(UserPageGate);
+  // isOpen === true пока компонент смонтирован
+  return <div>Страница {isOpen ? 'открыта' : 'закрыта'}</div>;
+}
+```
+
+### Provider и Scope — изоляция состояния
+
+По умолчанию Effector использует глобальное состояние. Для SSR, тестов и микрофронтендов нужна изоляция через `Scope`:
+
+```tsx
+import { fork, allSettled, serialize } from 'effector';
+import { Provider } from 'effector-react';
+
+// Создаём изолированный экземпляр (scope)
+const scope = fork({
+  values: [
+    [$user,   preloadedUser],
+    [$todos,  preloadedTodos],
+  ],
+});
+
+// Оборачиваем приложение
+function App() {
+  return (
+    <Provider value={scope}>
+      <AppRoutes />
+    </Provider>
+  );
+}
+```
+
+### SSR с Fork API
+
+```tsx
+// server.ts
+import { fork, allSettled, serialize } from 'effector';
+import { renderToString } from 'react-dom/server';
+
+async function handleRequest(userId: number) {
+  // Создаём изолированный scope для каждого запроса
+  const scope = fork();
+
+  // Запускаем эффекты в этом scope (не затрагивает глобальное состояние!)
+  await allSettled(fetchUserFx, { scope, params: userId });
+  await allSettled(fetchTodosFx, { scope, params: { userId } });
+
+  // Сериализуем состояние для передачи клиенту
+  const storeValues = serialize(scope);
+
+  const html = renderToString(
+    <Provider value={scope}>
+      <App />
+    </Provider>
+  );
+
+  return { html, storeValues };
+}
+
+// client.ts — восстанавливаем состояние
+const scope = fork({ values: window.__STORE_VALUES__ });
+
+hydrateRoot(
+  document.getElementById('root')!,
+  <Provider value={scope}><App /></Provider>
+);
+```
+
+### Полный пример: счётчик + профиль пользователя
+
+```typescript
+// model.ts
+import { createStore, createEvent, createEffect, sample, combine } from 'effector';
+
+// Counter
+export const incremented  = createEvent();
+export const decremented  = createEvent();
+export const $count       = createStore(0)
+  .on(incremented, s => s + 1)
+  .on(decremented, s => s - 1);
+
+// User
+export const fetchProfileFx = createEffect(async () => {
+  const res = await fetch('/api/me');
+  return res.json();
+});
+
+export const $profile   = createStore(null).on(fetchProfileFx.doneData, (_, u) => u);
+export const $isLoading = fetchProfileFx.pending;
+
+// Combined state
+export const $appState = combine({
+  count:     $count,
+  profile:   $profile,
+  isLoading: $isLoading,
+});
+```
+
+```tsx
+// App.tsx
+import { useUnit } from 'effector-react';
+import { $appState, incremented, decremented, fetchProfileFx } from './model';
+
+function App() {
+  const { count, profile, isLoading } = useUnit($appState);
+  const [increment, decrement, fetchProfile] = useUnit([incremented, decremented, fetchProfileFx]);
+
+  return (
+    <div>
+      {isLoading ? <Spinner /> : <Profile user={profile} />}
+      <Counter count={count} onInc={increment} onDec={decrement} />
+      <button onClick={() => fetchProfile()}>Загрузить профиль</button>
+    </div>
+  );
+}
+```
+
+### Лучшие практики
+
+[Icon: Layers] **Разделяй model и UI:** Вся логика — в `model.ts`, компоненты только отображают и вызывают события.
+[Icon: Zap] **useUnit вместо useStore/useEvent:** Новый универсальный API, работает с батчингом React 18.
+[Icon: Shield] **Gate для жизненного цикла:** Не используй `useEffect` для загрузки данных при монтировании — используй Gate.
+[Icon: Globe] **Scope для SSR:** Всегда изолируй состояние на сервере через `fork()`.
+
+---
+
+## 🔗 Полезные ссылки
+- [Effector: Введение](/react/effector-intro)
+- [Effector: Stores и Events](/react/effector-stores-events)
+- [Effector: Effects](/react/effector-effects)
+- [Effector: Продвинутый уровень](/react/effector-advanced)
+- [SSR и Hydration](/react/ssr-hydration)
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground template="react" files={{ "/model.ts": `// model.ts — логика живёт здесь, отдельно от UI
+// Симуляция effector-react паттернов через React
+
+export interface Todo { id: number; text: string; done: boolean; }
+export interface User { name: string; avatar: string; }
+
+// Симуляция Effector stores — просто объект с начальными значениями
+export const initialModel = {
+  count:   0,
+  todos:   [] as Todo[],
+  user:    null as User | null,
+  loading: false,
+  nextId:  1,
+};
+
+// Events (action types)
+export type ModelEvent =
+  | { type: "INCREMENTED" }
+  | { type: "DECREMENTED" }
+  | { type: "COUNT_RESET" }
+  | { type: "TODO_ADDED";   payload: string }
+  | { type: "TODO_TOGGLED"; payload: number }
+  | { type: "TODO_REMOVED"; payload: number }
+  | { type: "USER_LOAD_START" }
+  | { type: "USER_LOADED"; payload: User }
+  | { type: "USER_RESET" };
+
+export type ModelState = typeof initialModel;
+
+// Reducer = все .on() handlers в одном месте
+export function modelReducer(state: ModelState, event: ModelEvent): ModelState {
+  switch (event.type) {
+    case "INCREMENTED":    return { ...state, count: state.count + 1 };
+    case "DECREMENTED":    return { ...state, count: state.count - 1 };
+    case "COUNT_RESET":    return { ...state, count: 0 };
+    case "TODO_ADDED":     return { ...state, nextId: state.nextId + 1, todos: [...state.todos, { id: state.nextId, text: event.payload, done: false }] };
+    case "TODO_TOGGLED":   return { ...state, todos: state.todos.map(t => t.id === event.payload ? { ...t, done: !t.done } : t) };
+    case "TODO_REMOVED":   return { ...state, todos: state.todos.filter(t => t.id !== event.payload) };
+    case "USER_LOAD_START":return { ...state, loading: true };
+    case "USER_LOADED":    return { ...state, loading: false, user: event.payload };
+    case "USER_RESET":     return { ...state, user: null };
+    default:               return state;
+  }
+}
+
+// Derived stores (аналог $count.map(...), combine(...))
+export const deriveStats = (state: ModelState) => ({
+  doubled:      state.count * 2,
+  doneTodos:    state.todos.filter(t => t.done).length,
+  activeTodos:  state.todos.filter(t => !t.done).length,
+});
+`, "/App.tsx": `import { useReducer, useCallback, useContext, createContext, useState, useEffect } from "react";
+import { initialModel, modelReducer, deriveStats, ModelState, ModelEvent, Todo } from "./model";
+
+// Provider + Context — симуляция effector-react <Provider scope={scope}>
+const StoreCtx = createContext<{ state: ModelState; dispatch: (e: ModelEvent) => void } | null>(null);
+
+function StoreProvider({ children }: { children: React.ReactNode }) {
+  const [state, dispatch] = useReducer(modelReducer, initialModel);
+  return <StoreCtx.Provider value={{ state, dispatch }}>{children}</StoreCtx.Provider>;
+}
+
+// useUnit hook — симуляция useUnit() из effector-react
+function useUnit() {
+  const ctx = useContext(StoreCtx)!;
+  const { state, dispatch } = ctx;
+  const stats = deriveStats(state);
+
+  return {
+    // Stores
+    count:       state.count,
+    todos:       state.todos,
+    user:        state.user,
+    isLoading:   state.loading,
+    // Derived
+    doubled:     stats.doubled,
+    doneTodos:   stats.doneTodos,
+    activeTodos: stats.activeTodos,
+    // Events (useEvent)
+    increment:   useCallback(() => dispatch({ type: "INCREMENTED" }), [dispatch]),
+    decrement:   useCallback(() => dispatch({ type: "DECREMENTED" }), [dispatch]),
+    resetCount:  useCallback(() => dispatch({ type: "COUNT_RESET" }), [dispatch]),
+    addTodo:     useCallback((text: string) => dispatch({ type: "TODO_ADDED", payload: text }), [dispatch]),
+    toggleTodo:  useCallback((id: number) => dispatch({ type: "TODO_TOGGLED", payload: id }), [dispatch]),
+    removeTodo:  useCallback((id: number) => dispatch({ type: "TODO_REMOVED", payload: id }), [dispatch]),
+    // Gate-like: симуляция useGate
+    loadUser:    useCallback(async () => {
+      dispatch({ type: "USER_LOAD_START" });
+      await new Promise(r => setTimeout(r, 800));
+      dispatch({ type: "USER_LOADED", payload: { name: "Яша Иванов", avatar: "🧑‍💻" } });
+    }, [dispatch]),
+    resetUser: useCallback(() => dispatch({ type: "USER_RESET" }), [dispatch]),
+  };
+}
+
+// Counter widget — использует только нужные юниты
+function CounterWidget() {
+  const { count, doubled, increment, decrement, resetCount } = useUnit();
+  return (
+    <div style={{ background: "#0f172a", borderRadius: 12, padding: 16, marginBottom: 12 }}>
+      <div style={{ color: "#7c3aed", fontSize: 10, fontWeight: 700, marginBottom: 8 }}>📦 $count · $doubled (derived)</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 40, fontWeight: 900, color: "#f8fafc", lineHeight: 1 }}>{count}</div>
+          <div style={{ fontSize: 10, color: "#475569" }}>$count</div>
+        </div>
+        <div style={{ color: "#334155", fontSize: 20 }}>→</div>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 40, fontWeight: 900, color: "#a78bfa", lineHeight: 1 }}>{doubled}</div>
+          <div style={{ fontSize: 10, color: "#475569" }}>$doubled</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        {[
+          { label: "increment()", fn: increment, bg: "#22c55e" },
+          { label: "decrement()", fn: decrement, bg: "#ef4444" },
+          { label: "reset()",     fn: resetCount, bg: "#475569" },
+        ].map(({ label, fn, bg }) => (
+          <button key={label} onClick={fn} style={{ padding: "5px 10px", background: bg, color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 10, fontWeight: 700 }}>
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Todo widget
+function TodoWidget() {
+  const { todos, doneTodos, activeTodos, addTodo, toggleTodo, removeTodo } = useUnit();
+  const [input, setInput] = useState("");
+  const handleAdd = () => { if (input.trim()) { addTodo(input.trim()); setInput(""); } };
+  return (
+    <div style={{ background: "#0f172a", borderRadius: 12, padding: 16, marginBottom: 12 }}>
+      <div style={{ color: "#7c3aed", fontSize: 10, fontWeight: 700, marginBottom: 8 }}>
+        📦 $todos · ✅ {doneTodos} выполнено · 🔵 {activeTodos} активных
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && handleAdd()}
+          placeholder="Добавить задачу..." style={{ flex: 1, padding: "6px 10px", background: "#1e293b", border: "1px solid #334155", borderRadius: 6, color: "#f8fafc", fontSize: 12, outline: "none" }} />
+        <button onClick={handleAdd} style={{ padding: "6px 12px", background: "#7c3aed", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 700 }}>+</button>
+      </div>
+      <div style={{ maxHeight: 150, overflowY: "auto" }}>
+        {todos.map(todo => (
+          <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", background: "#1e293b", borderRadius: 6, marginBottom: 4 }}>
+            <button onClick={() => toggleTodo(todo.id)} style={{ width: 16, height: 16, borderRadius: "50%", border: \`2px solid \${todo.done ? "#22c55e" : "#475569"}\`, background: todo.done ? "#22c55e" : "transparent", cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {todo.done && <span style={{ color: "#fff", fontSize: 8, lineHeight: 1 }}>✓</span>}
+            </button>
+            <span style={{ flex: 1, color: todo.done ? "#475569" : "#e2e8f0", fontSize: 12, textDecoration: todo.done ? "line-through" : "none" }}>{todo.text}</span>
+            <button onClick={() => removeTodo(todo.id)} style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14 }}>×</button>
+          </div>
+        ))}
+        {!todos.length && <div style={{ color: "#334155", fontSize: 11, textAlign: "center", padding: 12 }}>Список пуст</div>}
+      </div>
+    </div>
+  );
+}
+
+// User widget — симуляция Gate (load on mount / reset on unmount)
+function UserWidget() {
+  const { user, isLoading, loadUser, resetUser } = useUnit();
+  // Gate.open — симулируем через useEffect
+  useEffect(() => { loadUser(); return () => {}; }, []);
+  return (
+    <div style={{ background: "#0f172a", borderRadius: 12, padding: 16 }}>
+      <div style={{ color: "#7c3aed", fontSize: 10, fontWeight: 700, marginBottom: 8 }}>⚡ UserGate (open → fetchProfileFx)</div>
+      {isLoading && <div style={{ color: "#f59e0b", fontSize: 12, textAlign: "center", padding: 8 }}>⏳ pending...</div>}
+      {user && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 28 }}>{user.avatar}</span>
+          <div>
+            <div style={{ color: "#f8fafc", fontWeight: 700, fontSize: 14 }}>{user.name}</div>
+            <div style={{ color: "#64748b", fontSize: 10 }}>fetchProfileFx.doneData</div>
+          </div>
+          <button onClick={resetUser} style={{ marginLeft: "auto", background: "#1e293b", border: "none", color: "#64748b", cursor: "pointer", fontSize: 11, padding: "4px 8px", borderRadius: 6 }}>Сбросить</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <StoreProvider>
+      <div style={{ minHeight: "100vh", background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "sans-serif", padding: 16 }}>
+        <div style={{ background: "#1e293b", borderRadius: 16, padding: 24, width: 440, boxShadow: "0 8px 32px rgba(0,0,0,.5)" }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+            <span style={{ background: "#7c3aed", color: "#fff", borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px" }}>effector-react</span>
+            <span style={{ background: "#1e3a5f", color: "#60a5fa", borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px" }}>useUnit · Gate · Provider</span>
+          </div>
+          <h2 style={{ color: "#f8fafc", margin: "0 0 16px", fontSize: 18 }}>Full App: Counter + Todos + Profile</h2>
+          <CounterWidget />
+          <TodoWidget />
+          <UserWidget />
+          <div style={{ background: "#0f172a", borderRadius: 8, padding: "10px 14px", marginTop: 12, fontSize: 10, color: "#475569", lineHeight: 1.8 }}>
+            // <span style={{ color: "#7c3aed" }}>Provider</span> = изолированный scope<br/>
+            // <span style={{ color: "#7c3aed" }}>useUnit</span> = читаем stores + вызываем events<br/>
+            // <span style={{ color: "#7c3aed" }}>Gate.open</span> = монтирование компонента
+          </div>
+        </div>
+      </div>
+    </StoreProvider>
+  );
+}
+` }} />

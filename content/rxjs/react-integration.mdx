@@ -1,0 +1,426 @@
+## RxJS + React: Дружба на всю жизнь 🤝
+
+Привет, кодер! Яша здесь. Ты уже умеешь создавать Observable-потоки, применять операторы и управлять подписками. Настало время соединить RxJS с React — и это дуэт, который реально меняет игру. Реакт отвечает за UI, RxJS — за потоки данных. Идеальное разделение ответственности!
+
+---
+
+### 1. 🌊 fromEvent: Браузерные события как потоки
+
+`fromEvent` превращает любое DOM-событие в Observable. Это один из самых частых паттернов RxJS + React.
+
+```typescript
+import { fromEvent, Observable } from 'rxjs';
+import { map, distinctUntilChanged, debounceTime } from 'rxjs/operators';
+
+// Поток изменения размера окна
+const resize$ = fromEvent(window, 'resize').pipe(
+  map(() => ({ width: window.innerWidth, height: window.innerHeight })),
+  distinctUntilChanged(
+    (a, b) => a.width === b.width && a.height === b.height
+  ),
+  debounceTime(200) // не спамим обновлениями
+);
+
+// Поток движения мыши
+const mousemove$ = fromEvent<MouseEvent>(document, 'mousemove').pipe(
+  map(e => ({ x: e.clientX, y: e.clientY })),
+  debounceTime(16) // ~60fps
+);
+
+// Поток нажатий клавиш — например, Ctrl+S
+const save$ = fromEvent<KeyboardEvent>(document, 'keydown').pipe(
+  filter(e => e.ctrlKey && e.key === 's')
+);
+```
+
+Главное правило: **всегда отписывайся при размонтировании компонента**. Иначе получишь утечку памяти и ошибки обновления размонтированного компонента.
+
+---
+
+### 2. ⚛️ useEffect + subscription: Правильный паттерн
+
+Вот канонический способ подключить Observable к React-компоненту:
+
+```typescript
+import React, { useState, useEffect } from 'react';
+import { fromEvent } from 'rxjs';
+import { map, debounceTime, distinctUntilChanged } from 'rxjs/operators';
+
+interface WindowSize {
+  width: number;
+  height: number;
+}
+
+function useWindowSize(): WindowSize {
+  const [size, setSize] = useState<WindowSize>({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
+
+  useEffect(() => {
+    const resize$ = fromEvent(window, 'resize').pipe(
+      map(() => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      })),
+      debounceTime(200),
+      distinctUntilChanged((a, b) => a.width === b.width && a.height === b.height)
+    );
+
+    // Создаём подписку
+    const subscription = resize$.subscribe(setSize);
+
+    // Функция очистки — вызывается при размонтировании!
+    return () => subscription.unsubscribe();
+  }, []); // пустой массив зависимостей = один раз при монтировании
+
+  return size;
+}
+
+function WindowSizeDisplay() {
+  const { width, height } = useWindowSize();
+  return <div>Окно: {width} × {height}</div>;
+}
+```
+
+Структура `useEffect` с RxJS всегда одинакова:
+1. Создать Observable внутри эффекта
+2. Подписаться, сохранить `subscription`
+3. Вернуть `() => subscription.unsubscribe()`
+
+---
+
+### 3. 📡 Subject для связи между компонентами
+
+`Subject` — это шина событий. Отлично работает для передачи данных между несвязанными компонентами:
+
+```typescript
+import { Subject, BehaviorSubject } from 'rxjs';
+import { filter } from 'rxjs/operators';
+
+// Тип события
+interface AppEvent {
+  type: string;
+  payload?: unknown;
+}
+
+// Создаём шину — один раз, вне компонентов
+const eventBus$ = new Subject<AppEvent>();
+
+// Отправитель: компонент-кнопка в глубине дерева
+function DeepButton() {
+  const handleClick = () => {
+    eventBus$.next({ type: 'USER_ACTION', payload: { id: 42 } });
+  };
+  return <button onClick={handleClick}>Сделать что-то</button>;
+}
+
+// Получатель: компонент где-то в другом месте дерева
+function StatusPanel() {
+  const [lastAction, setLastAction] = useState<string | null>(null);
+
+  useEffect(() => {
+    const sub = eventBus$.pipe(
+      filter(e => e.type === 'USER_ACTION')
+    ).subscribe(e => {
+      setLastAction(`Действие с id: ${(e.payload as any).id}`);
+    });
+
+    return () => sub.unsubscribe();
+  }, []);
+
+  return <div>Последнее: {lastAction ?? 'нет'}</div>;
+}
+```
+
+Это работает без Redux, Context API и пропов. Просто Subject как глобальная шина.
+
+---
+
+### 4. 🌐 WebSocket-подобная симуляция
+
+Реальный пример: симуляция WebSocket-потока данных в React-компоненте:
+
+```typescript
+import { Observable, Subject, interval } from 'rxjs';
+import { map, takeUntil, share } from 'rxjs/operators';
+
+interface StockPrice {
+  symbol: string;
+  price: number;
+  change: number;
+}
+
+// Фабрика "WebSocket"-потока (симуляция)
+function createStockStream(symbol: string): Observable<StockPrice> {
+  return interval(1000).pipe(
+    map(() => ({
+      symbol,
+      price: 100 + Math.random() * 50,
+      change: (Math.random() - 0.5) * 5,
+    })),
+    share() // многоразовый поток — все подписчики получают одно значение
+  );
+}
+
+function StockTicker({ symbol }: { symbol: string }) {
+  const [data, setData] = useState<StockPrice | null>(null);
+
+  useEffect(() => {
+    const stock$ = createStockStream(symbol);
+    const sub = stock$.subscribe(setData);
+    return () => sub.unsubscribe();
+  }, [symbol]); // перезапускаем если symbol меняется
+
+  if (!data) return <div>Загрузка...</div>;
+
+  const color = data.change >= 0 ? 'green' : 'red';
+  return (
+    <div>
+      <b>{data.symbol}</b>: ${data.price.toFixed(2)}
+      <span style={{ color }}> {data.change >= 0 ? '+' : ''}{data.change.toFixed(2)}</span>
+    </div>
+  );
+}
+```
+
+---
+
+### ⚠️ Типичные ошибки
+
+**Ошибка 1: Забыть отписаться**
+
+```typescript
+// ❌ УТЕЧКА ПАМЯТИ!
+useEffect(() => {
+  interval(1000).subscribe(tick => console.log(tick));
+}, []);
+
+// ✅ Правильно
+useEffect(() => {
+  const sub = interval(1000).subscribe(tick => console.log(tick));
+  return () => sub.unsubscribe();
+}, []);
+```
+
+**Ошибка 2: Создавать Subject внутри компонента**
+
+```typescript
+// ❌ Новый Subject при каждом рендере!
+function BadComponent() {
+  const subject$ = new Subject(); // пересоздаётся!
+  // ...
+}
+
+// ✅ useRef или вынести за пределы компонента
+function GoodComponent() {
+  const subject$ = useRef(new Subject()).current;
+  // ...
+}
+```
+
+**Ошибка 3: Не учитывать изменение зависимостей**
+
+```typescript
+// ❌ Подписка не обновляется при смене userId
+useEffect(() => {
+  userStream(userId).subscribe(setUser);
+  return () => sub.unsubscribe();
+}, []); // забыли userId!
+
+// ✅
+useEffect(() => {
+  const sub = userStream(userId).subscribe(setUser);
+  return () => sub.unsubscribe();
+}, [userId]); // правильно!
+```
+
+---
+
+### 🔗 Смотри также
+
+- [3. Subjects: горячие потоки](/rxjs/subjects) — Subject подробнее
+- [10. debounce и throttle](/rxjs/debounce-throttle) — для оптимизации событий
+- [18. Кастомные хуки с RxJS](/rxjs/react-hooks) — инкапсуляция логики в хуки
+- [19. RxJS как стейт-менеджер](/rxjs/react-state) — управление состоянием
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from 'react';
+import { interval, Subject, fromEvent, BehaviorSubject } from 'rxjs';
+import { map, takeUntil, filter, distinctUntilChanged } from 'rxjs/operators';
+
+// ── Глобальный Subject как шина событий ────────────────────────
+const controlBus$ = new Subject<'pause' | 'resume' | 'reset'>();
+
+// ── Компонент: живые часы с RxJS interval ─────────────────────
+function RxClock() {
+  const [time, setTime] = useState(new Date());
+  const [running, setRunning] = useState(true);
+  const pauseRef = useRef(false);
+
+  useEffect(() => {
+    // Поток тиков каждую секунду
+    const tick$ = interval(1000).pipe(
+      filter(() => !pauseRef.current),
+      map(() => new Date())
+    );
+
+    const sub = tick$.subscribe(setTime);
+
+    // Слушаем команды с шины
+    const ctrlSub = controlBus$.subscribe(cmd => {
+      if (cmd === 'pause') { pauseRef.current = true; setRunning(false); }
+      if (cmd === 'resume') { pauseRef.current = false; setRunning(true); }
+      if (cmd === 'reset') { setTime(new Date()); }
+    });
+
+    return () => {
+      sub.unsubscribe();
+      ctrlSub.unsubscribe();
+    };
+  }, []);
+
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const h = pad(time.getHours());
+  const m = pad(time.getMinutes());
+  const s = pad(time.getSeconds());
+
+  return (
+    <div style={{
+      background: '#1a1a2e',
+      border: '1px solid #e94560',
+      borderRadius: 12,
+      padding: '24px 40px',
+      textAlign: 'center',
+      marginBottom: 16
+    }}>
+      <div style={{ fontSize: 11, color: '#888', marginBottom: 8, letterSpacing: 2 }}>
+        RxJS INTERVAL CLOCK
+      </div>
+      <div style={{ fontSize: 56, fontFamily: 'monospace', color: running ? '#00ff88' : '#e94560', letterSpacing: 4 }}>
+        {h}:{m}:{s}
+      </div>
+      <div style={{ marginTop: 8, fontSize: 12, color: running ? '#00ff88' : '#e94560' }}>
+        {running ? '● Работает' : '⏸ Пауза'}
+      </div>
+    </div>
+  );
+}
+
+// ── Панель управления — отправляет команды через Subject ───────
+function ControlPanel() {
+  return (
+    <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
+      {[
+        { label: '▶ Запустить', cmd: 'resume' as const, color: '#00ff88' },
+        { label: '⏸ Пауза',     cmd: 'pause' as const,  color: '#f39c12' },
+        { label: '↺ Сброс',     cmd: 'reset' as const,  color: '#e94560' },
+      ].map(({ label, cmd, color }) => (
+        <button
+          key={cmd}
+          onClick={() => controlBus$.next(cmd)}
+          style={{
+            background: 'transparent',
+            border: \`1px solid \${color}\`,
+            color,
+            padding: '8px 16px',
+            borderRadius: 6,
+            cursor: 'pointer',
+            fontSize: 13
+          }}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── Симуляция WebSocket-потока данных ─────────────────────────
+interface StockData { symbol: string; price: number; delta: number; }
+
+const stocks$ = interval(1500).pipe(
+  map(() => ({
+    symbol: 'RXJ',
+    price: 100 + Math.random() * 80,
+    delta: (Math.random() - 0.5) * 10,
+  }))
+);
+
+function StockTicker() {
+  const [data, setData] = useState<StockData | null>(null);
+
+  useEffect(() => {
+    const sub = stocks$.subscribe(setData);
+    return () => sub.unsubscribe(); // ← очистка!
+  }, []);
+
+  if (!data) return <div style={{ color: '#888', textAlign: 'center' }}>Загрузка котировок...</div>;
+
+  const up = data.delta >= 0;
+  return (
+    <div style={{
+      background: '#0f3460',
+      border: '1px solid #16213e',
+      borderRadius: 8,
+      padding: '12px 20px',
+      textAlign: 'center',
+      fontSize: 14
+    }}>
+      <span style={{ color: '#aaa' }}>Котировка (симуляция WebSocket): </span>
+      <b style={{ color: '#fff' }}>{data.symbol}</b>
+      <span style={{ color: '#fff' }}> \${data.price.toFixed(2)}</span>
+      <span style={{ color: up ? '#00ff88' : '#e94560', marginLeft: 8 }}>
+        {up ? '▲' : '▼'} {Math.abs(data.delta).toFixed(2)}
+      </span>
+    </div>
+  );
+}
+
+// ── Главный компонент ──────────────────────────────────────────
+export default function App() {
+  return (
+    <div style={{
+      background: '#0d0d1a',
+      minHeight: '100vh',
+      padding: 24,
+      fontFamily: 'system-ui, sans-serif',
+      color: '#e0e0e0'
+    }}>
+      <h2 style={{ color: '#e94560', textAlign: 'center', marginBottom: 4 }}>
+        ⚡ RxJS + React
+      </h2>
+      <p style={{ color: '#888', textAlign: 'center', marginBottom: 24, fontSize: 13 }}>
+        interval() • Subject как шина событий • имитация WebSocket
+      </p>
+
+      {/* Часы на RxJS interval */}
+      <RxClock />
+
+      {/* Управление через Subject */}
+      <ControlPanel />
+
+      {/* WebSocket-симуляция */}
+      <StockTicker />
+
+      <div style={{ marginTop: 20, padding: 12, background: '#1a1a2e', borderRadius: 8, fontSize: 12, color: '#666' }}>
+        💡 <b style={{ color: '#aaa' }}>Как это работает:</b> часы используют{' '}
+        <code style={{ color: '#00ff88' }}>interval(1000)</code>, кнопки посылают команды через{' '}
+        <code style={{ color: '#e94560' }}>Subject</code>, котировки — отдельный поток с{' '}
+        <code style={{ color: '#f39c12' }}>interval(1500)</code>. Каждый <code>useEffect</code>{' '}
+        возвращает функцию отписки.
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

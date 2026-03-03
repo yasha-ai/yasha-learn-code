@@ -1,0 +1,663 @@
+## 🏗️ Dependency Injection в Angular
+
+DI (Dependency Injection) — это **система управления зависимостями**. Вместо того чтобы самому создавать объекты (`new UserService()`), ты говоришь Angular: «мне нужен UserService» — и фреймворк сам найдёт, создаст и передаст его. Это называется **Голливудский принцип**: «Не звони нам — мы позвоним тебе» 🎬
+
+---
+
+### 🤔 Зачем DI?
+
+```typescript
+// ❌ Без DI: жёсткие зависимости, невозможно тестировать
+class OrderComponent {
+  private userService = new UserService(
+    new HttpClient(/* ... */),
+    new LoggingService()
+  );
+  // Как подменить UserService в тестах? 😱
+}
+
+// ✅ С DI: Angular сам создаёт и передаёт зависимости
+class OrderComponent {
+  constructor(private userService: UserService) {}
+  // В тестах легко передать MockUserService ✅
+}
+```
+
+---
+
+### 🌲 Иерархическая система инжекторов
+
+Angular создаёт **дерево инжекторов**, которое отражает структуру приложения. Когда компонент запрашивает зависимость, Angular ищет её снизу вверх по дереву:
+
+```
+Root Injector (AppModule / bootstrapApplication)
+├── Platform Injector
+│   └── ApplicationRef
+│
+├── Module Injector (FeatureModule)
+│   └── Компоненты модуля
+│
+└── Component Injector (AppComponent)
+    ├── Component Injector (HeaderComponent)
+    │   └── Component Injector (NavItemComponent)
+    └── Component Injector (DashboardComponent)
+        └── Component Injector (WidgetComponent)
+```
+
+```typescript
+// Запрос зависимости идёт снизу вверх:
+// WidgetComponent → DashboardComponent → AppComponent → Module → Root
+// Angular берёт ПЕРВЫЙ найденный провайдер
+
+@Component({
+  selector: 'app-widget',
+  template: `...`
+})
+export class WidgetComponent {
+  // Angular ищет LoggingService начиная с этого компонента
+  // и идёт вверх по дереву инжекторов
+  constructor(private logger: LoggingService) {}
+}
+```
+
+---
+
+### 🎟️ InjectionToken — токены для не-классовых зависимостей
+
+Токены нужны для провайдинга примитивов (строк, объектов, функций) — того, что нельзя идентифицировать по классу:
+
+```typescript
+import { InjectionToken } from '@angular/core';
+
+// Создаём типизированный токен
+export const API_URL = new InjectionToken<string>('API_URL');
+export const APP_CONFIG = new InjectionToken<AppConfig>('APP_CONFIG');
+export const MAX_RETRIES = new InjectionToken<number>('MAX_RETRIES');
+
+// Регистрируем провайдеры
+@NgModule({
+  providers: [
+    { provide: API_URL,     useValue: 'https://api.example.com' },
+    { provide: MAX_RETRIES, useValue: 3 },
+    {
+      provide: APP_CONFIG,
+      useValue: {
+        version: '1.0.0',
+        features: { darkMode: true, analytics: false }
+      }
+    }
+  ]
+})
+export class AppModule {}
+
+// Используем в сервисе
+@Injectable({ providedIn: 'root' })
+export class ApiService {
+  constructor(
+    private http: HttpClient,
+    @Inject(API_URL) private apiUrl: string,        // 👈 @Inject для токенов
+    @Inject(MAX_RETRIES) private maxRetries: number  // 👈 Angular не знает тип по токену
+  ) {}
+
+  get<T>(endpoint: string): Observable<T> {
+    return this.http.get<T>(this.apiUrl + endpoint).pipe(
+      retry(this.maxRetries)
+    );
+  }
+}
+```
+
+---
+
+### 📦 Типы провайдеров
+
+#### useClass — подмена реализации
+
+```typescript
+// Интерфейс (контракт)
+abstract class NotificationService {
+  abstract notify(message: string): void;
+}
+
+// Реальная реализация
+@Injectable()
+class ToastNotificationService implements NotificationService {
+  notify(message: string): void {
+    // Показываем toast через DOM
+    this.toastLib.show(message);
+  }
+}
+
+// Альтернативная реализация для тестов
+@Injectable()
+class MockNotificationService implements NotificationService {
+  messages: string[] = [];
+  notify(message: string): void {
+    this.messages.push(message); // Просто сохраняем
+  }
+}
+
+// В основном приложении
+providers: [
+  { provide: NotificationService, useClass: ToastNotificationService }
+]
+
+// В тестах — подменяем реализацию!
+providers: [
+  { provide: NotificationService, useClass: MockNotificationService }
+]
+```
+
+#### useValue — константные значения
+
+```typescript
+// Конфигурация окружения
+export const ENVIRONMENT_CONFIG = new InjectionToken<Environment>('ENVIRONMENT');
+
+providers: [
+  {
+    provide: ENVIRONMENT_CONFIG,
+    useValue: {
+      production: false,
+      apiUrl: 'http://localhost:3000',
+      wsUrl:  'ws://localhost:3000',
+      version: '2.1.0'
+    }
+  }
+]
+
+// Использование
+@Injectable({ providedIn: 'root' })
+export class ConfigService {
+  constructor(@Inject(ENVIRONMENT_CONFIG) readonly config: Environment) {}
+
+  get apiUrl(): string { return this.config.apiUrl; }
+}
+```
+
+#### useFactory — создание на основе runtime-данных
+
+```typescript
+export const ANALYTICS_SERVICE = new InjectionToken<AnalyticsService>('Analytics');
+
+providers: [
+  {
+    provide: ANALYTICS_SERVICE,
+    useFactory: (config: AppConfig, logger: LoggingService) => {
+      // Решаем какую реализацию использовать в runtime
+      if (config.production) {
+        return new GoogleAnalyticsService(config.gaId, logger);
+      } else {
+        return new ConsoleAnalyticsService(logger);
+      }
+    },
+    deps: [APP_CONFIG, LoggingService] // 👈 Зависимости фабрики
+  }
+]
+```
+
+#### useExisting — алиас существующего провайдера
+
+```typescript
+// Создаём псевдоним — оба токена указывают на ОДИН экземпляр
+providers: [
+  AuthService,
+  {
+    provide: UserContextService,
+    useExisting: AuthService  // 👈 НЕ создаёт новый экземпляр!
+  }
+]
+
+// Компонент запрашивает UserContextService — получает AuthService
+constructor(private userCtx: UserContextService) {}
+```
+
+---
+
+### 🔢 Multi Providers — массив значений
+
+```typescript
+export const HTTP_INTERCEPTORS = new InjectionToken<HttpInterceptor[]>('HTTP_INTERCEPTORS');
+
+providers: [
+  {
+    provide: HTTP_INTERCEPTORS,
+    useClass: AuthInterceptor,
+    multi: true   // 👈 Добавляем В МАССИВ, не заменяем
+  },
+  {
+    provide: HTTP_INTERCEPTORS,
+    useClass: LoggingInterceptor,
+    multi: true   // 👈 Теперь [AuthInterceptor, LoggingInterceptor]
+  },
+  {
+    provide: HTTP_INTERCEPTORS,
+    useClass: CacheInterceptor,
+    multi: true   // 👈 [AuthInterceptor, LoggingInterceptor, CacheInterceptor]
+  }
+]
+```
+
+---
+
+### 🎛️ Декораторы: @Optional, @Self, @SkipSelf, @Host
+
+```typescript
+@Component({
+  selector: 'app-form-field',
+  template: `...`
+})
+export class FormFieldComponent {
+  constructor(
+    // @Optional — не падаем если провайдер не найден, получаем null
+    @Optional() private tooltip: TooltipService | null,
+
+    // @Self — ищем ТОЛЬКО в инжекторе этого компонента
+    @Self() private formControl: NgControl,
+
+    // @SkipSelf — пропускаем инжектор этого компонента, ищем выше
+    @SkipSelf() private parentForm: FormGroupDirective,
+
+    // @Host — ищем только в этом компоненте и его host-компоненте
+    @Host() private hostRef: ElementRef
+  ) {
+    if (!this.tooltip) {
+      console.log('TooltipService не зарегистрирован — это ок');
+    }
+  }
+}
+```
+
+---
+
+### ⚡ inject() — функциональная инъекция (Angular 14+)
+
+Функция `inject()` позволяет получить зависимости без конструктора. Идеальна для функций, guards, interceptors:
+
+```typescript
+import { inject } from '@angular/core';
+
+// В сервисе — вместо constructor
+@Injectable({ providedIn: 'root' })
+export class ProductService {
+  // Вместо constructor(private http: HttpClient, private logger: LoggingService)
+  private http = inject(HttpClient);
+  private logger = inject(LoggingService);
+  private apiUrl = inject(API_URL);
+
+  getAll(): Observable<Product[]> {
+    this.logger.log('Fetching products...');
+    return this.http.get<Product[]>(this.apiUrl + '/products');
+  }
+}
+
+// В Route Guard (функциональный стиль Angular 15+)
+export const authGuard = (): boolean | UrlTree => {
+  const authService = inject(AuthService);     // 👈 inject() вне класса!
+  const router = inject(Router);
+
+  if (authService.isAuthenticated) {
+    return true;
+  }
+  return router.createUrlTree(['/login']);
+};
+
+// В HTTP Interceptor (функциональный стиль Angular 15+)
+export const authInterceptor: HttpInterceptorFn = (req, next) => {
+  const authService = inject(AuthService);     // 👈 inject() в функции!
+  const token = authService.getToken();
+
+  if (token) {
+    const authReq = req.clone({
+      headers: req.headers.set('Authorization', 'Bearer ' + token)
+    });
+    return next(authReq);
+  }
+  return next(req);
+};
+```
+
+---
+
+### 🚀 APP_INITIALIZER — инициализация перед стартом
+
+```typescript
+import { APP_INITIALIZER } from '@angular/core';
+
+// Выполняется ДО того как Angular покажет первый компонент
+function initializeApp(configService: ConfigService): () => Promise<void> {
+  return () => configService.loadConfig(); // Загружаем конфиг до старта
+}
+
+@NgModule({
+  providers: [
+    {
+      provide: APP_INITIALIZER,
+      useFactory: initializeApp,
+      deps: [ConfigService],
+      multi: true
+    }
+  ]
+})
+export class AppModule {}
+
+@Injectable({ providedIn: 'root' })
+export class ConfigService {
+  private config: AppConfig | null = null;
+
+  async loadConfig(): Promise<void> {
+    // Angular ждёт завершения этого промиса перед стартом!
+    const response = await fetch('/assets/config.json');
+    this.config = await response.json();
+  }
+
+  get<T>(key: keyof AppConfig): T {
+    return this.config?.[key] as T;
+  }
+}
+```
+
+---
+
+### Практика
+
+<Playground template="react" files={{ "/App.tsx": `import { useState } from 'react';
+
+// Визуализация иерархии инжекторов Angular
+// Root → Module → Component — каждый уровень может переопределить провайдер
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+
+// Симулируем разные "экземпляры" сервисов на разных уровнях
+const SERVICE_INSTANCES = {
+  root:      { id: 'ROOT-001',   color: '#1e3a5f',  textColor: '#60a5fa',  label: 'Root Injector',    icon: '🌍' },
+  module:    { id: 'MOD-002',    color: '#14532d',  textColor: '#22c55e',  label: 'Module Injector',  icon: '📦' },
+  component: { id: 'COMP-003',   color: '#581c87',  textColor: '#a78bfa',  label: 'Component Injector', icon: '🧩' },
+};
+
+const NODES = [
+  {
+    id: 'root-injector',
+    label: 'Root Injector',
+    sublabel: 'bootstrapApplication / AppModule',
+    icon: '🌍',
+    level: 'root',
+    providerLevel: 'root',
+    x: 0,
+    children: ['feature-module', 'core-component'],
+    description: 'providedIn: "root" — синглтон для ВСЕГО приложения',
+    code: '@Injectable({ providedIn: "root" })',
+    depth: 0,
+  },
+  {
+    id: 'feature-module',
+    label: 'FeatureModule',
+    sublabel: 'Lazy-loaded модуль',
+    icon: '📦',
+    level: 'module',
+    providerLevel: 'module',
+    children: ['feature-component'],
+    description: 'Свой инжектор для ленивого модуля',
+    code: '@Injectable({ providedIn: FeatureModule })',
+    depth: 1,
+  },
+  {
+    id: 'core-component',
+    label: 'AppComponent',
+    sublabel: 'Корневой компонент',
+    icon: '🏠',
+    level: 'root',
+    providerLevel: 'root',
+    children: ['child-a', 'child-b'],
+    description: 'Использует Root инжектор по умолчанию',
+    code: 'constructor(private svc: MyService) {}',
+    depth: 1,
+  },
+  {
+    id: 'feature-component',
+    label: 'FeatureComponent',
+    sublabel: 'providers: [LocalService]',
+    icon: '🧩',
+    level: 'component',
+    providerLevel: 'component',
+    children: [],
+    description: 'providers: [] в декораторе — изолированный экземпляр',
+    code: '@Component({ providers: [LocalService] })',
+    depth: 2,
+  },
+  {
+    id: 'child-a',
+    label: 'HeaderComponent',
+    sublabel: 'Использует Root сервис',
+    icon: '📋',
+    level: 'root',
+    providerLevel: 'root',
+    children: [],
+    description: 'Нет своего провайдера → берёт из Root Injector',
+    code: 'constructor(private auth: AuthService) {}',
+    depth: 2,
+  },
+  {
+    id: 'child-b',
+    label: 'DashboardComponent',
+    sublabel: 'Использует Root сервис',
+    icon: '📊',
+    level: 'root',
+    providerLevel: 'root',
+    children: [],
+    description: 'Тот же AuthService что и в HeaderComponent!',
+    code: 'constructor(private auth: AuthService) {}',
+    depth: 2,
+  },
+];
+
+const PROVIDER_TYPES = [
+  { key: 'useClass',    label: 'useClass',    icon: '🏭', desc: 'Подменяем реализацию класса. Идеально для тестирования и стратегий.',  color: '#1e3a5f', textColor: '#60a5fa', example: '{ provide: Logger, useClass: FileLogger }' },
+  { key: 'useValue',   label: 'useValue',    icon: '📌', desc: 'Константа: строка, число, объект конфига. Не создаёт экземпляр.',       color: '#14532d', textColor: '#22c55e', example: '{ provide: API_URL, useValue: "https://api.app.com" }' },
+  { key: 'useFactory', label: 'useFactory',  icon: '⚙️', desc: 'Фабричная функция — решаем что создать на основе runtime-данных.',     color: '#581c87', textColor: '#a78bfa', example: '{ provide: Analytics, useFactory: analyticsFactory, deps: [Config] }' },
+  { key: 'useExisting',label: 'useExisting', icon: '🔗', desc: 'Псевдоним: оба токена указывают на ОДИН существующий экземпляр.',       color: '#7c2d12', textColor: '#fb923c', example: '{ provide: UserContext, useExisting: AuthService }' },
+];
+
+export default function App() {
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [activeProviderType, setActiveProviderType] = useState('useClass');
+  const [tab, setTab] = useState('tree');
+
+  const selected = NODES.find(n => n.id === selectedNode);
+  const instance = selected ? SERVICE_INSTANCES[selected.providerLevel] : null;
+  const activeProvider = PROVIDER_TYPES.find(p => p.key === activeProviderType);
+
+  const levelColors = {
+    root:      { bg: '#1e3a5f30', border: '#1d4ed8', dot: '#60a5fa' },
+    module:    { bg: '#14532d30', border: '#16a34a', dot: '#22c55e' },
+    component: { bg: '#58287030', border: '#7c3aed', dot: '#a78bfa' },
+  };
+
+  const renderNode = (nodeId, indent) => {
+    const node = NODES.find(n => n.id === nodeId);
+    if (!node) return null;
+    const lc = levelColors[node.level];
+    const isSelected = selectedNode === nodeId;
+    return (
+      <div key={node.id} style={{ marginLeft: indent * 20 + 'px', marginBottom: '6px' }}>
+        <div
+          onClick={() => setSelectedNode(isSelected ? null : node.id)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            background: isSelected ? lc.bg : CARD,
+            border: '1px solid ' + (isSelected ? lc.border : BORDER),
+            borderRadius: '8px', padding: '8px 12px',
+            cursor: 'pointer', transition: 'all 0.15s',
+          }}
+        >
+          <span style={{ fontSize: '16px' }}>{node.icon}</span>
+          <div>
+            <div style={{ fontSize: '13px', fontWeight: isSelected ? 700 : 400, color: isSelected ? '#e2e8f0' : '#94a3b8' }}>{node.label}</div>
+            <div style={{ fontSize: '10px', color: '#475569' }}>{node.sublabel}</div>
+          </div>
+          <div style={{ marginLeft: 'auto', width: '8px', height: '8px', borderRadius: '50%', background: lc.dot }} />
+        </div>
+        {node.children.map(childId => renderNode(childId, indent + 1))}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui', color: '#e2e8f0' }}>
+      <div style={{ color: RED, fontWeight: 700, fontSize: '17px', marginBottom: '16px' }}>🏗️ Angular DI Visualizer</div>
+
+      {/* Вкладки */}
+      <div style={{ display: 'flex', gap: '4px', marginBottom: '16px' }}>
+        {[['tree', '🌲 Иерархия'], ['providers', '📦 Провайдеры'], ['inject', '⚡ inject()']].map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            style={{ background: tab === key ? RED : CARD, color: tab === key ? 'white' : '#94a3b8', border: '1px solid ' + (tab === key ? RED : BORDER), borderRadius: '6px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontWeight: tab === key ? 600 : 400 }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Вкладка: Иерархия инжекторов */}
+      {tab === 'tree' && (
+        <div style={{ display: 'grid', gridTemplateColumns: selected ? '1fr 1fr' : '1fr', gap: '12px' }}>
+          <div>
+            <div style={{ fontSize: '11px', color: '#475569', marginBottom: '10px' }}>Кликни на компонент чтобы увидеть что он получает из DI 👇</div>
+            <div style={{ display: 'flex', gap: '12px', marginBottom: '12px', flexWrap: 'wrap' }}>
+              {Object.entries(SERVICE_INSTANCES).map(([key, inst]) => (
+                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px' }}>
+                  <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: inst.textColor }} />
+                  <span style={{ color: '#64748b' }}>{inst.label}</span>
+                </div>
+              ))}
+            </div>
+            {renderNode('root-injector', 0)}
+          </div>
+          {selected && instance && (
+            <div>
+              <div style={{ background: CARD, border: '1px solid ' + BORDER, borderRadius: '8px', padding: '14px' }}>
+                <div style={{ color: '#475569', fontSize: '10px', fontWeight: 700, letterSpacing: '0.1em', marginBottom: '10px' }}>RESOLVED DEPENDENCY</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+                  <span style={{ fontSize: '24px' }}>{selected.icon}</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: '14px' }}>{selected.label}</div>
+                    <div style={{ fontSize: '11px', color: '#64748b' }}>{selected.sublabel}</div>
+                  </div>
+                </div>
+                <div style={{ background: instance.color + '40', border: '1px solid ' + instance.color + '80', borderRadius: '6px', padding: '10px', marginBottom: '10px' }}>
+                  <div style={{ color: instance.textColor, fontSize: '11px', fontWeight: 700, marginBottom: '4px' }}>{instance.icon} Получает из: {instance.label}</div>
+                  <div style={{ fontFamily: 'monospace', fontSize: '11px', color: '#94a3b8' }}>instance.id = "{instance.id}"</div>
+                </div>
+                <div style={{ background: BG, borderRadius: '6px', padding: '10px', fontFamily: 'monospace', fontSize: '11px', color: '#f1fa8c', marginBottom: '10px' }}>
+                  {selected.code}
+                </div>
+                <div style={{ fontSize: '12px', color: '#64748b' }}>{selected.description}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Вкладка: Типы провайдеров */}
+      {tab === 'providers' && (
+        <div>
+          <div style={{ display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' }}>
+            {PROVIDER_TYPES.map(pt => (
+              <button
+                key={pt.key}
+                onClick={() => setActiveProviderType(pt.key)}
+                style={{ background: activeProviderType === pt.key ? pt.color : CARD, color: activeProviderType === pt.key ? pt.textColor : '#94a3b8', border: '1px solid ' + (activeProviderType === pt.key ? pt.textColor + '60' : BORDER), borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}
+              >
+                {pt.icon} {pt.label}
+              </button>
+            ))}
+          </div>
+          {activeProvider && (
+            <div style={{ background: CARD, border: '1px solid ' + BORDER, borderRadius: '8px', padding: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+                <span style={{ fontSize: '28px' }}>{activeProvider.icon}</span>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: '16px', color: activeProvider.textColor }}>{activeProvider.label}</div>
+                  <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>{activeProvider.desc}</div>
+                </div>
+              </div>
+              <div style={{ background: BG, borderRadius: '6px', padding: '12px', fontFamily: 'monospace', fontSize: '12px', color: '#f1fa8c', border: '1px solid ' + BORDER }}>
+                {activeProvider.example}
+              </div>
+              <div style={{ marginTop: '12px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                {[
+                  { label: 'Новый экземпляр?', value: activeProvider.key === 'useExisting' ? 'Нет (алиас)' : activeProvider.key === 'useValue' ? 'Нет (константа)' : 'Да' },
+                  { label: 'Для тестов?', value: activeProvider.key === 'useClass' ? 'Отлично! ✅' : activeProvider.key === 'useValue' ? 'Иногда' : 'Редко' },
+                  { label: 'Requires deps?', value: activeProvider.key === 'useFactory' ? 'Да, через deps: []' : 'Нет' },
+                  { label: 'Популярность', value: activeProvider.key === 'useClass' ? '⭐⭐⭐⭐⭐' : activeProvider.key === 'useValue' ? '⭐⭐⭐⭐' : activeProvider.key === 'useFactory' ? '⭐⭐⭐' : '⭐⭐' },
+                ].map(item => (
+                  <div key={item.label} style={{ background: '#0f172a', borderRadius: '6px', padding: '8px 10px' }}>
+                    <div style={{ fontSize: '10px', color: '#475569', marginBottom: '2px' }}>{item.label}</div>
+                    <div style={{ fontSize: '12px', color: activeProvider.textColor }}>{item.value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Вкладка: inject() функция */}
+      {tab === 'inject' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ background: CARD, border: '1px solid ' + BORDER, borderRadius: '8px', padding: '14px' }}>
+            <div style={{ color: '#7dd3fc', fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em', marginBottom: '10px' }}>CONSTRUCTOR vs inject()</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <div>
+                <div style={{ fontSize: '11px', color: '#475569', marginBottom: '6px' }}>Старый стиль (constructor):</div>
+                <div style={{ background: BG, borderRadius: '6px', padding: '10px', fontFamily: 'monospace', fontSize: '11px', color: '#94a3b8', lineHeight: 1.6 }}>
+                  <span style={{ color: '#c792ea' }}>@Injectable</span>()<br/>
+                  <span style={{ color: '#c792ea' }}>export class</span> <span style={{ color: '#82aaff' }}>MyService</span> {'{'}<br/>
+                  {'  '}<span style={{ color: '#c792ea' }}>constructor</span>(<br/>
+                  {'    '}<span style={{ color: '#c792ea' }}>private</span> http: <span style={{ color: '#ffcb6b' }}>HttpClient</span>,<br/>
+                  {'    '}<span style={{ color: '#c792ea' }}>private</span> log: <span style={{ color: '#ffcb6b' }}>Logger</span><br/>
+                  {'  '}) {'{'}<br/>
+                  {'  }'}<br/>
+                  {'}'}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '11px', color: '#22c55e', marginBottom: '6px' }}>Новый стиль inject() ✨:</div>
+                <div style={{ background: BG, borderRadius: '6px', padding: '10px', fontFamily: 'monospace', fontSize: '11px', color: '#94a3b8', lineHeight: 1.6 }}>
+                  <span style={{ color: '#c792ea' }}>@Injectable</span>()<br/>
+                  <span style={{ color: '#c792ea' }}>export class</span> <span style={{ color: '#82aaff' }}>MyService</span> {'{'}<br/>
+                  {'  '}<span style={{ color: '#c792ea' }}>private</span> http =<br/>
+                  {'    '}<span style={{ color: '#ffcb6b' }}>inject</span>(<span style={{ color: '#ffcb6b' }}>HttpClient</span>);<br/>
+                  {'  '}<span style={{ color: '#c792ea' }}>private</span> log =<br/>
+                  {'    '}<span style={{ color: '#ffcb6b' }}>inject</span>(<span style={{ color: '#ffcb6b' }}>Logger</span>);<br/>
+                  {'}'}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style={{ background: CARD, border: '1px solid ' + BORDER, borderRadius: '8px', padding: '14px' }}>
+            <div style={{ color: '#7dd3fc', fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em', marginBottom: '10px' }}>inject() В ФУНКЦИЯХ (Angular 15+)</div>
+            <div style={{ background: BG, borderRadius: '6px', padding: '12px', fontFamily: 'monospace', fontSize: '11px', color: '#94a3b8', lineHeight: 1.7 }}>
+              <div style={{ color: '#546e7a', marginBottom: '6px' }}>// Route Guard без класса!</div>
+              <div><span style={{ color: '#c792ea' }}>export const</span> authGuard = () {'=> {'}</div>
+              <div>{'  '}<span style={{ color: '#c792ea' }}>const</span> auth = <span style={{ color: '#ffcb6b' }}>inject</span>(<span style={{ color: '#ffcb6b' }}>AuthService</span>);</div>
+              <div>{'  '}<span style={{ color: '#c792ea' }}>const</span> router = <span style={{ color: '#ffcb6b' }}>inject</span>(<span style={{ color: '#ffcb6b' }}>Router</span>);</div>
+              <div>{'  '}<span style={{ color: '#c792ea' }}>return</span> auth.isAuthenticated</div>
+              <div>{'    ? '}<span style={{ color: '#c3e88d' }}>true</span></div>
+              <div>{'    : '} router.createUrlTree([<span style={{ color: '#c3e88d' }}>'/login'</span>]);</div>
+              <div>{'};'}</div>
+            </div>
+            <div style={{ marginTop: '10px', background: '#14532d30', border: '1px solid #16a34a50', borderRadius: '6px', padding: '10px', fontSize: '12px', color: '#86efac' }}>
+              ✅ Преимущества inject(): меньше кода, работает в функциях, лучше для tree-shaking, нет проблем с this в стрелочных функциях
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

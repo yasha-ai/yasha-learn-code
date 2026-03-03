@@ -1,0 +1,407 @@
+## 🛠️ Кастомные валидаторы в Angular
+
+Встроенных валидаторов часто недостаточно. Кастомные валидаторы позволяют добавить **любую бизнес-логику** — проверку уникальности на сервере, сравнение полей, проверку сложности пароля.
+
+---
+
+### 🎯 Синхронный валидатор (ValidatorFn)
+
+`ValidatorFn` — это просто функция:
+
+```typescript
+import { AbstractControl, ValidationErrors, ValidatorFn } from '@angular/forms';
+
+// Сигнатура ValidatorFn
+type ValidatorFn = (control: AbstractControl) => ValidationErrors | null;
+```
+
+Пример — запрещаем слово "admin" в имени:
+
+```typescript
+export function noAdminValidator(): ValidatorFn {
+  return (control: AbstractControl): ValidationErrors | null => {
+    const value = control.value as string;
+    if (value?.toLowerCase().includes('admin')) {
+      return { noAdmin: { forbiddenValue: value } };
+    }
+    return null;
+  };
+}
+```
+
+Использование в форме:
+
+```typescript
+this.form = this.fb.group({
+  username: ['', [Validators.required, noAdminValidator()]]
+});
+```
+
+```html
+<div *ngIf="form.get('username')?.errors?.['noAdmin']">
+  Имя не может содержать слово "admin"
+</div>
+```
+
+---
+
+### 🔒 Валидатор сложности пароля
+
+```typescript
+export interface PasswordStrength {
+  hasUpperCase: boolean;
+  hasLowerCase: boolean;
+  hasNumber: boolean;
+  hasSpecial: boolean;
+  hasMinLength: boolean;
+}
+
+export function passwordStrengthValidator(minLength = 8): ValidatorFn {
+  return (control: AbstractControl): ValidationErrors | null => {
+    const value: string = control.value || '';
+
+    const strength: PasswordStrength = {
+      hasMinLength: value.length >= minLength,
+      hasUpperCase: /[A-Z]/.test(value),
+      hasLowerCase: /[a-z]/.test(value),
+      hasNumber: /\d/.test(value),
+      hasSpecial: /[!@#$%^&*(),.?":{}|<>]/.test(value),
+    };
+
+    const failedRules = Object.entries(strength)
+      .filter(([, passed]) => !passed)
+      .map(([rule]) => rule);
+
+    if (failedRules.length === 0) return null;
+
+    return { passwordStrength: { ...strength, failedRules } };
+  };
+}
+```
+
+```typescript
+this.form = this.fb.group({
+  password: ['', [Validators.required, passwordStrengthValidator(8)]]
+});
+```
+
+---
+
+### ⏱️ Асинхронный валидатор (AsyncValidatorFn)
+
+`AsyncValidatorFn` возвращает `Observable` или `Promise`:
+
+```typescript
+import { AsyncValidatorFn, AbstractControl, ValidationErrors } from '@angular/forms';
+import { Observable, of } from 'rxjs';
+import { debounceTime, switchMap, map, catchError } from 'rxjs/operators';
+
+export function uniqueEmailValidator(userService: UserService): AsyncValidatorFn {
+  return (control: AbstractControl): Observable<ValidationErrors | null> => {
+    if (!control.value) return of(null);
+
+    return of(control.value).pipe(
+      debounceTime(300),      // ждём паузу в наборе
+      switchMap(email =>
+        userService.checkEmailExists(email).pipe(
+          map(exists => exists ? { emailTaken: true } : null),
+          catchError(() => of(null))  // на ошибке сети — пропускаем
+        )
+      )
+    );
+  };
+}
+```
+
+Подключение — третий аргумент `FormControl`:
+
+```typescript
+this.form = this.fb.group({
+  email: [
+    '',
+    [Validators.required, Validators.email],  // sync validators
+    [uniqueEmailValidator(this.userService)]   // async validators
+  ]
+});
+```
+
+```html
+<div *ngIf="form.get('email')?.pending">
+  🔄 Проверяем доступность...
+</div>
+<div *ngIf="form.get('email')?.errors?.['emailTaken']">
+  ⚠️ Этот email уже занят
+</div>
+```
+
+---
+
+### 🏗️ Класс-валидатор (injectable)
+
+Для инъекции сервисов — оборачиваем в injectable класс:
+
+```typescript
+import { Injectable } from '@angular/core';
+import { AsyncValidator, AbstractControl, ValidationErrors } from '@angular/forms';
+import { Observable, of } from 'rxjs';
+import { switchMap, map, catchError } from 'rxjs/operators';
+
+@Injectable({ providedIn: 'root' })
+export class UniqueUsernameValidator implements AsyncValidator {
+  constructor(private userService: UserService) {}
+
+  validate(control: AbstractControl): Observable<ValidationErrors | null> {
+    return this.userService.checkUsernameAvailable(control.value).pipe(
+      map(available => available ? null : { usernameTaken: true }),
+      catchError(() => of(null))
+    );
+  }
+}
+```
+
+Использование:
+
+```typescript
+constructor(
+  private fb: FormBuilder,
+  private usernameValidator: UniqueUsernameValidator
+) {
+  this.form = this.fb.group({
+    username: [
+      '',
+      [Validators.required, Validators.minLength(3)],
+      [this.usernameValidator]
+    ]
+  });
+}
+```
+
+---
+
+### 🔗 Кросс-полевой валидатор (matching passwords)
+
+Валидатор уровня FormGroup для сравнения двух полей:
+
+```typescript
+export function matchFieldsValidator(field1: string, field2: string): ValidatorFn {
+  return (group: AbstractControl): ValidationErrors | null => {
+    const value1 = group.get(field1)?.value;
+    const value2 = group.get(field2)?.value;
+
+    if (value1 !== value2) {
+      // Устанавливаем ошибку на второе поле
+      group.get(field2)?.setErrors({ fieldMismatch: { field: field1 } });
+      return { fieldMismatch: { fields: [field1, field2] } };
+    }
+
+    // Убираем ошибку если совпадают
+    const existingErrors = group.get(field2)?.errors;
+    if (existingErrors) {
+      const { fieldMismatch, ...rest } = existingErrors;
+      group.get(field2)?.setErrors(Object.keys(rest).length ? rest : null);
+    }
+
+    return null;
+  };
+}
+```
+
+```typescript
+this.form = this.fb.group({
+  password: ['', [Validators.required, passwordStrengthValidator()]],
+  confirmPassword: ['', Validators.required],
+}, {
+  validators: matchFieldsValidator('password', 'confirmPassword')
+});
+```
+
+---
+
+### 🎨 Композиция валидаторов
+
+Объединяем несколько ValidatorFn в один:
+
+```typescript
+import { Validators } from '@angular/forms';
+
+// Compose — все применяются, ошибки объединяются
+const usernameValidators = Validators.compose([
+  Validators.required,
+  Validators.minLength(3),
+  Validators.maxLength(20),
+  noAdminValidator(),
+  /^[a-z0-9_]+$/.test('') ? null : Validators.pattern(/^[a-z0-9_]+$/)
+]);
+
+// ComposeAsync — аналог для асинхронных
+const emailAsyncValidators = Validators.composeAsync([
+  uniqueEmailValidator(this.userService)
+]);
+```
+
+---
+
+### ⚙️ Динамическое управление валидаторами
+
+```typescript
+// Условная валидация — добавляем по условию
+togglePhoneRequired(isRequired: boolean) {
+  const phone = this.form.get('phone')!;
+  if (isRequired) {
+    phone.setValidators([Validators.required, Validators.pattern(/^\+7/)]);
+  } else {
+    phone.clearValidators();
+  }
+  phone.updateValueAndValidity();
+}
+
+// Слушаем изменения и обновляем валидацию
+ngOnInit() {
+  this.form.get('deliveryType')!.valueChanges.subscribe(type => {
+    this.togglePhoneRequired(type === 'courier');
+  });
+}
+```
+
+---
+
+```mdx-playground
+export default function CustomValidatorsPlayground() {
+  const [password, setPassword] = React.useState('');
+  const [confirm, setConfirm] = React.useState('');
+  const [pwTouched, setPwTouched] = React.useState(false);
+  const [cfTouched, setCfTouched] = React.useState(false);
+
+  const rules = [
+    { key: 'hasMinLength', label: 'Минимум 8 символов', check: v => v.length >= 8 },
+    { key: 'hasUpperCase', label: 'Хотя бы 1 заглавная (A-Z)', check: v => /[A-Z]/.test(v) },
+    { key: 'hasLowerCase', label: 'Хотя бы 1 строчная (a-z)', check: v => /[a-z]/.test(v) },
+    { key: 'hasNumber', label: 'Хотя бы 1 цифра (0-9)', check: v => /\d/.test(v) },
+    { key: 'hasSpecial', label: 'Хотя бы 1 спецсимвол (!@#$...)', check: v => /[!@#$%^&*(),.?":{}|<>]/.test(v) },
+  ];
+
+  const results = rules.map(r => ({ ...r, passed: r.check(password) }));
+  const passedCount = results.filter(r => r.passed).length;
+  const strength = passedCount <= 1 ? 'Слабый' : passedCount <= 3 ? 'Средний' : passedCount === 4 ? 'Хороший' : 'Сильный';
+  const strengthColor = passedCount <= 1 ? '#ef4444' : passedCount <= 3 ? '#f59e0b' : passedCount === 4 ? '#22c55e' : '#dd0031';
+
+  const passwordValid = passedCount === 5;
+  const mismatch = confirm && password !== confirm;
+  const confirmValid = confirm && !mismatch;
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: 480, padding: 24, borderRadius: 12, fontFamily: 'system-ui', color: '#e2e8f0' }}>
+      <div style={{ color: '#dd0031', fontWeight: 700, fontSize: 16, marginBottom: 20 }}>
+        🔒 passwordStrengthValidator — кастомный валидатор
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+        <div>
+          <div>
+            <label style={{ fontSize: 12, color: '#94a3b8', display: 'block', marginBottom: 6 }}>
+              Пароль
+              {pwTouched && (
+                <span style={{ marginLeft: 8, color: passwordValid ? '#22c55e' : '#f87171', fontSize: 11 }}>
+                  {passwordValid ? '✓ ValidatorFn = null' : '✗ errors.passwordStrength'}
+                </span>
+              )}
+            </label>
+            <input
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              onFocus={() => setPwTouched(true)}
+              placeholder="Введите пароль..."
+              style={{
+                width: '100%', background: '#0f172a', padding: '10px 14px', borderRadius: 8, fontSize: 14,
+                color: '#e2e8f0', outline: 'none', boxSizing: 'border-box',
+                border: `2px solid ${!pwTouched ? '#334155' : passwordValid ? '#22c55e' : '#dd0031'}`
+              }}
+            />
+          </div>
+
+          {password && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>Сложность пароля</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: strengthColor }}>{strength}</span>
+              </div>
+              <div style={{ display: 'flex', gap: 4, marginBottom: 14 }}>
+                {[1,2,3,4,5].map(i => (
+                  <div key={i} style={{
+                    flex: 1, height: 6, borderRadius: 3,
+                    background: passedCount >= i ? strengthColor : '#334155',
+                    transition: 'background 0.3s'
+                  }} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: 16 }}>
+            <label style={{ fontSize: 12, color: '#94a3b8', display: 'block', marginBottom: 6 }}>
+              Подтверждение пароля
+              {cfTouched && (
+                <span style={{ marginLeft: 8, color: confirmValid ? '#22c55e' : '#f87171', fontSize: 11 }}>
+                  {confirmValid ? '✓ null' : mismatch ? '✗ fieldMismatch' : '✗ required'}
+                </span>
+              )}
+            </label>
+            <input
+              type="password"
+              value={confirm}
+              onChange={e => setConfirm(e.target.value)}
+              onFocus={() => setCfTouched(true)}
+              placeholder="Повторите пароль..."
+              style={{
+                width: '100%', background: '#0f172a', padding: '10px 14px', borderRadius: 8, fontSize: 14,
+                color: '#e2e8f0', outline: 'none', boxSizing: 'border-box',
+                border: `2px solid ${!cfTouched ? '#334155' : confirmValid ? '#22c55e' : '#dd0031'}`
+              }}
+            />
+            {cfTouched && mismatch && (
+              <div style={{ color: '#f87171', fontSize: 12, marginTop: 6 }}>⚠️ Пароли не совпадают (cross-field validator)</div>
+            )}
+          </div>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155' }}>
+          <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 12 }}>
+            📋 errors.passwordStrength:
+          </div>
+          {rules.map(r => {
+            const passed = r.check(password);
+            return (
+              <div key={r.key} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                <div style={{
+                  width: 20, height: 20, borderRadius: '50%', display: 'flex', alignItems: 'center',
+                  justifyContent: 'center', fontSize: 12, flexShrink: 0,
+                  background: passed ? '#15803d40' : '#7f1d1d40',
+                  color: passed ? '#22c55e' : '#f87171',
+                  border: `1px solid ${passed ? '#22c55e' : '#f87171'}`,
+                  transition: 'all 0.3s'
+                }}>
+                  {passed ? '✓' : '✗'}
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, color: passed ? '#22c55e' : '#94a3b8' }}>{r.label}</div>
+                  <div style={{ fontSize: 10, color: '#475569', fontFamily: 'monospace' }}>
+                    {r.key}: {String(passed)}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          <div style={{ borderTop: '1px solid #334155', marginTop: 12, paddingTop: 12 }}>
+            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>Возвращаемое значение:</div>
+            <pre style={{ fontSize: 10, color: passwordValid ? '#22c55e' : '#f87171', background: '#0f172a', padding: 8, borderRadius: 6, margin: 0 }}>
+              {passwordValid ? 'null' : JSON.stringify({ passwordStrength: { failedRules: results.filter(r => !r.passed).map(r => r.key) }}, null, 2)}
+            </pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```

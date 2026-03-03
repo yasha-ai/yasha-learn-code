@@ -1,0 +1,519 @@
+## 16. Тестирование RxJS 🧪
+
+Привет! Яша на связи. Тестирование асинхронного кода — сложная задача. RxJS предоставляет инструменты, которые делают тестирование потоков **предсказуемым и быстрым**: `TestScheduler` и мраморное тестирование.
+
+### Почему тестировать RxJS сложно?
+
+```typescript
+// Обычный тест с реальным временем — медленно и ненадёжно
+it('debounce работает', (done) => {
+  const result: number[] = [];
+  source$.pipe(debounceTime(300)).subscribe(v => result.push(v));
+  
+  // Придётся ждать реальные 300+мс в каждом тесте
+  setTimeout(() => {
+    expect(result).toEqual([42]);
+    done();
+  }, 400); // 😱 медленно
+});
+
+// С TestScheduler — мгновенно!
+testScheduler.run(({ cold, expectObservable }) => {
+  const source$ = cold('--a--|');
+  const result$ = source$.pipe(delay(30));
+  expectObservable(result$).toBe('-----a--|'); // проверяется немедленно ✅
+});
+```
+
+---
+
+### Синтаксис мраморных диаграмм
+
+В TestScheduler каждый символ в строке представляет **10 виртуальных миллисекунд**:
+
+```
+Символ  Значение
+─────────────────────────────────────────────
+-       10мс паузы (один фрейм времени)
+a-z     Значение (a = {a: 'a'}, или задаётся через values)
+|       Успешное завершение потока
+#       Ошибка (завершение с ошибкой)
+^       Момент подписки (в hot observable)
+!       Момент отписки
+( )     Синхронная группа — всё в одном фрейме
+```
+
+```typescript
+// Примеры мраморных строк
+'--a--b--c|'      // a через 20мс, b через 50мс, c через 80мс, complete 90мс
+'--a--b--#'       // a, b, затем ошибка
+'(abc|)'          // a, b, c, complete — все синхронно в одном фрейме
+'--^--a--b--|'    // подписка на 20мс, a на 50мс, complete на 110мс (для hot)
+'^--a--!         // подписка, a, отписка на 70мс
+```
+
+---
+
+### TestScheduler
+
+```typescript
+import { TestScheduler } from 'rxjs/testing';
+
+// Настройка TestScheduler
+const testScheduler = new TestScheduler((actual, expected) => {
+  // Можно использовать любую библиотеку сравнения
+  expect(actual).toEqual(expected); // Jest/Jasmine
+});
+
+// Базовый синтаксис
+testScheduler.run(({ cold, hot, expectObservable, expectSubscriptions }) => {
+  // cold — холодный Observable (производит данные для каждого подписчика)
+  // hot — горячий Observable (данные идут независимо от подписки)
+  // expectObservable — проверяем что Observable испускает
+  // expectSubscriptions — проверяем когда были подписки/отписки
+});
+```
+
+---
+
+### Тест cold Observable
+
+```typescript
+import { TestScheduler } from 'rxjs/testing';
+import { map, filter } from 'rxjs/operators';
+
+describe('Операторы RxJS', () => {
+  let scheduler: TestScheduler;
+
+  beforeEach(() => {
+    scheduler = new TestScheduler((actual, expected) => {
+      expect(actual).toEqual(expected);
+    });
+  });
+
+  it('map умножает на 2', () => {
+    scheduler.run(({ cold, expectObservable }) => {
+      const source$ = cold('--a--b--c|', { a: 1, b: 2, c: 3 });
+      const result$ = source$.pipe(map(x => x * 2));
+      
+      expectObservable(result$).toBe('--a--b--c|', { a: 2, b: 4, c: 6 });
+    });
+  });
+
+  it('filter оставляет чётные', () => {
+    scheduler.run(({ cold, expectObservable }) => {
+      const source$ = cold('a-b-c-d|', { a: 1, b: 2, c: 3, d: 4 });
+      const result$ = source$.pipe(filter(x => x % 2 === 0));
+      
+      expectObservable(result$).toBe('-b---d|', { b: 2, d: 4 }); // нечётные отфильтрованы
+    });
+  });
+});
+```
+
+---
+
+### Тест с задержкой времени
+
+```typescript
+it('debounceTime работает за 300мс', () => {
+  scheduler.run(({ cold, expectObservable }) => {
+    // Быстрые нажатия клавиш
+    const keystrokes$ = cold('-a-b-cde----|', { a: 'r', b: 're', c: 'rea', d: 'reac', e: 'react' });
+    
+    const result$ = keystrokes$.pipe(
+      debounceTime(300)  // 300мс = 30 фреймов по 10мс каждый
+    );
+    
+    // Только 'react' проходит (остальные "задавлены")
+    //                          ↓ через 30 фреймов после 'e'
+    expectObservable(result$).toBe('----------e----|', { e: 'react' });
+  });
+});
+```
+
+---
+
+### Тест hot Observable
+
+```typescript
+it('takeUntil останавливает по сигналу', () => {
+  scheduler.run(({ cold, hot, expectObservable, expectSubscriptions }) => {
+    const source$ = hot('--a--b--c--d--|'); // горячий — данные без подписки
+    const notifier$ = hot('------n----|');   // сигнал остановки
+
+    const result$ = source$.pipe(takeUntil(notifier$));
+    
+    // После 'n' (60мс) — поток останавливается
+    expectObservable(result$).toBe('--a--b|');
+    
+    // Проверяем когда была подписка
+    expectSubscriptions(source$.subscriptions).toBe('^-----!');
+  });
+});
+```
+
+---
+
+### Тест обработки ошибок
+
+```typescript
+it('catchError восстанавливает поток', () => {
+  scheduler.run(({ cold, expectObservable }) => {
+    const source$ = cold('--a--#', { a: 1 }, new Error('упс'));
+    
+    const result$ = source$.pipe(
+      catchError(() => cold('--b--|', { b: 42 })) // резервный Observable
+    );
+    
+    // Ошибка на 50мс, затем резервный Observable
+    expectObservable(result$).toBe('--a----b--|', { a: 1, b: 42 });
+  });
+});
+```
+
+---
+
+### Тест switchMap с отменой
+
+```typescript
+it('switchMap отменяет предыдущий Observable', () => {
+  scheduler.run(({ cold, hot, expectObservable, expectSubscriptions }) => {
+    const inner = cold('---x|', { x: 'response' });
+    
+    const outer$ = hot('a--b--|');
+    const result$ = outer$.pipe(switchMap(() => inner));
+    
+    expectObservable(result$).toBe('---x--x|');
+    //                                ↑      ↑
+    //                        inner(a)  inner(b) — inner(a) отменён на 30мс
+    
+    // Проверяем подписки на inner
+    expectSubscriptions(inner.subscriptions).toBe([
+      '^--!',      // подписка для 'a' — отменена когда пришло 'b'
+      '---^---!',  // подписка для 'b' — завершена нормально
+    ]);
+  });
+});
+```
+
+---
+
+### Полный тест кастомного оператора
+
+```typescript
+import { pipe } from 'rxjs';
+import { filter } from 'rxjs/operators';
+import { OperatorFunction } from 'rxjs';
+
+function filterNil<T>(): OperatorFunction<T | null | undefined, T> {
+  return filter((v): v is T => v != null);
+}
+
+describe('filterNil', () => {
+  let scheduler: TestScheduler;
+  
+  beforeEach(() => {
+    scheduler = new TestScheduler((a, e) => expect(a).toEqual(e));
+  });
+  
+  it('убирает null и undefined', () => {
+    scheduler.run(({ cold, expectObservable }) => {
+      const values = { a: 1, b: null as null, c: 3, d: undefined as undefined, e: 5 };
+      const source$ = cold('a-b-c-d-e|', values);
+      
+      const result$ = source$.pipe(filterNil<number>());
+      
+      // null и undefined пропускаются, позиции в диаграмме остаются
+      expectObservable(result$).toBe('a---c---e|', { a: 1, c: 3, e: 5 });
+    });
+  });
+});
+```
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+import { of, interval, Subject, EMPTY } from 'rxjs';
+import { map, filter, take, delay, debounceTime, switchMap } from 'rxjs/operators';
+
+// ─── Визуализатор мраморных диаграмм ─────────────────────────────────────────
+
+interface MarbleEvent {
+  time: number;   // 0–100 (%)
+  value: string;
+  type: 'next' | 'complete' | 'error';
+  color: string;
+}
+
+interface MarbleLine {
+  label: string;
+  events: MarbleEvent[];
+  color: string;
+}
+
+// Цвета для значений
+const VALUE_COLORS = ['#818cf8', '#f472b6', '#4ade80', '#fbbf24', '#60a5fa', '#fb923c'];
+
+// Парсим мраморную строку в события
+function parseMarble(marble: string, values?: Record<string, string>): MarbleEvent[] {
+  const events: MarbleEvent[] = [];
+  let time = 0;
+  let colorIdx = 0;
+
+  for (let i = 0; i < marble.length; i++) {
+    const ch = marble[i];
+    if (ch === '-') {
+      time += 10;
+    } else if (ch === '|') {
+      events.push({ time, value: '|', type: 'complete', color: '#94a3b8' });
+    } else if (ch === '#') {
+      events.push({ time, value: '✕', type: 'error', color: '#f87171' });
+    } else if (ch === '(') {
+      // Группа — все синхронно
+      while (marble[++i] !== ')') {
+        const v = marble[i];
+        if (v && v !== ')') {
+          const label = values?.[v] ?? v;
+          events.push({ time, value: label, type: 'next', color: VALUE_COLORS[colorIdx++ % VALUE_COLORS.length] });
+        }
+      }
+      time += 10;
+    } else if (ch.match(/[a-z0-9]/i)) {
+      events.push({
+        time,
+        value: values?.[ch] ?? ch,
+        type: 'next',
+        color: VALUE_COLORS[colorIdx++ % VALUE_COLORS.length],
+      });
+      time += 10;
+    }
+  }
+  return events;
+}
+
+// ─── Примеры диаграмм ────────────────────────────────────────────────────────
+
+interface Example {
+  name: string;
+  description: string;
+  lines: { label: string; marble: string; values?: Record<string, string> }[];
+}
+
+const EXAMPLES: Example[] = [
+  {
+    name: 'map',
+    description: 'Трансформирует каждое значение',
+    lines: [
+      { label: 'источник', marble: '--a--b--c|', values: { a: '1', b: '2', c: '3' } },
+      { label: 'map(×2)',  marble: '--a--b--c|', values: { a: '2', b: '4', c: '6' } },
+    ],
+  },
+  {
+    name: 'filter',
+    description: 'Пропускает только чётные числа',
+    lines: [
+      { label: 'источник',    marble: 'a-b-c-d|', values: { a: '1', b: '2', c: '3', d: '4' } },
+      { label: 'filter(чёт)', marble: '-b---d|',  values: { b: '2', d: '4' } },
+    ],
+  },
+  {
+    name: 'debounceTime',
+    description: 'Подавляет частые события (300мс)',
+    lines: [
+      { label: 'ввод',         marble: '-a-b-cde----|', values: { a: 'r', b: 're', c: 'rea', d: 'reac', e: 'react' } },
+      { label: 'debounce(3ф)', marble: '----------e----|', values: { e: 'react' } },
+    ],
+  },
+  {
+    name: 'switchMap',
+    description: 'Отменяет предыдущий inner Observable',
+    lines: [
+      { label: 'внешний',    marble: 'a--b--|' },
+      { label: 'inner(a)',   marble: '---x|',    values: { x: 'A' } },
+      { label: 'inner(b)',   marble: '---x|',    values: { x: 'B' } },
+      { label: 'результат',  marble: '---A--B|' },
+    ],
+  },
+  {
+    name: 'catchError',
+    description: 'Перехватывает ошибку и переключается на fallback',
+    lines: [
+      { label: 'источник',  marble: '--a--#', values: { a: '✓' } },
+      { label: 'fallback',  marble: '--b--|', values: { b: '42' } },
+      { label: 'результат', marble: '--a----b--|', values: { a: '✓', b: '42' } },
+    ],
+  },
+];
+
+// ─── Компонент диаграммы ─────────────────────────────────────────────────────
+
+function MarbleDiagram({ example }: { example: Example }) {
+  const maxTime = 110; // нормализуем к 110 условным единицам
+
+  return (
+    <div style={{ background: '#1e293b', borderRadius: '10px', padding: '16px' }}>
+      <div style={{ marginBottom: '12px' }}>
+        <span style={{ color: '#818cf8', fontWeight: 'bold', fontSize: '15px' }}>
+          {example.name}
+        </span>
+        <span style={{ color: '#64748b', fontSize: '12px', marginLeft: '10px' }}>
+          — {example.description}
+        </span>
+      </div>
+
+      {example.lines.map((line, li) => {
+        const events = parseMarble(line.marble, line.values);
+        const isResult = li === example.lines.length - 1;
+
+        return (
+          <div key={li} style={{
+            display: 'flex', alignItems: 'center', gap: '12px',
+            marginBottom: '10px',
+            paddingTop: isResult ? '8px' : 0,
+            borderTop: isResult ? '1px solid #334155' : 'none',
+          }}>
+            {/* Метка */}
+            <div style={{
+              width: '80px', fontSize: '11px', color: isResult ? '#e2e8f0' : '#64748b',
+              textAlign: 'right', flexShrink: 0,
+            }}>
+              {line.label}
+            </div>
+
+            {/* Временная ось */}
+            <div style={{ flex: 1, position: 'relative', height: '28px' }}>
+              {/* Линия */}
+              <div style={{
+                position: 'absolute', top: '50%', left: 0, right: 0,
+                height: '2px', background: '#334155', transform: 'translateY(-50%)',
+              }} />
+              
+              {/* Стрелка */}
+              <div style={{
+                position: 'absolute', right: -6, top: '50%', transform: 'translateY(-50%)',
+                width: 0, height: 0,
+                borderTop: '5px solid transparent',
+                borderBottom: '5px solid transparent',
+                borderLeft: '8px solid #334155',
+              }} />
+
+              {/* События */}
+              {events.map((e, ei) => {
+                const left = \`\${(e.time / maxTime) * 100}%\`;
+                return (
+                  <div
+                    key={ei}
+                    style={{
+                      position: 'absolute', left,
+                      top: '50%', transform: 'translate(-50%, -50%)',
+                      display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    }}
+                  >
+                    {e.type === 'complete' ? (
+                      <div style={{
+                        width: '3px', height: '20px', background: '#94a3b8',
+                        marginTop: '-3px',
+                      }} />
+                    ) : e.type === 'error' ? (
+                      <div style={{
+                        width: '18px', height: '18px', borderRadius: '3px',
+                        background: '#f87171', color: 'white',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: '11px', fontWeight: 'bold',
+                      }}>✕</div>
+                    ) : (
+                      <div style={{
+                        minWidth: '22px', height: '22px', borderRadius: '50%',
+                        background: e.color, color: '#0f172a',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: '10px', fontWeight: 'bold', padding: '0 3px',
+                        boxShadow: \`0 0 8px \${e.color}66\`,
+                      }}>{e.value}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Главный компонент ───────────────────────────────────────────────────────
+
+export default function App() {
+  const [selected, setSelected] = useState(0);
+
+  return (
+    <div style={{
+      background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace',
+      minHeight: '100vh', padding: '24px',
+    }}>
+      <h2 style={{ color: '#818cf8', margin: '0 0 6px' }}>
+        🧪 Мраморные диаграммы RxJS
+      </h2>
+      <p style={{ color: '#94a3b8', margin: '0 0 20px', fontSize: '12px' }}>
+        Визуализация операторов: каждый круг = значение, | = complete, ✕ = error.
+      </p>
+
+      {/* Выбор оператора */}
+      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '20px' }}>
+        {EXAMPLES.map((ex, i) => (
+          <button
+            key={i}
+            onClick={() => setSelected(i)}
+            style={{
+              padding: '7px 14px', borderRadius: '8px', border: 'none',
+              cursor: 'pointer', fontSize: '12px', fontWeight: 'bold',
+              background: selected === i ? '#6366f1' : '#1e293b',
+              color: selected === i ? 'white' : '#64748b',
+            }}
+          >
+            {ex.name}
+          </button>
+        ))}
+      </div>
+
+      {/* Диаграмма */}
+      <MarbleDiagram example={EXAMPLES[selected]} />
+
+      {/* Мраморная строка */}
+      <div style={{
+        marginTop: '14px', background: '#1e293b', borderRadius: '10px',
+        padding: '14px', fontSize: '11px',
+      }}>
+        <div style={{ color: '#94a3b8', marginBottom: '8px', fontWeight: 'bold' }}>
+          Мраморные строки:
+        </div>
+        {EXAMPLES[selected].lines.map((line, i) => (
+          <div key={i} style={{ marginBottom: '4px' }}>
+            <span style={{ color: '#64748b', marginRight: '8px' }}>{line.label}:</span>
+            <code style={{ color: '#a78bfa' }}>&apos;{line.marble}&apos;</code>
+            {line.values && (
+              <span style={{ color: '#475569', marginLeft: '8px' }}>
+                {JSON.stringify(line.values)}
+              </span>
+            )}
+          </div>
+        ))}
+        <div style={{ marginTop: '12px', color: '#475569', lineHeight: 1.6 }}>
+          <strong style={{ color: '#64748b' }}>Синтаксис:</strong>
+          {' '}- = 10мс • a-z = значение • | = complete • # = error • () = синхронно
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

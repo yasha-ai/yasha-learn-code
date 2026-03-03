@@ -1,0 +1,508 @@
+## ⏱️ Управление временем: debounce, throttle и друзья
+
+Яша, время — деньги! ⏰ Сегодня учимся контролировать, как часто наш код реагирует на события. Это один из самых практичных уроков — ты будешь использовать эти операторы каждый день!
+
+---
+
+### 🧠 Зачем ограничивать частоту?
+
+Представь: пользователь печатает в поисковой строке. Каждое нажатие клавиши — событие. Если на каждое нажатие отправлять запрос на сервер... 😱
+
+- Слово "javascript" = 10 запросов
+- 1000 пользователей = 10 000 запросов на одно слово
+
+Нам нужно **умно фильтровать** события по времени!
+
+---
+
+### 🛗 debounceTime — лифт с удерживаемой дверью
+
+`debounceTime` — это как кнопка закрытия двери лифта: нажал ещё раз — таймер сбрасывается. Лифт поедет только когда **перестанешь** нажимать (и пройдёт указанное время).
+
+**Мраморная диаграмма (debounceTime(300)):**
+```
+События:   --a-b-c--------d-e--|
+           300мс ↕ 300мс ↕
+debounce:  -----------c------e-|
+```
+
+```typescript
+import { fromEvent } from 'rxjs';
+import { debounceTime, map } from 'rxjs/operators';
+
+const searchInput = document.getElementById('search') as HTMLInputElement;
+
+// Без debounce: запрос на КАЖДОЕ нажатие
+fromEvent(searchInput, 'input').subscribe(() => {
+  // 🔴 "j" → запрос
+  // 🔴 "ja" → запрос
+  // 🔴 "jav" → запрос
+  // ... 10 запросов для слова "javascript"
+});
+
+// С debounceTime(300): запрос только после паузы 300мс
+fromEvent(searchInput, 'input').pipe(
+  debounceTime(300),
+  map(e => (e.target as HTMLInputElement).value),
+).subscribe(query => {
+  // ✅ Только один запрос после паузы в печатании!
+  fetch(`/api/search?q=${query}`);
+});
+```
+
+> 💡 **Правило большого пальца:** `debounceTime(300)` для поиска, `debounceTime(500)` для менее срочных операций.
+
+---
+
+### 💓 throttleTime — сердцебиение
+
+`throttleTime` — это кардиостимулятор: пульс не чаще одного раза в X миллисекунд. Первое событие проходит сразу, остальные в течение интервала — отбрасываются.
+
+**Мраморная диаграмма (throttleTime(500)):**
+```
+События:   --a-b-c-d-e----f-g-h-->
+           |--- 500мс ---|--- 500мс ---
+throttle:  --a-----------f--------->
+```
+
+```typescript
+import { fromEvent } from 'rxjs';
+import { throttleTime, map } from 'rxjs/operators';
+
+// Отслеживание позиции мыши
+fromEvent(document, 'mousemove').pipe(
+  throttleTime(100), // не чаще 10 раз в секунду
+  map(e => ({ x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY }))
+).subscribe(pos => {
+  updateCursorPosition(pos); // вместо 1000 вызовов/сек → 10
+});
+
+// Защита от спама кнопки
+const btn = document.getElementById('action-btn')!;
+fromEvent(btn, 'click').pipe(
+  throttleTime(1000) // не чаще 1 раза в секунду
+).subscribe(() => {
+  doSomething();
+});
+```
+
+---
+
+### 🔬 debounce vs throttle — в чём разница?
+
+```
+Пользователь печатает: j-a-v-a-s-c-r-i-p-t (за 1 секунду)
+↕                             ↕
+debounceTime(300)         throttleTime(300)
+  Ждёт паузу                Первое + периодически
+  Эмитит ПОСЛЕ              Эмитит СРАЗУ
+
+debounce:  ---------------------------javascript
+           (ждёт 300мс после последнего нажатия)
+
+throttle:  --j-----------s-----------t
+           (первый символ, потом через каждые 300мс)
+```
+
+| | debounceTime | throttleTime |
+|---|---|---|
+| **Эмитит** | После паузы | Сразу + периодически |
+| **Последнее значение** | ✅ Всегда | ❌ Может потерять |
+| **Идеально для** | Поиск, валидация | Скролл, мышь, аналитика |
+
+---
+
+### 📊 auditTime — итог за период
+
+`auditTime` ждёт X миллисекунд, затем эмитит **последнее** значение за этот период. Похож на дебаунс, но таймер не сбрасывается.
+
+**Мраморная диаграмма (auditTime(500)):**
+```
+События:   --a-b-c---d-e------f-->
+           |-- 500мс --|-- 500мс --|
+audit:     ----------e-----------f-->
+```
+
+```typescript
+import { fromEvent } from 'rxjs';
+import { auditTime, map } from 'rxjs/operators';
+
+// Позиция скролла: отправляем аналитику не чаще раза в секунду,
+// но берём ПОСЛЕДНЮЮ позицию
+fromEvent(window, 'scroll').pipe(
+  auditTime(1000),
+  map(() => window.scrollY)
+).subscribe(position => {
+  sendAnalytics({ scrollDepth: position });
+});
+```
+
+---
+
+### 🎯 sampleTime — снимок по таймеру
+
+`sampleTime` делает "снимок" последнего значения через каждые X миллисекунд, независимо от того, было ли новое событие.
+
+```typescript
+import { interval, Subject } from 'rxjs';
+import { sampleTime } from 'rxjs/operators';
+
+// Мониторинг производительности: снимаем метрики каждую секунду
+const fps$ = new Subject<number>();
+
+fps$.pipe(
+  sampleTime(1000) // снимок каждую секунду
+).subscribe(currentFps => {
+  console.log(`FPS: ${currentFps}`);
+});
+```
+
+---
+
+### 🏆 Реальный пример: форма с умной валидацией
+
+```typescript
+import { fromEvent, combineLatest } from 'rxjs';
+import { debounceTime, map, distinctUntilChanged, startWith } from 'rxjs/operators';
+
+const emailInput = document.getElementById('email') as HTMLInputElement;
+const passwordInput = document.getElementById('password') as HTMLInputElement;
+
+const email$ = fromEvent(emailInput, 'input').pipe(
+  debounceTime(500),
+  map(e => (e.target as HTMLInputElement).value),
+  distinctUntilChanged(),
+  startWith('')
+);
+
+const password$ = fromEvent(passwordInput, 'input').pipe(
+  debounceTime(300),
+  map(e => (e.target as HTMLInputElement).value),
+  startWith('')
+);
+
+// Валидируем форму только после паузы в вводе
+combineLatest([email$, password$]).pipe(
+  map(([email, password]) => ({
+    emailValid: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email),
+    passwordValid: password.length >= 8,
+    canSubmit: email.length > 0 && password.length > 0,
+  }))
+).subscribe(({ emailValid, passwordValid, canSubmit }) => {
+  console.log({ emailValid, passwordValid, canSubmit });
+  // Обновляем UI только когда пользователь сделал паузу
+});
+```
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground
+  template="react-ts"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from "react";
+import { Subject } from "rxjs";
+import { debounceTime, throttleTime } from "rxjs/operators";
+
+interface KeyEvent {
+  time: number;
+  key: string;
+}
+
+export default function App() {
+  const [inputValue, setInputValue] = useState("");
+
+  // Счётчики
+  const [rawCount, setRawCount] = useState(0);
+  const [debounceCount, setDebounceCount] = useState(0);
+  const [throttleCount, setThrottleCount] = useState(0);
+
+  // Последние значения
+  const [rawLast, setRawLast] = useState("");
+  const [debounceLast, setDebounceLast] = useState("");
+  const [throttleLast, setThrottleLast] = useState("");
+
+  // Статус активности
+  const [debounceActive, setDebounceActive] = useState(false);
+  const [throttleActive, setThrottleActive] = useState(false);
+
+  const rawSubject$ = useRef(new Subject<string>());
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // Поток без ограничений
+    const rawSub = rawSubject$.current.subscribe(val => {
+      setRawCount(c => c + 1);
+      setRawLast(val);
+    });
+
+    // Поток с debounceTime(400)
+    const debounceSub = rawSubject$.current.pipe(
+      debounceTime(400) // ждём 400мс паузы
+    ).subscribe(val => {
+      setDebounceCount(c => c + 1);
+      setDebounceLast(val);
+      // Подсветим активность
+      setDebounceActive(true);
+      setTimeout(() => setDebounceActive(false), 300);
+    });
+
+    // Поток с throttleTime(400)
+    const throttleSub = rawSubject$.current.pipe(
+      throttleTime(400) // не чаще раза в 400мс
+    ).subscribe(val => {
+      setThrottleCount(c => c + 1);
+      setThrottleLast(val);
+      setThrottleActive(true);
+      setTimeout(() => setThrottleActive(false), 300);
+    });
+
+    return () => {
+      rawSub.unsubscribe();
+      debounceSub.unsubscribe();
+      throttleSub.unsubscribe();
+    };
+  }, []);
+
+  const handleInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setInputValue(val);
+    rawSubject$.current.next(val);
+  };
+
+  const reset = () => {
+    setInputValue("");
+    setRawCount(0);
+    setDebounceCount(0);
+    setThrottleCount(0);
+    setRawLast("");
+    setDebounceLast("");
+    setThrottleLast("");
+  };
+
+  const efficiency = rawCount > 0
+    ? Math.round((1 - debounceCount / rawCount) * 100)
+    : 0;
+
+  return (
+    <div style={{
+      background: "#0f172a",
+      minHeight: "100vh",
+      padding: "2rem",
+      fontFamily: "monospace",
+      color: "#e2e8f0",
+    }}>
+      <h2 style={{ color: "#38bdf8", marginBottom: "0.5rem" }}>
+        ⏱️ debounce vs throttle — живое сравнение
+      </h2>
+      <p style={{ color: "#94a3b8", marginBottom: "1.5rem", fontSize: "0.875rem" }}>
+        Печатайте быстро и наблюдайте разницу между операторами.
+        Все используют интервал <strong style={{ color: "#38bdf8" }}>400мс</strong>.
+      </p>
+
+      {/* Ввод */}
+      <input
+        value={inputValue}
+        onChange={handleInput}
+        placeholder="Печатайте здесь быстро-быстро..."
+        style={{
+          width: "100%",
+          padding: "0.75rem 1rem",
+          background: "#1e293b",
+          border: "1px solid #334155",
+          borderRadius: "8px",
+          color: "#e2e8f0",
+          fontSize: "1rem",
+          outline: "none",
+          boxSizing: "border-box",
+          marginBottom: "1.5rem",
+        }}
+      />
+
+      {/* Три колонки */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
+        {/* Без ограничений */}
+        <div style={{
+          background: "#1e293b",
+          borderRadius: "10px",
+          padding: "1.25rem",
+          border: "1px solid #334155",
+        }}>
+          <div style={{ fontSize: "0.7rem", color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.5rem" }}>
+            Без ограничений
+          </div>
+          <div style={{ fontSize: "0.85rem", color: "#94a3b8", marginBottom: "1rem", fontFamily: "monospace" }}>
+            <span style={{ color: "#f87171" }}>raw</span>
+          </div>
+          <div style={{ fontSize: "2.5rem", fontWeight: "bold", color: "#f87171", lineHeight: 1 }}>
+            {rawCount}
+          </div>
+          <div style={{ fontSize: "0.7rem", color: "#64748b", marginTop: "0.25rem" }}>событий</div>
+          <div style={{
+            marginTop: "1rem",
+            padding: "0.5rem",
+            background: "#0f172a",
+            borderRadius: "4px",
+            fontSize: "0.75rem",
+            color: rawLast ? "#94a3b8" : "#475569",
+            wordBreak: "break-all",
+            minHeight: "2rem",
+          }}>
+            {rawLast || "—"}
+          </div>
+          <div style={{ marginTop: "0.75rem", fontSize: "0.7rem", color: "#475569" }}>
+            ⚠️ Каждое нажатие = запрос
+          </div>
+        </div>
+
+        {/* debounceTime */}
+        <div style={{
+          background: "#1e293b",
+          borderRadius: "10px",
+          padding: "1.25rem",
+          border: \`1px solid \${debounceActive ? "#38bdf8" : "#334155"}\`,
+          transition: "border-color 0.3s",
+          boxShadow: debounceActive ? "0 0 20px #38bdf820" : "none",
+        }}>
+          <div style={{ fontSize: "0.7rem", color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.5rem" }}>
+            debounceTime
+          </div>
+          <div style={{ fontSize: "0.85rem", color: "#94a3b8", marginBottom: "1rem", fontFamily: "monospace" }}>
+            <span style={{ color: "#38bdf8" }}>debounceTime(400)</span>
+          </div>
+          <div style={{ fontSize: "2.5rem", fontWeight: "bold", color: "#38bdf8", lineHeight: 1 }}>
+            {debounceCount}
+          </div>
+          <div style={{ fontSize: "0.7rem", color: "#64748b", marginTop: "0.25rem" }}>событий</div>
+          <div style={{
+            marginTop: "1rem",
+            padding: "0.5rem",
+            background: "#0f172a",
+            borderRadius: "4px",
+            fontSize: "0.75rem",
+            color: debounceLast ? "#38bdf8" : "#475569",
+            wordBreak: "break-all",
+            minHeight: "2rem",
+          }}>
+            {debounceLast || "—"}
+          </div>
+          <div style={{ marginTop: "0.75rem", fontSize: "0.7rem", color: "#475569" }}>
+            🛗 Эмитит после паузы
+          </div>
+        </div>
+
+        {/* throttleTime */}
+        <div style={{
+          background: "#1e293b",
+          borderRadius: "10px",
+          padding: "1.25rem",
+          border: \`1px solid \${throttleActive ? "#a78bfa" : "#334155"}\`,
+          transition: "border-color 0.3s",
+          boxShadow: throttleActive ? "0 0 20px #a78bfa20" : "none",
+        }}>
+          <div style={{ fontSize: "0.7rem", color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.5rem" }}>
+            throttleTime
+          </div>
+          <div style={{ fontSize: "0.85rem", color: "#94a3b8", marginBottom: "1rem", fontFamily: "monospace" }}>
+            <span style={{ color: "#a78bfa" }}>throttleTime(400)</span>
+          </div>
+          <div style={{ fontSize: "2.5rem", fontWeight: "bold", color: "#a78bfa", lineHeight: 1 }}>
+            {throttleCount}
+          </div>
+          <div style={{ fontSize: "0.7rem", color: "#64748b", marginTop: "0.25rem" }}>событий</div>
+          <div style={{
+            marginTop: "1rem",
+            padding: "0.5rem",
+            background: "#0f172a",
+            borderRadius: "4px",
+            fontSize: "0.75rem",
+            color: throttleLast ? "#a78bfa" : "#475569",
+            wordBreak: "break-all",
+            minHeight: "2rem",
+          }}>
+            {throttleLast || "—"}
+          </div>
+          <div style={{ marginTop: "0.75rem", fontSize: "0.7rem", color: "#475569" }}>
+            💓 Эмитит сразу, потом ждёт
+          </div>
+        </div>
+      </div>
+
+      {/* Эффективность */}
+      {rawCount > 0 && (
+        <div style={{
+          padding: "1rem",
+          background: "#1e293b",
+          borderRadius: "8px",
+          border: "1px solid #334155",
+          marginBottom: "1rem",
+        }}>
+          <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "0.5rem" }}>
+            Экономия запросов (debounce vs raw):
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+            <div style={{
+              flex: 1,
+              height: "8px",
+              background: "#0f172a",
+              borderRadius: "4px",
+              overflow: "hidden",
+            }}>
+              <div style={{
+                height: "100%",
+                width: \`\${efficiency}%\`,
+                background: "linear-gradient(90deg, #38bdf8, #34d399)",
+                borderRadius: "4px",
+                transition: "width 0.3s",
+              }} />
+            </div>
+            <span style={{ color: "#34d399", fontWeight: "bold", fontSize: "1.1rem" }}>
+              {efficiency}%
+            </span>
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "#64748b", marginTop: "0.5rem" }}>
+            Без debounce: {rawCount} запросов → С debounce: {debounceCount} запросов
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <button
+          onClick={reset}
+          style={{
+            padding: "0.5rem 1rem",
+            background: "#334155",
+            border: "none",
+            borderRadius: "6px",
+            color: "#94a3b8",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+            fontFamily: "monospace",
+          }}
+        >
+          Сбросить счётчики
+        </button>
+      </div>
+
+      <div style={{
+        marginTop: "1rem",
+        padding: "1rem",
+        background: "#1e293b",
+        borderRadius: "8px",
+        border: "1px solid #334155",
+        fontSize: "0.8rem",
+        color: "#64748b",
+      }}>
+        <strong style={{ color: "#38bdf8" }}>debounce</strong> — идеален для поиска: ждёт паузу, эмитит последнее значение.
+        <br />
+        <strong style={{ color: "#a78bfa" }}>throttle</strong> — идеален для скролла/мыши: эмитит сразу, потом ждёт.
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,612 @@
+## 63. WebSockets в Angular 🔌
+
+Привет! Яша здесь. WebSocket — это постоянное двусторонее соединение между браузером и сервером. Идеально для чатов, дашбордов реального времени, онлайн-игр. RxJS делает работу с WebSocket элегантной 🚀
+
+---
+
+### webSocket() из rxjs/webSocket
+
+RxJS предоставляет готовый Subject для WebSocket:
+
+```typescript
+import { webSocket, WebSocketSubject } from 'rxjs/webSocket';
+
+const socket$ = webSocket('wss://api.example.com/ws');
+
+// Отправить сообщение
+socket$.next({ type: 'message', text: 'Hello!' });
+
+// Получить сообщения
+socket$.subscribe({
+  next: (message) => console.log('Получено:', message),
+  error: (err) => console.error('Ошибка:', err),
+  complete: () => console.log('Соединение закрыто'),
+});
+
+// Закрыть соединение
+socket$.complete();
+```
+
+---
+
+### WebSocket Service: production-паттерн
+
+```typescript
+// websocket.service.ts
+import { Injectable, OnDestroy } from '@angular/core';
+import { webSocket, WebSocketSubject, WebSocketSubjectConfig } from 'rxjs/webSocket';
+import { Observable, Subject, timer, EMPTY } from 'rxjs';
+import {
+  switchMap, catchError, retryWhen, delay,
+  filter, share, takeUntil, tap
+} from 'rxjs/operators';
+import { environment } from '../environments/environment';
+
+export interface WsMessage<T = unknown> {
+  type: string;
+  payload: T;
+  timestamp?: number;
+}
+
+@Injectable({ providedIn: 'root' })
+export class WebSocketService implements OnDestroy {
+  private socket$!: WebSocketSubject<WsMessage>;
+  private destroy$ = new Subject<void>();
+  private messages$!: Observable<WsMessage>;
+  private reconnectAttempts = 0;
+  private readonly MAX_RECONNECT_ATTEMPTS = 5;
+
+  connect(url: string = environment.wsUrl): void {
+    const config: WebSocketSubjectConfig<WsMessage> = {
+      url,
+      openObserver: {
+        next: () => {
+          console.log('WebSocket подключён');
+          this.reconnectAttempts = 0;
+        }
+      },
+      closeObserver: {
+        next: () => {
+          console.log('WebSocket отключён');
+        }
+      },
+    };
+
+    this.socket$ = webSocket<WsMessage>(config);
+
+    this.messages$ = this.socket$.pipe(
+      // Автоматическое переподключение
+      retryWhen(errors => errors.pipe(
+        tap(err => {
+          this.reconnectAttempts++;
+          console.warn(\`WebSocket ошибка (попытка \${this.reconnectAttempts}):\`, err);
+        }),
+        // Экспоненциальная задержка: 1s, 2s, 4s, 8s...
+        delay(Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000)),
+        switchMap(() => {
+          if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+            console.error('Превышено число попыток переподключения');
+            return EMPTY;
+          }
+          return [true]; // продолжаем
+        }),
+      )),
+      catchError(() => EMPTY),
+      takeUntil(this.destroy$),
+      share(), // один WebSocket на всех подписчиков
+    );
+  }
+
+  // Подписаться на конкретный тип сообщений
+  on<T>(type: string): Observable<T> {
+    return this.messages$.pipe(
+      filter(msg => msg.type === type),
+      // Используем unknown → T для типизации payload
+    ) as Observable<T>;
+  }
+
+  // Отправить сообщение
+  send<T>(type: string, payload: T): void {
+    this.socket$.next({
+      type,
+      payload,
+      timestamp: Date.now(),
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+    this.socket$.complete();
+  }
+}
+```
+
+---
+
+### Использование в компоненте
+
+```typescript
+// chat.component.ts
+import { Component, OnInit, OnDestroy, signal } from '@angular/core';
+import { WebSocketService, WsMessage } from '../websocket.service';
+import { Subject } from 'rxjs';
+import { takeUntil } from 'rxjs/operators';
+
+interface ChatMessage {
+  id: string;
+  userId: string;
+  userName: string;
+  text: string;
+  timestamp: number;
+}
+
+@Component({
+  selector: 'app-chat',
+  template: `
+    <div class="chat-container">
+      <div class="messages">
+        @for (msg of messages(); track msg.id) {
+          <div class="message" [class.own]="msg.userId === currentUserId">
+            <span class="author">{{ msg.userName }}</span>
+            <span class="text">{{ msg.text }}</span>
+            <span class="time">{{ msg.timestamp | date:'HH:mm' }}</span>
+          </div>
+        }
+      </div>
+
+      <div class="input-area">
+        <input
+          [(ngModel)]="messageText"
+          (keydown.enter)="sendMessage()"
+          placeholder="Введите сообщение...">
+        <button (click)="sendMessage()">Отправить</button>
+      </div>
+
+      <div class="status" [class.connected]="isConnected()">
+        {{ isConnected() ? '🟢 Подключён' : '🔴 Переподключение...' }}
+      </div>
+    </div>
+  `,
+})
+export class ChatComponent implements OnInit, OnDestroy {
+  messages = signal<ChatMessage[]>([]);
+  isConnected = signal(false);
+  messageText = '';
+  currentUserId = 'user-1';
+
+  private destroy$ = new Subject<void>();
+
+  constructor(private ws: WebSocketService) {}
+
+  ngOnInit(): void {
+    this.ws.connect();
+
+    // Подписка на сообщения чата
+    this.ws.on<ChatMessage>('chat:message')
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(msg => {
+        this.messages.update(msgs => [...msgs, msg]);
+      });
+
+    // Подписка на статус подключения
+    this.ws.on<boolean>('connection:status')
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(status => this.isConnected.set(status));
+
+    // Уведомления о typing
+    this.ws.on<{ userId: string; isTyping: boolean }>('chat:typing')
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(({ userId, isTyping }) => {
+        console.log(\`\${userId} \${isTyping ? 'печатает...' : 'перестал печатать'}\`);
+      });
+  }
+
+  sendMessage(): void {
+    if (!this.messageText.trim()) return;
+
+    this.ws.send('chat:message', {
+      text: this.messageText,
+      userId: this.currentUserId,
+    });
+
+    this.messageText = '';
+  }
+
+  onTyping(): void {
+    this.ws.send('chat:typing', {
+      userId: this.currentUserId,
+      isTyping: true,
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+}
+```
+
+---
+
+### STOMP протокол (Spring/Java backends)
+
+```bash
+npm install @stomp/rx-stomp
+```
+
+```typescript
+// stomp.service.ts
+import { Injectable } from '@angular/core';
+import { RxStomp, RxStompConfig } from '@stomp/rx-stomp';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+@Injectable({ providedIn: 'root' })
+export class StompService {
+  private stomp = new RxStomp();
+
+  connect(): void {
+    const config: RxStompConfig = {
+      brokerURL: 'wss://api.example.com/stomp',
+      connectHeaders: {
+        Authorization: \`Bearer \${localStorage.getItem('token')}\`,
+      },
+      heartbeatIncoming: 4000,
+      heartbeatOutgoing: 4000,
+      reconnectDelay: 3000,
+    };
+
+    this.stomp.configure(config);
+    this.stomp.activate();
+  }
+
+  // Подписаться на топик
+  watch<T>(destination: string): Observable<T> {
+    return this.stomp.watch(destination).pipe(
+      map(message => JSON.parse(message.body) as T)
+    );
+  }
+
+  // Отправить сообщение
+  publish<T>(destination: string, body: T): void {
+    this.stomp.publish({
+      destination,
+      body: JSON.stringify(body),
+    });
+  }
+
+  get connected$(): Observable<boolean> {
+    return this.stomp.connected$;
+  }
+}
+
+// Использование
+this.stompService.watch<Notification>('/topic/notifications')
+  .subscribe(notification => this.showNotification(notification));
+
+this.stompService.publish('/app/chat', { text: 'Hello STOMP!' });
+```
+
+---
+
+### Subject-based Message Bus
+
+```typescript
+// message-bus.service.ts — внутренняя шина событий
+import { Injectable } from '@angular/core';
+import { Subject, Observable, filter, map } from 'rxjs';
+
+type EventTypes = 'user:login' | 'user:logout' | 'notification' | 'cart:update';
+
+interface BusEvent<T = unknown> {
+  type: EventTypes;
+  data: T;
+}
+
+@Injectable({ providedIn: 'root' })
+export class MessageBusService {
+  private bus = new Subject<BusEvent>();
+
+  emit<T>(type: EventTypes, data: T): void {
+    this.bus.next({ type, data });
+  }
+
+  on<T>(type: EventTypes): Observable<T> {
+    return this.bus.pipe(
+      filter(event => event.type === type),
+      map(event => event.data as T),
+    );
+  }
+}
+```
+
+---
+
+### Reconnection Strategy: практический пример
+
+```typescript
+import { webSocket } from 'rxjs/webSocket';
+import { Observable, Subject, timer, EMPTY } from 'rxjs';
+import { switchMap, catchError, tap, share } from 'rxjs/operators';
+
+function createReconnectingSocket<T>(url: string): Observable<T> {
+  return new Observable<T>(observer => {
+    let socket: WebSocketSubject<T>;
+    let attempts = 0;
+
+    const connect = () => {
+      socket = webSocket<T>(url);
+      socket.pipe(
+        catchError(err => {
+          attempts++;
+          const backoff = Math.min(1000 * 2 ** attempts, 30000);
+          console.log(\`Reconnect in \${backoff}ms (attempt \${attempts})\`);
+          return timer(backoff).pipe(
+            switchMap(() => {
+              connect();
+              return EMPTY;
+            })
+          );
+        })
+      ).subscribe(observer);
+    };
+
+    connect();
+
+    return () => socket?.complete();
+  }).pipe(share());
+}
+```
+
+---
+
+## Playground 🎮
+
+Симулятор чата с WebSocket в реальном времени:
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const BOT_NAMES = ['RxJS Bot', 'Angular Bot', 'TS Bot'];
+const BOT_REPLIES = [
+  'Отличный вопрос! Observable решает это элегантно 🎯',
+  'Помни: unsubscribe() при OnDestroy! 💡',
+  'OnPush + async pipe = производительность 🚀',
+  'pipe(takeUntil(destroy$)) — лучший паттерн',
+  'Signals — будущее Angular 17+ ✨',
+  'NgRx для сложного состояния, ComponentStore для локального',
+  'Standalone components — будущее без NgModule!',
+];
+
+let messageId = 0;
+const ME = 'Яша';
+
+function ConnectionStatus({ status, reconnecting, attempts }) {
+  const color = status === 'connected' ? '#4ade80' : status === 'disconnected' ? '#f87171' : '#fbbf24';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 14px', background: '#1e293b', borderRadius: '8px' }}>
+      <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: color, 
+        boxShadow: status === 'connected' ? \`0 0 8px \${color}\` : 'none' }} />
+      <span style={{ color, fontSize: '12px', fontWeight: 'bold' }}>
+        {status === 'connected' ? 'WebSocket подключён' 
+          : status === 'disconnected' ? 'Отключён' 
+          : \`Переподключение... (попытка \${attempts})\`}
+      </span>
+      {reconnecting && <span style={{ color: '#94a3b8', fontSize: '11px' }}>retryWhen + exponential backoff</span>}
+    </div>
+  );
+}
+
+function Message({ msg, isOwn }) {
+  return (
+    <div style={{
+      display: 'flex', justifyContent: isOwn ? 'flex-end' : 'flex-start',
+      marginBottom: '10px',
+    }}>
+      <div style={{ maxWidth: '70%' }}>
+        <div style={{
+          fontSize: '11px', color: '#64748b', marginBottom: '3px',
+          textAlign: isOwn ? 'right' : 'left',
+        }}>
+          {msg.author} · {msg.time}
+        </div>
+        <div style={{
+          background: isOwn ? ANGULAR_RED : '#1e293b',
+          color: 'white', borderRadius: isOwn ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
+          padding: '10px 14px', fontSize: '14px', lineHeight: 1.5,
+        }}>
+          {msg.text}
+        </div>
+        {msg.type && (
+          <div style={{ fontSize: '10px', color: '#475569', marginTop: '3px', textAlign: isOwn ? 'right' : 'left', fontFamily: 'monospace' }}>
+            type: "{msg.type}"
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [messages, setMessages] = useState([
+    { id: ++messageId, author: 'Angular Bot', text: 'Привет! 👋 Я WebSocket чат на RxJS. Напиши что-нибудь!', time: '10:00', isOwn: false, type: 'chat:message' },
+  ]);
+  const [input, setInput] = useState('');
+  const [connected, setConnected] = useState(true);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [typing, setTyping] = useState(null);
+  const [log, setLog] = useState([
+    { text: 'WebSocket connected to wss://chat.example.com', color: '#4ade80' },
+  ]);
+  const messagesEndRef = useRef(null);
+  const typingTimeout = useRef(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const addLog = useCallback((text, color = '#94a3b8') => {
+    setLog(prev => [...prev.slice(-20), { text, color, time: new Date().toLocaleTimeString() }]);
+  }, []);
+
+  const simulateDisconnect = useCallback(() => {
+    setConnected(false);
+    setReconnecting(true);
+    setReconnectAttempts(1);
+    addLog('WebSocket connection lost', '#f87171');
+    addLog('retryWhen: waiting 1000ms...', '#fbbf24');
+
+    let attempt = 1;
+    const tryReconnect = () => {
+      if (attempt >= 3) {
+        setTimeout(() => {
+          setConnected(true);
+          setReconnecting(false);
+          setReconnectAttempts(0);
+          addLog('WebSocket reconnected! ✅', '#4ade80');
+          setMessages(prev => [...prev, {
+            id: ++messageId, author: 'System', text: '🔄 Соединение восстановлено!',
+            time: new Date().toLocaleTimeString(), isOwn: false, type: 'system',
+          }]);
+        }, 1000);
+      } else {
+        attempt++;
+        setReconnectAttempts(attempt);
+        const delay = 1000 * Math.pow(2, attempt - 1);
+        addLog(\`retryWhen: attempt \${attempt}, waiting \${delay}ms...\`, '#fbbf24');
+        setTimeout(tryReconnect, delay);
+      }
+    };
+    setTimeout(tryReconnect, 1000);
+  }, [addLog]);
+
+  const sendMessage = useCallback(() => {
+    if (!input.trim() || !connected) return;
+    const text = input.trim();
+    setInput('');
+
+    const msg = {
+      id: ++messageId, author: ME, text,
+      time: new Date().toLocaleTimeString(), isOwn: true, type: 'chat:message',
+    };
+    setMessages(prev => [...prev, msg]);
+    addLog(\`→ send: { type: "chat:message", text: "\${text.slice(0, 20)}..." }\`, '#60a5fa');
+
+    // Bot reply
+    const botName = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+    const reply = BOT_REPLIES[Math.floor(Math.random() * BOT_REPLIES.length)];
+
+    // Typing indicator
+    setTimeout(() => {
+      setTyping(botName);
+      addLog(\`← receive: { type: "chat:typing", userId: "\${botName}" }\`, '#a78bfa');
+    }, 300);
+
+    setTimeout(() => {
+      setTyping(null);
+      setMessages(prev => [...prev, {
+        id: ++messageId, author: botName, text: reply,
+        time: new Date().toLocaleTimeString(), isOwn: false, type: 'chat:message',
+      }]);
+      addLog(\`← receive: { type: "chat:message", author: "\${botName}" }\`, '#a78bfa');
+    }, 1200 + Math.random() * 800);
+  }, [input, connected, addLog]);
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '720px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '12px 20px',
+          marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <div>
+            <div style={{ fontWeight: 'bold', fontSize: '18px' }}>🔌 WebSocket Chat</div>
+            <div style={{ fontSize: '12px', opacity: 0.8 }}>webSocket() из rxjs/webSocket</div>
+          </div>
+          <button onClick={simulateDisconnect} disabled={!connected || reconnecting} style={{
+            padding: '6px 14px', borderRadius: '6px', border: 'none',
+            background: connected && !reconnecting ? '#7f1d1d' : '#334155',
+            color: 'white', cursor: connected && !reconnecting ? 'pointer' : 'not-allowed', fontSize: '12px',
+          }}>
+            💥 Обрыв соединения
+          </button>
+        </div>
+
+        <div style={{ marginBottom: '12px' }}>
+          <ConnectionStatus status={reconnecting ? 'reconnecting' : connected ? 'connected' : 'disconnected'} reconnecting={reconnecting} attempts={reconnectAttempts} />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: '16px' }}>
+          {/* Chat */}
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', display: 'flex', flexDirection: 'column', height: '460px' }}>
+            <div style={{ flex: 1, overflowY: 'auto', marginBottom: '12px' }}>
+              {messages.map(msg => (
+                <Message key={msg.id} msg={msg} isOwn={msg.isOwn} />
+              ))}
+              {typing && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#64748b', fontSize: '13px', marginBottom: '10px' }}>
+                  <div style={{ display: 'flex', gap: '3px' }}>
+                    {[0, 1, 2].map(i => (
+                      <div key={i} style={{
+                        width: '6px', height: '6px', borderRadius: '50%', background: '#64748b',
+                        animation: 'bounce 1s infinite', animationDelay: \`\${i * 0.2}s\`,
+                      }} />
+                    ))}
+                  </div>
+                  {typing} печатает...
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendMessage()}
+                placeholder={connected ? 'Написать сообщение...' : 'Нет соединения...'}
+                disabled={!connected}
+                style={{
+                  flex: 1, padding: '10px', borderRadius: '8px',
+                  background: '#0f172a', border: '1px solid #334155',
+                  color: 'white', fontSize: '14px',
+                }}
+              />
+              <button onClick={sendMessage} disabled={!connected || !input.trim()} style={{
+                padding: '10px 16px', borderRadius: '8px', border: 'none',
+                background: connected && input.trim() ? ANGULAR_RED : '#334155',
+                color: 'white', cursor: 'pointer', fontWeight: 'bold',
+              }}>→</button>
+            </div>
+          </div>
+
+          {/* Log */}
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px', height: '460px', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ color: '#94a3b8', fontSize: '11px', fontWeight: 'bold', marginBottom: '8px' }}>
+              WS LOG
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', fontSize: '10px', fontFamily: 'monospace' }}>
+              {log.slice().reverse().map((entry, i) => (
+                <div key={i} style={{ color: entry.color, marginBottom: '6px', lineHeight: 1.4 }}>
+                  <span style={{ color: '#475569' }}>{entry.time} </span>
+                  {entry.text}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,723 @@
+## 🛠️ Кастомные Pipes в Angular
+
+Когда встроенных Pipes недостаточно — создавай свои. Кастомные Pipes позволяют инкапсулировать любую логику трансформации данных и переиспользовать её в шаблонах всего приложения.
+
+---
+
+### 🏗️ Анатомия кастомного Pipe
+
+Любой кастомный Pipe состоит из трёх обязательных частей:
+
+```typescript
+import { Pipe, PipeTransform } from '@angular/core';
+
+// 1. @Pipe декоратор — регистрирует класс как pipe
+@Pipe({
+  name: 'myPipe',      // Имя для использования в шаблоне: {{ val | myPipe }}
+  pure: true,          // По умолчанию true — только при смене ссылки
+  standalone: true,    // Angular 14+ — без NgModule!
+})
+// 2. implements PipeTransform — интерфейс с методом transform
+export class MyPipe implements PipeTransform {
+  // 3. Метод transform — принимает значение и аргументы, возвращает результат
+  transform(value: unknown, ...args: unknown[]): unknown {
+    return value;
+  }
+}
+```
+
+---
+
+### ✂️ Pipe: Truncate (обрезка текста)
+
+Самый популярный кастомный pipe — обрезка длинного текста:
+
+```typescript
+// truncate.pipe.ts
+import { Pipe, PipeTransform } from '@angular/core';
+
+@Pipe({
+  name: 'truncate',
+  standalone: true,
+})
+export class TruncatePipe implements PipeTransform {
+  /**
+   * @param value     - исходная строка
+   * @param limit     - максимальная длина (по умолчанию 100)
+   * @param trail     - суффикс при обрезке (по умолчанию '...')
+   * @param breakWord - обрывать по символу (true) или по слову (false)
+   */
+  transform(
+    value: string | null | undefined,
+    limit = 100,
+    trail = '...',
+    breakWord = true
+  ): string {
+    if (!value) return '';
+    if (value.length <= limit) return value;
+
+    if (breakWord) {
+      return value.slice(0, limit - trail.length) + trail;
+    }
+
+    // Обрезать по ближайшему слову
+    const truncated = value.slice(0, limit - trail.length);
+    const lastSpace = truncated.lastIndexOf(' ');
+    return (lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated) + trail;
+  }
+}
+```
+
+```html
+<!-- Использование в шаблоне -->
+{{ article.description | truncate }}               <!-- до 100 символов -->
+{{ article.description | truncate:50 }}            <!-- до 50 символов -->
+{{ article.description | truncate:30:'…' }}        <!-- кастомный суффикс -->
+{{ article.description | truncate:80:'...':false }} <!-- по границе слова -->
+```
+
+---
+
+### ⏰ Pipe: TimeAgo («x времени назад»)
+
+```typescript
+// time-ago.pipe.ts
+import { Pipe, PipeTransform, OnDestroy } from '@angular/core';
+
+@Pipe({
+  name: 'timeAgo',
+  standalone: true,
+  pure: false, // Impure! Время меняется независимо от входных данных
+})
+export class TimeAgoPipe implements PipeTransform, OnDestroy {
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  transform(value: Date | string | number): string {
+    const date = new Date(value);
+    const now = new Date();
+    const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+
+    this.scheduleUpdate();
+
+    if (seconds < 5)   return 'только что';
+    if (seconds < 60)  return \`\${seconds} сек. назад\`;
+
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60)  return \`\${minutes} мин. назад\`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24)    return \`\${hours} ч. назад\`;
+
+    const days = Math.floor(hours / 24);
+    if (days < 7)      return \`\${days} дн. назад\`;
+
+    const weeks = Math.floor(days / 7);
+    if (weeks < 4)     return \`\${weeks} нед. назад\`;
+
+    const months = Math.floor(days / 30);
+    if (months < 12)   return \`\${months} мес. назад\`;
+
+    return \`\${Math.floor(months / 12)} лет назад\`;
+  }
+
+  private scheduleUpdate(): void {
+    if (!this.timer) {
+      this.timer = setInterval(() => { /* change detection trigger */ }, 30_000);
+    }
+  }
+
+  ngOnDestroy(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+    }
+  }
+}
+```
+
+```html
+<!-- Использование -->
+<span>{{ post.createdAt | timeAgo }}</span>    <!-- "5 мин. назад" -->
+<span>{{ comment.date | timeAgo }}</span>      <!-- "2 дн. назад" -->
+```
+
+---
+
+### 🔍 Pipe: Highlight (подсветка поискового запроса)
+
+```typescript
+// highlight.pipe.ts
+import { Pipe, PipeTransform } from '@angular/core';
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
+
+@Pipe({
+  name: 'highlight',
+  standalone: true,
+  pure: false, // Impure — search query меняется извне
+})
+export class HighlightPipe implements PipeTransform {
+  constructor(private sanitizer: DomSanitizer) {}
+
+  transform(text: string, search: string): SafeHtml {
+    if (!search || !text) return text;
+
+    // Экранируем спецсимволы RegExp
+    const escaped = search.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+    const regex = new RegExp(\`(\${escaped})\`, 'gi');
+
+    const highlighted = text.replace(
+      regex,
+      '<mark style="background:#fde047;color:#1e293b;border-radius:2px">$1</mark>'
+    );
+
+    // DomSanitizer защищает от XSS
+    return this.sanitizer.bypassSecurityTrustHtml(highlighted);
+  }
+}
+```
+
+```html
+<!-- Использование: innerHtml обязателен для HTML результата -->
+<p [innerHTML]="item.title | highlight:searchQuery"></p>
+<p [innerHTML]="item.body | highlight:searchQuery | truncate:200"></p>
+```
+
+---
+
+### 📁 Pipe: FileSize (форматирование размера файла)
+
+```typescript
+// file-size.pipe.ts
+import { Pipe, PipeTransform } from '@angular/core';
+
+type SizeUnit = 'B' | 'KB' | 'MB' | 'GB' | 'TB';
+
+@Pipe({
+  name: 'fileSize',
+  standalone: true,
+})
+export class FileSizePipe implements PipeTransform {
+  private readonly units: SizeUnit[] = ['B', 'KB', 'MB', 'GB', 'TB'];
+
+  transform(bytes: number, decimals = 2, unit?: SizeUnit): string {
+    if (bytes === 0) return '0 B';
+    if (bytes < 0)   return 'Invalid';
+
+    if (unit) {
+      const idx = this.units.indexOf(unit);
+      const converted = bytes / Math.pow(1024, idx);
+      return \`\${converted.toFixed(decimals)} \${unit}\`;
+    }
+
+    const k = 1024;
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const size = bytes / Math.pow(k, i);
+
+    return \`\${parseFloat(size.toFixed(decimals))} \${this.units[i]}\`;
+  }
+}
+```
+
+```html
+{{ file.size | fileSize }}           <!-- "4.56 MB" -->
+{{ file.size | fileSize:0 }}         <!-- "5 MB" (без дробей) -->
+{{ file.size | fileSize:3:'KB' }}    <!-- "4567.123 KB" -->
+{{ diskSpace | fileSize:1:'GB' }}    <!-- "2.5 GB" -->
+```
+
+---
+
+### 🔎 Pipe: Filter (фильтрация массива)
+
+```typescript
+// filter.pipe.ts
+import { Pipe, PipeTransform } from '@angular/core';
+
+@Pipe({
+  name: 'filter',
+  standalone: true,
+  pure: false, // Следит за мутациями массива
+})
+export class FilterPipe implements PipeTransform {
+  transform<T extends Record<string, unknown>>(
+    items: T[] | null | undefined,
+    searchTerm: string,
+    fields: string[] = []
+  ): T[] {
+    if (!items) return [];
+    if (!searchTerm.trim()) return items;
+
+    const term = searchTerm.toLowerCase();
+
+    return items.filter(item => {
+      if (fields.length === 0) {
+        // Ищем по всем строковым полям
+        return Object.values(item).some(
+          val => typeof val === 'string' && val.toLowerCase().includes(term)
+        );
+      }
+      // Ищем по указанным полям
+      return fields.some(field => {
+        const val = item[field];
+        return typeof val === 'string' && val.toLowerCase().includes(term);
+      });
+    });
+  }
+}
+```
+
+```html
+<!-- Фильтрация по всем полям -->
+@for (user of users | filter:searchText; track user.id) {
+  <li>{{ user.name }} — {{ user.email }}</li>
+}
+
+<!-- Фильтрация по конкретным полям -->
+@for (product of products | filter:query:['name', 'description']; track product.id) {
+  <li>{{ product.name }}</li>
+}
+```
+
+---
+
+### 🔑 Pipe: GroupBy (группировка массива)
+
+```typescript
+// group-by.pipe.ts
+import { Pipe, PipeTransform } from '@angular/core';
+
+@Pipe({
+  name: 'groupBy',
+  standalone: true,
+})
+export class GroupByPipe implements PipeTransform {
+  transform<T>(
+    items: T[],
+    field: keyof T
+  ): { key: string; items: T[] }[] {
+    if (!items || !field) return [];
+
+    const groups = items.reduce((acc, item) => {
+      const key = String(item[field]);
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(item);
+      return acc;
+    }, {} as Record<string, T[]>);
+
+    return Object.entries(groups).map(([key, items]) => ({ key, items }));
+  }
+}
+```
+
+```html
+@for (group of products | groupBy:'category'; track group.key) {
+  <h3>{{ group.key }}</h3>
+  @for (product of group.items; track product.id) {
+    <p>{{ product.name }}</p>
+  }
+}
+```
+
+---
+
+### ⚡ Async кастомный Pipe
+
+Когда нужно выполнить асинхронную операцию внутри pipe:
+
+```typescript
+// translate.pipe.ts
+import { Pipe, PipeTransform, ChangeDetectorRef, OnDestroy } from '@angular/core';
+import { TranslateService } from './translate.service';
+
+@Pipe({
+  name: 'translate',
+  standalone: true,
+  pure: false, // Impure — язык может смениться извне
+})
+export class TranslatePipe implements PipeTransform, OnDestroy {
+  private lastKey = '';
+  private lastResult = '';
+  private subscription = Subscription.EMPTY;
+
+  constructor(
+    private translateService: TranslateService,
+    private cd: ChangeDetectorRef
+  ) {}
+
+  transform(key: string): string {
+    if (key === this.lastKey) return this.lastResult;
+
+    this.lastKey = key;
+    this.subscription.unsubscribe();
+
+    this.subscription = this.translateService
+      .get(key)
+      .subscribe(value => {
+        this.lastResult = value;
+        this.cd.markForCheck(); // Уведомить Angular об изменении
+      });
+
+    return this.lastResult || key;
+  }
+
+  ngOnDestroy(): void {
+    this.subscription.unsubscribe();
+  }
+}
+```
+
+---
+
+### 📦 Standalone Pipes (Angular 14+)
+
+```typescript
+// С standalone: true — не нужен NgModule!
+@Pipe({
+  name: 'truncate',
+  standalone: true, // ← Ключевое поле
+})
+export class TruncatePipe implements PipeTransform {
+  transform(value: string, limit = 100): string {
+    return value?.length > limit ? value.slice(0, limit) + '...' : value ?? '';
+  }
+}
+
+// Использование в standalone компоненте
+@Component({
+  standalone: true,
+  imports: [TruncatePipe], // ← Просто импортируем
+  template: `{{ description | truncate:50 }}`
+})
+export class ArticleCardComponent {
+  description = 'Очень длинное описание статьи...';
+}
+
+// Barrel export для удобства
+// pipes/index.ts
+export * from './truncate.pipe';
+export * from './time-ago.pipe';
+export * from './file-size.pipe';
+export * from './filter.pipe';
+export * from './highlight.pipe';
+```
+
+---
+
+### 📊 Сравнение Pure vs Impure Pipes
+
+| Параметр | Pure Pipe | Impure Pipe |
+|---------|-----------|-------------|
+| `pure` в декораторе | `true` (дефолт) | `false` |
+| Вызов `transform()` | При смене ссылки на входные данные | При каждом цикле CD |
+| Производительность | ✅ Высокая | ⚠️ Зависит от логики |
+| Видит мутации | ❌ Нет | ✅ Да |
+| Подходит для | Чистых трансформаций | Фильтров, переводов, относительного времени |
+| Встроенные примеры | `date`, `currency`, `uppercase` | `async` |
+
+---
+
+### 🧪 Тестирование кастомных Pipes
+
+```typescript
+// truncate.pipe.spec.ts
+import { TruncatePipe } from './truncate.pipe';
+
+describe('TruncatePipe', () => {
+  let pipe: TruncatePipe;
+
+  beforeEach(() => {
+    pipe = new TruncatePipe();
+  });
+
+  it('возвращает пустую строку для null', () => {
+    expect(pipe.transform(null)).toBe('');
+  });
+
+  it('не обрезает текст короче лимита', () => {
+    expect(pipe.transform('hello', 10)).toBe('hello');
+  });
+
+  it('обрезает текст по лимиту с суффиксом', () => {
+    const result = pipe.transform('hello world test', 10);
+    expect(result.length).toBeLessThanOrEqual(10);
+    expect(result).toEndWith('...');
+  });
+
+  it('поддерживает кастомный суффикс', () => {
+    const result = pipe.transform('hello world test', 8, '…');
+    expect(result).toEndWith('…');
+  });
+});
+```
+
+---
+
+### Практика
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const DIM = '#64748b';
+const ACCENT = '#38bdf8';
+const GREEN = '#4ade80';
+
+// === Симуляция кастомных Angular Pipes ===
+
+const truncatePipe = (value, limit = 100, trail = '...', breakWord = true) => {
+  if (!value) return '';
+  if (value.length <= limit) return value;
+  if (breakWord) return value.slice(0, limit - trail.length) + trail;
+  const truncated = value.slice(0, limit - trail.length);
+  const lastSpace = truncated.lastIndexOf(' ');
+  return (lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated) + trail;
+};
+
+const timeAgoPipe = (value) => {
+  const date = new Date(value);
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 5)   return 'только что';
+  if (seconds < 60)  return \`\${seconds} сек. назад\`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60)  return \`\${minutes} мин. назад\`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24)    return \`\${hours} ч. назад\`;
+  const days = Math.floor(hours / 24);
+  if (days < 30)     return \`\${days} дн. назад\`;
+  return 'давно';
+};
+
+const fileSizePipe = (bytes, decimals = 2) => {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const k = 1024;
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + units[i];
+};
+
+const filterPipe = (items, search, fields = []) => {
+  if (!search.trim()) return items;
+  const term = search.toLowerCase();
+  return items.filter(item => {
+    const searchFields = fields.length ? fields : Object.keys(item);
+    return searchFields.some(f => typeof item[f] === 'string' && item[f].toLowerCase().includes(term));
+  });
+};
+
+const highlightPipe = (text, search) => {
+  if (!search || !text) return text;
+  const escaped = search.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+  return text.replace(new RegExp(\`(\${escaped})\`, 'gi'), '<mark style="background:#fde047;color:#1e293b;padding:0 2px;border-radius:2px">$1</mark>');
+};
+
+// ====
+
+const TABS = ['truncate', 'timeAgo', 'fileSize', 'filter', 'highlight'];
+
+const s = {
+  app: { background: BG, minHeight: '100vh', padding: '16px', fontFamily: "'Inter', system-ui", color: '#e2e8f0', fontSize: '14px' },
+  header: { color: RED, fontWeight: 700, fontSize: '17px', marginBottom: '4px' },
+  sub: { color: DIM, fontSize: '12px', marginBottom: '16px' },
+  tabs: { display: 'flex', gap: '6px', marginBottom: '14px', flexWrap: 'wrap' },
+  tab: (active) => ({ background: active ? RED : CARD, color: active ? 'white' : '#94a3b8', border: '1px solid ' + (active ? RED : BORDER), borderRadius: '6px', padding: '5px 14px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }),
+  card: { background: CARD, border: '1px solid ' + BORDER, borderRadius: '10px', padding: '14px 16px', marginBottom: '10px' },
+  sectionLabel: { color: ACCENT, fontSize: '10px', fontWeight: 700, letterSpacing: '0.12em', marginBottom: '8px', display: 'block' },
+  codeBadge: { background: BG, border: '1px solid ' + BORDER, color: '#f1fa8c', fontSize: '11px', padding: '3px 8px', borderRadius: '4px', fontFamily: 'monospace', display: 'inline-block', marginBottom: '10px' },
+  input: { background: BG, border: '1px solid ' + BORDER, color: '#e2e8f0', borderRadius: '6px', padding: '7px 12px', fontSize: '13px', outline: 'none', width: '100%', boxSizing: 'border-box' },
+  result: { background: BG, borderRadius: '6px', padding: '10px 12px', border: '1px solid ' + BORDER, marginTop: '10px', fontSize: '13px', fontFamily: 'monospace', color: GREEN, lineHeight: 1.6 },
+  row: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px', flexWrap: 'wrap' },
+  btn: { background: RED, color: 'white', border: 'none', borderRadius: '6px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, whiteSpace: 'nowrap' },
+};
+
+function TruncateTab() {
+  const [text, setText] = useState('Angular — это платформа и фреймворк для создания одностраничных приложений на основе TypeScript. Angular включает в себя набор инструментов для разработки, тестирования и поддержки приложений.');
+  const [limit, setLimit] = useState(80);
+  const [trail, setTrail] = useState('...');
+  const [breakWord, setBreakWord] = useState(true);
+  return (
+    <div>
+      <span style={s.sectionLabel}>TRUNCATE PIPE — обрезка текста</span>
+      <div style={s.codeBadge}>{'{{ text | truncate:limit:trail:breakWord }}'}</div>
+      <textarea style={{ ...s.input, height: '80px', resize: 'vertical', marginBottom: '8px' }} value={text} onChange={e => setText(e.target.value)} />
+      <div style={s.row}>
+        <label style={{ color: DIM, fontSize: '12px', whiteSpace: 'nowrap' }}>limit: <strong style={{ color: '#e2e8f0' }}>{limit}</strong></label>
+        <input type="range" min="20" max="200" value={limit} onChange={e => setLimit(Number(e.target.value))} style={{ flex: 1, accentColor: RED }} />
+      </div>
+      <div style={s.row}>
+        <label style={{ color: DIM, fontSize: '12px' }}>trail:</label>
+        <input style={{ ...s.input, width: '80px' }} value={trail} onChange={e => setTrail(e.target.value)} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: DIM, fontSize: '12px', cursor: 'pointer' }}>
+          <input type="checkbox" checked={breakWord} onChange={e => setBreakWord(e.target.checked)} style={{ accentColor: RED }} />
+          По символу (breakWord)
+        </label>
+      </div>
+      <div style={s.result}>
+        <div style={{ color: DIM, fontSize: '10px', marginBottom: '4px' }}>Результат: {truncatePipe(text, limit, trail, breakWord).length} символов</div>
+        {truncatePipe(text, limit, trail, breakWord)}
+      </div>
+      <div style={{ marginTop: '8px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+        {[30, 50, 80, 100, 150].map(l => (
+          <button key={l} style={{ ...s.btn, background: limit === l ? RED : '#334155' }} onClick={() => setLimit(l)}>{l}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TimeAgoTab() {
+  const [now, setNow] = useState(Date.now());
+  const [events, setEvents] = useState([
+    { id: 1, text: 'Урок начат', time: Date.now() - 2000 },
+    { id: 2, text: 'Компонент создан', time: Date.now() - 65000 },
+    { id: 3, text: 'Сервис написан', time: Date.now() - 3600000 },
+    { id: 4, text: 'PR открыт', time: Date.now() - 86400000 },
+  ]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const addEvent = () => {
+    setEvents(prev => [{ id: Date.now(), text: 'Новое событие', time: Date.now() }, ...prev]);
+  };
+
+  return (
+    <div>
+      <span style={s.sectionLabel}>TIME-AGO PIPE — относительное время (impure)</span>
+      <div style={s.codeBadge}>{'{{ event.time | timeAgo }}'} — pure: false</div>
+      <div style={{ background: '#0c1e0c', border: '1px solid #166534', borderRadius: '6px', padding: '8px 12px', marginBottom: '10px', fontSize: '11px', color: '#4ade80' }}>
+        ⏱ Текущее время: {new Date(now).toLocaleTimeString('ru-RU')} — pipe обновляется автоматически (impure)
+      </div>
+      <button style={{ ...s.btn, marginBottom: '10px' }} onClick={addEvent}>+ Добавить событие сейчас</button>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        {events.map(ev => (
+          <div key={ev.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: BG, borderRadius: '6px', padding: '8px 12px', border: '1px solid ' + BORDER }}>
+            <span style={{ fontSize: '13px' }}>{ev.text}</span>
+            <span style={{ color: ACCENT, fontSize: '12px', fontFamily: 'monospace' }}>{timeAgoPipe(ev.time)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FileSizeTab() {
+  const [bytes, setBytes] = useState(4718592);
+  const [decimals, setDecimals] = useState(2);
+  const files = [
+    { name: 'main.bundle.js', size: 245760 },
+    { name: 'polyfills.js', size: 92160 },
+    { name: 'styles.css', size: 15360 },
+    { name: 'assets/hero.jpg', size: 2097152 },
+    { name: 'assets/video.mp4', size: 52428800 },
+  ];
+  return (
+    <div>
+      <span style={s.sectionLabel}>FILE-SIZE PIPE — форматирование размеров</span>
+      <div style={s.codeBadge}>{'{{ file.size | fileSize:decimals }}'}</div>
+      <div style={s.row}>
+        <input type="range" min="0" max="10737418240" step="1024" value={bytes} onChange={e => setBytes(Number(e.target.value))} style={{ flex: 1, accentColor: RED }} />
+        <span style={{ color: GREEN, fontFamily: 'monospace', minWidth: '80px', textAlign: 'right', fontSize: '14px', fontWeight: 700 }}>{fileSizePipe(bytes, decimals)}</span>
+      </div>
+      <div style={s.row}>
+        <label style={{ color: DIM, fontSize: '12px' }}>decimals: <strong style={{ color: '#e2e8f0' }}>{decimals}</strong></label>
+        <input type="range" min="0" max="4" value={decimals} onChange={e => setDecimals(Number(e.target.value))} style={{ width: '100px', accentColor: RED }} />
+      </div>
+      <div style={{ marginTop: '10px' }}>
+        <div style={{ color: DIM, fontSize: '11px', marginBottom: '6px' }}>Примеры из реального проекта:</div>
+        {files.map(f => (
+          <div key={f.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #1e293b', fontSize: '12px' }}>
+            <span style={{ fontFamily: 'monospace', color: '#cbd5e1' }}>{f.name}</span>
+            <span style={{ color: GREEN, fontFamily: 'monospace' }}>{fileSizePipe(f.size, 1)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const SAMPLE_USERS = [
+  { id: 1, name: 'Яша Иванов', role: 'Frontend Dev', city: 'Москва' },
+  { id: 2, name: 'Маша Петрова', role: 'Backend Dev', city: 'Питер' },
+  { id: 3, name: 'Коля Сидоров', role: 'Angular Expert', city: 'Москва' },
+  { id: 4, name: 'Аня Козлова', role: 'React Dev', city: 'Казань' },
+  { id: 5, name: 'Дима Орлов', role: 'TypeScript Ninja', city: 'Питер' },
+];
+
+function FilterTab() {
+  const [search, setSearch] = useState('');
+  const filtered = filterPipe(SAMPLE_USERS, search);
+  return (
+    <div>
+      <span style={s.sectionLabel}>FILTER PIPE — фильтрация массива (impure)</span>
+      <div style={s.codeBadge}>{'users | filter:searchTerm'} — pure: false</div>
+      <input style={{ ...s.input, marginBottom: '10px' }} value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по всем полям..." />
+      <div style={{ color: DIM, fontSize: '11px', marginBottom: '8px' }}>Найдено: {filtered.length} из {SAMPLE_USERS.length}</div>
+      {filtered.length === 0 ? (
+        <div style={{ color: DIM, padding: '16px', textAlign: 'center', fontSize: '13px' }}>😢 Ничего не найдено</div>
+      ) : (
+        filtered.map(u => (
+          <div key={u.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: BG, borderRadius: '6px', marginBottom: '6px', border: '1px solid ' + BORDER }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '13px' }}
+                dangerouslySetInnerHTML={{ __html: highlightPipe(u.name, search) }} />
+              <div style={{ color: DIM, fontSize: '11px' }}
+                dangerouslySetInnerHTML={{ __html: highlightPipe(u.role, search) }} />
+            </div>
+            <span style={{ color: ACCENT, fontSize: '11px' }}>{u.city}</span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function HighlightTab() {
+  const [search, setSearch] = useState('Angular');
+  const texts = [
+    'Angular — это TypeScript-фреймворк от Google для SPA приложений.',
+    'В Angular можно создавать кастомные Pipes для трансформации данных.',
+    'Angular Pipes — это чистые функции трансформации для шаблонов.',
+    'Кастомные Angular Pipes реализуют интерфейс PipeTransform.',
+  ];
+  return (
+    <div>
+      <span style={s.sectionLabel}>HIGHLIGHT PIPE — подсветка текста (impure)</span>
+      <div style={s.codeBadge}>{'[innerHTML]="text | highlight:query"'}</div>
+      <input style={{ ...s.input, marginBottom: '12px' }} value={search} onChange={e => setSearch(e.target.value)} placeholder="Поисковый запрос..." />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        {texts.map((t, i) => (
+          <div key={i} style={{ background: BG, borderRadius: '6px', padding: '10px 12px', border: '1px solid ' + BORDER, fontSize: '13px', lineHeight: 1.6 }}
+            dangerouslySetInnerHTML={{ __html: highlightPipe(t, search) }} />
+        ))}
+      </div>
+      <div style={{ marginTop: '10px', background: '#0c2340', border: '1px solid #1d4ed8', borderRadius: '6px', padding: '10px', fontSize: '12px', color: '#60a5fa' }}>
+        💡 В Angular используй <code style={{ color: '#f1fa8c' }}>DomSanitizer.bypassSecurityTrustHtml()</code> для безопасного рендера HTML. Всегда экранируй пользовательский ввод!
+      </div>
+    </div>
+  );
+}
+
+const TAB_COMPONENTS = [TruncateTab, TimeAgoTab, FileSizeTab, FilterTab, HighlightTab];
+
+export default function App() {
+  const [tab, setTab] = useState(0);
+  const Tab = TAB_COMPONENTS[tab];
+  return (
+    <div style={s.app}>
+      <div style={s.header}>🛠️ Angular Custom Pipes — демо</div>
+      <div style={s.sub}>truncate · timeAgo · fileSize · filter · highlight</div>
+      <div style={s.tabs}>
+        {TABS.map((t, i) => (
+          <button key={t} style={s.tab(tab === i)} onClick={() => setTab(i)}>{t}</button>
+        ))}
+      </div>
+      <div style={s.card}>
+        <Tab />
+      </div>
+    </div>
+  );
+}
+` }} />

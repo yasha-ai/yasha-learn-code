@@ -1,0 +1,484 @@
+## TypeScript: Глубокое погружение в `useCallback`
+
+Привет, кодер! Яша снова на связи, и сегодня мы распахнем завесу над одним из самых обсуждаемых хуков в React – `useCallback`. Если ты уже уверенно жонглируешь стейтом, эффектами и кастомными хуками, то готов к этому путешествию. `useCallback` — это как личная заморозка для твоих функций, позволяющая им сохранять свою форму между рендерами. Звучит интригующе, правда? Давай разбираться, зачем нам это нужно и как использовать правильно, чтобы не наломать дров.
+
+### Зачем нам `useCallback`?
+
+Представь себе, что у тебя есть родительский компонент, который рендерит дочерний. И родитель постоянно обновляет свой стейт, вызывая ре-рендер. Если ты передаешь функцию как проп в дочерний компонент, то каждый раз при ре-рендере родителя эта функция создается заново. JavaScript считает новую функцию, даже если она идентична по логике, *другой* функцией. Это называется потерей **референциальной идентичности**.
+
+### Callback Dependency Diagram
+
+```mermaid
+flowchart TD
+    Parent[Parent Component] -->|1. Render| Func[Create handleClick]
+    Func -->|2. Pass Prop| Child[MemoizedChild with React.memo]
+    
+    subgraph Without_useCallback [Problem: Identity Loss]
+    Func1[handleClick v1]
+    Func2[handleClick v2]
+    Func1 !== Func2
+    end
+    
+    subgraph With_useCallback [Solution: Stability]
+    MemoFunc[memoizedHandleClick]
+    MemoFunc === MemoFunc
+    end
+    
+    Child -->|3. Check Props| Diff{Identity changed?}
+    Diff -- Yes --> ReRender[Re-render Child]
+    Diff -- No --> Skip[Skip re-render]
+
+    style Without_useCallback fill:#ffcccc,stroke:#333
+    style With_useCallback fill:#ccffcc,stroke:#333
+```
+*Зависимость дочернего компонента от стабильности ссылки на функцию.*
+
+А теперь самое интересное: если твой дочерний компонент обернут в `React.memo` (или является классовым компонентом, реализующим `shouldComponentUpdate`), он будет сравнивать пропсы, чтобы решить, нужно ли ему ре-рендериться. Но поскольку функция-проп каждый раз новая, `React.memo` решает: "Ого, проп изменился! Нужно ре-рендериться!". И вуаля – оптимизация `React.memo` идет насмарку.
+
+Вот тут на сцену и выходит `useCallback`. Он "замораживает" твою функцию, сохраняя её референциальную идентичность между ре-рендерами родителя, пока зависимости не изменятся. Это позволяет `React.memo` честно выполнить свою работу и избежать лишних ре-рендеров дочерних компонентов.
+
+### Основы использования `useCallback`
+
+Синтаксис `useCallback` прост:
+
+```typescript
+import React, { useCallback } from 'react';
+
+const memoizedCallback = useCallback(
+  () => {
+    // Твоя функция
+  },
+  [dependencies] // Массив зависимостей
+);
+```
+
+`useCallback` возвращает мемоизированную версию твоего коллбэка, которая будет пересоздана только тогда, когда изменится одна из зависимостей в массиве `[dependencies]`.
+
+Давай рассмотрим это на примере.
+
+**Пример 1: Без `useCallback` – проблема лишних ре-рендеров**
+
+У нас есть родительский компонент, который рендерит счетчик и кнопку, и дочерний компонент, который просто принимает коллбэк.
+
+```typescript
+import React, { useState, memo } from 'react';
+
+interface ButtonProps {
+  onClick: () => void;
+  label: string;
+}
+
+// Дочерний компонент, обернутый в memo для оптимизации
+const MemoizedButton: React.FC<ButtonProps> = memo(({ onClick, label }) => {
+  console.log(`[MemoizedButton] Рендер кнопки: ${label}`); // Лог для отслеживания ре-рендеров
+  return (
+    <button onClick={onClick}>
+      {label}
+    </button>
+  );
+});
+
+// Родительский компонент
+const ParentComponentWithoutCallback: React.FC = () => {
+  const [count, setCount] = useState<number>(0);
+  const [anotherCount, setAnotherCount] = useState<number>(0);
+
+  // Эта функция будет создаваться заново при каждом ре-рендере ParentComponentWithoutCallback
+  const handleClick = () => {
+    setCount(prevCount => prevCount + 1);
+  };
+
+  const handleAnotherClick = () => {
+    setAnotherCount(prevCount => prevCount + 1);
+  }
+
+  console.log('[ParentComponentWithoutCallback] Рендер родителя'); // Лог для отслеживания ре-рендеров
+
+  return (
+    <div>
+      <h3>Без useCallback</h3>
+      <p>Счетчик 1: {count}</p>
+      <p>Счетчик 2: {anotherCount}</p>
+      {/* Кнопка ре-рендерится каждый раз, хотя её логика не меняется */}
+      <MemoizedButton onClick={handleClick} label="Увеличить счетчик 1" />
+      <button onClick={handleAnotherClick}>Увеличить счетчик 2 (сам родитель)</button>
+    </div>
+  );
+};
+
+// <ParentComponentWithoutCallback />
+```
+
+Если ты запустишь этот код и будешь нажимать на кнопку "Увеличить счетчик 2", ты увидишь в консоли:
+```
+[ParentComponentWithoutCallback] Рендер родителя
+[MemoizedButton] Рендер кнопки: Увеличить счетчик 1
+```
+Несмотря на `memo`, `MemoizedButton` ре-рендерится, потому что функция `handleClick` создается заново при каждом изменении `anotherCount`, и `React.memo` видит, что `onClick` проп изменился.
+
+**Пример 2: С `useCallback` – предотвращаем лишние ре-рендеры**
+
+Теперь применим `useCallback` к нашей функции `handleClick`.
+
+```typescript
+import React, { useState, memo, useCallback } from 'react';
+
+// Используем те же типы и MemoizedButton из примера 1
+interface ButtonProps {
+  onClick: () => void;
+  label: string;
+}
+
+const MemoizedButton: React.FC<ButtonProps> = memo(({ onClick, label }) => {
+  console.log(`[MemoizedButton] Рендер кнопки: ${label}`);
+  return (
+    <button onClick={onClick}>
+      {label}
+    </button>
+  );
+});
+
+const ParentComponentWithCallback: React.FC = () => {
+  const [count, setCount] = useState<number>(0);
+  const [anotherCount, setAnotherCount] = useState<number>(0);
+
+  // Функция handleClick теперь мемоизирована
+  // Она будет пересоздана только если изменятся её зависимости.
+  // В данном случае, зависимостей нет, т.к. setCount стабильна.
+  const handleClick = useCallback(() => {
+    setCount(prevCount => prevCount + 1);
+  }, []); // Пустой массив зависимостей означает, что функция никогда не будет пересоздана
+
+  const handleAnotherClick = () => {
+    setAnotherCount(prevCount => prevCount + 1);
+  };
+
+  console.log('[ParentComponentWithCallback] Рендер родителя');
+
+  return (
+    <div>
+      <h3>С useCallback</h3>
+      <p>Счетчик 1: {count}</p>
+      <p>Счетчик 2: {anotherCount}</p>
+      <MemoizedButton onClick={handleClick} label="Увеличить счетчик 1" />
+      <button onClick={handleAnotherClick}>Увеличить счетчик 2 (сам родитель)</button>
+    </div>
+  );
+};
+
+// <ParentComponentWithCallback />
+```
+
+Теперь, если ты будешь нажимать на кнопку "Увеличить счетчик 2", ты увидишь в консоли только:
+```
+[ParentComponentWithCallback] Рендер родителя
+```
+`MemoizedButton` больше не ре-рендерится, потому что `handleClick` сохраняет свою референциальную идентичность благодаря `useCallback`. Магия!
+
+### Продвинутые примеры и типичные ошибки
+
+**Пример 3: `useCallback` с зависимостями**
+
+Что делать, если функция использует какие-то переменные из области видимости компонента (стейт или пропсы)? Их нужно указать в массиве зависимостей. Если ты их не укажешь, ты получишь проблему "замыкания устаревших значений" (stale closure), когда мемоизированная функция будет работать со старыми значениями стейта/пропсов.
+
+```typescript
+import React, { useState, memo, useCallback } from 'react';
+
+interface DisplayProps {
+  onNotify: (message: string) => void;
+  currentValue: number;
+}
+
+const MemoizedDisplay: React.FC<DisplayProps> = memo(({ onNotify, currentValue }) => {
+  console.log(`[MemoizedDisplay] Рендер, значение: ${currentValue}`);
+  // Вызываем коллбэк при каком-то событии, например, при клике
+  return (
+    <div style={{ border: '1px solid gray', padding: '10px', margin: '10px 0' }}>
+      <p>Текущее отображаемое значение: {currentValue}</p>
+      <button onClick={() => onNotify(`Значение было ${currentValue}`)}>
+        Уведомить о текущем значении
+      </button>
+    </div>
+  );
+});
+
+const ParentWithDependencies: React.FC = () => {
+  const [value, setValue] = useState<number>(0);
+  const [notifications, setNotifications] = useState<string[]>([]);
+
+  const handleNotify = useCallback((message: string) => {
+    // Внимание! Без `value` в зависимостях, `value` внутри этой функции
+    // всегда будет 0, если мы не будем использовать функциональное обновление стейта.
+    // Но для формирования сообщения нам нужно актуальное value.
+    setNotifications(prev => [...prev, message + ` (актуальное в функции: ${value})`]);
+  }, [value]); // !!! Важно: `value` здесь - зависимость.
+
+  console.log('[ParentWithDependencies] Рендер родителя');
+
+  return (
+    <div>
+      <h3>С useCallback и зависимостями</h3>
+      <p>Основное значение: {value}</p>
+      <button onClick={() => setValue(prev => prev + 1)}>
+        Увеличить основное значение
+      </button>
+      <MemoizedDisplay onNotify={handleNotify} currentValue={value} />
+      <h4>Уведомления:</h4>
+      <ul>
+        {notifications.map((note, index) => (
+          <li key={index}>{note}</li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
+// <ParentWithDependencies />
+```
+
+Если ты нажмешь несколько раз на "Увеличить основное значение", а затем на "Уведомить о текущем значении", ты увидишь, что `handleNotify` корректно "видит" актуальное `value`. Если бы мы убрали `value` из массива зависимостей `[value]`, то в уведомлении всегда было бы `Значение было 0` (т.к. `value` при первом рендере было 0, и функция "запомнила" это).
+
+**Типичная ошибка: Забыть зависимости**
+
+Забытый массив зависимостей или неполный массив — самая частая причина багов со `useCallback`. Всегда убеждайся, что все переменные из внешней области видимости, которые используются внутри мемоизированной функции, указаны в массиве зависимостей. TypeScript в некоторых случаях может помочь с этим, если настроен на `exhaustive-deps` правило в ESLint.
+
+**Типичная ошибка: Чрезмерное использование `useCallback`**
+
+Не стоит мемоизировать *все* функции подряд. `useCallback` сам по себе имеет небольшие накладные расходы (дополнительная память и сравнение зависимостей). Если функция передается в компонент, который не обернут в `React.memo`, или если компонент сам по себе очень легкий и не производит ресурсоемких операций, то `useCallback` может принести больше вреда, чем пользы. Используй его там, где есть заметные проблемы с производительностью, или когда работаешь с `React.memo` / `shouldComponentUpdate`.
+
+### Когда использовать `useCallback`?
+
+1.  **С `React.memo`**: Когда ты передаешь коллбэки в дочерние компоненты, обернутые в `React.memo`, чтобы избежать их лишних ре-рендеров.
+2.  **В зависимостях `useEffect` или `useMemo`**: Когда функция является зависимостью для другого хука, чтобы предотвратить его лишние срабатывания.
+3.  **При передаче коллбэков в кастомные хуки**: Если кастомный хук сам мемоизирует что-то или является дорогостоящим.
+
+### 🎯 Практика
+
+Время для самостоятельной работы, Яша-кодер!
+
+**Задание 1: Оптимизируй список задач**
+
+У тебя есть компонент `TaskList`, который отображает список задач. Каждая задача имеет кнопку "Выполнено".
+```typescript
+// TaskList.tsx
+import React, { useState, memo } from 'react';
+
+interface Task {
+  id: string;
+  text: string;
+  completed: boolean;
+}
+
+interface TaskItemProps {
+  task: Task;
+  onToggleComplete: (id: string) => void;
+}
+
+const TaskItem: React.FC<TaskItemProps> = memo(({ task, onToggleComplete }) => {
+  console.log(`[TaskItem] Рендер задачи: ${task.text}`);
+  return (
+    <li style={{ textDecoration: task.completed ? 'line-through' : 'none' }}>
+      {task.text}
+      <button onClick={() => onToggleComplete(task.id)} style={{ marginLeft: '10px' }}>
+        {task.completed ? 'Отменить' : 'Выполнено'}
+      </button>
+    </li>
+  );
+});
+
+const TaskList: React.FC = () => {
+  const [tasks, setTasks] = useState<Task[]>([
+    { id: '1', text: 'Изучить useCallback', completed: false },
+    { id: '2', text: 'Написать код', completed: false },
+    { id: '3', text: 'Пойти гулять', completed: false },
+  ]);
+  const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all');
+
+  const handleToggleComplete = (id: string) => {
+    setTasks(prevTasks =>
+      prevTasks.map(task =>
+        task.id === id ? { ...task, completed: !task.completed } : task
+      )
+    );
+  };
+
+  const filteredTasks = tasks.filter(task => {
+    if (filter === 'active') return !task.completed;
+    if (filter === 'completed') return task.completed;
+    return true;
+  });
+
+  console.log('[TaskList] Рендер основного списка');
+
+  return (
+    <div>
+      <h2>Список Задач</h2>
+      <div>
+        <button onClick={() => setFilter('all')}>Все</button>
+        <button onClick={() => setFilter('active')}>Активные</button>
+        <button onClick={() => setFilter('completed')}>Выполненные</button>
+      </div>
+      <ul>
+        {filteredTasks.map(task => (
+          <TaskItem key={task.id} task={task} onToggleComplete={handleToggleComplete} />
+        ))}
+      </ul>
+    </div>
+  );
+};
+```
+**Задача:** При каждом изменении `filter` происходит ре-рендер всех `TaskItem`, хотя их проп `onToggleComplete` не изменился. Используй `useCallback` для `handleToggleComplete`, чтобы предотвратить лишние ре-рендеры `TaskItem` при изменении `filter`. Проверь, что `TaskItem` рендерится только при изменении своих пропсов.
+
+**Задание 2: `useCallback` и `useEffect`**
+
+Создай компонент, который получает данные с API. У него есть кнопка "Обновить данные". Используй `useEffect` для запроса данных, а функцию запроса оберни в `useCallback`. Убедись, что `useEffect` срабатывает только при изменении функции запроса (если она меняет свои зависимости) или при явном изменении других зависимостей `useEffect`.
+
+```typescript
+// DataFetcher.tsx
+import React, { useState, useEffect, useCallback } from 'react';
+
+interface User {
+  id: number;
+  name: string;
+}
+
+const DataFetcher: React.FC = () => {
+  const [users, setUsers] = useState<User[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
+
+  // TODO: Оберни эту функцию в useCallback
+  const fetchUsers = async () => {
+    console.log('Fetching users...');
+    setIsLoading(true);
+    try {
+      // Имитация API запроса
+      const response = await new Promise<User[]>(resolve =>
+        setTimeout(() => {
+          const newUsers: User[] = [
+            { id: 1, name: 'Alice' + Math.random().toFixed(2) },
+            { id: 2, name: 'Bob' + Math.random().toFixed(2) },
+          ];
+          resolve(newUsers);
+        }, 1000)
+      );
+      setUsers(response);
+    } catch (error) {
+      console.error('Failed to fetch users:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // TODO: Здесь должна быть мемоизированная версия fetchUsers
+    fetchUsers();
+  }, [/* TODO: Добавь правильные зависимости */ refreshTrigger]); // refreshTrigger для ручного обновления
+
+  return (
+    <div>
+      <h2>Загрузка Данных с `useEffect` и `useCallback`</h2>
+      <button onClick={() => setRefreshTrigger(prev => prev + 1)} disabled={isLoading}>
+        {isLoading ? 'Загрузка...' : 'Обновить данные'}
+      </button>
+      {users.length > 0 && (
+        <ul>
+          {users.map(user => (
+            <li key={user.id}>{user.name}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
+```
+**Задача:** Оберни `fetchUsers` в `useCallback` с пустым массивом зависимостей (т.к. она не использует локальные стейты/пропсы напрямую, кроме `setIsLoading` и `setUsers`, которые стабильны). Затем используй мемоизированную версию `fetchUsers` в `useEffect`, добавив её в зависимости `useEffect`. Убедись, что `useEffect` не срабатывает при каждом ре-рендере компонента, а только при первом монтировании и при изменении `refreshTrigger`.
+
+### 💡 Совет
+
+Всегда начинай с написания кода без `useCallback`. Только если профилирование производительности (например, с помощью React DevTools) показывает, что у тебя есть проблемы с излишними ре-рендерами из-за потери референциальной идентичности функций, тогда стоит подумать о внедрении `useCallback`. Не используй его по умолчанию для *всех* функций, иначе ты просто добавишь ненужный оверхед и усложнишь код. `useCallback` – это инструмент для *оптимизации*, а не обязательная часть каждой функции.
+
+Удачи в кодинге, Яша!
+
+---
+
+## 🔗 Полезные ссылки
+- [React Memo](/react/react-memo)
+- [Use Memo](/react/use-memo)
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground template="react" files={{ "/App.tsx": `import { useState, useCallback, memo, useRef } from 'react';
+
+interface Task { id: number; text: string; done: boolean; }
+
+// Дочерний компонент обёрнут в memo — пропустит рендер если пропсы не изменились
+const TaskItem = memo(({ task, onToggle }: { task: Task; onToggle: (id: number) => void }) => {
+  const renders = useRef(0);
+  renders.current += 1;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: '#1e293b', borderRadius: 8, marginBottom: 6 }}>
+      <input type="checkbox" checked={task.done} onChange={() => onToggle(task.id)} />
+      <span style={{ flex: 1, color: task.done ? '#475569' : '#e2e8f0', textDecoration: task.done ? 'line-through' : 'none', fontSize: 14 }}>
+        {task.text}
+      </span>
+      <span style={{ color: '#64748b', fontSize: 12 }}>{'рендеров: ' + renders.current}</span>
+    </div>
+  );
+});
+
+export default function App() {
+  const [tasks, setTasks] = useState<Task[]>([
+    { id: 1, text: 'Изучить useCallback', done: false },
+    { id: 2, text: 'Написать тесты', done: false },
+    { id: 3, text: 'Сделать ревью кода', done: false },
+  ]);
+  const [counter, setCounter] = useState(0);
+  const [enabled, setEnabled] = useState(true);
+
+  // Мемоизированная версия — ссылка стабильна между рендерами родителя
+  const memoToggle = useCallback((id: number) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, done: !t.done } : t));
+  }, []);
+
+  // Обычная версия — новая ссылка при каждом рендере родителя
+  const plainToggle = (id: number) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, done: !t.done } : t));
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#0f172a', padding: 24, fontFamily: 'sans-serif' }}>
+      <h2 style={{ color: '#38bdf8', marginTop: 0, marginBottom: 4 }}>useCallback</h2>
+      <p style={{ color: '#94a3b8', fontSize: 14, marginBottom: 16 }}>
+        Счётчик рендеров у TaskItem — при useCallback OFF он растёт при нажатии кнопки ниже.
+      </p>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+        <button
+          onClick={() => setCounter(c => c + 1)}
+          style={{ background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}
+        >
+          {'Обновить родителя (' + counter + ')'}
+        </button>
+        <button
+          onClick={() => setEnabled(v => !v)}
+          style={{ background: enabled ? '#0ea5e9' : '#dc2626', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}
+        >
+          {'useCallback: ' + (enabled ? 'ВКЛ' : 'ВЫКЛ')}
+        </button>
+      </div>
+      <div>
+        {tasks.map(t => (
+          <TaskItem key={t.id} task={t} onToggle={enabled ? memoToggle : plainToggle} />
+        ))}
+      </div>
+      <p style={{ color: '#64748b', fontSize: 13, marginTop: 12 }}>
+        {enabled
+          ? '✅ useCallback ON — TaskItem не перерисуется при обновлении родителя'
+          : '⚠️ useCallback OFF — каждое нажатие кнопки перерисует все TaskItem'}
+      </p>
+    </div>
+  );
+}
+` }} />

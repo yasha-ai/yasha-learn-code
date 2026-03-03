@@ -1,0 +1,498 @@
+## 🃏 Тестирование Angular: Jest
+
+Jest — это альтернатива Karma/Jasmine от Facebook, которая работает без браузера (JSDOM). Он быстрее, удобнее для снепшот-тестов и лучше интегрируется с современными инструментами 🚀
+
+---
+
+## Миграция с Karma на Jest
+
+```bash
+# Удаляем Karma
+npm uninstall karma karma-chrome-launcher karma-coverage karma-jasmine karma-jasmine-html-reporter
+
+# Устанавливаем Jest
+npm install --save-dev jest jest-preset-angular @types/jest ts-jest
+
+# Удаляем karma.conf.js и test.ts
+rm karma.conf.js src/test.ts
+```
+
+---
+
+## jest.config.ts — конфигурация
+
+```typescript
+// jest.config.ts
+import type { Config } from 'jest';
+
+const config: Config = {
+  preset: 'jest-preset-angular',
+
+  setupFilesAfterFramework: ['<rootDir>/setup-jest.ts'],
+
+  testEnvironment: 'jsdom',
+
+  transform: {
+    '^.+\\.(ts|js|html|svg)$': [
+      'jest-preset-angular',
+      {
+        tsconfig: '<rootDir>/tsconfig.spec.json',
+        stringifyContentPathRegex: '\\.(html|svg)$',
+      },
+    ],
+  },
+
+  moduleNameMapper: {
+    // Алиасы путей из tsconfig
+    '^@app/(.*)$': '<rootDir>/src/app/$1',
+    '^@env/(.*)$': '<rootDir>/src/environments/$1',
+    // Статические файлы
+    '\\.(jpg|jpeg|png|gif|svg)$': '<rootDir>/src/__mocks__/fileMock.ts',
+  },
+
+  collectCoverageFrom: [
+    'src/**/*.ts',
+    '!src/**/*.spec.ts',
+    '!src/main.ts',
+    '!src/environments/**',
+  ],
+
+  coverageThresholds: {
+    global: {
+      branches: 70,
+      functions: 80,
+      lines: 80,
+      statements: 80,
+    },
+  },
+
+  testPathPattern: '(/__tests__/.*|(\\.|/)(test|spec))\\.[jt]sx?$',
+};
+
+export default config;
+```
+
+```typescript
+// setup-jest.ts
+import 'jest-preset-angular/setup-jest';
+import '@testing-library/jest-dom'; // Опционально: DOM matchers
+```
+
+---
+
+## package.json скрипты
+
+```json
+{
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:ci": "jest --ci --coverage --runInBand"
+  }
+}
+```
+
+---
+
+## Jest matchers vs Jasmine
+
+```typescript
+// Jasmine
+expect(value).toBeTruthy();
+expect(spy).toHaveBeenCalledWith(arg);
+
+// Jest — практически идентично!
+expect(value).toBeTruthy();
+expect(mockFn).toHaveBeenCalledWith(arg);
+
+// Jest-exclusive matchers:
+expect(value).toMatchSnapshot();           // Снепшот
+expect(array).toMatchObject([{id: 1}]);    // Частичное совпадение
+expect(fn).toThrowErrorMatchingSnapshot(); // Снепшот ошибки
+expect(mockFn).toHaveBeenNthCalledWith(2, 'arg'); // N-й вызов
+```
+
+---
+
+## jest.fn() и jest.spyOn()
+
+```typescript
+describe('UserService', () => {
+  it('should use jest.fn() for mocks', () => {
+    // Создаём мок-функцию
+    const mockGetAll = jest.fn().mockReturnValue(of([{ id: '1', name: 'Яша' }]));
+
+    const service = new UserService({ get: mockGetAll } as any);
+
+    service.getAll().subscribe(users => {
+      expect(users).toHaveLength(1);
+    });
+
+    expect(mockGetAll).toHaveBeenCalledTimes(1);
+    expect(mockGetAll).toHaveBeenCalledWith('/api/users');
+  });
+
+  it('should use jest.spyOn()', () => {
+    const service = TestBed.inject(UserService);
+    const spy = jest.spyOn(service, 'getAll').mockReturnValue(of([]));
+
+    component.ngOnInit();
+
+    expect(spy).toHaveBeenCalled();
+  });
+});
+```
+
+---
+
+## Мокирование модулей
+
+```typescript
+// Мокаем весь Angular Material Dialog
+jest.mock('@angular/material/dialog', () => ({
+  MatDialog: jest.fn().mockImplementation(() => ({
+    open: jest.fn().mockReturnValue({
+      afterClosed: jest.fn().mockReturnValue(of(true))
+    })
+  })),
+  MatDialogModule: { ɵmod: jest.fn(), ɵinj: jest.fn() },
+}));
+
+// Мокаем environment
+jest.mock('../environments/environment', () => ({
+  environment: {
+    production: false,
+    apiUrl: 'http://test-api.com'
+  }
+}));
+
+// Мокаем localStorage
+const localStorageMock = {
+  getItem: jest.fn(),
+  setItem: jest.fn(),
+  removeItem: jest.fn(),
+  clear: jest.fn(),
+};
+Object.defineProperty(window, 'localStorage', { value: localStorageMock });
+```
+
+---
+
+## Snapshot testing — снепшоты
+
+```typescript
+describe('UserCardComponent', () => {
+  it('should match snapshot', () => {
+    const fixture = TestBed.createComponent(UserCardComponent);
+    fixture.componentInstance.user = mockUser;
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement).toMatchSnapshot();
+    // Создаёт/сравнивает __snapshots__/user-card.component.spec.ts.snap
+  });
+
+  it('should match inline snapshot', () => {
+    const pipe = new DateFormatPipe();
+    expect(pipe.transform(new Date('2024-01-15'), 'short')).toMatchInlineSnapshot(
+      `"15 янв"`
+    );
+  });
+});
+
+// Обновить снепшоты:
+// jest --updateSnapshot или jest -u
+```
+
+---
+
+## Тестирование Observables с RxJS Testing
+
+```typescript
+import { TestScheduler } from 'rxjs/testing';
+
+describe('UserService debounceSearch', () => {
+  let scheduler: TestScheduler;
+
+  beforeEach(() => {
+    scheduler = new TestScheduler((actual, expected) => {
+      expect(actual).toEqual(expected);
+    });
+  });
+
+  it('should debounce search by 300ms', () => {
+    scheduler.run(({ cold, hot, expectObservable }) => {
+      // hot — уже "запущенный" Observable (simulates user typing)
+      const search$ = hot('-a-b---c-------', {
+        a: 'j',
+        b: 'ja',
+        c: 'yas'
+      });
+
+      const result$ = search$.pipe(debounceTime(300, scheduler));
+
+      // a и b не прошли (следующий пришёл раньше 300ms)
+      // c прошёл (300ms тишины)
+      expectObservable(result$).toBe('-------c-------', { c: 'yas' });
+    });
+  });
+
+  it('should switchMap search requests', () => {
+    scheduler.run(({ cold, hot, expectObservable }) => {
+      const mockHttp = (query: string) => cold('--r', { r: [`Result for ${query}`] });
+
+      const source$ = hot('a-b---', { a: 'foo', b: 'bar' });
+      const result$ = source$.pipe(switchMap(q => mockHttp(q)));
+
+      // Первый запрос 'foo' отменяется, только 'bar' доходит
+      expectObservable(result$).toBe('----r-', { r: ['Result for bar'] });
+    });
+  });
+});
+```
+
+---
+
+## Тестирование NgRx с Jest
+
+```typescript
+import { provideMockStore, MockStore } from '@ngrx/store/testing';
+
+describe('UsersPageComponent with NgRx', () => {
+  let component: UsersPageComponent;
+  let fixture: ComponentFixture<UsersPageComponent>;
+  let store: MockStore;
+
+  const initialState = {
+    users: {
+      users: [],
+      loading: false,
+      error: null,
+    }
+  };
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      imports: [UsersPageComponent],
+      providers: [
+        provideMockStore({ initialState })
+      ]
+    });
+
+    fixture = TestBed.createComponent(UsersPageComponent);
+    store = TestBed.inject(MockStore);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  it('should dispatch loadUsers on init', () => {
+    const dispatchSpy = jest.spyOn(store, 'dispatch');
+    component.ngOnInit();
+    expect(dispatchSpy).toHaveBeenCalledWith(loadUsers());
+  });
+
+  it('should show spinner when loading', () => {
+    store.setState({ users: { ...initialState.users, loading: true } });
+    fixture.detectChanges();
+
+    const spinner = fixture.debugElement.query(By.css('mat-spinner'));
+    expect(spinner).toBeTruthy();
+  });
+});
+```
+
+---
+
+### Практика
+
+<Playground template="react" files={{ "/App.tsx": `import { useState } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+
+interface TestFile {
+  name: string;
+  tests: TestCase[];
+}
+
+interface TestCase {
+  id: string;
+  description: string;
+  type: 'unit' | 'snapshot' | 'observable' | 'ngrx';
+  code: string;
+  status: 'idle' | 'running' | 'pass' | 'fail';
+  snapshot?: string;
+}
+
+const testFiles: TestFile[] = [
+  {
+    name: 'user.service.spec.ts',
+    tests: [
+      { id: '1', description: 'should be created', type: 'unit', code: 'expect(service).toBeDefined()', status: 'idle' },
+      { id: '2', description: 'should mock getAll with jest.fn()', type: 'unit', code: 'jest.fn().mockReturnValue(of([]))', status: 'idle' },
+      { id: '3', description: 'should spy on delete method', type: 'unit', code: 'jest.spyOn(service, "delete")', status: 'idle' },
+    ],
+  },
+  {
+    name: 'user-card.component.spec.ts',
+    tests: [
+      { id: '4', description: 'should match snapshot', type: 'snapshot', code: 'expect(fixture).toMatchSnapshot()', status: 'idle', snapshot: '<app-user-card user="[object Object]">' },
+      { id: '5', description: 'should render user name', type: 'unit', code: 'expect(el.textContent).toContain("Яша")', status: 'idle' },
+      { id: '6', description: 'should emit on delete click', type: 'unit', code: 'expect(mockFn).toHaveBeenCalledWith(userId)', status: 'idle' },
+    ],
+  },
+  {
+    name: 'search.service.spec.ts',
+    tests: [
+      { id: '7', description: 'should debounce by 300ms', type: 'observable', code: "expectObservable(result$).toBe('-------c', {c: 'yas'})", status: 'idle' },
+      { id: '8', description: 'should cancel prev request on new input', type: 'observable', code: "switchMap → only last emission", status: 'idle' },
+    ],
+  },
+  {
+    name: 'users-page.component.spec.ts',
+    tests: [
+      { id: '9', description: 'should dispatch loadUsers on init', type: 'ngrx', code: "expect(dispatchSpy).toHaveBeenCalledWith(loadUsers())", status: 'idle' },
+      { id: '10', description: 'should show spinner when loading=true', type: 'ngrx', code: "store.setState({loading: true}); expect(spinner).toBeTruthy()", status: 'idle' },
+    ],
+  },
+];
+
+const typeColors: Record<string, string> = {
+  unit: '#3b82f6',
+  snapshot: '#8b5cf6',
+  observable: WARN,
+  ngrx: RED,
+};
+
+const typeLabels: Record<string, string> = {
+  unit: 'unit',
+  snapshot: '📸 snap',
+  observable: '📡 rx',
+  ngrx: '🏪 ngrx',
+};
+
+export default function App() {
+  const [files, setFiles] = useState(testFiles);
+  const [running, setRunning] = useState(false);
+  const [coverage, setCoverage] = useState<{lines: number; branches: number; fns: number} | null>(null);
+  const [showSnapshot, setShowSnapshot] = useState<string | null>(null);
+
+  const updateTest = (fileIdx: number, testId: string, status: TestCase['status']) => {
+    setFiles(prev => prev.map((f, i) => i !== fileIdx ? f : {
+      ...f,
+      tests: f.tests.map(t => t.id === testId ? { ...t, status } : t),
+    }));
+  };
+
+  const runAll = async () => {
+    setRunning(true);
+    setCoverage(null);
+    // Reset
+    setFiles(prev => prev.map(f => ({ ...f, tests: f.tests.map(t => ({ ...t, status: 'idle' as const })) })));
+    await new Promise(r => setTimeout(r, 200));
+
+    for (let fi = 0; fi < testFiles.length; fi++) {
+      for (const test of testFiles[fi].tests) {
+        setFiles(prev => prev.map((f, i) => i !== fi ? f : { ...f, tests: f.tests.map(t => t.id === test.id ? { ...t, status: 'running' } : t) }));
+        await new Promise(r => setTimeout(r, 250 + Math.random() * 200));
+        const pass = Math.random() > 0.1; // 90% pass rate
+        setFiles(prev => prev.map((f, i) => i !== fi ? f : { ...f, tests: f.tests.map(t => t.id === test.id ? { ...t, status: pass ? 'pass' : 'fail' } : t) }));
+      }
+    }
+
+    setCoverage({ lines: 84, branches: 71, fns: 88 });
+    setRunning(false);
+  };
+
+  const allTests = files.flatMap(f => f.tests);
+  const passed = allTests.filter(t => t.status === 'pass').length;
+  const failed = allTests.filter(t => t.status === 'fail').length;
+  const total = allTests.length;
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🃏 Jest Test Runner</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+        jest-preset-angular + jest.fn() + snapshots + TestScheduler
+      </p>
+
+      {/* Summary */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '1.25rem', fontSize: '0.82rem' }}>
+          <span>Tests: <b style={{ color: '#e2e8f0' }}>{total}</b></span>
+          <span style={{ color: SUCCESS }}>✓ {passed}</span>
+          <span style={{ color: RED }}>✗ {failed}</span>
+        </div>
+        <button onClick={runAll} disabled={running} style={{ padding: '0.4rem 1rem', background: running ? '#334155' : RED, color: running ? '#475569' : '#fff', border: 'none', borderRadius: '4px', cursor: running ? 'not-allowed' : 'pointer', fontSize: '0.78rem', fontWeight: 700 }}>
+          {running ? '⏳ Running Jest...' : '▶ npx jest'}
+        </button>
+      </div>
+
+      {/* Test files */}
+      {files.map((file, fi) => (
+        <div key={file.name} style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '0.75rem' }}>
+          <div style={{ color: WARN, fontSize: '0.78rem', marginBottom: '0.5rem', display: 'flex', justifyContent: 'space-between' }}>
+            <span>📄 {file.name}</span>
+            <span style={{ color: '#475569', fontSize: '0.72rem' }}>
+              {file.tests.filter(t => t.status === 'pass').length}/{file.tests.length} passed
+            </span>
+          </div>
+          {file.tests.map(test => (
+            <div key={test.id} style={{ padding: '0.4rem 0.5rem', marginBottom: '0.25rem', background: BG, border: \`1px solid \${test.status === 'pass' ? SUCCESS : test.status === 'fail' ? RED : BORDER}\`, borderRadius: '5px', transition: 'border-color 0.2s' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span style={{ color: test.status === 'running' ? WARN : test.status === 'pass' ? SUCCESS : test.status === 'fail' ? RED : '#334155', fontWeight: 700, fontSize: '0.9rem', minWidth: '14px' }}>
+                  {test.status === 'running' ? '⏳' : test.status === 'pass' ? '✓' : test.status === 'fail' ? '✗' : '○'}
+                </span>
+                <span style={{ fontSize: '0.75rem', color: test.status === 'pass' ? '#e2e8f0' : test.status === 'fail' ? RED : '#64748b', flex: 1 }}>
+                  {test.description}
+                </span>
+                <span style={{ fontSize: '0.65rem', padding: '0.1rem 0.35rem', background: typeColors[test.type] + '20', color: typeColors[test.type], border: \`1px solid \${typeColors[test.type]}\`, borderRadius: '3px' }}>
+                  {typeLabels[test.type]}
+                </span>
+                {test.type === 'snapshot' && test.status === 'pass' && (
+                  <button onClick={() => setShowSnapshot(test.snapshot || null)} style={{ padding: '0.1rem 0.4rem', background: '#8b5cf620', color: '#8b5cf6', border: '1px solid #8b5cf6', borderRadius: '3px', cursor: 'pointer', fontSize: '0.65rem' }}>
+                    📸 View
+                  </button>
+                )}
+              </div>
+              {test.status !== 'idle' && test.status !== 'running' && (
+                <div style={{ color: '#334155', fontSize: '0.68rem', paddingLeft: '1.25rem', marginTop: '0.1rem' }}>{test.code}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {/* Coverage report */}
+      {coverage && (
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem', marginBottom: '0.75rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>Coverage Report</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.5rem' }}>
+            {[['Lines', coverage.lines], ['Branches', coverage.branches], ['Functions', coverage.fns]].map(([label, val]) => (
+              <div key={label} style={{ background: BG, borderRadius: '6px', padding: '0.5rem', textAlign: 'center' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 700, color: Number(val) >= 80 ? SUCCESS : WARN }}>{val}%</div>
+                <div style={{ fontSize: '0.68rem', color: '#475569' }}>{label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Snapshot modal */}
+      {showSnapshot && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }} onClick={() => setShowSnapshot(null)}>
+          <div style={{ background: CARD, border: \`1px solid #8b5cf6\`, borderRadius: '8px', padding: '1.25rem', maxWidth: '400px', width: '90%' }}>
+            <div style={{ color: '#8b5cf6', fontWeight: 700, marginBottom: '0.75rem' }}>📸 Snapshot</div>
+            <pre style={{ background: BG, padding: '0.75rem', borderRadius: '4px', fontSize: '0.75rem', color: '#94a3b8', overflowX: 'auto' }}>{showSnapshot}</pre>
+            <div style={{ color: '#475569', fontSize: '0.72rem', marginTop: '0.5rem' }}>Click anywhere to close</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

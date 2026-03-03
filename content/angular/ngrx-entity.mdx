@@ -1,0 +1,501 @@
+## 🗂️ NgRx Entity — Управление коллекциями
+
+NgRx Entity — это надстройка над Store для работы с нормализованными коллекциями объектов. Вместо того чтобы писать одни и те же CRUD-редьюсеры снова и снова, Entity даёт тебе готовые операции за несколько строк кода 📦
+
+---
+
+## Установка
+
+```bash
+npm install @ngrx/entity
+```
+
+---
+
+## EntityState — структура нормализованной коллекции
+
+NgRx Entity хранит данные в нормализованном виде — не как массив `[{id:1,...}, {id:2,...}]`, а как:
+
+```typescript
+interface EntityState<T> {
+  ids: string[] | number[];     // ["1", "2", "3"] — порядок
+  entities: { [id: string]: T }; // { "1": {...}, "2": {...} } — быстрый доступ по ID
+}
+```
+
+**Почему это лучше массива:**
+- O(1) поиск по ID вместо O(n)
+- Нет дублей (каждый ID уникален)
+- Простые обновления без перебора массива
+
+---
+
+## createEntityAdapter()
+
+```typescript
+// store/users/users.reducer.ts
+import { createEntityAdapter, EntityAdapter, EntityState } from '@ngrx/entity';
+import { User } from '../../models/user.model';
+
+// Создаём адаптер для типа User
+export const usersAdapter: EntityAdapter<User> = createEntityAdapter<User>({
+  // selectId: как получить уникальный ID (по умолчанию entity.id)
+  selectId: (user: User) => user.id,
+
+  // sortComparer: функция сортировки (по умолчанию нет сортировки)
+  sortComparer: (a: User, b: User) => a.name.localeCompare(b.name),
+});
+
+// Расширяем EntityState дополнительными полями
+export interface UsersState extends EntityState<User> {
+  loading: boolean;
+  creating: boolean;
+  error: string | null;
+  selectedUserId: string | null;
+  total: number;
+  filter: string;
+}
+
+// Начальное состояние через getInitialState()
+export const initialState: UsersState = usersAdapter.getInitialState({
+  loading: false,
+  creating: false,
+  error: null,
+  selectedUserId: null,
+  total: 0,
+  filter: '',
+});
+```
+
+---
+
+## CRUD операции адаптера
+
+```typescript
+// store/users/users.reducer.ts
+import { createReducer, on } from '@ngrx/store';
+import * as UsersActions from './users.actions';
+
+export const usersReducer = createReducer(
+  initialState,
+
+  // ===== LOAD (массив) =====
+  on(UsersActions.loadUsers, state => ({
+    ...state, loading: true, error: null
+  })),
+
+  on(UsersActions.loadUsersSuccess, (state, { users, total }) =>
+    // setAll: заменяет ВСЕ entities новым массивом
+    usersAdapter.setAll(users, { ...state, loading: false, total })
+  ),
+
+  // ===== CREATE =====
+  on(UsersActions.createUserSuccess, (state, { user }) =>
+    // addOne: добавляет одного, НЕ заменяет если уже есть
+    usersAdapter.addOne(user, { ...state, creating: false, total: state.total + 1 })
+  ),
+
+  // addMany: добавляет несколько
+  on(UsersActions.importUsersSuccess, (state, { users }) =>
+    usersAdapter.addMany(users, state)
+  ),
+
+  // ===== UPDATE =====
+  on(UsersActions.updateUserSuccess, (state, { id, changes }) =>
+    // updateOne: частичное обновление
+    usersAdapter.updateOne({ id, changes }, state)
+  ),
+
+  on(UsersActions.updateManyUsers, (state, { updates }) =>
+    // updateMany: несколько обновлений
+    usersAdapter.updateMany(updates, state)
+  ),
+
+  // setOne: полная замена (upsert с заменой)
+  on(UsersActions.setUserFromSocket, (state, { user }) =>
+    usersAdapter.setOne(user, state)
+  ),
+
+  // upsertOne: добавить если нет, обновить если есть
+  on(UsersActions.syncUser, (state, { user }) =>
+    usersAdapter.upsertOne(user, state)
+  ),
+
+  // upsertMany
+  on(UsersActions.syncUsers, (state, { users }) =>
+    usersAdapter.upsertMany(users, state)
+  ),
+
+  // ===== DELETE =====
+  on(UsersActions.deleteUserSuccess, (state, { id }) =>
+    // removeOne: удалить по ID
+    usersAdapter.removeOne(id, { ...state, total: state.total - 1 })
+  ),
+
+  on(UsersActions.deleteUsersSuccess, (state, { ids }) =>
+    // removeMany: удалить несколько по IDs
+    usersAdapter.removeMany(ids, state)
+  ),
+
+  // removeWhere: удалить по предикату
+  on(UsersActions.deleteInactiveUsers, state =>
+    usersAdapter.removeMany(
+      user => !user.isActive,
+      state
+    )
+  ),
+
+  // removeAll: очистить коллекцию
+  on(UsersActions.clearUsers, state =>
+    usersAdapter.removeAll({ ...state, total: 0 })
+  ),
+
+  // mapOne: трансформация одного элемента
+  on(UsersActions.toggleUserActive, (state, { id }) =>
+    usersAdapter.mapOne(
+      { id, map: user => ({ ...user, isActive: !user.isActive }) },
+      state
+    )
+  ),
+
+  // map: трансформация всех элементов
+  on(UsersActions.deactivateAll, state =>
+    usersAdapter.map(user => ({ ...user, isActive: false }), state)
+  ),
+
+  on(UsersActions.loadUsersFailure, (state, { error }) => ({
+    ...state, loading: false, error
+  })),
+);
+```
+
+---
+
+## Встроенные селекторы
+
+`createEntityAdapter` возвращает готовые селекторы:
+
+```typescript
+// store/users/users.selectors.ts
+import { createFeatureSelector, createSelector } from '@ngrx/store';
+import { usersAdapter, UsersState } from './users.reducer';
+
+export const selectUsersState = createFeatureSelector<UsersState>('users');
+
+// Получаем встроенные selectors из адаптера
+export const {
+  selectIds: selectUserIds,           // ids[]
+  selectEntities: selectUserEntities, // {id: User} dictionary
+  selectAll: selectAllUsers,          // User[] (отсортированный по sortComparer)
+  selectTotal: selectUsersCount,      // number
+} = usersAdapter.getSelectors(selectUsersState);
+
+// Дополнительные кастомные селекторы
+export const selectUsersLoading = createSelector(
+  selectUsersState,
+  state => state.loading
+);
+
+export const selectSelectedUserId = createSelector(
+  selectUsersState,
+  state => state.selectedUserId
+);
+
+export const selectSelectedUser = createSelector(
+  selectUserEntities,
+  selectSelectedUserId,
+  (entities, selectedId) =>
+    selectedId ? entities[selectedId] ?? null : null
+);
+
+// Быстрый поиск по ID через entities (O(1))
+export const selectUserById = (id: string) =>
+  createSelector(selectUserEntities, entities => entities[id] ?? null);
+
+export const selectActiveUsers = createSelector(
+  selectAllUsers,
+  users => users.filter(u => u.isActive)
+);
+```
+
+---
+
+## Пример полного flow в компоненте
+
+```typescript
+@Component({
+  standalone: true,
+  imports: [AsyncPipe, ...],
+  template: `
+    @if (loading$ | async) { <mat-spinner /> }
+
+    <mat-form-field>
+      <input matInput placeholder="Поиск..." (input)="onSearch($event)" />
+    </mat-form-field>
+
+    <div class="users-count">
+      Показано: {{ (filteredUsers$ | async)?.length }} из {{ total$ | async }}
+    </div>
+
+    @for (user of filteredUsers$ | async; track user.id) {
+      <app-user-card
+        [user]="user"
+        (edit)="onEdit(user)"
+        (delete)="onDelete(user.id)"
+        (toggle)="onToggleActive(user.id)"
+      />
+    }
+  `
+})
+export class UsersPageComponent implements OnInit {
+  private store = inject(Store);
+  private dialog = inject(MatDialog);
+
+  loading$ = this.store.select(selectUsersLoading);
+  total$ = this.store.select(selectUsersCount);
+  filteredUsers$ = this.store.select(selectActiveUsers);
+
+  ngOnInit() {
+    this.store.dispatch(UsersActions.loadUsers());
+  }
+
+  onToggleActive(id: string) {
+    this.store.dispatch(UsersActions.toggleUserActive({ id }));
+  }
+
+  onDelete(id: string) {
+    this.store.dispatch(UsersActions.deleteUser({ id }));
+  }
+
+  onEdit(user: User) {
+    const ref = this.dialog.open(UserEditDialogComponent, { data: user });
+    ref.afterClosed().subscribe(changes => {
+      if (changes) {
+        this.store.dispatch(UsersActions.updateUser({ id: user.id, changes }));
+      }
+    });
+  }
+}
+```
+
+---
+
+### Практика
+
+<Playground template="react" files={{ "/App.tsx": `import { useReducer, useState } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+
+interface User {
+  id: string;
+  name: string;
+  dept: string;
+  active: boolean;
+  role: 'admin' | 'user' | 'guest';
+}
+
+// Normalized EntityState
+interface EntityState {
+  ids: string[];
+  entities: Record<string, User>;
+  loading: boolean;
+  selectedId: string | null;
+}
+
+const initialUsers: User[] = [
+  { id: '1', name: 'Яша', dept: 'Engineering', active: true, role: 'admin' },
+  { id: '2', name: 'Алиса', dept: 'Design', active: true, role: 'user' },
+  { id: '3', name: 'Боб', dept: 'Engineering', active: false, role: 'user' },
+];
+
+// Simulate EntityAdapter
+function setAll(users: User[], state: EntityState): EntityState {
+  const entities: Record<string, User> = {};
+  const ids: string[] = [];
+  users.sort((a, b) => a.name.localeCompare(b.name)).forEach(u => { entities[u.id] = u; ids.push(u.id); });
+  return { ...state, ids, entities, loading: false };
+}
+
+function addOne(user: User, state: EntityState): EntityState {
+  if (state.entities[user.id]) return state;
+  return { ...state, ids: [...state.ids, user.id].sort((a, b) => (state.entities[a]?.name || user.name).localeCompare(state.entities[b]?.name || '')), entities: { ...state.entities, [user.id]: user } };
+}
+
+function updateOne(id: string, changes: Partial<User>, state: EntityState): EntityState {
+  if (!state.entities[id]) return state;
+  return { ...state, entities: { ...state.entities, [id]: { ...state.entities[id], ...changes } } };
+}
+
+function removeOne(id: string, state: EntityState): EntityState {
+  const { [id]: _, ...rest } = state.entities;
+  return { ...state, ids: state.ids.filter(i => i !== id), entities: rest };
+}
+
+function upsertOne(user: User, state: EntityState): EntityState {
+  if (state.entities[user.id]) return updateOne(user.id, user, state);
+  return addOne(user, state);
+}
+
+// Selectors
+const selectAll = (s: EntityState) => s.ids.map(id => s.entities[id]).filter(Boolean);
+const selectTotal = (s: EntityState) => s.ids.length;
+const selectById = (id: string, s: EntityState) => s.entities[id] ?? null;
+
+type ActionType = 'SET_ALL' | 'ADD_ONE' | 'UPDATE_ONE' | 'REMOVE_ONE' | 'UPSERT_ONE' | 'REMOVE_WHERE' | 'MAP_ONE' | 'SELECT';
+
+function reducer(state: EntityState, action: { type: ActionType; payload?: any }): EntityState {
+  switch (action.type) {
+    case 'SET_ALL': return setAll(action.payload, state);
+    case 'ADD_ONE': return addOne(action.payload, state);
+    case 'UPDATE_ONE': return updateOne(action.payload.id, action.payload.changes, state);
+    case 'REMOVE_ONE': return removeOne(action.payload, state);
+    case 'UPSERT_ONE': return upsertOne(action.payload, state);
+    case 'REMOVE_WHERE': return { ...state, ids: state.ids.filter(id => action.payload(state.entities[id])), entities: Object.fromEntries(Object.entries(state.entities).filter(([, u]) => action.payload(u))) };
+    case 'MAP_ONE': return updateOne(action.payload.id, action.payload.map(state.entities[action.payload.id]), state);
+    case 'SELECT': return { ...state, selectedId: state.selectedId === action.payload ? null : action.payload };
+    default: return state;
+  }
+}
+
+let nextId = 10;
+
+export default function App() {
+  const [state, dispatch] = useReducer(reducer, {
+    ...setAll(initialUsers, { ids: [], entities: {}, loading: false, selectedId: null }),
+    selectedId: null,
+  });
+  const [log, setLog] = useState<string[]>([]);
+  const [newName, setNewName] = useState('');
+  const [editName, setEditName] = useState('');
+
+  const addLog = (msg: string) => setLog(p => [msg, ...p.slice(0, 8)]);
+
+  const users = selectAll(state);
+  const selectedUser = state.selectedId ? selectById(state.selectedId, state) : null;
+
+  const ops = [
+    {
+      label: 'setAll(initialUsers)',
+      color: '#8b5cf6',
+      action: () => { dispatch({ type: 'SET_ALL', payload: initialUsers }); addLog('setAll(initialUsers) — replace all'); },
+    },
+    {
+      label: 'removeMany(inactive)',
+      color: WARN,
+      action: () => { dispatch({ type: 'REMOVE_WHERE', payload: (u: User) => u.active }); addLog('removeMany(u => !u.active)'); },
+    },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🗂️ NgRx Entity Playground</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+        createEntityAdapter + CRUD operations + selectAll/selectEntities
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        {/* Operations */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>Adapter Operations</div>
+
+          <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.5rem' }}>
+            <input
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              placeholder="Name..."
+              style={{ flex: 1, padding: '0.4rem', background: BG, border: \`1px solid \${BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.75rem', outline: 'none' }}
+            />
+            <button onClick={() => {
+              if (!newName.trim()) return;
+              const id = String(nextId++);
+              const user: User = { id, name: newName, dept: 'New', active: true, role: 'guest' };
+              dispatch({ type: 'ADD_ONE', payload: user });
+              addLog(\`addOne({ id: "\${id}", name: "\${newName}" })\`);
+              setNewName('');
+            }} style={{ padding: '0.4rem 0.6rem', background: SUCCESS, color: BG, border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 700 }}>+</button>
+          </div>
+
+          {selectedUser && (
+            <div style={{ background: BG, border: \`1px solid \${RED}\`, borderRadius: '6px', padding: '0.6rem', marginBottom: '0.5rem' }}>
+              <div style={{ color: RED, fontSize: '0.72rem', marginBottom: '0.35rem' }}>Selected: {selectedUser.name}</div>
+              <div style={{ display: 'flex', gap: '0.35rem' }}>
+                <input value={editName} onChange={e => setEditName(e.target.value)} placeholder="New name..." style={{ flex: 1, padding: '0.3rem', background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '3px', color: '#e2e8f0', fontSize: '0.72rem', outline: 'none' }} />
+                <button onClick={() => {
+                  if (!editName.trim()) return;
+                  dispatch({ type: 'UPDATE_ONE', payload: { id: state.selectedId, changes: { name: editName } } });
+                  addLog(\`updateOne({ id: "\${state.selectedId}", changes: { name: "\${editName}" } })\`);
+                  setEditName('');
+                }} style={{ padding: '0.3rem 0.5rem', background: WARN, color: BG, border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '0.72rem', fontWeight: 700 }}>✎</button>
+                <button onClick={() => {
+                  dispatch({ type: 'MAP_ONE', payload: { id: state.selectedId, map: (u: User) => ({ ...u, active: !u.active }) } });
+                  addLog(\`mapOne({ id: "\${state.selectedId}", map: u => ({...u, active: !\${selectedUser.active}}) })\`);
+                }} style={{ padding: '0.3rem 0.5rem', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '0.72rem' }}>⟳</button>
+                <button onClick={() => {
+                  dispatch({ type: 'REMOVE_ONE', payload: state.selectedId });
+                  addLog(\`removeOne("\${state.selectedId}")\`);
+                }} style={{ padding: '0.3rem 0.5rem', background: RED, color: '#fff', border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '0.72rem' }}>✕</button>
+              </div>
+            </div>
+          )}
+
+          {ops.map(op => (
+            <button key={op.label} onClick={op.action} style={{ display: 'block', width: '100%', padding: '0.4rem 0.6rem', background: op.color + '20', border: \`1px solid \${op.color}\`, color: op.color, borderRadius: '4px', cursor: 'pointer', fontSize: '0.73rem', fontWeight: 600, marginBottom: '0.35rem', textAlign: 'left' }}>
+              {op.label}
+            </button>
+          ))}
+
+          <button onClick={() => {
+            const id = String(nextId++);
+            const name = 'Sync User';
+            dispatch({ type: 'UPSERT_ONE', payload: { id: state.ids[0] || id, name, dept: 'HR', active: true, role: 'user' as const } });
+            addLog(\`upsertOne({ id: "\${state.ids[0] || id}", name: "\${name}" }) — add or update\`);
+          }} style={{ display: 'block', width: '100%', padding: '0.4rem 0.6rem', background: '#0284c720', border: '1px solid #0284c7', color: '#0284c7', borderRadius: '4px', cursor: 'pointer', fontSize: '0.73rem', fontWeight: 600, textAlign: 'left' }}>
+            upsertOne(first | new)
+          </button>
+        </div>
+
+        {/* Entity State */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.5rem', textTransform: 'uppercase' }}>
+            selectAll() — {selectTotal(state)} entities
+          </div>
+          <div style={{ maxHeight: '200px', overflowY: 'auto', marginBottom: '0.5rem' }}>
+            {users.map(u => (
+              <div key={u.id} onClick={() => { dispatch({ type: 'SELECT', payload: u.id }); addLog(\`selectUser("\${u.id}")\`); }} style={{
+                display: 'flex', alignItems: 'center', gap: '0.5rem',
+                padding: '0.4rem 0.5rem',
+                background: state.selectedId === u.id ? RED + '15' : BG,
+                border: \`1px solid \${state.selectedId === u.id ? RED : BORDER}\`,
+                borderRadius: '5px', marginBottom: '0.3rem', cursor: 'pointer', fontSize: '0.75rem',
+              }}>
+                <span style={{ color: u.active ? SUCCESS : '#475569', fontSize: '0.8rem' }}>●</span>
+                <span style={{ fontWeight: 600 }}>{u.name}</span>
+                <span style={{ color: '#475569' }}>{u.dept}</span>
+                <span style={{ marginLeft: 'auto', color: '#334155', fontSize: '0.68rem' }}>#{u.id}</span>
+              </div>
+            ))}
+            {users.length === 0 && <div style={{ color: '#334155', textAlign: 'center', padding: '1rem', fontSize: '0.8rem' }}>Empty collection</div>}
+          </div>
+          <div style={{ fontSize: '0.7rem', color: '#334155' }}>
+            ids: [{state.ids.map(id => \`"\${id}"\`).join(', ')}]
+          </div>
+        </div>
+      </div>
+
+      {/* Adapter log */}
+      <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', maxHeight: '120px', overflowY: 'auto' }}>
+        <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.35rem' }}>EntityAdapter Log</div>
+        {log.length === 0
+          ? <div style={{ color: '#334155', fontSize: '0.78rem' }}>// Perform CRUD operations...</div>
+          : log.map((l, i) => <div key={i} style={{ color: i === 0 ? SUCCESS : '#475569', fontSize: '0.75rem', marginBottom: '0.1rem' }}>usersAdapter.{l}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,540 @@
+## TypeScript: Виртуализация списков
+
+Привет, пацаны и девчата! Сегодня мы нырнем в мир производительности и рассмотрим одну из ключевых техник для работы с большими объемами данных в UI — виртуализацию списков. Если вы когда-нибудь сталкивались с лагами при прокрутке длинного списка из тысяч элементов, то этот урок для вас. Виртуализация — это наш спаситель, который превратит "тормоза" в плавное скольжение!
+
+### Что такое виртуализация списков и зачем она нужна?
+
+Представьте, что у вас есть список из 10 000 комментариев к видео, или 50 000 товаров в каталоге. Если браузер попытается отрисовать все эти элементы одновременно, он просто захлебнется. DOM станет огромным, стили будут пересчитываться дольше, и пользователь получит слайд-шоу вместо плавной прокрутки.
+
+Виртуализация списков решает эту проблему, отрисовывая только те элементы, которые *видимы* в текущий момент на экране, плюс небольшой буфер сверху и снизу. Остальные элементы не существуют в DOM, пока не попадут в область видимости. Это как кинопроектор: он показывает лишь один кадр за раз, хотя фильм состоит из тысяч. Мы "проектируем" только нужные элементы, а не держим весь фильм на экране.
+
+**Ключевые идеи:**
+1.  **Отрисовка подмножества:** Рендерим только видимую часть списка.
+2.  **Пересчет позиции:** Используем `transform: translateY()` (или `top` в абсолютном позиционировании) для смещения видимых элементов, чтобы они выглядели так, будто находятся на своих настоящих позициях.
+3.  **Фиксированная высота:** Самый простой вариант — когда все элементы списка имеют одинаковую высоту.
+4.  **Динамическая высота:** Более сложный, но гибкий вариант, когда элементы могут иметь разную высоту.
+
+### Основная теория с примерами: Фиксированная высота элементов
+
+Начнем с самого простого, но мощного случая: все элементы списка имеют одинаковую высоту.
+
+#### ### Интерфейсы и типы для нашего виртуального списка
+
+```typescript
+// Тип данных для элемента списка
+interface ListItem {
+  id: string;
+  text: string;
+  // Могут быть любые другие данные
+}
+
+// Пропсы для компонента виртуального списка
+interface VirtualListProps<T extends ListItem> {
+  data: T[]; // Массив данных для отображения
+  itemHeight: number; // Фиксированная высота каждого элемента в пикселях
+  containerHeight: number; // Высота контейнера, в котором отображается список
+  renderItem: (item: T, index: number) => JSX.Element; // Функция для рендера каждого элемента
+  overscanCount?: number; // Количество элементов для рендера за пределами видимой области (буфер)
+}
+
+// Состояние нашего виртуального списка (в реальном приложении это был бы useState или store)
+interface VirtualListState {
+  scrollTop: number; // Текущая позиция прокрутки
+  visibleStartIndex: number; // Индекс первого видимого элемента
+  visibleEndIndex: number; // Индекс последнего видимого элемента
+}
+```
+
+#### ### Расчет видимой области
+
+Самое главное — это определить, какие элементы должны быть видны. Это зависит от текущей позиции скролла (`scrollTop`), высоты контейнера (`containerHeight`) и высоты каждого элемента (`itemHeight`).
+
+```typescript
+// Вспомогательная функция для расчета видимого диапазона
+function calculateVisibleRange<T extends ListItem>(
+  props: Pick<VirtualListProps<T>, 'data' | 'itemHeight' | 'containerHeight' | 'overscanCount'>,
+  scrollTop: number
+): { startIndex: number; endIndex: number } {
+  const { data, itemHeight, containerHeight, overscanCount = 3 } = props;
+  const totalItems = data.length;
+
+  // Рассчитываем, сколько элементов помещается в видимой области
+  const itemsInView = Math.ceil(containerHeight / itemHeight);
+
+  // Определяем начальный индекс видимого элемента
+  let startIndex = Math.floor(scrollTop / itemHeight);
+
+  // Определяем конечный индекс видимого элемента
+  let endIndex = Math.min(totalItems - 1, startIndex + itemsInView);
+
+  // Добавляем буфер (overscan) для плавной прокрутки
+  startIndex = Math.max(0, startIndex - overscanCount);
+  endIndex = Math.min(totalItems - 1, endIndex + overscanCount);
+
+  return { startIndex, endIndex };
+}
+```
+
+#### ### Пример концептуального компонента VirtualList
+
+Давайте соберем это в концептуальный компонент, который показывает, как это могло бы выглядеть в React или другом фреймворке. Мы будем фокусироваться на логике TypeScript.
+
+```typescript
+// Концептуальный класс, представляющий логику VirtualList
+class VirtualListManager<T extends ListItem> {
+  private props: VirtualListProps<T>;
+  private state: VirtualListState;
+  private totalHeight: number; // Общая высота всего контента
+
+  constructor(props: VirtualListProps<T>) {
+    this.props = props;
+    this.state = {
+      scrollTop: 0,
+      visibleStartIndex: 0,
+      visibleEndIndex: 0,
+    };
+    this.totalHeight = props.data.length * props.itemHeight;
+
+    // Инициализируем видимый диапазон
+    this.updateVisibleRange(0);
+  }
+
+  // Обновляет пропсы (например, при изменении данных)
+  public updateProps(newProps: VirtualListProps<T>): void {
+    this.props = newProps;
+    this.totalHeight = newProps.data.length * newProps.itemHeight;
+    this.updateVisibleRange(this.state.scrollTop);
+  }
+
+  // Обработчик события прокрутки
+  public handleScroll(newScrollTop: number): void {
+    if (newScrollTop === this.state.scrollTop) {
+      return; // Оптимизация: если скролл не изменился, ничего не делаем
+    }
+    this.state.scrollTop = newScrollTop;
+    this.updateVisibleRange(newScrollTop);
+  }
+
+  // Метод для пересчета видимых элементов и обновления состояния
+  private updateVisibleRange(scrollTop: number): void {
+    const { startIndex, endIndex } = calculateVisibleRange(this.props, scrollTop);
+    if (startIndex !== this.state.visibleStartIndex || endIndex !== this.state.visibleEndIndex) {
+      this.state.visibleStartIndex = startIndex;
+      this.state.visibleEndIndex = endIndex;
+      // В реальном приложении здесь было бы обновление состояния компонента
+      // console.log(`Visible range: [${startIndex}, ${endIndex}]`);
+      // console.log(`Current scroll top: ${scrollTop}`);
+    }
+  }
+
+  // Получить данные для рендера
+  public getRenderedItems(): T[] {
+    const { data } = this.props;
+    const { visibleStartIndex, visibleEndIndex } = this.state;
+    // Возвращаем только те элементы, которые находятся в видимом диапазоне
+    return data.slice(visibleStartIndex, visibleEndIndex + 1);
+  }
+
+  // Получить стили для контейнера (например, высоту всего скролла и смещение)
+  public getContainerStyles(): { height: number; paddingTop: number; paddingBottom: number } {
+    const { itemHeight } = this.props;
+    const { visibleStartIndex } = this.state;
+
+    // Общая высота контента (для полосы прокрутки)
+    const totalContentHeight = this.totalHeight;
+    // Смещение для первого видимого элемента
+    const offsetTop = visibleStartIndex * itemHeight;
+
+    // Для простоты, paddingBottom не рассчитываем, но в реальном мире он нужен
+    // чтобы "заполнить" пространство после последнего видимого элемента.
+    return {
+      height: totalContentHeight, // Высота для создания скроллбара
+      paddingTop: offsetTop, // Смещение для создания эффекта "прокрутки"
+      paddingBottom: totalContentHeight - offsetTop - (this.getRenderedItems().length * itemHeight),
+    };
+  }
+}
+
+// --- Пример использования VirtualListManager ---
+const mockData: ListItem[] = Array.from({ length: 10000 }, (_, i) => ({
+  id: `item-${i}`,
+  text: `Это элемент номер ${i + 1}`,
+}));
+
+const virtualListProps: VirtualListProps<ListItem> = {
+  data: mockData,
+  itemHeight: 50, // Высота каждого элемента 50px
+  containerHeight: 500, // Высота видимого контейнера 500px (10 элементов)
+  renderItem: (item) => <div key={item.id}>{item.text}</div>, // Просто заглушка для рендера
+  overscanCount: 5, // Буфер из 5 элементов
+};
+
+const listManager = new VirtualListManager(virtualListProps);
+
+// Симулируем прокрутку
+listManager.handleScroll(0); // Скролл в начало
+console.log("При скролле 0px:", listManager.getRenderedItems().length, "элементов рендерится.");
+console.log("Стили контейнера при скролле 0px:", listManager.getContainerStyles());
+
+listManager.handleScroll(2000); // Скролл вниз на 2000px (40 элементов)
+console.log("При скролле 2000px:", listManager.getRenderedItems().length, "элементов рендерится.");
+console.log("Стили контейнера при скролле 2000px:", listManager.getContainerStyles());
+
+listManager.handleScroll(499950); // Скролл почти в конец
+console.log("При скролле 499950px:", listManager.getRenderedItems().length, "элементов рендерится.");
+console.log("Стили контейнера при скролле 499950px:", listManager.getContainerStyles());
+```
+
+### Продвинутые примеры: Переменная высота элементов
+
+Когда элементы имеют разную высоту, все становится интереснее. Мы не можем просто умножить `scrollTop` на `itemHeight`, потому что `itemHeight` больше не является константой.
+
+**Подход:**
+1.  **Кэширование высот:** Нам нужен способ хранить высоту каждого элемента. Если высота известна заранее, отлично. Если нет, её придется измерять после рендера и кэшировать.
+2.  **Карта позиций/префиксов:** Чтобы быстро находить `startIndex` по `scrollTop`, мы можем использовать массив префиксных сумм высот или бинарный поиск по кэшированным высотам.
+
+#### ### Интерфейс для элемента с динамической высотой
+
+```typescript
+// Интерфейс элемента с возможностью динамической высоты (если она известна заранее)
+interface DynamicListItem extends ListItem {
+  height?: number; // Высота элемента, если известна
+}
+
+// Пропсы для компонента виртуального списка с динамической высотой
+interface DynamicVirtualListProps<T extends DynamicListItem> extends Omit<VirtualListProps<T>, 'itemHeight'> {
+  // itemHeight здесь не нужен, так как высота переменна
+  // Мы можем опционально передать среднюю высоту для начальных расчетов
+  estimatedItemHeight?: number;
+}
+```
+
+#### ### Расчет видимой области с динамической высотой (концепт)
+
+Это значительно сложнее, и для полной реализации требуется взаимодействие с DOM (например, `ResizeObserver` для измерения высоты), что выходит за рамки чисто TypeScript-урока. Однако мы можем смоделировать логику.
+
+```typescript
+// Мы будем хранить кэшированные высоты и их префиксные суммы
+interface ItemMetrics {
+  height: number;
+  offset: number; // Смещение этого элемента от начала списка
+}
+
+// Класс для управления метриками элементов с динамической высотой
+class DynamicHeightListManager<T extends DynamicListItem> {
+  private props: DynamicVirtualListProps<T>;
+  private itemMetricsMap: Map<string, ItemMetrics> = new Map(); // Кэш метрик по ID
+  private totalHeight: number = 0; // Актуальная общая высота
+  private estimatedItemHeight: number;
+
+  constructor(props: DynamicVirtualListProps<T>) {
+    this.props = props;
+    this.estimatedItemHeight = props.estimatedItemHeight || 50; // Средняя/оценочная высота
+    this.recalculateMetrics(props.data);
+  }
+
+  // Обновление пропсов и пересчет метрик
+  public updateProps(newProps: DynamicVirtualListProps<T>): void {
+    this.props = newProps;
+    this.estimatedItemHeight = newProps.estimatedItemHeight || this.estimatedItemHeight;
+    this.recalculateMetrics(newProps.data);
+  }
+
+  // Метод для обновления метрик конкретного элемента (вызывается после его рендера и измерения)
+  public setItemHeight(itemId: string, height: number): void {
+    const currentMetric = this.itemMetricsMap.get(itemId);
+    if (!currentMetric || currentMetric.height !== height) {
+      // Обновляем высоту и пересчитываем все смещения после этого элемента
+      this.itemMetricsMap.set(itemId, { ...currentMetric, height });
+      this.recalculateOffsetsFrom(itemId);
+    }
+  }
+
+  // Пересчитываем все метрики или с определенного элемента
+  private recalculateMetrics(data: T[], startIndexId?: string): void {
+    let currentOffset = 0;
+    let foundStartIndex = false;
+
+    // Если указан startIndexId, ищем его
+    if (startIndexId) {
+      const metric = this.itemMetricsMap.get(startIndexId);
+      if (metric) {
+        currentOffset = metric.offset; // Начинаем от смещения этого элемента
+        foundStartIndex = true;
+      }
+    }
+
+    data.forEach((item, index) => {
+      let itemHeight = this.estimatedItemHeight;
+      const cachedMetric = this.itemMetricsMap.get(item.id);
+
+      // Если элемент уже был измерен, используем его реальную высоту
+      if (cachedMetric && (!startIndexId || foundStartIndex || item.id === startIndexId)) {
+        itemHeight = cachedMetric.height;
+      } else if (item.height) { // Если высота задана в данных
+        itemHeight = item.height;
+      }
+
+      this.itemMetricsMap.set(item.id, {
+        height: itemHeight,
+        offset: currentOffset,
+      });
+      currentOffset += itemHeight;
+    });
+    this.totalHeight = currentOffset;
+  }
+
+  private recalculateOffsetsFrom(itemId: string): void {
+    const data = this.props.data;
+    let currentOffset = 0;
+    let foundStartItem = false;
+
+    for (const item of data) {
+      const cachedMetric = this.itemMetricsMap.get(item.id);
+      if (cachedMetric) {
+        if (!foundStartItem && item.id !== itemId) {
+          // Ищем элемент, с которого нужно пересчитывать
+          currentOffset = cachedMetric.offset + cachedMetric.height;
+          continue;
+        } else if (item.id === itemId) {
+          foundStartItem = true;
+          // Обновляем offset для текущего элемента, если он изменился
+          this.itemMetricsMap.set(item.id, { ...cachedMetric, offset: currentOffset });
+          currentOffset += cachedMetric.height;
+          continue;
+        }
+        // Для всех последующих элементов, начиная с itemId, пересчитываем offset
+        this.itemMetricsMap.set(item.id, { ...cachedMetric, offset: currentOffset });
+        currentOffset += cachedMetric.height;
+      } else {
+        // Если метрик нет, используем оценочную высоту
+        const itemHeight = item.height || this.estimatedItemHeight;
+        this.itemMetricsMap.set(item.id, { height: itemHeight, offset: currentOffset });
+        currentOffset += itemHeight;
+      }
+    }
+    this.totalHeight = currentOffset;
+  }
+
+
+  // Найти индекс элемента, который должен быть виден на scrollTop
+  public getStartIndexByScrollTop(scrollTop: number): number {
+    // Используем бинарный поиск для эффективного нахождения startIndex
+    let low = 0;
+    let high = this.props.data.length - 1;
+    let resultIndex = 0;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const item = this.props.data[mid];
+      const metric = this.itemMetricsMap.get(item.id);
+      if (metric && metric.offset <= scrollTop) {
+        resultIndex = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return resultIndex;
+  }
+
+  // Определить видимый диапазон для динамической высоты
+  public getVisibleRange(scrollTop: number, containerHeight: number, overscanCount: number = 3): { startIndex: number; endIndex: number } {
+    const data = this.props.data;
+    if (data.length === 0) return { startIndex: 0, endIndex: 0 };
+
+    let startIndex = this.getStartIndexByScrollTop(scrollTop);
+    let currentHeight = 0;
+    let endIndex = startIndex;
+
+    // Идем вперед, пока не заполним видимую область
+    while (endIndex < data.length) {
+      const item = data[endIndex];
+      const metric = this.itemMetricsMap.get(item.id);
+      currentHeight += metric ? metric.height : this.estimatedItemHeight;
+      if (currentHeight >= containerHeight) {
+        break;
+      }
+      endIndex++;
+    }
+
+    // Применяем overscan
+    startIndex = Math.max(0, startIndex - overscanCount);
+    endIndex = Math.min(data.length - 1, endIndex + overscanCount);
+
+    return { startIndex, endIndex };
+  }
+
+  public getTotalHeight(): number {
+    return this.totalHeight;
+  }
+
+  public getItemOffset(index: number): number {
+    const item = this.props.data[index];
+    const metric = this.itemMetricsMap.get(item.id);
+    return metric ? metric.offset : 0; // Если метрики нет, то это ошибка или элемент еще не измерен
+  }
+}
+
+// --- Пример использования DynamicHeightListManager ---
+const dynamicMockData: DynamicListItem[] = Array.from({ length: 5000 }, (_, i) => ({
+  id: `dynamic-item-${i}`,
+  text: `Это элемент номер ${i + 1} с ${i % 3 === 0 ? 'большой' : 'обычной'} высотой.`,
+  height: i % 3 === 0 ? 80 : 40, // Некоторые элементы выше
+}));
+
+const dynamicListProps: DynamicVirtualListProps<DynamicListItem> = {
+  data: dynamicMockData,
+  containerHeight: 400, // Высота видимого контейнера
+  estimatedItemHeight: 50,
+  renderItem: (item) => <div key={item.id} style={{ height: item.height }}>{item.text}</div>,
+  overscanCount: 5,
+};
+
+const dynamicListManager = new DynamicHeightListManager(dynamicListProps);
+
+// Симулируем измерение высоты после рендера для нескольких элементов
+dynamicListManager.setItemHeight('dynamic-item-0', 80);
+dynamicListManager.setItemHeight('dynamic-item-1', 40);
+dynamicListManager.setItemHeight('dynamic-item-2', 40);
+dynamicListManager.setItemHeight('dynamic-item-3', 80); // Пересчет с 3-го элемента
+
+dynamicListManager.getVisibleRange(0, dynamicListProps.containerHeight); // Скролл в начало
+console.log("Динамический список - общая высота:", dynamicListManager.getTotalHeight());
+console.log("Динамический список - offset для item-100:", dynamicListManager.getItemOffset(99)); // Проверить смещение
+```
+
+### Типичные ошибки и подводные камни
+
+1.  **Неправильный `itemHeight` (для фиксированной высоты):** Если вы указываете неточную высоту элемента, список будет "прыгать", а скроллбар — вести себя неадекватно.
+2.  **Отсутствие `key` пропса:** В React/Vue каждый элемент списка должен иметь уникальный `key`. Без него переиспользование DOM-нод не работает, и производительность падает, а также могут быть баги со состоянием элементов.
+3.  **Неправильный `overflow`:** Контейнер списка должен иметь `overflow: auto` или `overflow: scroll` для появления полосы прокрутки.
+4.  **Слишком маленький `overscanCount`:** Если буфер слишком мал, элементы будут "появляться" и "исчезать" при быстрой прокрутке. Слишком большой — нивелирует преимущества виртуализации.
+5.  **Измерение динамических высот:** Если высоты элементов неизвестны заранее и их нужно измерять в DOM, это добавляет сложности. Важно делать это эффективно (например, с помощью `ResizeObserver`) и кэшировать результаты. Пересчитывать все высоты при каждом изменении — дорого.
+6.  **Отсутствие обработчика `scroll` или его оптимизация:** Важно подписываться на событие `scroll` и отписываться от него. Желательно использовать `debounce` или `throttle` для обработчика скролла, чтобы не вызывать перерасчеты слишком часто.
+
+### ### 🎯 Практика
+
+Ваша задача — расширить и улучшить нашу концепцию `VirtualListManager`.
+
+1.  **Добавьте возможность "загрузить еще" (infinite scrolling):**
+    *   Когда пользователь прокручивает список почти до конца, менеджер должен уведомить о необходимости загрузить больше данных.
+    *   Реализуйте метод `onReachEnd: () => void` в `VirtualListProps`, который вызывается, когда `scrollTop` приближается к концу списка (например, осталось 200px до конца).
+
+2.  **Реализуйте метод `scrollToIndex(index: number)`:**
+    *   Этот метод должен программно прокручивать список к указанному элементу, чтобы он стал видимым (желательно в верхней части контейнера).
+    *   Учитывайте как фиксированную, так и динамическую высоту (для динамической высоты вам придется использовать `getItemOffset`).
+
+3.  **Улучшите `getContainerStyles` для `DynamicHeightListManager`:**
+    *   Метод `getContainerStyles` должен возвращать правильные `paddingTop` и `paddingBottom` для корректного отображения скролла и смещения элементов, используя `itemMetricsMap`.
+
+### ### 💡 Совет
+
+Виртуализация списков — это мощный инструмент, но используйте его с умом. Для списков из 10-20 элементов выигрыш в производительности будет незначительным, а сложность кода возрастет. Однако для сотен и тысяч элементов это маст-хэв. Существуют отличные библиотеки (например, `react-window`, `react-virtualized` для React, или `@tanstack/react-virtual` для универсального использования), которые уже реализуют всю эту логику за вас, включая сложные сценарии с динамической высотой и "липкими" заголовками. Понимание принципов работы этих библиотек поможет вам эффективно их использовать и отлаживать.
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground template="react" files={{ "/App.tsx": `import { useState, useCallback, useRef } from 'react';
+
+const ITEM_HEIGHT = 44;
+const CONTAINER_HEIGHT = 420;
+const OVERSCAN = 3;
+const TOTAL = 10000;
+
+const ITEMS = Array.from({ length: TOTAL }, (_, i) => ({
+  id: i,
+  text: 'Row ' + (i + 1),
+  value: (i * 137) % 1000,
+  color: (['#38bdf8', '#a78bfa', '#34d399', '#fb923c', '#f472b6'] as const)[i % 5],
+}));
+
+export default function App() {
+  const [scrollTop, setScrollTop] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const visibleCount = Math.ceil(CONTAINER_HEIGHT / ITEM_HEIGHT);
+  const startIndex = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN);
+  const endIndex = Math.min(TOTAL - 1, startIndex + visibleCount + OVERSCAN * 2);
+  const visibleItems = ITEMS.slice(startIndex, endIndex + 1);
+  const totalHeight = TOTAL * ITEM_HEIGHT;
+  const offsetY = startIndex * ITEM_HEIGHT;
+
+  const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrollTop(e.currentTarget.scrollTop);
+  }, []);
+
+  const scrollTo = useCallback((index: number) => {
+    if (containerRef.current) {
+      containerRef.current.scrollTop = index * ITEM_HEIGHT;
+    }
+  }, []);
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: 24, fontFamily: 'monospace', color: 'white' }}>
+      <h2 style={{ color: '#38bdf8', margin: '0 0 4px' }}>List Virtualization</h2>
+      <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 12px' }}>
+        10,000 items — only rendering what is visible in the viewport
+      </p>
+
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ background: '#1e293b', borderRadius: 6, padding: '8px 14px', fontSize: 12 }}>
+          <span style={{ color: '#64748b' }}>DOM nodes: </span>
+          <span style={{ color: '#4ade80', fontWeight: 700 }}>{visibleItems.length}</span>
+          <span style={{ color: '#334155' }}> / {TOTAL.toLocaleString()}</span>
+        </div>
+        <div style={{ background: '#1e293b', borderRadius: 6, padding: '8px 14px', fontSize: 12 }}>
+          <span style={{ color: '#64748b' }}>Visible range: </span>
+          <span style={{ color: '#38bdf8' }}>{startIndex} – {endIndex}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {(['Top', 'Middle', 'End'] as const).map((label, i) => (
+            <button
+              key={label}
+              onClick={() => scrollTo([0, 4999, 9990][i])}
+              style={{ background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 11 }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div
+        ref={containerRef}
+        onScroll={onScroll}
+        style={{ height: CONTAINER_HEIGHT, overflowY: 'auto', borderRadius: 8, border: '1px solid #1e293b', position: 'relative' }}
+      >
+        <div style={{ height: totalHeight, position: 'relative' }}>
+          <div style={{ position: 'absolute', top: offsetY, left: 0, right: 0 }}>
+            {visibleItems.map(item => (
+              <div
+                key={item.id}
+                style={{
+                  height: ITEM_HEIGHT,
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: '0 16px',
+                  borderBottom: '1px solid #1e293b',
+                  background: item.id % 2 === 0 ? '#0f172a' : '#0b1120',
+                  gap: 12,
+                }}
+              >
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: item.color, flexShrink: 0 }} />
+                <span style={{ color: '#94a3b8', minWidth: 100, fontSize: 13 }}>{item.text}</span>
+                <span style={{ color: item.color, fontSize: 12, opacity: 0.7 }}>value: {item.value}</span>
+                <span style={{ color: '#334155', fontSize: 11, marginLeft: 'auto' }}>idx {item.id}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12, background: '#1e293b', borderRadius: 8, padding: 12, fontSize: 12, color: '#64748b', lineHeight: 1.6 }}>
+        Only {visibleItems.length} rows exist in the DOM. A full-height placeholder div creates the scrollbar.
+        As you scroll, the window of rendered rows shifts — everything else is virtual.
+      </div>
+    </div>
+  );
+}
+` }} />
