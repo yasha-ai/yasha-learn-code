@@ -1,0 +1,724 @@
+## 🧿 Специальные элементы Svelte
+
+Svelte имеет набор встроенных «магических» элементов — они начинаются с `svelte:` и дают возможности, которые нельзя получить обычным HTML или компонентами. Это как суперспособности для шаблонов 🦸
+
+---
+
+## Обзор всех специальных элементов
+
+```
+<svelte:self>          — рекурсивный рендер компонента
+<svelte:component>     — динамический выбор компонента
+<svelte:element>       — динамический HTML тег
+<svelte:window>        — события и привязки window
+<svelte:document>      — события document
+<svelte:body>          — события и классы body
+<svelte:head>          — meta теги, title, CSS
+<svelte:fragment>      — обёртка без DOM элемента
+<svelte:options>       — настройки компонента
+```
+
+---
+
+## svelte:self — Рекурсия 🔁
+
+Позволяет компоненту **рендерить самого себя**. Идеально для деревьев:
+
+```svelte
+<!-- TreeNode.svelte -->
+<script lang="ts">
+  interface TreeNode {
+    id: number
+    label: string
+    children?: TreeNode[]
+  }
+
+  export let node: TreeNode
+  export let depth = 0
+  let expanded = depth < 2  // Первые 2 уровня раскрыты
+</script>
+
+<div class="tree-node" style="padding-left: {depth * 16}px">
+  <button
+    class="toggle"
+    on:click={() => expanded = !expanded}
+    class:has-children={node.children?.length}
+  >
+    {#if node.children?.length}
+      {expanded ? '▼' : '▶'}
+    {:else}
+      •
+    {/if}
+    {node.label}
+  </button>
+
+  {#if expanded && node.children}
+    {#each node.children as child (child.id)}
+      <!-- Рекурсия! -->
+      <svelte:self node={child} depth={depth + 1} />
+    {/each}
+  {/if}
+</div>
+```
+
+```svelte
+<!-- Использование -->
+<script>
+  import TreeNode from './TreeNode.svelte'
+
+  const tree = {
+    id: 1,
+    label: '📁 Проект',
+    children: [
+      { id: 2, label: '📁 src', children: [
+        { id: 3, label: '📄 App.svelte' },
+        { id: 4, label: '📄 main.ts' },
+        { id: 5, label: '📁 components', children: [
+          { id: 6, label: '📄 Button.svelte' },
+        ]},
+      ]},
+      { id: 7, label: '📄 package.json' },
+    ],
+  }
+</script>
+
+<TreeNode node={tree} />
+```
+
+---
+
+## svelte:component — Динамические компоненты 🎭
+
+Рендерит **разные компоненты** в зависимости от значения:
+
+```svelte
+<script lang="ts">
+  import Button from './Button.svelte'
+  import Link from './Link.svelte'
+  import IconButton from './IconButton.svelte'
+
+  type ButtonType = 'button' | 'link' | 'icon'
+
+  export let type: ButtonType = 'button'
+  export let label: string
+
+  const components = {
+    button: Button,
+    link: Link,
+    icon: IconButton,
+  } as const
+
+  $: component = components[type]
+</script>
+
+<!-- Динамически выбирает компонент! -->
+<svelte:component this={component} {label} {...$$restProps} />
+```
+
+```svelte
+<!-- Паттерн: Page Router -->
+<script>
+  import HomePage from './pages/HomePage.svelte'
+  import AboutPage from './pages/AboutPage.svelte'
+  import ContactPage from './pages/ContactPage.svelte'
+  import NotFoundPage from './pages/NotFoundPage.svelte'
+
+  const routes = {
+    '/': HomePage,
+    '/about': AboutPage,
+    '/contact': ContactPage,
+  }
+
+  let currentPath = window.location.pathname
+  $: currentComponent = routes[currentPath] ?? NotFoundPage
+</script>
+
+<!-- this={null} — ничего не рендерится -->
+<svelte:component this={currentComponent} />
+```
+
+### Условие `this={null}`
+
+```svelte
+<script>
+  let component = null  // Ничего не рендерится!
+</script>
+
+{#if condition}
+  <!-- Альтернатива {#if} -->
+  <svelte:component this={condition ? MyComponent : null} />
+{/if}
+```
+
+---
+
+## svelte:element — Динамический HTML тег 🏷️
+
+Когда нужен разный HTML тег, но одинаковое содержимое:
+
+```svelte
+<script lang="ts">
+  export let level: 1 | 2 | 3 | 4 | 5 | 6 = 1
+  export let text: string
+
+  $: tag = `h${level}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
+</script>
+
+<!-- Рендерит h1, h2, h3 и т.д. в зависимости от level -->
+<svelte:element this={tag} class="heading">
+  {text}
+</svelte:element>
+```
+
+```svelte
+<!-- Паттерн: Полиморфный компонент -->
+<script lang="ts">
+  export let as: string = 'div'  // HTML тег
+  export let href: string | undefined = undefined
+
+  // Если href есть — используем 'a'
+  $: tag = href ? 'a' : as
+</script>
+
+<svelte:element this={tag} {href} {...$$restProps}>
+  <slot />
+</svelte:element>
+```
+
+```svelte
+<!-- Использование -->
+<Polymorphic>Обычный div</Polymorphic>
+<Polymorphic as="section">Секция</Polymorphic>
+<Polymorphic href="/about">Ссылка (тег a)</Polymorphic>
+<Polymorphic as="article">Статья</Polymorphic>
+```
+
+---
+
+## svelte:window — Привязки к window 🪟
+
+```svelte
+<script>
+  let scrollY = 0
+  let innerWidth = 0
+  let innerHeight = 0
+  let online = navigator.onLine
+
+  // Клавиши
+  function handleKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') closeModal()
+    if (event.ctrlKey && event.key === 's') saveDocument()
+  }
+</script>
+
+<!-- Привязки к свойствам window -->
+<svelte:window
+  bind:scrollY
+  bind:innerWidth
+  bind:innerHeight
+  bind:online
+  on:keydown={handleKeydown}
+  on:resize={() => console.log('Размер изменился')}
+  on:beforeunload={e => { e.preventDefault(); return '' }}
+/>
+
+<p>Прокрутка: {scrollY}px</p>
+<p>Ширина окна: {innerWidth}px</p>
+<p>
+  {innerWidth < 768 ? '📱 Мобильный' : '🖥️ Десктоп'}
+</p>
+```
+
+### Все доступные привязки svelte:window
+
+```
+bind:innerWidth    — ширина viewport
+bind:innerHeight   — высота viewport
+bind:outerWidth    — ширина окна с рамкой
+bind:outerHeight   — высота окна с рамкой
+bind:scrollX       — горизонтальная прокрутка
+bind:scrollY       — вертикальная прокрутка
+bind:online        — онлайн статус
+```
+
+---
+
+## svelte:document — Документ
+
+```svelte
+<script>
+  let pointerX = 0
+  let pointerY = 0
+  let activeElement: Element | null = null
+
+  function handlePointerMove(event: PointerEvent) {
+    pointerX = event.clientX
+    pointerY = event.clientY
+  }
+</script>
+
+<svelte:document
+  on:pointermove={handlePointerMove}
+  on:visibilitychange={() => {
+    if (document.hidden) pauseVideo()
+  }}
+  bind:activeElement
+/>
+
+<!-- Курсор всегда отображается -->
+<div
+  class="cursor"
+  style="left: {pointerX}px; top: {pointerY}px"
+/>
+```
+
+---
+
+## svelte:body — Управление body
+
+```svelte
+<script>
+  export let theme: 'dark' | 'light' = 'dark'
+  export let modalOpen = false
+</script>
+
+<svelte:body
+  class:dark-theme={theme === 'dark'}
+  class:modal-open={modalOpen}
+  on:touchstart={handleTouchStart}
+  on:touchend={handleTouchEnd}
+/>
+
+<!-- При modalOpen=true на body добавляется класс modal-open -->
+<!-- CSS: .modal-open { overflow: hidden; } -->
+```
+
+---
+
+## svelte:head — Meta теги, Title 📰
+
+```svelte
+<!-- +page.svelte (SvelteKit) -->
+<script>
+  export let data
+</script>
+
+<svelte:head>
+  <!-- Динамический title -->
+  <title>{data.post.title} | Мой блог</title>
+
+  <!-- Meta теги для SEO -->
+  <meta name="description" content={data.post.excerpt} />
+  <meta property="og:title" content={data.post.title} />
+  <meta property="og:image" content={data.post.coverImage} />
+  <meta property="og:type" content="article" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={data.post.title} />
+
+  <!-- Canonical URL -->
+  <link rel="canonical" href="https://myblog.com/posts/{data.post.slug}" />
+
+  <!-- Дополнительные стили для этой страницы -->
+  <link rel="stylesheet" href="/syntax-highlight.css" />
+</svelte:head>
+
+<article>
+  <h1>{data.post.title}</h1>
+  <!-- ... -->
+</article>
+```
+
+```svelte
+<!-- Компонент для переиспользования SEO -->
+<!-- Seo.svelte -->
+<script lang="ts">
+  export let title: string
+  export let description: string
+  export let image: string | undefined = undefined
+  export let noindex = false
+
+  const siteName = 'Мой Сайт'
+  const siteUrl = 'https://mysite.com'
+</script>
+
+<svelte:head>
+  <title>{title} | {siteName}</title>
+  <meta name="description" content={description} />
+  {#if noindex}
+    <meta name="robots" content="noindex, nofollow" />
+  {/if}
+  {#if image}
+    <meta property="og:image" content={image} />
+    <meta name="twitter:image" content={image} />
+  {/if}
+</svelte:head>
+```
+
+---
+
+## svelte:fragment — Группировка без обёртки
+
+```svelte
+<!-- Когда нужно передать несколько элементов в именованный слот -->
+<Layout>
+  <!-- БЕЗ svelte:fragment — нужен лишний div -->
+  <div slot="header">
+    <Logo />
+    <Nav />
+    <SearchBar />
+  </div>
+
+  <!-- С svelte:fragment — нет лишнего div в DOM! -->
+  <svelte:fragment slot="header">
+    <Logo />
+    <Nav />
+    <SearchBar />
+  </svelte:fragment>
+</Layout>
+```
+
+---
+
+## svelte:options — Настройки компонента ⚙️
+
+```svelte
+<!-- В начале файла, до <script> -->
+<svelte:options
+  immutable={true}
+  accessors={true}
+  namespace="svg"
+  customElement="my-button"
+/>
+
+<script>
+  export let count = 0
+</script>
+```
+
+### immutable — Оптимизация обновлений
+
+```svelte
+<!-- svelte:options immutable=true говорит Svelte:
+     "Данные не мутируются — только заменяются" -->
+<svelte:options immutable={true} />
+
+<script>
+  export let items: string[]
+  // Svelte теперь сравнивает items по ссылке (===)
+  // вместо глубокого сравнения
+  // БЫСТРЕЕ для больших списков!
+</script>
+
+{#each items as item}
+  <li>{item}</li>
+{/each}
+```
+
+### accessors — Внешний доступ к экспортам
+
+```svelte
+<!-- Counter.svelte -->
+<svelte:options accessors={true} />
+
+<script>
+  export let count = 0
+  export function increment() { count++ }
+</script>
+```
+
+```svelte
+<!-- Родитель может обращаться напрямую! -->
+<script>
+  import Counter from './Counter.svelte'
+
+  let counter: Counter
+
+  function external() {
+    console.log(counter.count)  // Читаем
+    counter.increment()          // Вызываем метод
+  }
+</script>
+
+<Counter bind:this={counter} />
+<button on:click={external}>Внешнее управление</button>
+```
+
+### customElement — Web Components
+
+```svelte
+<!-- Компилируется в настоящий Web Component! -->
+<svelte:options customElement="my-cool-button" />
+
+<script>
+  export let label = 'Нажми'
+  export let variant = 'primary'
+</script>
+
+<button class="btn btn--{variant}">
+  {label}
+</button>
+
+<!-- Теперь можно использовать без Svelte! -->
+<!-- <my-cool-button label="Привет" variant="secondary"></my-cool-button> -->
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const SVELTE = '#ff3e00';
+const YELLOW = '#ffba00';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+
+type Demo = 'self' | 'component' | 'element' | 'window' | 'head';
+
+interface TreeNode { id: number; label: string; children?: TreeNode[]; }
+
+const treeData: TreeNode = {
+  id: 1, label: '📁 svelte-project',
+  children: [
+    { id: 2, label: '📁 src', children: [
+      { id: 3, label: '📄 App.svelte' },
+      { id: 4, label: '📄 main.ts' },
+      { id: 5, label: '📁 components', children: [
+        { id: 6, label: '📄 Button.svelte' },
+        { id: 7, label: '📄 Card.svelte' },
+      ]},
+    ]},
+    { id: 8, label: '📁 static', children: [
+      { id: 9, label: '🖼️ favicon.png' },
+    ]},
+    { id: 10, label: '📄 svelte.config.js' },
+    { id: 11, label: '📄 package.json' },
+  ],
+};
+
+function TreeNodeComp({ node, depth = 0 }: { node: TreeNode; depth?: number }) {
+  const [expanded, setExpanded] = useState(depth < 1);
+  return (
+    <div>
+      <div
+        onClick={() => node.children && setExpanded(e => !e)}
+        style={{
+          paddingLeft: depth * 16 + 'px',
+          cursor: node.children ? 'pointer' : 'default',
+          padding: '0.2rem 0 0.2rem ' + (depth * 16) + 'px',
+          color: node.children ? SVELTE : TEXT,
+          fontSize: '0.82rem',
+          display: 'flex', alignItems: 'center', gap: '0.3rem',
+        }}
+        onMouseEnter={e => { if (node.children) (e.currentTarget as HTMLElement).style.opacity = '0.8'; }}
+        onMouseLeave={e => { (e.currentTarget as HTMLElement).style.opacity = '1'; }}
+      >
+        <span style={{color: MUTED, minWidth: '12px', fontSize: '0.65rem'}}>{node.children ? (expanded ? '▼' : '▶') : ' '}</span>
+        {node.label}
+      </div>
+      {expanded && node.children && node.children.map(child => (
+        <TreeNodeComp key={child.id} node={child} depth={depth + 1} />
+      ))}
+    </div>
+  );
+}
+
+const pageComponents: Record<string, {icon: string; content: string; color: string}> = {
+  home:    {icon: '🏠', content: 'Добро пожаловать на главную!', color: SVELTE},
+  about:   {icon: '👤', content: 'О нас: Мы создаём крутые сайты на Svelte', color: YELLOW},
+  contact: {icon: '📧', content: 'Свяжитесь с нами: hello@svelte.dev', color: '#60a5fa'},
+  blog:    {icon: '📝', content: 'Блог: статьи о Svelte и веб-разработке', color: '#34d399'},
+};
+
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('self');
+  const [currentPage, setCurrentPage] = useState('home');
+  const [headingLevel, setHeadingLevel] = useState(1);
+  const [scrollY, setScrollY] = useState(0);
+  const [winWidth, setWinWidth] = useState(window.innerWidth);
+  const [metaTitle, setMetaTitle] = useState('Моя страница');
+  const [metaDesc, setMetaDesc] = useState('Описание страницы для SEO');
+  const [dynamicTag, setDynamicTag] = useState('div');
+
+  useEffect(() => {
+    const onScroll = () => setScrollY(window.scrollY);
+    const onResize = () => setWinWidth(window.innerWidth);
+    window.addEventListener('scroll', onScroll);
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('scroll', onScroll); window.removeEventListener('resize', onResize); };
+  }, []);
+
+  const tabs: {key: Demo; icon: string; label: string}[] = [
+    {key: 'self',      icon: '🔁', label: 'svelte:self'},
+    {key: 'component', icon: '🎭', label: 'svelte:component'},
+    {key: 'element',   icon: '🏷️', label: 'svelte:element'},
+    {key: 'window',    icon: '🪟', label: 'svelte:window'},
+    {key: 'head',      icon: '📰', label: 'svelte:head'},
+  ];
+
+  const DynamicTag = dynamicTag as keyof JSX.IntrinsicElements;
+  const page = pageComponents[currentPage];
+
+  return (
+    <div style={{background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: TEXT}}>
+      <h2 style={{color: SVELTE, marginBottom: '0.25rem', fontSize: '1.2rem'}}>🧿 Специальные элементы</h2>
+      <p style={{color: MUTED, fontSize: '0.78rem', marginBottom: '1.25rem'}}>
+        svelte:self, svelte:component, svelte:element, svelte:window, svelte:head
+      </p>
+      <div style={{display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '1.25rem'}}>
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setDemo(t.key)} style={{
+            padding: '0.4rem 0.8rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+            background: demo === t.key ? SVELTE : CARD,
+            color: demo === t.key ? '#0f172a' : '#94a3b8',
+            fontWeight: demo === t.key ? 700 : 400, fontSize: '0.78rem',
+          }}>
+            {t.icon} {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{background: CARD, border: '1px solid ' + BORDER, borderRadius: '10px', padding: '1.25rem'}}>
+        {demo === 'self' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// <svelte:self node={child} depth={depth+1} /> — рекурсия!'}
+            </div>
+            <div style={{background: '#0a0f1e', borderRadius: '8px', padding: '0.75rem', fontFamily: 'monospace'}}>
+              <TreeNodeComp node={treeData} />
+            </div>
+            <div style={{marginTop: '0.75rem', color: MUTED, fontSize: '0.75rem'}}>
+              💡 Кликай на папки для раскрытия — это рекурсивный компонент!
+            </div>
+          </div>
+        )}
+
+        {demo === 'component' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// <svelte:component this={currentComponent} /> — динамический роутер'}
+            </div>
+            <div style={{display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '1rem'}}>
+              {Object.entries(pageComponents).map(([key, val]) => (
+                <button key={key} onClick={() => setCurrentPage(key)} style={{
+                  padding: '0.4rem 0.8rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                  background: currentPage === key ? val.color : CARD,
+                  color: currentPage === key ? '#0f172a' : '#94a3b8',
+                  fontWeight: currentPage === key ? 700 : 400, fontSize: '0.82rem',
+                }}>
+                  {val.icon} {key}
+                </button>
+              ))}
+            </div>
+            <div style={{background: '#0a0f1e', padding: '1.5rem', borderRadius: '8px', border: '1px solid ' + page.color + '44', textAlign: 'center' as const}}>
+              <div style={{fontSize: '2rem', marginBottom: '0.5rem'}}>{page.icon}</div>
+              <div style={{color: page.color, fontWeight: 700, marginBottom: '0.25rem'}}>{currentPage.toUpperCase()}</div>
+              <div style={{color: '#94a3b8', fontSize: '0.85rem'}}>{page.content}</div>
+            </div>
+            <div style={{marginTop: '0.75rem', background: '#0a0f1e', padding: '0.6rem', borderRadius: '6px', fontSize: '0.75rem'}}>
+              <span style={{color: '#60a5fa'}}>{'<svelte:component '}</span>
+              <span style={{color: YELLOW}}>this</span>
+              <span style={{color: TEXT}}>{'={routes["' + currentPage + '"]}'}</span>
+              <span style={{color: '#60a5fa'}}>{' />'}</span>
+            </div>
+          </div>
+        )}
+
+        {demo === 'element' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// <svelte:element this={tag}> — динамический HTML тег'}
+            </div>
+            <div style={{marginBottom: '1rem'}}>
+              <label style={{color: MUTED, fontSize: '0.78rem', display: 'block', marginBottom: '0.4rem'}}>Тег: &lt;{dynamicTag}&gt;</label>
+              <div style={{display: 'flex', gap: '0.4rem', flexWrap: 'wrap'}}>
+                {['div', 'section', 'article', 'aside', 'p', 'blockquote'].map(tag => (
+                  <button key={tag} onClick={() => setDynamicTag(tag)} style={{
+                    padding: '0.3rem 0.6rem', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                    background: dynamicTag === tag ? SVELTE : BORDER,
+                    color: dynamicTag === tag ? '#0f172a' : TEXT, fontSize: '0.78rem', fontFamily: 'monospace',
+                  }}>
+                    &lt;{tag}&gt;
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{marginBottom: '1rem'}}>
+              <label style={{color: MUTED, fontSize: '0.78rem', display: 'block', marginBottom: '0.4rem'}}>Heading level: h{headingLevel}</label>
+              <input type="range" min={1} max={6} value={headingLevel}
+                onChange={e => setHeadingLevel(Number(e.target.value))}
+                style={{width: '100%', accentColor: SVELTE, display: 'block'}}
+              />
+            </div>
+            <div style={{background: '#0a0f1e', padding: '1rem', borderRadius: '6px'}}>
+              {['h1','h2','h3','h4','h5','h6'][headingLevel-1] === 'h1' && <h1 style={{color: SVELTE, margin: '0 0 0.5rem', fontSize: '1.8rem'}}>Заголовок H{headingLevel}</h1>}
+              {['h1','h2','h3','h4','h5','h6'][headingLevel-1] === 'h2' && <h2 style={{color: SVELTE, margin: '0 0 0.5rem', fontSize: '1.5rem'}}>Заголовок H{headingLevel}</h2>}
+              {['h1','h2','h3','h4','h5','h6'][headingLevel-1] === 'h3' && <h3 style={{color: SVELTE, margin: '0 0 0.5rem', fontSize: '1.2rem'}}>Заголовок H{headingLevel}</h3>}
+              {['h1','h2','h3','h4','h5','h6'][headingLevel-1] === 'h4' && <h4 style={{color: SVELTE, margin: '0 0 0.5rem'}}>Заголовок H{headingLevel}</h4>}
+              {['h1','h2','h3','h4','h5','h6'][headingLevel-1] === 'h5' && <h5 style={{color: SVELTE, margin: '0 0 0.5rem'}}>Заголовок H{headingLevel}</h5>}
+              {['h1','h2','h3','h4','h5','h6'][headingLevel-1] === 'h6' && <h6 style={{color: SVELTE, margin: '0 0 0.5rem'}}>Заголовок H{headingLevel}</h6>}
+              <div style={{color: MUTED, fontSize: '0.75rem'}}>
+                {'<svelte:element this={"h' + headingLevel + '"}>Заголовок</svelte:element>'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {demo === 'window' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// <svelte:window bind:scrollY bind:innerWidth on:keydown />'}
+            </div>
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem'}}>
+              {[
+                {label: 'bind:scrollY', value: scrollY + 'px', icon: '📜'},
+                {label: 'bind:innerWidth', value: winWidth + 'px', icon: '↔️'},
+                {label: 'Viewport', value: winWidth < 768 ? '📱 Mobile' : '🖥️ Desktop', icon: '📐'},
+                {label: 'bind:online', value: navigator.onLine ? '🟢 Online' : '🔴 Offline', icon: '🌐'},
+              ].map(item => (
+                <div key={item.label} style={{background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', border: '1px solid ' + BORDER}}>
+                  <div style={{fontSize: '1.5rem', marginBottom: '0.25rem'}}>{item.icon}</div>
+                  <div style={{color: SVELTE, fontWeight: 700, fontSize: '0.9rem'}}>{item.value}</div>
+                  <div style={{color: MUTED, fontSize: '0.7rem', marginTop: '0.2rem'}}>{item.label}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop: '0.75rem', color: MUTED, fontSize: '0.75rem', background: '#0a0f1e', padding: '0.6rem', borderRadius: '6px'}}>
+              💡 Попробуй прокрутить страницу или изменить размер окна
+            </div>
+          </div>
+        )}
+
+        {demo === 'head' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// <svelte:head><title>{title}</title><meta .../></svelte:head>'}
+            </div>
+            <div style={{display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1rem'}}>
+              <div>
+                <label style={{color: MUTED, fontSize: '0.75rem', display: 'block', marginBottom: '0.3rem'}}>Title тега страницы:</label>
+                <input value={metaTitle} onChange={e => setMetaTitle(e.target.value)} style={{width: '100%', padding: '0.5rem', borderRadius: '6px', border: '1px solid ' + BORDER, background: '#0a0f1e', color: TEXT, fontSize: '0.85rem', fontFamily: 'monospace', boxSizing: 'border-box' as const, outline: 'none'}} />
+              </div>
+              <div>
+                <label style={{color: MUTED, fontSize: '0.75rem', display: 'block', marginBottom: '0.3rem'}}>Meta description:</label>
+                <input value={metaDesc} onChange={e => setMetaDesc(e.target.value)} style={{width: '100%', padding: '0.5rem', borderRadius: '6px', border: '1px solid ' + BORDER, background: '#0a0f1e', color: TEXT, fontSize: '0.85rem', fontFamily: 'monospace', boxSizing: 'border-box' as const, outline: 'none'}} />
+              </div>
+            </div>
+            <div style={{background: '#0a0f1e', padding: '1rem', borderRadius: '8px', border: '1px solid ' + BORDER}}>
+              <div style={{color: MUTED, fontSize: '0.7rem', marginBottom: '0.5rem'}}>Preview — что попадёт в {'<head>'}:</div>
+              <div style={{fontSize: '0.8rem', color: TEXT, lineHeight: 1.8}}>
+                <div><span style={{color: '#60a5fa'}}>{'<title>'}</span><span style={{color: YELLOW}}>{metaTitle} | Мой Svelte App</span><span style={{color: '#60a5fa'}}>{'</title>'}</span></div>
+                <div><span style={{color: '#60a5fa'}}>{'<meta'}</span><span style={{color: '#34d399'}}> name</span><span style={{color: TEXT}}>="description"</span><span style={{color: '#34d399'}}> content</span><span style={{color: TEXT}}>={'"' + metaDesc + '"'}</span><span style={{color: '#60a5fa'}}>{'/>'}</span></div>
+                <div><span style={{color: '#60a5fa'}}>{'<meta'}</span><span style={{color: '#34d399'}}> property</span><span style={{color: TEXT}}>="og:title"</span><span style={{color: '#34d399'}}> content</span><span style={{color: TEXT}}>={'"' + metaTitle + '"'}</span><span style={{color: '#60a5fa'}}>{'/>'}</span></div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

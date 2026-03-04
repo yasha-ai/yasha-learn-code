@@ -1,0 +1,754 @@
+## 🗺️ SvelteKit Роутинг: от простого к сложному
+
+Привет! 👋 Роутинг в SvelteKit — это как карта города: у каждой улицы есть своё название (URL), у каждого здания — своя функция (компонент). И самое приятное — структура папок **и есть** маршруты. Никаких отдельных конфигурационных файлов!
+
+Думай о роутинге SvelteKit как об оглавлении книги: `src/routes/` — это оглавление, а каждая папка — это глава. Создал папку — создал маршрут. Магия!
+
+---
+
+## 📄 Базовые файлы роутинга
+
+В SvelteKit файлы маршрутов начинаются с `+`. Это не просто соглашение — это синтаксис, который позволяет SvelteKit отличать файлы маршрутов от вспомогательных файлов в той же папке.
+
+```
+src/routes/
+├── +page.svelte          ← Страница по пути /
+├── +layout.svelte        ← Layout для всех страниц
+├── +error.svelte         ← Страница ошибки
+├── +page.ts              ← Загрузка данных для /
+├── about/
+│   └── +page.svelte      ← Страница /about
+├── blog/
+│   ├── +page.svelte      ← Страница /blog
+│   ├── +layout.svelte    ← Layout только для /blog/**
+│   └── [slug]/
+│       └── +page.svelte  ← Страница /blog/любой-слаг
+└── (marketing)/           ← Группа роутов (нет в URL!)
+    ├── +layout.svelte    ← Layout только для этой группы
+    ├── landing/
+    │   └── +page.svelte  ← Страница /landing (не /(marketing)/landing!)
+    └── pricing/
+        └── +page.svelte  ← Страница /pricing
+```
+
+---
+
+## 🏗️ +layout.svelte: общий каркас страниц
+
+`+layout.svelte` — это оболочка, в которую вставляются дочерние страницы. Идеально для навигации, футеров, провайдеров тем:
+
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script lang="ts">
+  import { page } from '$app/stores';
+  import Navigation from '$lib/components/Navigation.svelte';
+  import Footer from '$lib/components/Footer.svelte';
+
+  // Слот children — это место, куда вставится дочерняя страница
+  let { children } = $props();
+</script>
+
+<div class="app">
+  <Navigation currentPath={$page.url.pathname} />
+
+  <main>
+    <!-- Здесь рендерится контент страницы -->
+    {@render children()}
+  </main>
+
+  <Footer />
+</div>
+
+<style>
+  .app {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  main {
+    flex: 1;
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+  }
+</style>
+```
+
+**Вложенные layouts:**
+
+```svelte
+<!-- src/routes/blog/+layout.svelte — только для /blog/** -->
+<script lang="ts">
+  let { children, data } = $props();
+</script>
+
+<div class="blog-layout">
+  <aside class="sidebar">
+    <h3>Категории</h3>
+    {#each data.categories as cat}
+      <a href="/blog/category/{cat.slug}">{cat.name}</a>
+    {/each}
+  </aside>
+
+  <article class="content">
+    {@render children()}
+  </article>
+</div>
+```
+
+**Цепочка layouts:**
+
+```
+Запрос /blog/my-post:
+  1. +layout.svelte (корневой — навигация + футер)
+  2. blog/+layout.svelte (блог — сайдбар)
+  3. blog/[slug]/+page.svelte (контент поста)
+```
+
+---
+
+## ❌ +error.svelte: красивые страницы ошибок
+
+```svelte
+<!-- src/routes/+error.svelte — для любых ошибок в любом маршруте -->
+<script lang="ts">
+  import { page } from '$app/stores';
+</script>
+
+<div class="error-page">
+  <h1>{$page.status}</h1>
+  <p>{$page.error?.message}</p>
+
+  {#if $page.status === 404}
+    <p>Страница не найдена 🕵️</p>
+  {:else if $page.status === 500}
+    <p>Что-то пошло не так на сервере 💥</p>
+  {/if}
+
+  <a href="/">На главную</a>
+</div>
+```
+
+```svelte
+<!-- Можно создавать error.svelte для конкретных секций: -->
+<!-- src/routes/blog/+error.svelte — только для ошибок в /blog/** -->
+<script lang="ts">
+  import { page } from '$app/stores';
+</script>
+
+<div>
+  <h2>Ошибка в блоге</h2>
+  <p>Пост "{$page.params.slug}" не найден</p>
+</div>
+```
+
+---
+
+## 🎯 Динамические маршруты: [param]
+
+```
+src/routes/
+├── blog/
+│   └── [slug]/+page.svelte        ← /blog/hello-world
+├── users/
+│   └── [id]/
+│       ├── +page.svelte           ← /users/123
+│       └── settings/
+│           └── +page.svelte       ← /users/123/settings
+├── products/
+│   └── [category]/
+│       └── [id]/+page.svelte      ← /products/electronics/42
+```
+
+```svelte
+<!-- src/routes/blog/[slug]/+page.svelte -->
+<script lang="ts">
+  import type { PageData } from './$types';
+  let { data }: { data: PageData } = $props();
+
+  // data.slug доступен из load функции
+  // или через $page.params.slug
+</script>
+
+<h1>{data.post.title}</h1>
+<div class="content">{@html data.post.html}</div>
+```
+
+```typescript
+// src/routes/blog/[slug]/+page.server.ts
+import type { PageServerLoad } from './$types';
+import { error } from '@sveltejs/kit';
+
+export const load: PageServerLoad = async ({ params }) => {
+  const { slug } = params; // Тип: string
+
+  const post = await db.posts.findUnique({
+    where: { slug },
+  });
+
+  if (!post) {
+    error(404, { message: `Пост "${slug}" не найден` });
+  }
+
+  return { post };
+};
+```
+
+**Валидация параметров с матчерами:**
+
+```typescript
+// src/params/integer.ts — кастомный матчер
+import type { ParamMatcher } from '@sveltejs/kit';
+
+export const match: ParamMatcher = (param) => {
+  return /^\d+$/.test(param); // Только целые числа
+};
+```
+
+```
+// Использование матчера в имени папки:
+src/routes/users/[id=integer]/+page.svelte  ← /users/123 ✅, /users/abc ❌
+```
+
+---
+
+## 🌊 Catch-all маршруты: [...rest]
+
+```svelte
+<!-- src/routes/docs/[...path]/+page.svelte -->
+<!-- Совпадает с: /docs/intro, /docs/api/getting-started, /docs/a/b/c -->
+<script lang="ts">
+  import { page } from '$app/stores';
+
+  // $page.params.path будет строкой: "api/getting-started"
+  let pathSegments = $page.params.path.split('/');
+</script>
+
+<nav>
+  {#each pathSegments as segment, i}
+    <span>
+      {#if i < pathSegments.length - 1}
+        <a href="/docs/{pathSegments.slice(0, i + 1).join('/')}">{segment}</a> /
+      {:else}
+        <strong>{segment}</strong>
+      {/if}
+    </span>
+  {/each}
+</nav>
+```
+
+**Необязательные параметры:**
+
+```
+src/routes/[[lang]]/about/+page.svelte
+  ← Совпадает и с /about, и с /ru/about, и с /en/about
+```
+
+```typescript
+// load функция для [[lang]]:
+export const load: PageServerLoad = async ({ params }) => {
+  const lang = params.lang ?? 'ru'; // Необязательный параметр
+  const content = await getContent('about', lang);
+  return { content, lang };
+};
+```
+
+---
+
+## 🎪 Группы маршрутов: (group)
+
+Круглые скобки в имени папки создают **группы роутов** — они не добавляются в URL, но позволяют делиться layout-ами:
+
+```
+src/routes/
+├── (app)/                          ← Группа для авторизованных страниц
+│   ├── +layout.svelte              ← Проверяет авторизацию!
+│   ├── dashboard/
+│   │   └── +page.svelte            ← URL: /dashboard (без /(app)/)
+│   ├── profile/
+│   │   └── +page.svelte            ← URL: /profile
+│   └── settings/
+│       └── +page.svelte            ← URL: /settings
+├── (auth)/                         ← Группа для страниц авторизации
+│   ├── +layout.svelte              ← Минимальный layout (без навигации)
+│   ├── login/
+│   │   └── +page.svelte            ← URL: /login
+│   └── register/
+│       └── +page.svelte            ← URL: /register
+└── (marketing)/                    ← Публичные маркетинговые страницы
+    ├── +layout.svelte              ← Layout с Hero секцией
+    ├── +page.svelte                ← URL: / (главная)
+    ├── pricing/
+    │   └── +page.svelte            ← URL: /pricing
+    └── about/
+        └── +page.svelte            ← URL: /about
+```
+
+```svelte
+<!-- src/routes/(app)/+layout.svelte — защита авторизованных маршрутов -->
+<script lang="ts">
+  import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
+  import type { LayoutData } from './$types';
+
+  let { children, data }: { children: any, data: LayoutData } = $props();
+
+  // Редирект если не авторизован (лучше делать в +layout.server.ts!)
+</script>
+
+{#if data.user}
+  <nav>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/profile">Профиль</a>
+    <a href="/settings">Настройки</a>
+    <span>Привет, {data.user.name}!</span>
+  </nav>
+  {@render children()}
+{:else}
+  <p>Загрузка...</p>
+{/if}
+```
+
+---
+
+## 🧭 $page store: информация о текущей странице
+
+```svelte
+<script lang="ts">
+  import { page } from '$app/stores';
+
+  // $page содержит:
+  // $page.url          — текущий URL (объект URL)
+  // $page.params       — параметры маршрута { slug: 'hello' }
+  // $page.route        — информация о маршруте { id: '/blog/[slug]' }
+  // $page.status       — HTTP статус
+  // $page.error        — объект ошибки
+  // $page.data         — данные из load функций
+  // $page.form         — данные форм (Form Actions)
+
+  $effect(() => {
+    console.log('Текущий URL:', $page.url.pathname);
+    console.log('Параметры:', $page.params);
+  });
+</script>
+
+<!-- Активная навигация с $page -->
+<nav>
+  {#each [
+    { href: '/', label: 'Главная' },
+    { href: '/blog', label: 'Блог' },
+    { href: '/about', label: 'О нас' },
+  ] as link}
+    <a
+      href={link.href}
+      class:active={$page.url.pathname === link.href}
+    >
+      {link.label}
+    </a>
+  {/each}
+</nav>
+```
+
+---
+
+## 🚗 Навигация: goto() и ссылки
+
+```svelte
+<script lang="ts">
+  import { goto, beforeNavigate, afterNavigate, preloadData, preloadCode } from '$app/navigation';
+
+  // Программная навигация:
+  async function handleLogin() {
+    await login();
+    goto('/dashboard', {
+      replaceState: true,    // Не добавлять в историю
+      invalidateAll: true,   // Инвалидировать все load функции
+      state: { fromLogin: true }, // Состояние истории (history.state)
+    });
+  }
+
+  // Перехватчики навигации:
+  beforeNavigate(({ to, from, type, cancel }) => {
+    if (hasUnsavedChanges) {
+      const confirmed = confirm('Есть несохранённые изменения. Уйти?');
+      if (!confirmed) {
+        cancel(); // Отменяем навигацию
+      }
+    }
+    console.log(`Уходим с ${from?.url.pathname} на ${to?.url.pathname}`);
+    console.log('Тип навигации:', type); // 'link' | 'goto' | 'popstate' | 'enter' | 'leave'
+  });
+
+  afterNavigate(({ to, from, type }) => {
+    // Аналитика:
+    analytics.track('page_view', { path: to?.url.pathname });
+  });
+
+  // Prefetch данных (как наводить мышь в Next.js):
+  function handleMouseEnter(href: string) {
+    preloadData(href); // Загружает данные для страницы заранее
+  }
+
+  function handleMouseEnterCode(href: string) {
+    preloadCode(href); // Загружает JavaScript код для страницы
+  }
+</script>
+
+<!-- Обычные ссылки SvelteKit — автоматически перехватывают клики -->
+<a href="/about">О нас</a>
+
+<!-- data-sveltekit-preload-data — prefetch при наведении -->
+<a href="/blog" data-sveltekit-preload-data="hover">Блог</a>
+
+<!-- data-sveltekit-preload-data="tap" — prefetch при клике (мобильные) -->
+<a href="/shop" data-sveltekit-preload-data="tap">Магазин</a>
+
+<!-- Отключить клиентскую навигацию: -->
+<a href="/external" data-sveltekit-reload>Внешняя страница</a>
+```
+
+---
+
+## 🔄 beforeNavigate / afterNavigate хуки
+
+```svelte
+<script lang="ts">
+  import { beforeNavigate, afterNavigate } from '$app/navigation';
+  import { page } from '$app/stores';
+
+  let isLoading = $state(false);
+  let previousPage = $state('');
+
+  // Показываем индикатор загрузки:
+  beforeNavigate(() => {
+    isLoading = true;
+  });
+
+  afterNavigate(({ from }) => {
+    isLoading = false;
+    previousPage = from?.url.pathname ?? '';
+
+    // Скролл наверх при навигации:
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+</script>
+
+{#if isLoading}
+  <div class="loading-bar"></div>
+{/if}
+
+{#if previousPage}
+  <button onclick={() => history.back()}>← Назад ({previousPage})</button>
+{/if}
+```
+
+---
+
+## 🔗 Link preloading настройка
+
+```svelte
+<!-- В +layout.svelte — глобальный prefetch -->
+<svelte:head>
+  <!-- Prefetch критических страниц: -->
+  <link rel="prefetch" href="/api/user" />
+</svelte:head>
+```
+
+```html
+<!-- app.html — настройка глобального prefetch -->
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    %sveltekit.head%
+  </head>
+  <!-- data-sveltekit-preload-data на body — prefetch для всех ссылок: -->
+  <body data-sveltekit-preload-data="hover">
+    <div style="display: contents">%sveltekit.body%</div>
+  </body>
+</html>
+```
+
+---
+
+## 🔧 Параллельные slots и именованные snippets
+
+Svelte 5 + SvelteKit поддерживает именованные snippets для более сложных layout-ов:
+
+```svelte
+<!-- src/routes/+layout.svelte с именованными слотами (Svelte 5) -->
+<script lang="ts">
+  let { children, sidebar } = $props();
+</script>
+
+<div class="two-column">
+  <aside>
+    {#if sidebar}
+      {@render sidebar()}
+    {:else}
+      <!-- Дефолтный сайдбар -->
+      <DefaultSidebar />
+    {/if}
+  </aside>
+
+  <main>
+    {@render children()}
+  </main>
+</div>
+```
+
+---
+
+## 🛡️ Защищённые маршруты
+
+```typescript
+// src/routes/(app)/+layout.server.ts
+import { redirect } from '@sveltejs/kit';
+import type { LayoutServerLoad } from './$types';
+
+export const load: LayoutServerLoad = async ({ locals, url }) => {
+  // locals.user устанавливается в hooks.server.ts
+  if (!locals.user) {
+    redirect(307, `/login?redirectTo=${url.pathname}`);
+  }
+
+  return {
+    user: locals.user,
+  };
+};
+```
+
+```typescript
+// src/hooks.server.ts — заполняем locals.user
+import type { Handle } from '@sveltejs/kit';
+import { verifyToken } from '$lib/server/auth';
+
+export const handle: Handle = async ({ event, resolve }) => {
+  const token = event.cookies.get('session');
+
+  if (token) {
+    const user = await verifyToken(token);
+    event.locals.user = user;
+  }
+
+  return resolve(event);
+};
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const SVELTE_ORANGE = "#ff3e00";
+const SVELTE_YELLOW = "#ffba00";
+const BG = "#0f172a";
+const BG2 = "#1e293b";
+const BG3 = "#334155";
+
+type Page = "home" | "blog" | "post" | "about" | "dashboard" | "login" | "not-found";
+
+interface Route {
+  path: string;
+  page: Page;
+  params?: Record<string, string>;
+  requiresAuth?: boolean;
+}
+
+const routes: Route[] = [
+  { path: "/", page: "home" },
+  { path: "/blog", page: "blog" },
+  { path: "/blog/hello-svelte", page: "post", params: { slug: "hello-svelte" } },
+  { path: "/about", page: "about" },
+  { path: "/dashboard", page: "dashboard", requiresAuth: true },
+  { path: "/login", page: "login" },
+];
+
+function matchRoute(pathname: string): Route {
+  return routes.find((r) => r.path === pathname) ?? { path: pathname, page: "not-found" };
+}
+
+export default function App() {
+  const [currentPath, setCurrentPath] = useState("/");
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [navLog, setNavLog] = useState<string[]>(["Навигация запущена"]);
+  const [pendingNav, setPendingNav] = useState<string | null>(null);
+  const [hasChanges, setHasChanges] = useState(false);
+
+  const addLog = (msg: string) =>
+    setNavLog((prev) => [...prev.slice(-5), msg]);
+
+  const navigate = (path: string) => {
+    const target = matchRoute(path);
+
+    if (hasChanges) {
+      setPendingNav(path);
+      return;
+    }
+
+    if (target.requiresAuth && !isLoggedIn) {
+      addLog(\`beforeNavigate: редирект → /login?redirectTo=\${path}\`);
+      setCurrentPath("/login");
+      addLog(\`afterNavigate: /login загружена\`);
+      return;
+    }
+
+    addLog(\`beforeNavigate: \${currentPath} → \${path}\`);
+    setCurrentPath(path);
+    addLog(\`afterNavigate: \${path} загружена ✓\`);
+  };
+
+  const currentRoute = matchRoute(currentPath);
+
+  const navLinks = [
+    { href: "/", label: "Главная" },
+    { href: "/blog", label: "Блог" },
+    { href: "/about", label: "О нас" },
+    { href: "/dashboard", label: "Dashboard 🔒" },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", fontFamily: "system-ui, sans-serif", color: "#e2e8f0" }}>
+      {/* Navigation */}
+      <nav style={{ background: BG2, padding: "12px 20px", display: "flex", alignItems: "center", gap: "16px", borderBottom: "1px solid #1e293b" }}>
+        <span style={{ color: SVELTE_ORANGE, fontWeight: "bold", fontSize: "14px" }}>🔥 SvelteKit Router</span>
+        <div style={{ display: "flex", gap: "6px", flex: 1 }}>
+          {navLinks.map((link) => (
+            <button
+              key={link.href}
+              onClick={() => navigate(link.href)}
+              style={{
+                padding: "5px 10px", border: "none", borderRadius: "6px", cursor: "pointer",
+                background: currentPath === link.href ? SVELTE_ORANGE : BG3,
+                color: currentPath === link.href ? "#fff" : "#94a3b8",
+                fontSize: "12px", fontWeight: currentPath === link.href ? "bold" : "normal",
+                transition: "all 0.15s",
+              }}
+            >
+              {link.label}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => { setIsLoggedIn((v) => !v); addLog(isLoggedIn ? "Выход из системы" : "Вход выполнен ✓"); }}
+          style={{ padding: "5px 12px", border: \`1px solid \${isLoggedIn ? "#34d399" : "#64748b"}\`, borderRadius: "6px", background: "transparent", color: isLoggedIn ? "#34d399" : "#64748b", cursor: "pointer", fontSize: "12px" }}
+        >
+          {isLoggedIn ? "👤 Выйти" : "🔑 Войти"}
+        </button>
+      </nav>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "0", minHeight: "calc(100vh - 50px)" }}>
+        {/* Main content */}
+        <div style={{ padding: "20px" }}>
+          {/* URL bar */}
+          <div style={{ background: BG3, borderRadius: "8px", padding: "8px 12px", marginBottom: "16px", display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ fontSize: "11px", color: "#64748b" }}>URL:</span>
+            <span style={{ fontFamily: "monospace", fontSize: "13px", color: SVELTE_YELLOW }}>{currentPath}</span>
+            {currentRoute.params && (
+              <span style={{ fontSize: "11px", color: "#64748b", marginLeft: "8px" }}>
+                params: {JSON.stringify(currentRoute.params)}
+              </span>
+            )}
+          </div>
+
+          {/* Page content */}
+          <div style={{ background: BG2, borderRadius: "12px", padding: "20px", border: "1px solid #1e293b" }}>
+            {currentRoute.page === "home" && (
+              <div>
+                <h2 style={{ color: SVELTE_ORANGE, margin: "0 0 12px" }}>🏠 Главная страница</h2>
+                <p style={{ color: "#94a3b8", fontSize: "13px" }}>Маршрут: <code style={{ color: SVELTE_YELLOW }}>/</code> → <code style={{ color: "#e2e8f0" }}>src/routes/+page.svelte</code></p>
+                <p style={{ color: "#64748b", fontSize: "12px", marginTop: "8px" }}>Это корневая страница. Layout (+layout.svelte) рендерится вокруг неё.</p>
+              </div>
+            )}
+            {currentRoute.page === "blog" && (
+              <div>
+                <h2 style={{ color: SVELTE_ORANGE, margin: "0 0 12px" }}>📝 Блог</h2>
+                <p style={{ color: "#94a3b8", fontSize: "13px" }}>Маршрут: <code style={{ color: SVELTE_YELLOW }}>/blog</code> → <code style={{ color: "#e2e8f0" }}>src/routes/blog/+page.svelte</code></p>
+                <div style={{ marginTop: "12px" }}>
+                  {["hello-svelte", "reactivity-deep-dive", "sveltekit-rocks"].map((slug) => (
+                    <div key={slug} onClick={() => navigate(\`/blog/\${slug}\`)} style={{ padding: "8px 12px", background: BG3, borderRadius: "6px", marginBottom: "6px", cursor: "pointer", border: "1px solid #475569", fontSize: "13px" }}>
+                      📄 {slug}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {currentRoute.page === "post" && (
+              <div>
+                <h2 style={{ color: SVELTE_ORANGE, margin: "0 0 12px" }}>📄 Пост</h2>
+                <p style={{ color: "#94a3b8", fontSize: "13px" }}>Маршрут: <code style={{ color: SVELTE_YELLOW }}>/blog/[slug]</code> → <code style={{ color: "#e2e8f0" }}>src/routes/blog/[slug]/+page.svelte</code></p>
+                <div style={{ marginTop: "8px", background: BG3, borderRadius: "6px", padding: "10px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontFamily: "monospace" }}>$page.params.slug =</div>
+                  <div style={{ fontSize: "14px", color: SVELTE_YELLOW, fontFamily: "monospace" }}>"{currentRoute.params?.slug}"</div>
+                </div>
+                <div style={{ marginTop: "10px" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#94a3b8", cursor: "pointer" }}>
+                    <input type="checkbox" checked={hasChanges} onChange={(e) => setHasChanges(e.target.checked)} style={{ accentColor: SVELTE_ORANGE }} />
+                    Симулировать несохранённые изменения (тест beforeNavigate)
+                  </label>
+                </div>
+              </div>
+            )}
+            {currentRoute.page === "about" && (
+              <div>
+                <h2 style={{ color: SVELTE_ORANGE, margin: "0 0 12px" }}>ℹ️ О нас</h2>
+                <p style={{ color: "#94a3b8", fontSize: "13px" }}>Маршрут: <code style={{ color: SVELTE_YELLOW }}>/about</code> → <code style={{ color: "#e2e8f0" }}>src/routes/about/+page.svelte</code></p>
+              </div>
+            )}
+            {currentRoute.page === "dashboard" && (
+              <div>
+                <h2 style={{ color: "#34d399", margin: "0 0 12px" }}>🔒 Dashboard</h2>
+                <p style={{ color: "#94a3b8", fontSize: "13px" }}>Защищённый маршрут в группе <code style={{ color: SVELTE_YELLOW }}>(app)</code></p>
+                <p style={{ color: "#34d399", fontSize: "12px", marginTop: "8px" }}>✅ Ты авторизован! Доступ разрешён.</p>
+              </div>
+            )}
+            {currentRoute.page === "login" && (
+              <div>
+                <h2 style={{ color: SVELTE_ORANGE, margin: "0 0 12px" }}>🔑 Логин</h2>
+                <p style={{ color: "#94a3b8", fontSize: "13px" }}>Группа маршрутов <code style={{ color: SVELTE_YELLOW }}>(auth)</code> — свой layout!</p>
+                <button onClick={() => { setIsLoggedIn(true); addLog("Вход выполнен!"); navigate("/dashboard"); }} style={{ marginTop: "12px", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "8px 20px", cursor: "pointer", fontSize: "13px" }}>
+                  Войти
+                </button>
+              </div>
+            )}
+            {currentRoute.page === "not-found" && (
+              <div>
+                <h2 style={{ color: "#f87171", margin: "0 0 12px" }}>404 Не найдено</h2>
+                <p style={{ color: "#94a3b8", fontSize: "13px" }}>→ <code style={{ color: "#e2e8f0" }}>src/routes/+error.svelte</code></p>
+              </div>
+            )}
+          </div>
+
+          {/* Unsaved changes dialog */}
+          {pendingNav && (
+            <div style={{ marginTop: "12px", background: "#7c3aed22", border: "1px solid #7c3aed", borderRadius: "8px", padding: "12px" }}>
+              <div style={{ fontSize: "13px", color: "#a78bfa", marginBottom: "8px" }}>⚠️ beforeNavigate: есть несохранённые изменения!</div>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button onClick={() => { setHasChanges(false); navigate(pendingNav); setPendingNav(null); addLog("Навигация подтверждена"); }} style={{ background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer", fontSize: "12px" }}>Уйти</button>
+                <button onClick={() => { setPendingNav(null); addLog("Навигация отменена: cancel()"); }} style={{ background: BG3, color: "#94a3b8", border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer", fontSize: "12px" }}>Остаться</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Sidebar: Navigation log */}
+        <div style={{ background: BG2, borderLeft: "1px solid #1e293b", padding: "16px" }}>
+          <div style={{ color: SVELTE_YELLOW, fontSize: "12px", fontFamily: "monospace", marginBottom: "10px" }}>📋 Навигация лог</div>
+          {navLog.map((entry, i) => (
+            <div key={i} style={{ fontSize: "11px", fontFamily: "monospace", color: i === navLog.length - 1 ? SVELTE_ORANGE : "#64748b", padding: "3px 0", borderBottom: "1px solid #0f172a" }}>
+              {entry}
+            </div>
+          ))}
+
+          <div style={{ marginTop: "16px", color: SVELTE_YELLOW, fontSize: "12px", fontFamily: "monospace", marginBottom: "8px" }}>🗂️ Маршруты</div>
+          {routes.map((r) => (
+            <div key={r.path} onClick={() => navigate(r.path)} style={{ fontSize: "11px", fontFamily: "monospace", color: currentPath === r.path ? SVELTE_ORANGE : "#64748b", padding: "3px 6px", borderRadius: "4px", cursor: "pointer", background: currentPath === r.path ? \`\${SVELTE_ORANGE}15\` : "transparent", marginBottom: "2px" }}>
+              {r.requiresAuth ? "🔒 " : "📄 "}{r.path}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

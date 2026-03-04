@@ -1,0 +1,1121 @@
+## Svelte Stores: глобальное состояние без Redux 🏪
+
+Пропсы отлично работают для передачи данных между родителем и дочерним компонентом. Но что если нужно поделиться состоянием между компонентами, которые вообще не связаны в дереве? Вот тут-то и приходят на помощь **Svelte Stores** — реактивные хранилища данных, живущие вне компонентов! 🚀
+
+---
+
+## Что такое Store? 🤔
+
+Store — это объект с методом `subscribe`, который хранит значение и **уведомляет всех подписчиков** при его изменении. Это не компонент, не хук — просто реактивный контейнер данных.
+
+```
+  ┌─────────────────────────────────┐
+  │          Store (writable)       │
+  │                                 │
+  │   value: 42                     │
+  │                                 │
+  │   subscribe(fn)  ─────────────► Компонент A
+  │   set(newVal)    ─────────────► Компонент B
+  │   update(fn)     ─────────────► Компонент C
+  └─────────────────────────────────┘
+```
+
+Любой объект, у которого есть метод `subscribe(callback)`, **является Store** по контракту Svelte. Это открывает огромные возможности для кастомизации!
+
+---
+
+## writable — основной Store 📝
+
+`writable(initialValue)` создаёт Store с тремя методами:
+
+```javascript
+// stores.js
+import { writable } from 'svelte/store';
+
+// Создаём store с начальным значением 0
+export const count = writable(0);
+```
+
+| Метод | Описание | Пример |
+|-------|----------|--------|
+| `set(value)` | Заменяет значение | `count.set(42)` |
+| `update(fn)` | Обновляет на основе текущего | `count.update(n => n + 1)` |
+| `subscribe(fn)` | Подписывается на изменения | `count.subscribe(v => console.log(v))` |
+
+---
+
+## Ручная подписка — для понимания 🔬
+
+Чтобы понять, как работает Store изнутри, посмотрим на ручную подписку:
+
+```svelte
+<!-- App.svelte -->
+<script>
+  import { count } from './stores.js';
+  import { onDestroy } from 'svelte';
+
+  let localCount;
+
+  // Подписываемся: callback вызывается сразу с текущим значением,
+  // и затем при каждом изменении
+  const unsubscribe = count.subscribe(value => {
+    localCount = value;
+  });
+
+  // ВАЖНО: отписаться при уничтожении компонента!
+  onDestroy(unsubscribe);
+</script>
+
+<p>Текущее значение: {localCount}</p>
+<button on:click={() => count.update(n => n + 1)}>+1</button>
+```
+
+Это работает, но довольно многословно. К счастью, Svelte придумал кое-что получше...
+
+---
+
+## Auto-subscribe с $ — магия Svelte ✨
+
+Svelte предоставляет специальный синтаксис: **приставка `$`** перед именем Store. Компилятор автоматически:
+- Подписывается при монтировании компонента
+- Отписывается при уничтожении
+- Обновляет шаблон при каждом изменении
+
+```svelte
+<script>
+  import { count } from './stores.js';
+  // Больше никаких subscribe/unsubscribe вручную!
+</script>
+
+<!-- $count = автоматически подписанное значение -->
+<p>Значение: {$count}</p>
+<button on:click={() => $count++}>+1 (прямое присваивание!)</button>
+<button on:click={() => count.set(0)}>Сброс</button>
+```
+
+> 💡 **Wow-момент**: `$count++` не просто читает значение — Svelte компилирует это в вызов `count.set($count + 1)` автоматически!
+
+---
+
+## Изменение Store — все способы
+
+```svelte
+<script>
+  import { count } from './stores.js';
+
+  // 1. Через set()
+  function reset() { count.set(0); }
+
+  // 2. Через update()
+  function increment() { count.update(n => n + 1); }
+  function double() { count.update(n => n * 2); }
+
+  // 3. Через $ (прямое присваивание — самый элегантный способ!)
+  function setTen() { $count = 10; }
+  function incrementDirect() { $count++; }
+  function decrementDirect() { $count--; }
+</script>
+
+<p>Count: {$count}</p>
+<button on:click={reset}>Reset</button>
+<button on:click={increment}>+1 (update)</button>
+<button on:click={double}>×2 (update)</button>
+<button on:click={setTen}>= 10 (set)</button>
+<button on:click={incrementDirect}>+1 ($)</button>
+```
+
+---
+
+## readable — Store только для чтения 📖
+
+`readable(initial, start)` создаёт Store, в который внешний код не может записывать данные. Только **внутренний producer** изменяет значение. Идеально для: текущего времени, геолокации, размера окна.
+
+```javascript
+// stores.js
+import { readable } from 'svelte/store';
+
+// Часы — классический пример readable store
+export const time = readable(new Date(), function start(set) {
+  // start() вызывается, когда появляется первый подписчик
+  const interval = setInterval(() => {
+    set(new Date());
+  }, 1000);
+
+  // stop() вызывается, когда подписчиков не осталось
+  return function stop() {
+    clearInterval(interval);
+  };
+});
+```
+
+```svelte
+<script>
+  import { time } from './stores.js';
+
+  const formatter = new Intl.DateTimeFormat('ru', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+</script>
+
+<!-- time обновляется каждую секунду, cleanup автоматический -->
+<p>Сейчас: {formatter.format($time)}</p>
+```
+
+### Геолокация как readable store:
+
+```javascript
+import { readable } from 'svelte/store';
+
+export const geolocation = readable(null, (set) => {
+  if (!navigator.geolocation) {
+    set({ error: 'Геолокация недоступна' });
+    return () => {};
+  }
+
+  const watchId = navigator.geolocation.watchPosition(
+    (pos) => set({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+    (err) => set({ error: err.message })
+  );
+
+  return () => navigator.geolocation.clearWatch(watchId);
+});
+```
+
+---
+
+## Контракт Store — кастомные объекты
+
+Любой объект с методом `subscribe(fn)` является валидным Store в Svelte! `subscribe` должен:
+1. Вызвать `fn` немедленно с текущим значением
+2. Возвращать функцию `unsubscribe`
+3. Вызывать `fn` при каждом изменении
+
+```javascript
+// Минимальный store вручную:
+function createMinimalStore(value) {
+  const subscribers = new Set();
+
+  return {
+    subscribe(fn) {
+      fn(value);          // 1. Сразу вызываем с текущим значением
+      subscribers.add(fn);
+      return () => subscribers.delete(fn); // 2. Возвращаем unsubscribe
+    },
+    set(newValue) {
+      value = newValue;
+      subscribers.forEach(fn => fn(value)); // 3. Уведомляем всех
+    },
+  };
+}
+
+const myStore = createMinimalStore(42);
+```
+
+---
+
+## Кастомные Store с методами 🏗️
+
+Самый мощный паттерн — обернуть `writable` и добавить свою бизнес-логику:
+
+```javascript
+// stores.js
+import { writable } from 'svelte/store';
+
+function createCounter(initial = 0) {
+  const { subscribe, set, update } = writable(initial);
+
+  return {
+    subscribe,                          // Обязательно экспортируем!
+    increment: () => update(n => n + 1),
+    decrement: () => update(n => n - 1),
+    reset: () => set(initial),
+    setTo: (n) => set(n),
+  };
+}
+
+export const counter = createCounter(0);
+```
+
+```svelte
+<script>
+  import { counter } from './stores.js';
+</script>
+
+<p>Счётчик: {$counter}</p>
+<button on:click={counter.increment}>+1</button>
+<button on:click={counter.decrement}>−1</button>
+<button on:click={counter.reset}>Сброс</button>
+<button on:click={() => counter.setTo(100)}>= 100</button>
+```
+
+### Корзина покупок как кастомный Store:
+
+```javascript
+// cartStore.js
+import { writable } from 'svelte/store';
+
+function createCart() {
+  const { subscribe, update, set } = writable([]);
+
+  return {
+    subscribe,
+
+    addItem(item) {
+      update(items => {
+        const existing = items.find(i => i.id === item.id);
+        if (existing) {
+          return items.map(i =>
+            i.id === item.id ? { ...i, qty: i.qty + 1 } : i
+          );
+        }
+        return [...items, { ...item, qty: 1 }];
+      });
+    },
+
+    removeItem(id) {
+      update(items => items.filter(i => i.id !== id));
+    },
+
+    updateQty(id, qty) {
+      if (qty <= 0) { this.removeItem(id); return; }
+      update(items => items.map(i => i.id === id ? { ...i, qty } : i));
+    },
+
+    clear: () => set([]),
+  };
+}
+
+export const cart = createCart();
+```
+
+---
+
+## Stores в TypeScript 💪
+
+Svelte предоставляет типы из `svelte/store`:
+
+```typescript
+// stores.ts
+import { writable, readable } from 'svelte/store';
+import type { Writable, Readable } from 'svelte/store';
+
+// Типизированный writable
+export const count: Writable<number> = writable(0);
+
+// Типизированный readable
+export const time: Readable<Date> = readable(new Date(), (set) => {
+  const interval = setInterval(() => set(new Date()), 1000);
+  return () => clearInterval(interval);
+});
+
+// Кастомный интерфейс
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+export const currentUser: Writable<User | null> = writable(null);
+
+// Тип для кастомного store
+interface CartStore extends Readable<CartItem[]> {
+  addItem: (item: Product) => void;
+  removeItem: (id: number) => void;
+  clear: () => void;
+}
+```
+
+---
+
+## Store как модуль — разделяем между компонентами 📁
+
+Правильный способ — вынести stores в отдельный файл:
+
+```
+src/
+├── stores/
+│   ├── auth.ts         // authStore, currentUser
+│   ├── cart.ts         // cartStore
+│   ├── ui.ts           // themeStore, sidebarOpen
+│   └── index.ts        // реэкспорт всего
+├── components/
+│   ├── Header.svelte   // использует authStore, cartStore
+│   ├── Cart.svelte     // использует cartStore
+│   └── UserMenu.svelte // использует authStore
+```
+
+```typescript
+// stores/auth.ts
+import { writable, derived } from 'svelte/store';
+
+export const currentUser = writable<User | null>(null);
+
+// derived store — вычисляется из другого
+export const isLoggedIn = derived(currentUser, $user => $user !== null);
+export const userName = derived(currentUser, $user => $user?.name ?? 'Гость');
+```
+
+---
+
+## Derived Store — предварительный просмотр 🔮
+
+`derived(store, fn)` создаёт Store, вычисляемый на основе другого. Подробно разберём в следующем уроке, но вот быстрый пример:
+
+```javascript
+import { writable, derived } from 'svelte/store';
+
+const cartItems = writable([
+  { name: 'Книга', price: 500, qty: 2 },
+  { name: 'Кружка', price: 300, qty: 1 },
+]);
+
+// Автоматически пересчитывается при изменении cartItems
+const totalPrice = derived(cartItems, $items =>
+  $items.reduce((sum, item) => sum + item.price * item.qty, 0)
+);
+
+const itemCount = derived(cartItems, $items =>
+  $items.reduce((sum, item) => sum + item.qty, 0)
+);
+```
+
+```svelte
+<p>Товаров: {$itemCount}</p>
+<p>Итого: {$totalPrice} ₽</p>
+```
+
+---
+
+## Реактивные выражения со Store 🔗
+
+Store отлично сочетаются с реактивными блоками `$:`:
+
+```svelte
+<script>
+  import { cartItems, promoCode } from './stores.js';
+
+  // Реактивно пересчитывается при изменении $cartItems или $promoCode
+  $: subtotal = $cartItems.reduce((sum, i) => sum + i.price * i.qty, 0);
+  $: discount = $promoCode === 'SVELTE30' ? 0.3 : 0;
+  $: total = subtotal * (1 - discount);
+
+  $: if ($cartItems.length > 10) {
+    console.log('Богатый покупатель!', $cartItems.length, 'товаров');
+  }
+</script>
+
+<p>Подытог: {subtotal} ₽</p>
+<p>Скидка: {discount * 100}%</p>
+<p>Итого: {total} ₽</p>
+```
+
+---
+
+## Когда использовать Store, а когда — props/context? 🤔
+
+| Подход | Когда использовать |
+|--------|-------------------|
+| **Props** | Данные от родителя к дочернему компоненту |
+| **Store** | Общие данные между несвязанными компонентами |
+| **Context** | Данные для поддерева компонентов (без глобальности) |
+| **URL/params** | Данные, которые должны быть в адресной строке |
+
+```
+✅ Store — правильный выбор:
+  - Авторизованный пользователь (нужен везде)
+  - Корзина покупок (Header + Cart + OrderPage)
+  - Тема оформления (весь UI)
+  - Уведомления (глобальная очередь)
+
+✅ Props — правильный выбор:
+  - Список товаров передаётся в <ProductGrid>
+  - Цвет кнопки передаётся в <Button>
+  - Данные пагинации в <Table>
+
+✅ Context — правильный выбор:
+  - Конфигурация формы для всех полей внутри <Form>
+  - Тема для виджета (не всего сайта)
+```
+
+---
+
+## Сравнение с другими инструментами 🔄
+
+| | Svelte Store | React Context | Zustand | Vue Pinia | Redux |
+|--|-------------|--------------|---------|-----------|-------|
+| Размер | ~0kb (встроен) | ~0kb (встроен) | ~1kb | ~1kb | ~40kb |
+| Синтаксис | `$store` | `useContext` | `useStore` | `store.count` | `useSelector` |
+| Шаблонный код | Минимум | Немного | Немного | Средне | Много |
+| DevTools | ✅ | ⚠️ | ✅ | ✅ | ✅ |
+| TypeScript | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Async | Ручной | Ручной | Встроен | Встроен | Redux Thunk |
+
+Svelte Store выигрывает по простоте — `$count++` vs `dispatch(increment())` в Redux! 😄
+
+---
+
+## Svelte 5: Store остаются, но есть $state 🆕
+
+В Svelte 5 появились **runes** — более мощная система реактивности. Stores не исчезают, но для локального состояния рекомендуется `$state`:
+
+```svelte
+<!-- Svelte 5 -->
+<script>
+  // Локальное состояние компонента
+  let count = $state(0);
+
+  // Для глобального состояния — Stores по-прежнему актуальны!
+  import { cart } from './stores.js';
+</script>
+```
+
+```javascript
+// Svelte 5: universal reactivity (без компонентов)
+import { writable } from 'svelte/store';
+
+// Stores работают везде — в .svelte, .js, .ts файлах
+export const theme = writable('dark');
+```
+
+---
+
+## Практические примеры 🛠️
+
+### Auth Store с persistence:
+
+```typescript
+// stores/auth.ts
+import { writable } from 'svelte/store';
+
+function createAuthStore() {
+  // Читаем из localStorage при старте
+  const saved = localStorage.getItem('user');
+  const initial = saved ? JSON.parse(saved) : null;
+
+  const { subscribe, set, update } = writable(initial);
+
+  return {
+    subscribe,
+
+    login(user: User) {
+      localStorage.setItem('user', JSON.stringify(user));
+      set(user);
+    },
+
+    logout() {
+      localStorage.removeItem('user');
+      set(null);
+    },
+
+    updateProfile(changes: Partial<User>) {
+      update(user => {
+        const updated = { ...user!, ...changes };
+        localStorage.setItem('user', JSON.stringify(updated));
+        return updated;
+      });
+    },
+  };
+}
+
+export const auth = createAuthStore();
+```
+
+### Notification Store:
+
+```typescript
+// stores/notifications.ts
+import { writable } from 'svelte/store';
+
+export type NotificationType = 'success' | 'error' | 'info' | 'warning';
+
+export interface Notification {
+  id: number;
+  type: NotificationType;
+  message: string;
+}
+
+let nextId = 0;
+
+function createNotificationStore() {
+  const { subscribe, update } = writable<Notification[]>([]);
+
+  return {
+    subscribe,
+
+    add(type: NotificationType, message: string, duration = 4000) {
+      const id = nextId++;
+      update(list => [...list, { id, type, message }]);
+
+      // Автоудаление через duration мс
+      setTimeout(() => this.remove(id), duration);
+    },
+
+    remove(id: number) {
+      update(list => list.filter(n => n.id !== id));
+    },
+
+    success: (msg: string) => this.add('success', msg),
+    error: (msg: string) => this.add('error', msg),
+  };
+}
+
+export const notifications = createNotificationStore();
+```
+
+---
+
+## Итоги урока 🎯
+
+| Концепция | Суть |
+|-----------|------|
+| `writable(val)` | Store с set/update/subscribe |
+| `readable(val, start)` | Store только для чтения с producer |
+| `$store` | Автоподписка и автоотписка |
+| `$store = value` | Компилируется в store.set(value) |
+| Кастомный Store | Обёртка над writable с методами |
+| Контракт Store | Любой объект с subscribe(fn) |
+| Derived (preview) | Вычисляемый из другого Store |
+
+---
+
+## Интерактивный Playground 🎮
+
+Несколько виртуальных "компонентов" разделяют один Store. Когда ты меняешь значение в любом из них — все остальные обновляются мгновенно. Плюс: живые часы на readable store и корзина на кастомном store!
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, useCallback } from 'react';
+
+const BG = '#0f172a';
+const ACCENT = '#ff3e00';
+const YELLOW = '#ffba00';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const DIM = '#475569';
+const SUCCESS = '#4ade80';
+
+// ─── Simulated writable store ─────────────────────────────────────────────────
+function createWritable<T>(initial: T) {
+  let value = initial;
+  const subscribers = new Set<(v: T) => void>();
+
+  const subscribe = (fn: (v: T) => void) => {
+    fn(value);
+    subscribers.add(fn);
+    return () => subscribers.delete(fn);
+  };
+  const set = (v: T) => { value = v; subscribers.forEach(fn => fn(value)); };
+  const update = (fn: (v: T) => T) => set(fn(value));
+
+  return { subscribe, set, update };
+}
+
+// ─── Simulated readable store (clock) ─────────────────────────────────────────
+function createReadable<T>(initial: T, start: (set: (v: T) => void) => () => void) {
+  let value = initial;
+  const subscribers = new Set<(v: T) => void>();
+  let stop: (() => void) | null = null;
+
+  const subscribe = (fn: (v: T) => void) => {
+    fn(value);
+    subscribers.add(fn);
+    if (subscribers.size === 1) {
+      stop = start((v) => {
+        value = v;
+        subscribers.forEach(s => s(value));
+      });
+    }
+    return () => {
+      subscribers.delete(fn);
+      if (subscribers.size === 0 && stop) { stop(); stop = null; }
+    };
+  };
+
+  return { subscribe };
+}
+
+// ─── Store instances ──────────────────────────────────────────────────────────
+
+// writable: shared counter
+const countStore = createWritable(0);
+
+// readable: live clock
+const clockStore = createReadable(new Date(), (set) => {
+  const id = setInterval(() => set(new Date()), 1000);
+  return () => clearInterval(id);
+});
+
+// custom store: shopping cart
+interface CartItem { id: number; name: string; price: number; qty: number; }
+const products = [
+  { id: 1, name: 'Svelte книга', price: 890 },
+  { id: 2, name: 'Sticker Pack', price: 250 },
+  { id: 3, name: 'Мышь', price: 1490 },
+  { id: 4, name: 'Кружка', price: 350 },
+];
+
+function createCartStore() {
+  const store = createWritable<CartItem[]>([]);
+  return {
+    subscribe: store.subscribe,
+    addItem(product: { id: number; name: string; price: number }) {
+      store.update(items => {
+        const ex = items.find(i => i.id === product.id);
+        if (ex) return items.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+        return [...items, { ...product, qty: 1 }];
+      });
+    },
+    removeItem(id: number) { store.update(items => items.filter(i => i.id !== id)); },
+    clear() { store.set([]); },
+  };
+}
+const cartStore = createCartStore();
+
+// ─── Hook to subscribe to a store ─────────────────────────────────────────────
+function useStore<T>(store: { subscribe: (fn: (v: T) => void) => () => void }): T {
+  const [value, setValue] = useState<T>(() => {
+    let initial!: T;
+    store.subscribe(v => { initial = v; })();
+    return initial;
+  });
+  useEffect(() => store.subscribe(setValue), []);
+  return value;
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function ComponentPanel({
+  label,
+  color,
+  showControls,
+}: {
+  label: string;
+  color: string;
+  showControls: boolean;
+}) {
+  const count = useStore(countStore);
+
+  return (
+    <div
+      style={{
+        background: CARD,
+        border: \`1px solid \${color}55\`,
+        borderRadius: '8px',
+        padding: '0.75rem',
+        flex: 1,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: '0.6rem',
+        }}
+      >
+        <span style={{ color, fontWeight: 700, fontSize: '0.78rem' }}>
+          {"<"}{label}{" />"}
+        </span>
+        <span
+          style={{
+            background: color + '22',
+            color,
+            borderRadius: '9999px',
+            padding: '0.15rem 0.5rem',
+            fontSize: '0.65rem',
+          }}
+        >
+          $count
+        </span>
+      </div>
+      <div
+        style={{
+          fontSize: '2.2rem',
+          fontWeight: 700,
+          color: TEXT,
+          textAlign: 'center',
+          margin: '0.5rem 0',
+        }}
+      >
+        {count}
+      </div>
+      {showControls && (
+        <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.5rem' }}>
+          <button
+            onClick={() => countStore.update(n => n - 1)}
+            style={{
+              flex: 1, padding: '0.3rem', border: \`1px solid \${BORDER}\`,
+              borderRadius: '5px', background: 'transparent', color: TEXT,
+              cursor: 'pointer', fontSize: '0.9rem', fontFamily: 'monospace',
+            }}
+          >
+            −
+          </button>
+          <button
+            onClick={() => countStore.set(0)}
+            style={{
+              flex: 1, padding: '0.3rem', border: \`1px solid \${BORDER}\`,
+              borderRadius: '5px', background: 'transparent', color: MUTED,
+              cursor: 'pointer', fontSize: '0.7rem', fontFamily: 'monospace',
+            }}
+          >
+            reset
+          </button>
+          <button
+            onClick={() => countStore.update(n => n + 1)}
+            style={{
+              flex: 1, padding: '0.3rem', border: \`1px solid \${BORDER}\`,
+              borderRadius: '5px', background: 'transparent', color: TEXT,
+              cursor: 'pointer', fontSize: '0.9rem', fontFamily: 'monospace',
+            }}
+          >
+            +
+          </button>
+        </div>
+      )}
+      {!showControls && (
+        <div style={{ color: DIM, fontSize: '0.68rem', textAlign: 'center' }}>
+          только читает $count
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClockPanel() {
+  const time = useStore(clockStore);
+
+  const fmt = new Intl.DateTimeFormat('ru', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+
+  return (
+    <div
+      style={{
+        background: CARD,
+        border: \`1px solid \${BORDER}\`,
+        borderRadius: '8px',
+        padding: '0.85rem',
+      }}
+    >
+      <div
+        style={{
+          color: MUTED,
+          fontSize: '0.68rem',
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          marginBottom: '0.5rem',
+        }}
+      >
+        🕐 readable store — live clock
+      </div>
+      <div style={{ fontSize: '1.6rem', fontWeight: 700, color: '#60a5fa', letterSpacing: '0.05em' }}>
+        {fmt.format(time)}
+      </div>
+      <div style={{ color: DIM, fontSize: '0.68rem', marginTop: '0.3rem' }}>
+        setInterval в readable start(), clearInterval в stop()
+      </div>
+    </div>
+  );
+}
+
+function CartPanel() {
+  const items = useStore(cartStore);
+  const total = items.reduce((s, i) => s + i.price * i.qty, 0);
+  const count = items.reduce((s, i) => s + i.qty, 0);
+
+  const btnStyle = (bg: string, color: string): React.CSSProperties => ({
+    border: 'none', borderRadius: '5px', padding: '0.3rem 0.6rem',
+    cursor: 'pointer', fontSize: '0.72rem', fontWeight: 700,
+    fontFamily: 'monospace', background: bg, color,
+  });
+
+  return (
+    <div
+      style={{
+        background: CARD,
+        border: \`1px solid \${BORDER}\`,
+        borderRadius: '8px',
+        padding: '0.85rem',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: '0.65rem',
+        }}
+      >
+        <div
+          style={{
+            color: MUTED,
+            fontSize: '0.68rem',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+          }}
+        >
+          🛒 custom store — корзина
+        </div>
+        {items.length > 0 && (
+          <button onClick={() => cartStore.clear()} style={btnStyle('#7f1d1d', '#f87171')}>
+            очистить
+          </button>
+        )}
+      </div>
+
+      {/* Products to add */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem', marginBottom: '0.65rem' }}>
+        {products.map(p => (
+          <button
+            key={p.id}
+            onClick={() => cartStore.addItem(p)}
+            style={{
+              ...btnStyle(BORDER, TEXT),
+              textAlign: 'left',
+              padding: '0.4rem 0.5rem',
+            }}
+          >
+            <div style={{ fontSize: '0.72rem' }}>{p.name}</div>
+            <div style={{ color: YELLOW, fontSize: '0.68rem' }}>{p.price} ₽</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Cart items */}
+      {items.length === 0 ? (
+        <div style={{ color: DIM, fontSize: '0.75rem', textAlign: 'center', padding: '0.5rem' }}>
+          Корзина пуста — добавь товары выше!
+        </div>
+      ) : (
+        <>
+          {items.map(item => (
+            <div
+              key={item.id}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '0.3rem 0',
+                borderBottom: \`1px solid \${BORDER}\`,
+              }}
+            >
+              <div>
+                <span style={{ color: TEXT, fontSize: '0.75rem' }}>{item.name}</span>
+                <span style={{ color: DIM, fontSize: '0.68rem' }}> ×{item.qty}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <span style={{ color: YELLOW, fontSize: '0.75rem', fontWeight: 700 }}>
+                  {item.price * item.qty} ₽
+                </span>
+                <button
+                  onClick={() => cartStore.removeItem(item.id)}
+                  style={{ ...btnStyle('transparent', '#f87171'), padding: '0.1rem 0.4rem' }}
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          ))}
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              paddingTop: '0.5rem',
+              marginTop: '0.1rem',
+            }}
+          >
+            <span style={{ color: MUTED, fontSize: '0.75rem' }}>
+              Итого ({count} шт.)
+            </span>
+            <span style={{ color: SUCCESS, fontWeight: 700, fontSize: '0.85rem' }}>
+              {total} ₽
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [customVal, setCustomVal] = useState('');
+
+  const compColors = [ACCENT, '#60a5fa', SUCCESS];
+  const compLabels = ['ComponentA', 'ComponentB', 'ComponentC'];
+
+  return (
+    <div
+      style={{
+        background: BG,
+        minHeight: '100vh',
+        padding: '1.25rem',
+        fontFamily: 'monospace',
+        color: TEXT,
+        boxSizing: 'border-box',
+      }}
+    >
+      {/* Header */}
+      <div style={{ marginBottom: '1.25rem' }}>
+        <h2
+          style={{
+            color: ACCENT,
+            fontSize: '1.15rem',
+            fontWeight: 700,
+            margin: '0 0 0.25rem',
+          }}
+        >
+          🏪 Svelte Stores Playground
+        </h2>
+        <p style={{ color: MUTED, fontSize: '0.78rem', margin: 0 }}>
+          Три компонента разделяют один writable store — измени у любого!
+        </p>
+      </div>
+
+      {/* Store connection diagram */}
+      <div
+        style={{
+          background: CARD,
+          border: \`1px solid \${BORDER}\`,
+          borderRadius: '8px',
+          padding: '0.75rem 1rem',
+          marginBottom: '1rem',
+          fontSize: '0.72rem',
+          color: DIM,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.5rem',
+          flexWrap: 'wrap',
+        }}
+      >
+        <span style={{ color: ACCENT, fontWeight: 700 }}>countStore</span>
+        <span>─── subscribe ──►</span>
+        {compLabels.map((l, i) => (
+          <span key={l} style={{ color: compColors[i], fontWeight: 700 }}>
+            {l}
+          </span>
+        ))}
+        <span style={{ marginLeft: 'auto', color: MUTED }}>
+          writable(0)
+        </span>
+      </div>
+
+      {/* writable store: shared counter across components */}
+      <div style={{ marginBottom: '1rem' }}>
+        <div
+          style={{
+            color: MUTED,
+            fontSize: '0.68rem',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            marginBottom: '0.5rem',
+          }}
+        >
+          📝 writable store — разделяется между компонентами
+        </div>
+        <div style={{ display: 'flex', gap: '0.6rem' }}>
+          <ComponentPanel label={compLabels[0]} color={compColors[0]} showControls={true} />
+          <ComponentPanel label={compLabels[1]} color={compColors[1]} showControls={false} />
+          <ComponentPanel label={compLabels[2]} color={compColors[2]} showControls={false} />
+        </div>
+      </div>
+
+      {/* set/update/custom */}
+      <div
+        style={{
+          background: CARD,
+          border: \`1px solid \${BORDER}\`,
+          borderRadius: '8px',
+          padding: '0.85rem',
+          marginBottom: '1rem',
+        }}
+      >
+        <div
+          style={{
+            color: MUTED,
+            fontSize: '0.68rem',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            marginBottom: '0.65rem',
+          }}
+        >
+          Методы store
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          {[
+            { label: 'count.set(0)', action: () => countStore.set(0), color: '#f87171' },
+            { label: 'count.set(42)', action: () => countStore.set(42), color: YELLOW },
+            { label: 'update(n => n * 2)', action: () => countStore.update(n => n * 2), color: '#a78bfa' },
+            { label: 'update(n => n * -1)', action: () => countStore.update(n => -n), color: '#60a5fa' },
+          ].map(({ label, action, color }) => (
+            <button
+              key={label}
+              onClick={action}
+              style={{
+                border: \`1px solid \${color}44\`,
+                borderRadius: '6px',
+                padding: '0.4rem 0.75rem',
+                background: color + '11',
+                color,
+                cursor: 'pointer',
+                fontSize: '0.75rem',
+                fontFamily: 'monospace',
+                fontWeight: 600,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+          <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            <input
+              type="number"
+              value={customVal}
+              onChange={e => setCustomVal(e.target.value)}
+              placeholder="число..."
+              style={{
+                background: '#0f172a',
+                border: \`1px solid \${BORDER}\`,
+                borderRadius: '5px',
+                color: TEXT,
+                padding: '0.4rem 0.6rem',
+                fontSize: '0.75rem',
+                fontFamily: 'monospace',
+                width: '80px',
+              }}
+            />
+            <button
+              onClick={() => {
+                const n = parseInt(customVal);
+                if (!isNaN(n)) { countStore.set(n); setCustomVal(''); }
+              }}
+              style={{
+                border: \`1px solid \${ACCENT}44\`,
+                borderRadius: '6px',
+                padding: '0.4rem 0.75rem',
+                background: ACCENT + '11',
+                color: ACCENT,
+                cursor: 'pointer',
+                fontSize: '0.75rem',
+                fontFamily: 'monospace',
+                fontWeight: 600,
+              }}
+            >
+              count.set(n)
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom row: readable clock + custom cart */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+        <ClockPanel />
+        <CartPanel />
+      </div>
+    </div>
+  );
+}
+` }} />

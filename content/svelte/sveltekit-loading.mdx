@@ -1,0 +1,816 @@
+## 📡 SvelteKit Load Functions: Загрузка данных как профи
+
+Привет! 👋 Загрузка данных — это сердце любого веб-приложения. SvelteKit предлагает элегантное решение: `load` функции, которые запускаются **перед** рендерингом страницы и передают данные в компонент через специальный `data` prop.
+
+Думай о `load` функции как о waiter в ресторане 🍽️: гость (браузер) делает заказ (запрос страницы), официант (load) идёт на кухню (сервер/база данных), приносит блюдо (данные), и только тогда гость видит свою еду (страница рендерится).
+
+---
+
+## 🎯 Два вида load функций: Universal vs Server
+
+Это ключевое разделение в SvelteKit, которое нужно понять сразу:
+
+```
++page.ts           ← Universal load (запускается и на сервере, и на клиенте)
++page.server.ts    ← Server load (ТОЛЬКО на сервере, никогда на клиенте)
+
++layout.ts         ← Universal load для layout
++layout.server.ts  ← Server load для layout
+```
+
+**Когда что использовать:**
+
+```
++page.ts (Universal):
+  ✅ Публичные API (не нужен секретный ключ)
+  ✅ Данные, которые нужны при клиентской навигации
+  ✅ Fetch с внешних API
+  ❌ Прямой доступ к базе данных
+  ❌ Секретные переменные окружения
+
++page.server.ts (Server only):
+  ✅ База данных (Prisma, Drizzle, etc.)
+  ✅ Секретные API ключи
+  ✅ Проверка сессии/авторизации
+  ✅ Cookies
+  ✅ Form Actions (ТОЛЬКО здесь!)
+  ❌ Не запускается при клиентской навигации без SSR
+```
+
+---
+
+## 📖 +page.ts: Universal Load
+
+```typescript
+// src/routes/blog/+page.ts
+import type { PageLoad } from './$types';
+
+export const load: PageLoad = async ({ fetch, url, params, data }) => {
+  // fetch здесь — специальный SvelteKit fetch:
+  // - На сервере: делает прямые запросы (нет сетевого overhead)
+  // - На клиенте: обычный браузерный fetch
+  // - Поддерживает относительные URL
+  // - Автоматически передаёт cookies
+
+  const page = Number(url.searchParams.get('page') ?? '1');
+  const limit = 10;
+
+  const response = await fetch(`/api/posts?page=${page}&limit=${limit}`);
+
+  if (!response.ok) {
+    throw new Error('Не удалось загрузить посты');
+  }
+
+  const { posts, total } = await response.json();
+
+  return {
+    posts,
+    total,
+    page,
+    limit,
+    // Всё это будет доступно в +page.svelte через data.posts, data.total, etc.
+  };
+};
+```
+
+```svelte
+<!-- src/routes/blog/+page.svelte -->
+<script lang="ts">
+  import type { PageData } from './$types';
+
+  // data — автоматически типизирован из load функции!
+  let { data }: { data: PageData } = $props();
+
+  // TypeScript знает что data.posts — массив постов, data.total — число
+</script>
+
+<h1>Блог</h1>
+<p>Всего постов: {data.total}</p>
+
+{#each data.posts as post}
+  <article>
+    <h2>{post.title}</h2>
+    <p>{post.excerpt}</p>
+    <a href="/blog/{post.slug}">Читать →</a>
+  </article>
+{/each}
+
+<!-- Пагинация -->
+<nav>
+  {#if data.page > 1}
+    <a href="?page={data.page - 1}">← Назад</a>
+  {/if}
+  <span>Страница {data.page}</span>
+  {#if data.page * data.limit < data.total}
+    <a href="?page={data.page + 1}">Далее →</a>
+  {/if}
+</nav>
+```
+
+---
+
+## 🖥️ +page.server.ts: Server Load
+
+```typescript
+// src/routes/blog/[slug]/+page.server.ts
+import type { PageServerLoad } from './$types';
+import { error, redirect } from '@sveltejs/kit';
+import { db } from '$lib/server/database';
+
+export const load: PageServerLoad = async ({
+  params,        // Параметры маршрута
+  locals,        // Данные из hooks (user session, etc.)
+  cookies,       // Куки
+  request,       // Request объект
+  url,           // URL объект
+  setHeaders,    // Установить HTTP заголовки
+}) => {
+  const { slug } = params;
+
+  // Прямой доступ к базе данных — только на сервере!
+  const post = await db.post.findUnique({
+    where: { slug },
+    include: {
+      author: true,
+      tags: true,
+      comments: {
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      },
+    },
+  });
+
+  if (!post) {
+    error(404, { message: `Пост "${slug}" не найден` });
+  }
+
+  if (!post.published && !locals.user?.isAdmin) {
+    error(403, { message: 'Нет доступа к черновику' });
+  }
+
+  // Кэшируем страницу на CDN на 1 час (только публичные посты):
+  if (post.published) {
+    setHeaders({
+      'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+    });
+  }
+
+  // Обновляем счётчик просмотров асинхронно (не ждём результата):
+  db.post.update({
+    where: { id: post.id },
+    data: { views: { increment: 1 } },
+  }).catch(console.error); // Не блокируем загрузку страницы
+
+  return {
+    post,
+    // Заметь: locals.user НЕ передаём автоматически — только то что нужно компоненту
+    isOwner: locals.user?.id === post.authorId,
+  };
+};
+```
+
+---
+
+## 🏗️ +layout.ts и +layout.server.ts: данные для всех страниц
+
+```typescript
+// src/routes/+layout.server.ts — данные для ВСЕХ страниц приложения
+import type { LayoutServerLoad } from './$types';
+import { db } from '$lib/server/database';
+
+export const load: LayoutServerLoad = async ({ locals, cookies }) => {
+  // Эти данные будут доступны ВЕЗДЕ через $page.data или data prop layout
+
+  const user = locals.user ?? null;
+
+  // Загружаем данные для навигации один раз:
+  const [categories, notifications] = await Promise.all([
+    db.category.findMany({ orderBy: { name: 'asc' } }),
+    user ? db.notification.count({ where: { userId: user.id, read: false } }) : 0,
+  ]);
+
+  return {
+    user,
+    categories,
+    notificationsCount: notifications,
+    theme: cookies.get('theme') ?? 'dark',
+  };
+};
+```
+
+```svelte
+<!-- src/routes/+layout.svelte — используем layout данные -->
+<script lang="ts">
+  import type { LayoutData } from './$types';
+
+  let { children, data }: { children: any; data: LayoutData } = $props();
+  // data.user, data.categories, data.notificationsCount — всё здесь!
+</script>
+
+<nav>
+  {#if data.user}
+    <span>Привет, {data.user.name}!</span>
+    <span>🔔 {data.notificationsCount}</span>
+  {:else}
+    <a href="/login">Войти</a>
+  {/if}
+
+  {#each data.categories as cat}
+    <a href="/category/{cat.slug}">{cat.name}</a>
+  {/each}
+</nav>
+
+{@render children()}
+```
+
+---
+
+## 🔗 parent(): получаем данные родительского layout
+
+```typescript
+// src/routes/blog/[slug]/+page.server.ts
+import type { PageServerLoad } from './$types';
+
+export const load: PageServerLoad = async ({ parent, params }) => {
+  // parent() даёт нам данные из +layout.server.ts и +layout.ts
+  const { user, categories } = await parent();
+
+  // Теперь можем использовать user для проверки доступа
+  const post = await db.post.findUnique({
+    where: { slug: params.slug },
+  });
+
+  // Комбинируем данные:
+  return {
+    post,
+    relatedPosts: await getRelatedPosts(post.id, categories),
+  };
+};
+```
+
+**Важно:** `parent()` создаёт зависимость от родительского layout. Если родительский layout инвалидируется — дочерний load тоже перезапускается.
+
+---
+
+## ⚡ depends() и invalidate(): контроль кэширования
+
+```typescript
+// src/routes/dashboard/+page.ts
+import type { PageLoad } from './$types';
+
+export const load: PageLoad = async ({ fetch, depends }) => {
+  // depends() — регистрируем зависимости для invalidation
+  depends('app:notifications');    // Кастомный идентификатор
+  depends('app:user-stats');
+
+  const [notifications, stats] = await Promise.all([
+    fetch('/api/notifications').then(r => r.json()),
+    fetch('/api/stats').then(r => r.json()),
+  ]);
+
+  return { notifications, stats };
+};
+```
+
+```svelte
+<!-- src/routes/dashboard/+page.svelte -->
+<script lang="ts">
+  import { invalidate, invalidateAll } from '$app/navigation';
+  import type { PageData } from './$types';
+
+  let { data }: { data: PageData } = $props();
+
+  // Инвалидировать только уведомления:
+  async function refreshNotifications() {
+    await invalidate('app:notifications'); // Перезапустит load для этой зависимости
+  }
+
+  // Инвалидировать по URL:
+  async function refreshStats() {
+    await invalidate('/api/stats'); // Перезапустит load, который fetch этот URL
+  }
+
+  // Инвалидировать всё на странице:
+  async function refreshAll() {
+    await invalidateAll(); // Перезапустит все load функции текущей страницы
+  }
+
+  // Автоматическое обновление каждые 30 секунд:
+  $effect(() => {
+    const interval = setInterval(() => {
+      invalidate('app:notifications');
+    }, 30000);
+
+    return () => clearInterval(interval);
+  });
+</script>
+
+<div>
+  <h1>Dashboard</h1>
+  <p>Уведомления: {data.notifications.length}</p>
+  <button onclick={refreshNotifications}>🔔 Обновить</button>
+  <button onclick={refreshAll}>🔄 Обновить всё</button>
+</div>
+```
+
+---
+
+## 🌊 Стриминг с Promise
+
+SvelteKit поддерживает стриминг данных — ты можешь вернуть Promise из load функции, и страница начнёт рендериться до того, как все данные загружены:
+
+```typescript
+// src/routes/product/[id]/+page.server.ts
+import type { PageServerLoad } from './$types';
+
+export const load: PageServerLoad = async ({ params }) => {
+  const productId = params.id;
+
+  // Критически важные данные — ждём немедленно:
+  const product = await db.product.findUnique({
+    where: { id: productId },
+  });
+
+  if (!product) error(404, 'Товар не найден');
+
+  return {
+    product,                    // ← Ждём сразу (блокирует рендер)
+
+    // Возвращаем Promise-ы — они стримятся!
+    reviews: db.review.findMany({
+      where: { productId },
+      orderBy: { createdAt: 'desc' },
+    }),                         // ← Не ждём, стримим
+
+    recommendations: getAIRecommendations(productId)
+      .catch(() => []),         // ← Стримим, с fallback при ошибке
+  };
+};
+```
+
+```svelte
+<!-- src/routes/product/[id]/+page.svelte -->
+<script lang="ts">
+  import type { PageData } from './$types';
+
+  let { data }: { data: PageData } = $props();
+</script>
+
+<!-- Основные данные уже доступны: -->
+<h1>{data.product.name}</h1>
+<p>{data.product.price} ₽</p>
+
+<!-- Стримируемые данные — используем {#await}: -->
+{#await data.reviews}
+  <div class="skeleton">Загружаем отзывы...</div>
+{:then reviews}
+  {#each reviews as review}
+    <div class="review">
+      <strong>{review.author}</strong>
+      <p>{review.text}</p>
+    </div>
+  {/each}
+{:catch error}
+  <p>Не удалось загрузить отзывы</p>
+{/await}
+
+{#await data.recommendations}
+  <div class="skeleton">Подбираем рекомендации...</div>
+{:then recommendations}
+  <h3>Похожие товары</h3>
+  {#each recommendations as rec}
+    <a href="/product/{rec.id}">{rec.name}</a>
+  {/each}
+{/await}
+```
+
+---
+
+## 🔒 TypeScript: PageLoad и PageServerLoad
+
+```typescript
+// src/routes/users/[id]/+page.server.ts
+import type { PageServerLoad } from './$types';
+import { error } from '@sveltejs/kit';
+
+// PageServerLoad автоматически типизирует params из имени файла!
+// Для /users/[id]/ params.id всегда string
+export const load = (async ({ params, locals }) => {
+  const user = await db.user.findUnique({
+    where: { id: params.id }, // params.id: string (автоматически!)
+  });
+
+  if (!user) error(404, 'Пользователь не найден');
+
+  return { user }; // TypeScript выведет тип возврата автоматически
+}) satisfies PageServerLoad;
+
+// src/routes/users/[id]/+page.svelte
+// PageData автоматически = { user: User }
+```
+
+```typescript
+// Явная типизация если нужно:
+import type { PageServerLoad, Actions } from './$types';
+
+interface Post {
+  id: string;
+  title: string;
+  content: string;
+  author: { name: string; avatar: string };
+}
+
+export const load = (async ({ params }) => {
+  const post: Post = await getPost(params.slug);
+  return { post };
+}) satisfies PageServerLoad;
+
+// Это даст PageData = { post: Post } в +page.svelte
+```
+
+---
+
+## 📊 $page.data: доступ к данным без prop drilling
+
+```svelte
+<!-- Любой компонент может получить данные страницы через $page -->
+<script lang="ts">
+  import { page } from '$app/stores';
+
+  // $page.data содержит все merged данные от всех load функций:
+  // - +layout.server.ts data
+  // - +layout.ts data
+  // - +page.server.ts data
+  // - +page.ts data
+
+  // Получаем user из layout data без prop drilling:
+  let user = $derived($page.data.user);
+</script>
+
+{#if $page.data.user}
+  <span>Привет, {$page.data.user.name}!</span>
+{/if}
+```
+
+---
+
+## ⚙️ Конфигурация: prerender, ssr, csr
+
+```typescript
+// src/routes/static-page/+page.ts
+// Предрендеривать страницу при сборке (SSG):
+export const prerender = true;
+
+// Отключить SSR — только клиентский рендеринг:
+export const ssr = false;
+
+// Отключить клиентский рендеринг — чистый HTML:
+export const csr = false;
+
+// Загрузка данных для статической страницы:
+export const load = async () => {
+  // Эта функция запустится один раз при сборке
+  const data = await fetchBuildTimeData();
+  return { data };
+};
+```
+
+---
+
+## 🚨 Обработка ошибок в load
+
+```typescript
+import { error, redirect, fail } from '@sveltejs/kit';
+
+export const load: PageServerLoad = async ({ params, locals }) => {
+  // error() — возвращает HTTP ошибку
+  if (!locals.user) {
+    redirect(307, '/login'); // Редирект
+  }
+
+  const resource = await db.find(params.id);
+
+  if (!resource) {
+    error(404, {
+      message: 'Ресурс не найден',
+      code: 'NOT_FOUND', // Дополнительные данные ошибки
+    });
+  }
+
+  if (resource.ownerId !== locals.user.id) {
+    error(403, 'Нет доступа');
+  }
+
+  return { resource };
+};
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useCallback } from "react";
+
+const SVELTE_ORANGE = "#ff3e00";
+const SVELTE_YELLOW = "#ffba00";
+const BG = "#0f172a";
+const BG2 = "#1e293b";
+const BG3 = "#334155";
+
+type LoadType = "universal" | "server" | "layout" | "streaming";
+
+const tabs = [
+  { id: "universal" as LoadType, label: "+page.ts", emoji: "🌐" },
+  { id: "server" as LoadType, label: "+page.server.ts", emoji: "🖥️" },
+  { id: "layout" as LoadType, label: "+layout.server.ts", emoji: "🏗️" },
+  { id: "streaming" as LoadType, label: "Стриминг", emoji: "🌊" },
+];
+
+// Симуляция Universal Load
+function UniversalDemo() {
+  const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [posts, setPosts] = useState<{ id: number; title: string; excerpt: string }[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loadLocation, setLoadLocation] = useState<"server" | "client" | null>(null);
+  const [isFirstLoad, setIsFirstLoad] = useState(true);
+
+  const loadPosts = useCallback(async (pageNum: number, isServer: boolean) => {
+    setLoading(true);
+    setLoadLocation(isServer ? "server" : "client");
+
+    await new Promise((r) => setTimeout(r, isServer ? 400 : 200));
+
+    const fakePosts = Array.from({ length: 3 }, (_, i) => ({
+      id: (pageNum - 1) * 3 + i + 1,
+      title: \`Пост \${(pageNum - 1) * 3 + i + 1}: \${["Svelte 5 рулит", "SvelteKit для чайников", "Реактивность изнутри"][i]}\`,
+      excerpt: "Краткое описание поста...",
+    }));
+
+    setPosts(fakePosts);
+    setTotal(12);
+    setLoading(false);
+    setIsFirstLoad(false);
+  }, []);
+
+  useEffect(() => { loadPosts(1, true); }, []);
+
+  const changePage = (newPage: number) => {
+    setPage(newPage);
+    loadPosts(newPage, false); // Клиентская навигация!
+  };
+
+  return (
+    <div>
+      <div style={{ background: BG3, borderRadius: "8px", padding: "10px", marginBottom: "12px", fontSize: "12px" }}>
+        <div style={{ color: SVELTE_YELLOW, fontFamily: "monospace", marginBottom: "4px" }}>// +page.ts (Universal)</div>
+        <div style={{ color: "#94a3b8" }}>
+          {isFirstLoad ? "⏳ Первый рендер — выполняется на " : "🔄 Навигация — выполняется на "}
+          <span style={{ color: loadLocation === "server" ? "#34d399" : SVELTE_ORANGE }}>
+            {loadLocation === "server" ? "СЕРВЕРЕ" : "КЛИЕНТЕ"}
+          </span>
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ textAlign: "center", padding: "20px", color: "#64748b", fontSize: "13px" }}>
+          ⏳ Загрузка данных ({loadLocation === "server" ? "сервер" : "клиент"})...
+        </div>
+      ) : (
+        <>
+          {posts.map((post) => (
+            <div key={post.id} style={{ background: BG3, borderRadius: "8px", padding: "10px", marginBottom: "8px" }}>
+              <div style={{ color: "#e2e8f0", fontSize: "13px", fontWeight: "bold" }}>{post.title}</div>
+              <div style={{ color: "#64748b", fontSize: "11px", marginTop: "4px" }}>{post.excerpt}</div>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: "6px", justifyContent: "center", marginTop: "10px" }}>
+            {Array.from({ length: Math.ceil(total / 3) }, (_, i) => i + 1).map((p) => (
+              <button key={p} onClick={() => changePage(p)} style={{ padding: "4px 10px", border: "none", borderRadius: "4px", cursor: "pointer", background: page === p ? SVELTE_ORANGE : BG3, color: page === p ? "#fff" : "#94a3b8", fontSize: "12px" }}>
+                {p}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Симуляция Server Load
+function ServerDemo() {
+  const [scenario, setScenario] = useState<"success" | "404" | "403" | "redirect">("success");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<{ type: string; data?: object; error?: string } | null>(null);
+
+  const scenarios = [
+    { id: "success" as const, label: "✅ Успех", desc: "Пост найден" },
+    { id: "404" as const, label: "❌ 404", desc: "Пост не найден" },
+    { id: "403" as const, label: "🔒 403", desc: "Нет доступа" },
+    { id: "redirect" as const, label: "↩️ Redirect", desc: "Нужна авторизация" },
+  ];
+
+  const runLoad = async () => {
+    setLoading(true);
+    setResult(null);
+    await new Promise((r) => setTimeout(r, 600));
+
+    const outcomes = {
+      success: { type: "success", data: { post: { id: "1", title: "Hello Svelte", author: "Яша", views: 42 } } },
+      "404": { type: "error", error: "error(404, 'Пост не найден')" },
+      "403": { type: "error", error: "error(403, 'Нет доступа к черновику')" },
+      redirect: { type: "redirect", error: "redirect(307, '/login?redirectTo=/blog/secret')" },
+    };
+
+    setResult(outcomes[scenario]);
+    setLoading(false);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "12px" }}>
+        {scenarios.map((s) => (
+          <button key={s.id} onClick={() => setScenario(s.id)} style={{ padding: "8px", border: \`1px solid \${scenario === s.id ? SVELTE_ORANGE : "#475569"}\`, borderRadius: "6px", background: scenario === s.id ? \`\${SVELTE_ORANGE}22\` : BG3, cursor: "pointer", fontSize: "12px", color: "#e2e8f0", transition: "all 0.15s" }}>
+            <div>{s.label}</div>
+            <div style={{ fontSize: "10px", color: "#64748b" }}>{s.desc}</div>
+          </button>
+        ))}
+      </div>
+
+      <button onClick={runLoad} style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "10px", cursor: "pointer", fontSize: "13px", marginBottom: "12px" }}>
+        ▶ Запустить load()
+      </button>
+
+      {loading && <div style={{ textAlign: "center", color: "#64748b", fontSize: "13px" }}>🖥️ Выполняется на сервере...</div>}
+
+      {result && (
+        <div style={{ background: BG, borderRadius: "8px", padding: "12px", border: \`1px solid \${result.type === "success" ? "#34d399" : result.type === "redirect" ? SVELTE_YELLOW : "#f87171"}44\` }}>
+          <div style={{ fontSize: "12px", fontFamily: "monospace", color: result.type === "success" ? "#34d399" : result.type === "redirect" ? SVELTE_YELLOW : "#f87171", marginBottom: "6px" }}>
+            {result.type === "success" ? "✅ return { ... }" : result.type === "redirect" ? "↩️ " + result.error : "💥 throw " + result.error}
+          </div>
+          {result.data && (
+            <pre style={{ fontSize: "11px", color: "#e2e8f0", margin: 0, overflow: "auto", whiteSpace: "pre-wrap" }}>
+              {JSON.stringify(result.data, null, 2)}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Симуляция Layout Load
+function LayoutDemo() {
+  const [user] = useState({ name: "Яша", role: "admin", notifs: 3 });
+  const [categories] = useState(["TypeScript", "Svelte", "SvelteKit", "Vite"]);
+
+  return (
+    <div>
+      <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+        // Данные из +layout.server.ts доступны ВЕЗДЕ
+      </div>
+
+      <div style={{ background: BG3, borderRadius: "8px", marginBottom: "10px" }}>
+        <div style={{ padding: "10px 12px", borderBottom: "1px solid #1e293b", display: "flex", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "18px" }}>👤</span>
+          <span style={{ color: "#e2e8f0", fontSize: "13px" }}>{user.name}</span>
+          <span style={{ fontSize: "10px", color: SVELTE_YELLOW, background: \`\${SVELTE_YELLOW}22\`, padding: "2px 6px", borderRadius: "4px" }}>{user.role}</span>
+          <span style={{ marginLeft: "auto", fontSize: "12px", color: SVELTE_ORANGE }}>🔔 {user.notifs}</span>
+        </div>
+        <div style={{ padding: "10px 12px" }}>
+          <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "6px" }}>Категории (layout data):</div>
+          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+            {categories.map((c) => (
+              <span key={c} style={{ fontSize: "11px", background: BG, color: SVELTE_ORANGE, padding: "2px 8px", borderRadius: "4px", border: \`1px solid \${SVELTE_ORANGE}44\` }}>{c}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ background: BG, borderRadius: "8px", padding: "12px", border: "1px solid #1e293b" }}>
+        <div style={{ fontSize: "12px", color: SVELTE_YELLOW, fontFamily: "monospace", marginBottom: "6px" }}>// В любом компоненте через $page.data:</div>
+        <code style={{ fontSize: "11px", color: "#e2e8f0", fontFamily: "monospace" }}>
+          import {"{ page }"} from '$app/stores';<br/>
+          $page.data.user.name    // "{user.name}"<br/>
+          $page.data.categories   // [...{categories.length}]<br/>
+          $page.data.notificationsCount // {user.notifs}
+        </code>
+      </div>
+    </div>
+  );
+}
+
+// Симуляция Streaming
+function StreamingDemo() {
+  const [phase, setPhase] = useState<"idle" | "product" | "reviews" | "recs" | "done">("idle");
+  const [product, setProduct] = useState<object | null>(null);
+  const [reviews, setReviews] = useState<object[] | null>(null);
+  const [recs, setRecs] = useState<object[] | null>(null);
+
+  const simulate = async () => {
+    setPhase("idle");
+    setProduct(null);
+    setReviews(null);
+    setRecs(null);
+
+    await new Promise((r) => setTimeout(r, 200));
+    setPhase("product");
+    setProduct({ name: "iPhone 15 Pro", price: 99990, inStock: true });
+
+    setTimeout(async () => {
+      setPhase("reviews");
+      await new Promise((r) => setTimeout(r, 800));
+      setReviews([{ author: "Дима", text: "Отличный!" }, { author: "Катя", text: "Советую" }]);
+    }, 300);
+
+    setTimeout(async () => {
+      await new Promise((r) => setTimeout(r, 1200));
+      setPhase("recs");
+      setRecs([{ name: "AirPods Pro" }, { name: "MagSafe Charger" }]);
+      setPhase("done");
+    }, 400);
+  };
+
+  return (
+    <div>
+      <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+        // Страница рендерится немедленно, данные стримятся
+      </div>
+
+      <button onClick={simulate} style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "10px", cursor: "pointer", fontSize: "13px", marginBottom: "12px" }}>
+        ▶ Симулировать загрузку страницы
+      </button>
+
+      {phase !== "idle" && (
+        <div>
+          <div style={{ background: BG3, borderRadius: "8px", padding: "10px", marginBottom: "8px", border: product ? \`1px solid #34d39944\` : "1px solid #33415588" }}>
+            <div style={{ fontSize: "12px", color: "#64748b", fontFamily: "monospace", marginBottom: "4px" }}>product (await) — блокирует</div>
+            {product ? (
+              <div>
+                <div style={{ color: "#e2e8f0", fontSize: "13px", fontWeight: "bold" }}>{(product as any).name}</div>
+                <div style={{ color: SVELTE_ORANGE, fontSize: "12px" }}>{(product as any).price} ₽</div>
+              </div>
+            ) : (
+              <div style={{ color: "#64748b", fontSize: "12px" }}>⏳ Загрузка...</div>
+            )}
+          </div>
+
+          <div style={{ background: BG3, borderRadius: "8px", padding: "10px", marginBottom: "8px", border: reviews ? \`1px solid #818cf844\` : "1px solid #33415588" }}>
+            <div style={{ fontSize: "12px", color: "#64748b", fontFamily: "monospace", marginBottom: "4px" }}>reviews (Promise) — стримится</div>
+            {reviews ? (
+              reviews.map((r: any, i) => (
+                <div key={i} style={{ color: "#e2e8f0", fontSize: "12px" }}>⭐ {r.author}: {r.text}</div>
+              ))
+            ) : (
+              <div style={{ color: "#64748b", fontSize: "12px", fontStyle: "italic" }}>
+                {"{#await data.reviews}<Skeleton />{:then reviews}...{/await}"}
+              </div>
+            )}
+          </div>
+
+          <div style={{ background: BG3, borderRadius: "8px", padding: "10px", border: recs ? \`1px solid \${SVELTE_YELLOW}44\` : "1px solid #33415588" }}>
+            <div style={{ fontSize: "12px", color: "#64748b", fontFamily: "monospace", marginBottom: "4px" }}>recommendations (Promise) — стримится</div>
+            {recs ? (
+              recs.map((r: any, i) => (
+                <div key={i} style={{ color: SVELTE_YELLOW, fontSize: "12px" }}>→ {r.name}</div>
+              ))
+            ) : (
+              <div style={{ color: "#64748b", fontSize: "12px", fontStyle: "italic" }}>
+                {"{#await data.recommendations}<Skeleton />{:then recs}...{/await}"}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<LoadType>("universal");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "20px", fontFamily: "system-ui, sans-serif", color: "#e2e8f0" }}>
+      <div style={{ maxWidth: "600px", margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: "20px" }}>
+          <div style={{ fontSize: "26px", fontWeight: "bold", color: SVELTE_ORANGE }}>Load Functions</div>
+          <div style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>SvelteKit загрузка данных 📡</div>
+        </div>
+
+        <div style={{ display: "flex", gap: "6px", marginBottom: "16px", background: BG2, padding: "4px", borderRadius: "10px" }}>
+          {tabs.map((tab) => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "8px 2px", border: "none", borderRadius: "7px", cursor: "pointer", background: activeTab === tab.id ? SVELTE_ORANGE : "transparent", color: activeTab === tab.id ? "#fff" : "#94a3b8", fontSize: "10px", fontWeight: activeTab === tab.id ? "bold" : "normal", transition: "all 0.15s" }}>
+              {tab.emoji} {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: BG2, borderRadius: "12px", padding: "16px", border: "1px solid #1e293b" }}>
+          {activeTab === "universal" && <UniversalDemo />}
+          {activeTab === "server" && <ServerDemo />}
+          {activeTab === "layout" && <LayoutDemo />}
+          {activeTab === "streaming" && <StreamingDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
