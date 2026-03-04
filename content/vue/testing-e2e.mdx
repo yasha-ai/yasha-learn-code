@@ -1,0 +1,890 @@
+## 🎭 Урок 25: E2E-тестирование с Playwright
+
+End-to-End (E2E) тестирование проверяет твоё приложение **глазами реального пользователя** — открывает браузер, кликает кнопки, заполняет формы и проверяет, что всё работает от начала до конца. Playwright — современный инструмент от Microsoft, который делает это быстро, надёжно и с кучей полезных фишек. 🚀
+
+---
+
+### 🤔 Зачем E2E-тесты?
+
+Unit-тесты проверяют отдельные функции, интеграционные — связи между компонентами, а E2E-тесты — **весь пользовательский сценарий** целиком:
+
+```
+Unit тест:       [функция] → ✅
+Integration:     [компонент A] + [компонент B] → ✅
+E2E тест:        [браузер] → открыть → кликнуть → заполнить → отправить → ✅
+```
+
+Это последний рубеж защиты. Именно E2E-тесты ловят баги, которые возникают только когда всё работает вместе.
+
+---
+
+### ⚙️ Установка Playwright
+
+```bash
+# В корне проекта Vue
+npm init playwright@latest
+
+# Выбери:
+# ✔ Where to put your end-to-end tests? › tests
+# ✔ Add a GitHub Actions workflow? › Yes
+# ✔ Install Playwright browsers? › Yes
+```
+
+После установки появятся файлы:
+
+```
+playwright.config.ts     ← главный конфиг
+tests/
+  example.spec.ts        ← пример теста
+tests-examples/
+  demo-todo-app.spec.ts  ← подробный пример
+```
+
+---
+
+### 📋 Конфигурация `playwright.config.ts`
+
+```typescript
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './tests',
+  // Параллельный запуск тестов
+  fullyParallel: true,
+  // Запрет случайного пуша с .only
+  forbidOnly: !!process.env.CI,
+  // Повторы при падении в CI
+  retries: process.env.CI ? 2 : 0,
+  // Количество воркеров
+  workers: process.env.CI ? 1 : undefined,
+  // Репортер
+  reporter: 'html',
+
+  use: {
+    // Базовый URL приложения
+    baseURL: 'http://localhost:5173',
+    // Записывать скриншоты при падении
+    screenshot: 'only-on-failure',
+    // Записывать видео при падении
+    video: 'retain-on-failure',
+    // Трейс для отладки
+    trace: 'on-first-retry',
+  },
+
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'firefox',
+      use: { ...devices['Desktop Firefox'] },
+    },
+    {
+      name: 'webkit',
+      use: { ...devices['Desktop Safari'] },
+    },
+    // Мобильные
+    {
+      name: 'Mobile Chrome',
+      use: { ...devices['Pixel 5'] },
+    },
+  ],
+
+  // Запустить dev-сервер перед тестами
+  webServer: {
+    command: 'npm run dev',
+    url: 'http://localhost:5173',
+    reuseExistingServer: !process.env.CI,
+  },
+});
+```
+
+---
+
+### 🧪 Первый тест
+
+```typescript
+// tests/navigation.spec.ts
+import { test, expect } from '@playwright/test';
+
+test('главная страница загружается', async ({ page }) => {
+  // Перейти на главную
+  await page.goto('/');
+
+  // Проверить заголовок
+  await expect(page).toHaveTitle(/Vue App/);
+
+  // Проверить наличие элемента
+  await expect(page.getByRole('heading', { name: 'Добро пожаловать' })).toBeVisible();
+});
+
+test('навигация между страницами', async ({ page }) => {
+  await page.goto('/');
+
+  // Кликнуть по ссылке "О нас"
+  await page.getByRole('link', { name: 'О нас' }).click();
+
+  // Проверить, что URL изменился
+  await expect(page).toHaveURL('/about');
+
+  // Проверить контент новой страницы
+  await expect(page.getByRole('heading', { name: 'О нас' })).toBeVisible();
+});
+```
+
+---
+
+### 🏗️ Page Object Model (POM)
+
+Page Object Model — паттерн, который делает тесты **читаемыми и поддерживаемыми**. Вместо прямых селекторов в тестах — объекты, инкапсулирующие взаимодействие со страницей.
+
+```typescript
+// tests/pages/LoginPage.ts
+import { Page, Locator, expect } from '@playwright/test';
+
+export class LoginPage {
+  readonly page: Page;
+  readonly emailInput: Locator;
+  readonly passwordInput: Locator;
+  readonly submitButton: Locator;
+  readonly errorMessage: Locator;
+
+  constructor(page: Page) {
+    this.page = page;
+    this.emailInput = page.getByLabel('Email');
+    this.passwordInput = page.getByLabel('Пароль');
+    this.submitButton = page.getByRole('button', { name: 'Войти' });
+    this.errorMessage = page.getByRole('alert');
+  }
+
+  async goto() {
+    await this.page.goto('/login');
+  }
+
+  async login(email: string, password: string) {
+    await this.emailInput.fill(email);
+    await this.passwordInput.fill(password);
+    await this.submitButton.click();
+  }
+
+  async expectError(message: string) {
+    await expect(this.errorMessage).toContainText(message);
+  }
+}
+```
+
+```typescript
+// tests/pages/DashboardPage.ts
+import { Page, Locator, expect } from '@playwright/test';
+
+export class DashboardPage {
+  readonly page: Page;
+  readonly welcomeMessage: Locator;
+  readonly logoutButton: Locator;
+
+  constructor(page: Page) {
+    this.page = page;
+    this.welcomeMessage = page.getByTestId('welcome-message');
+    this.logoutButton = page.getByRole('button', { name: 'Выйти' });
+  }
+
+  async expectLoggedIn(userName: string) {
+    await expect(this.welcomeMessage).toContainText(userName);
+  }
+}
+```
+
+```typescript
+// tests/auth.spec.ts
+import { test, expect } from '@playwright/test';
+import { LoginPage } from './pages/LoginPage';
+import { DashboardPage } from './pages/DashboardPage';
+
+test.describe('Аутентификация', () => {
+  test('успешный вход', async ({ page }) => {
+    const loginPage = new LoginPage(page);
+    const dashboardPage = new DashboardPage(page);
+
+    await loginPage.goto();
+    await loginPage.login('user@test.com', 'password123');
+
+    await expect(page).toHaveURL('/dashboard');
+    await dashboardPage.expectLoggedIn('Иван');
+  });
+
+  test('неверный пароль', async ({ page }) => {
+    const loginPage = new LoginPage(page);
+
+    await loginPage.goto();
+    await loginPage.login('user@test.com', 'wrongpassword');
+
+    await loginPage.expectError('Неверный email или пароль');
+    await expect(page).toHaveURL('/login');
+  });
+});
+```
+
+---
+
+### 🎯 Атрибуты `data-testid`
+
+Лучшая практика — помечать элементы специальными атрибутами для тестов. Они не зависят от CSS-классов или структуры DOM.
+
+```vue
+<!-- В Vue-компоненте -->
+<template>
+  <div class="todo-app">
+    <input
+      data-testid="todo-input"
+      v-model="newTodo"
+      placeholder="Новая задача..."
+      @keyup.enter="addTodo"
+    />
+    <button data-testid="add-todo-btn" @click="addTodo">
+      Добавить
+    </button>
+
+    <ul data-testid="todo-list">
+      <li
+        v-for="todo in todos"
+        :key="todo.id"
+        :data-testid="`todo-item-${todo.id}`"
+      >
+        <input
+          type="checkbox"
+          :data-testid="`todo-checkbox-${todo.id}`"
+          :checked="todo.done"
+          @change="toggleTodo(todo.id)"
+        />
+        <span :data-testid="`todo-text-${todo.id}`">{{ todo.text }}</span>
+        <button :data-testid="`delete-todo-${todo.id}`" @click="deleteTodo(todo.id)">
+          ✕
+        </button>
+      </li>
+    </ul>
+
+    <footer data-testid="todo-footer">
+      <span data-testid="todo-count">{{ remaining }} задач осталось</span>
+    </footer>
+  </div>
+</template>
+```
+
+```typescript
+// tests/todo.spec.ts
+test('управление задачами', async ({ page }) => {
+  await page.goto('/todos');
+
+  // Добавить задачу
+  await page.getByTestId('todo-input').fill('Купить молоко');
+  await page.getByTestId('add-todo-btn').click();
+
+  // Проверить, что задача добавилась
+  await expect(page.getByTestId('todo-list')).toContainText('Купить молоко');
+
+  // Проверить счётчик
+  await expect(page.getByTestId('todo-count')).toContainText('1 задач');
+
+  // Отметить выполненной
+  await page.getByTestId('todo-checkbox-1').check();
+
+  // Удалить задачу
+  await page.getByTestId('delete-todo-1').click();
+  await expect(page.getByTestId('todo-list')).not.toContainText('Купить молоко');
+});
+```
+
+---
+
+### 📝 Тестирование форм
+
+```typescript
+// tests/form.spec.ts
+test('заполнение и отправка формы регистрации', async ({ page }) => {
+  await page.goto('/register');
+
+  // Заполняем поля
+  await page.getByLabel('Имя').fill('Иван Петров');
+  await page.getByLabel('Email').fill('ivan@example.com');
+  await page.getByLabel('Пароль').fill('SecurePass123!');
+  await page.getByLabel('Подтверждение пароля').fill('SecurePass123!');
+
+  // Выбор из select
+  await page.getByLabel('Страна').selectOption('RU');
+
+  // Чекбокс
+  await page.getByLabel('Согласен с условиями').check();
+
+  // Radio button
+  await page.getByRole('radio', { name: 'Физическое лицо' }).check();
+
+  // Загрузка файла
+  await page.getByLabel('Аватар').setInputFiles('tests/fixtures/avatar.jpg');
+
+  // Отправить форму
+  await page.getByRole('button', { name: 'Зарегистрироваться' }).click();
+
+  // Проверить успех
+  await expect(page.getByText('Регистрация прошла успешно!')).toBeVisible();
+  await expect(page).toHaveURL('/welcome');
+});
+
+test('валидация формы', async ({ page }) => {
+  await page.goto('/register');
+
+  // Отправить пустую форму
+  await page.getByRole('button', { name: 'Зарегистрироваться' }).click();
+
+  // Проверить ошибки валидации
+  await expect(page.getByText('Имя обязательно')).toBeVisible();
+  await expect(page.getByText('Введите корректный email')).toBeVisible();
+
+  // Проверить aria-invalid
+  await expect(page.getByLabel('Email')).toHaveAttribute('aria-invalid', 'true');
+});
+```
+
+---
+
+### 👁️ Визуальное тестирование
+
+Playwright умеет делать скриншоты и сравнивать их с эталонами — отлично для проверки внешнего вида:
+
+```typescript
+// tests/visual.spec.ts
+import { test, expect } from '@playwright/test';
+
+test('главная страница выглядит правильно', async ({ page }) => {
+  await page.goto('/');
+
+  // Скриншот всей страницы
+  await expect(page).toHaveScreenshot('homepage.png');
+});
+
+test('модальное окно', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Открыть модалку' }).click();
+
+  // Ждём анимацию
+  await page.waitForTimeout(300);
+
+  // Скриншот только модалки
+  const modal = page.getByRole('dialog');
+  await expect(modal).toHaveScreenshot('modal.png');
+});
+
+test('мобильный вид', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto('/');
+
+  await expect(page).toHaveScreenshot('homepage-mobile.png', {
+    // Допуск 1% пикселей
+    maxDiffPixelRatio: 0.01,
+  });
+});
+```
+
+```bash
+# Обновить эталонные скриншоты
+npx playwright test --update-snapshots
+```
+
+---
+
+### 🔧 Фикстуры и хуки
+
+```typescript
+// tests/fixtures.ts
+import { test as base } from '@playwright/test';
+import { LoginPage } from './pages/LoginPage';
+
+// Расширяем базовые фикстуры
+export const test = base.extend<{
+  loginPage: LoginPage;
+  authenticatedPage: void;
+}>({
+  // Фикстура - объект страницы
+  loginPage: async ({ page }, use) => {
+    const loginPage = new LoginPage(page);
+    await use(loginPage);
+  },
+
+  // Фикстура - авторизованная сессия
+  authenticatedPage: async ({ page }, use) => {
+    // Логинимся через API (быстрее чем через UI)
+    await page.request.post('/api/auth/login', {
+      data: { email: 'test@test.com', password: 'password' },
+    });
+    await use();
+  },
+});
+```
+
+```typescript
+// tests/dashboard.spec.ts
+import { test } from './fixtures';
+import { expect } from '@playwright/test';
+
+// Хуки для группы тестов
+test.describe('Dashboard', () => {
+  // Выполнится перед каждым тестом в группе
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/dashboard');
+  });
+
+  test('показывает статистику', async ({ page, authenticatedPage }) => {
+    await expect(page.getByTestId('stats-widget')).toBeVisible();
+  });
+});
+```
+
+---
+
+### 🌐 API-запросы и моки
+
+```typescript
+// tests/api-mock.spec.ts
+test('показывает данные из API', async ({ page }) => {
+  // Перехватить API-запрос и вернуть мок
+  await page.route('**/api/users', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { id: 1, name: 'Иван', role: 'admin' },
+        { id: 2, name: 'Мария', role: 'user' },
+      ]),
+    });
+  });
+
+  await page.goto('/users');
+
+  await expect(page.getByText('Иван')).toBeVisible();
+  await expect(page.getByText('Мария')).toBeVisible();
+});
+
+test('обрабатывает ошибку API', async ({ page }) => {
+  // Симулировать ошибку сервера
+  await page.route('**/api/users', async (route) => {
+    await route.fulfill({ status: 500 });
+  });
+
+  await page.goto('/users');
+
+  await expect(page.getByTestId('error-message')).toContainText(
+    'Ошибка загрузки данных'
+  );
+});
+```
+
+---
+
+### 🔄 Параллельный запуск и репортинг
+
+```bash
+# Запустить все тесты
+npx playwright test
+
+# Запустить конкретный файл
+npx playwright test tests/auth.spec.ts
+
+# Запустить в конкретном браузере
+npx playwright test --project=chromium
+
+# Запустить тесты с совпадением в названии
+npx playwright test -g "форма"
+
+# Открыть интерактивный UI
+npx playwright test --ui
+
+# Отладка конкретного теста
+npx playwright test --debug tests/auth.spec.ts
+
+# HTML-репорт
+npx playwright show-report
+```
+
+---
+
+### 🤖 CI/CD интеграция (GitHub Actions)
+
+```yaml
+# .github/workflows/playwright.yml
+name: Playwright Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright tests
+        run: npx playwright test
+        env:
+          CI: true
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+```
+
+---
+
+### 💡 Лучшие практики
+
+**1. Используй роли и метки вместо CSS-селекторов:**
+```typescript
+// ❌ Плохо — ломается при изменении CSS
+page.locator('.btn-primary.submit-form')
+
+// ✅ Хорошо — устойчиво к рефакторингу
+page.getByRole('button', { name: 'Отправить' })
+page.getByLabel('Email')
+page.getByTestId('submit-btn')
+```
+
+**2. Избегай жёстких таймаутов:**
+```typescript
+// ❌ Плохо — ненадёжно
+await page.waitForTimeout(2000);
+
+// ✅ Хорошо — ждём конкретного состояния
+await page.waitForSelector('[data-testid="loader"]', { state: 'hidden' });
+await expect(page.getByText('Загружено')).toBeVisible();
+```
+
+**3. Изолируй тесты:**
+```typescript
+// Каждый тест создаёт свои данные и не зависит от других
+test.beforeEach(async ({ page }) => {
+  // Очистить состояние через API
+  await page.request.post('/api/test/reset');
+});
+```
+
+**4. Тестируй доступность:**
+```typescript
+test('доступность форм', async ({ page }) => {
+  await page.goto('/contact');
+  // Проверить наличие меток у полей
+  await expect(page.getByLabel('Имя')).toBeVisible();
+  // Проверить keyboard navigation
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Email')).toBeFocused();
+});
+```
+
+---
+
+### 📊 Итог: что умеет Playwright
+
+| Возможность | Описание |
+|-------------|----------|
+| Браузеры | Chromium, Firefox, WebKit |
+| Мобильные | Эмуляция устройств |
+| Сеть | Перехват и мок запросов |
+| Скриншоты | Визуальное тестирование |
+| Трейсинг | Запись и воспроизведение |
+| Параллельность | Встроенная поддержка |
+| TypeScript | Полная поддержка |
+| CI/CD | GitHub Actions, GitLab CI |
+
+E2E-тесты с Playwright — это уверенность в том, что приложение работает **как единое целое**. Начни с критических пользовательских сценариев: логин, основной флоу, оформление заказа — и постепенно расширяй покрытие. 🎯
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect } from "react";
+
+const GREEN = "#42b883";
+const DARK = "#35495e";
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const BORDER = "#2d3f55";
+
+interface TestStep {
+  id: number;
+  action: string;
+  selector: string;
+  status: "pending" | "running" | "pass" | "fail";
+  duration?: number;
+}
+
+interface TestCase {
+  id: number;
+  name: string;
+  steps: TestStep[];
+  status: "pending" | "running" | "pass" | "fail";
+}
+
+const TESTS: TestCase[] = [
+  {
+    id: 1,
+    name: "✅ Успешный вход в систему",
+    status: "pending",
+    steps: [
+      { id: 1, action: "goto", selector: "/login", status: "pending" },
+      { id: 2, action: "fill", selector: "[data-testid=email]", status: "pending" },
+      { id: 3, action: "fill", selector: "[data-testid=password]", status: "pending" },
+      { id: 4, action: "click", selector: "button[type=submit]", status: "pending" },
+      { id: 5, action: "expect URL", selector: "/dashboard", status: "pending" },
+    ],
+  },
+  {
+    id: 2,
+    name: "📝 Заполнение формы регистрации",
+    status: "pending",
+    steps: [
+      { id: 1, action: "goto", selector: "/register", status: "pending" },
+      { id: 2, action: "fill", selector: "getByLabel('Имя')", status: "pending" },
+      { id: 3, action: "fill", selector: "getByLabel('Email')", status: "pending" },
+      { id: 4, action: "check", selector: "getByLabel('Условия')", status: "pending" },
+      { id: 5, action: "click", selector: "getByRole('button')", status: "pending" },
+      { id: 6, action: "expect", selector: "'Регистрация успешна'", status: "pending" },
+    ],
+  },
+  {
+    id: 3,
+    name: "❌ Неверный пароль — ошибка",
+    status: "pending",
+    steps: [
+      { id: 1, action: "goto", selector: "/login", status: "pending" },
+      { id: 2, action: "fill", selector: "[data-testid=email]", status: "pending" },
+      { id: 3, action: "fill", selector: "[data-testid=password]", status: "pending" },
+      { id: 4, action: "click", selector: "button[type=submit]", status: "pending" },
+      { id: 5, action: "expect", selector: "'Неверный пароль'", status: "pending" },
+    ],
+  },
+];
+
+const ACTION_COLORS: Record<string, string> = {
+  goto: "#60a5fa",
+  fill: GREEN,
+  click: "#f59e0b",
+  check: "#a78bfa",
+  expect: "#34d399",
+  "expect URL": "#34d399",
+};
+
+function sleep(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
+
+export default function App() {
+  const [tests, setTests] = useState<TestCase[]>(TESTS.map(t => ({
+    ...t,
+    steps: t.steps.map(s => ({ ...s })),
+  })));
+  const [running, setRunning] = useState(false);
+  const [activeTest, setActiveTest] = useState<number | null>(null);
+  const [log, setLog] = useState<string[]>([]);
+  const [browser, setBrowser] = useState<"chromium" | "firefox" | "webkit">("chromium");
+
+  const addLog = (msg: string) => setLog(prev => [...prev.slice(-20), msg]);
+
+  const reset = () => {
+    setTests(TESTS.map(t => ({ ...t, steps: t.steps.map(s => ({ ...s })) })));
+    setActiveTest(null);
+    setLog([]);
+  };
+
+  const runTests = async () => {
+    reset();
+    await sleep(100);
+    setRunning(true);
+    addLog(\`🚀 Запуск тестов в \${browser}...\`);
+    await sleep(400);
+
+    const newTests = TESTS.map(t => ({ ...t, steps: t.steps.map(s => ({ ...s })) }));
+
+    for (let ti = 0; ti < newTests.length; ti++) {
+      const test = newTests[ti];
+      test.status = "running";
+      setTests([...newTests]);
+      setActiveTest(test.id);
+      addLog(\`\\n📋 Тест: \${test.name}\`);
+      await sleep(300);
+
+      let testFailed = false;
+      for (let si = 0; si < test.steps.length; si++) {
+        const step = test.steps[si];
+        step.status = "running";
+        setTests([...newTests]);
+        await sleep(200);
+
+        const isFail = test.id === 3 && si === 4;
+        const dur = 80 + Math.floor(Math.random() * 200);
+        await sleep(dur);
+
+        step.status = isFail ? "fail" : "pass";
+        step.duration = dur;
+        setTests([...newTests]);
+
+        if (isFail) {
+          addLog(\`  ❌ \${step.action}(\${step.selector}) — AssertionError\`);
+          testFailed = true;
+          break;
+        } else {
+          addLog(\`  ✓ \${step.action}(\${step.selector}) [\${dur}ms]\`);
+        }
+        await sleep(100);
+      }
+
+      test.status = testFailed ? "fail" : "pass";
+      setTests([...newTests]);
+      await sleep(300);
+    }
+
+    const passed = newTests.filter(t => t.status === "pass").length;
+    const failed = newTests.filter(t => t.status === "fail").length;
+    addLog(\`\\n📊 Результат: \${passed} прошло, \${failed} упало\`);
+    setRunning(false);
+    setActiveTest(null);
+  };
+
+  const statusIcon = (s: string) =>
+    s === "pass" ? "✓" : s === "fail" ? "✗" : s === "running" ? "⟳" : "○";
+  const statusColor = (s: string) =>
+    s === "pass" ? GREEN : s === "fail" ? "#ef4444" : s === "running" ? "#f59e0b" : "#475569";
+
+  const passed = tests.filter(t => t.status === "pass").length;
+  const failed = tests.filter(t => t.status === "fail").length;
+  const total = tests.length;
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "1rem", fontFamily: "monospace", fontSize: "0.78rem" }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
+        <div style={{ background: DARK, borderRadius: "8px", padding: "0.4rem 0.75rem", color: GREEN, fontWeight: 700, fontSize: "0.85rem" }}>
+          🎭 Playwright
+        </div>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: "flex", gap: "0.4rem" }}>
+          {(["chromium", "firefox", "webkit"] as const).map(b => (
+            <button key={b} onClick={() => !running && setBrowser(b)} style={{
+              padding: "0.25rem 0.5rem", borderRadius: "4px", border: "none", cursor: running ? "not-allowed" : "pointer",
+              background: browser === b ? GREEN : BORDER, color: browser === b ? DARK : "#94a3b8", fontSize: "0.7rem", fontWeight: 600,
+            }}>
+              {b === "chromium" ? "🔵" : b === "firefox" ? "🦊" : "🧭"} {b}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "0.5rem", marginBottom: "1rem" }}>
+        {[
+          { label: "Всего", value: total, color: "#60a5fa" },
+          { label: "Прошло", value: passed, color: GREEN },
+          { label: "Упало", value: failed, color: "#ef4444" },
+        ].map(s => (
+          <div key={s.label} style={{ background: CARD, borderRadius: "6px", padding: "0.5rem", border: \`1px solid \${BORDER}\`, textAlign: "center" }}>
+            <div style={{ color: s.color, fontSize: "1.4rem", fontWeight: 700 }}>{s.value}</div>
+            <div style={{ color: "#475569", fontSize: "0.68rem" }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+        {/* Test list */}
+        <div>
+          <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.5rem" }}>ТЕСТ-КЕЙСЫ</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            {tests.map(t => (
+              <div key={t.id} style={{
+                background: CARD, borderRadius: "6px", padding: "0.6rem",
+                border: \`1px solid \${activeTest === t.id ? GREEN : BORDER}\`,
+                transition: "border-color 0.2s",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.4rem" }}>
+                  <span style={{ color: statusColor(t.status), fontWeight: 700 }}>{statusIcon(t.status)}</span>
+                  <span style={{ color: "#e2e8f0", fontSize: "0.72rem" }}>{t.name}</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", paddingLeft: "1rem" }}>
+                  {t.steps.map(s => (
+                    <div key={s.id} style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                      <span style={{ color: statusColor(s.status), fontSize: "0.65rem" }}>{statusIcon(s.status)}</span>
+                      <span style={{
+                        background: \`\${ACTION_COLORS[s.action] || GREEN}22\`,
+                        color: ACTION_COLORS[s.action] || GREEN,
+                        borderRadius: "3px", padding: "0 0.3rem", fontSize: "0.62rem",
+                      }}>{s.action}</span>
+                      <span style={{ color: "#64748b", fontSize: "0.62rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100px" }}>{s.selector}</span>
+                      {s.duration && <span style={{ color: "#475569", fontSize: "0.6rem", marginLeft: "auto" }}>{s.duration}ms</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Log */}
+        <div>
+          <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.5rem" }}>КОНСОЛЬ</div>
+          <div style={{
+            background: "#0a0f1a", borderRadius: "6px", padding: "0.6rem",
+            border: \`1px solid \${BORDER}\`, height: "280px", overflowY: "auto",
+            display: "flex", flexDirection: "column", gap: "0.15rem",
+          }}>
+            {log.length === 0 && (
+              <span style={{ color: "#475569", fontStyle: "italic" }}>Нажми «Запустить тесты»...</span>
+            )}
+            {log.map((l, i) => (
+              <div key={i} style={{
+                color: l.includes("✓") ? GREEN : l.includes("✗") || l.includes("❌") ? "#ef4444"
+                  : l.includes("🚀") || l.includes("📊") ? "#f59e0b"
+                  : l.includes("📋") ? "#60a5fa" : "#94a3b8",
+                fontSize: "0.68rem", whiteSpace: "pre",
+              }}>{l}</div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Buttons */}
+      <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+        <button onClick={runTests} disabled={running} style={{
+          padding: "0.5rem 1.25rem", borderRadius: "6px", border: "none",
+          background: running ? BORDER : GREEN, color: running ? "#64748b" : DARK,
+          cursor: running ? "not-allowed" : "pointer", fontWeight: 700, fontSize: "0.78rem",
+        }}>
+          {running ? "⟳ Выполняется..." : "▶ Запустить тесты"}
+        </button>
+        <button onClick={reset} disabled={running} style={{
+          padding: "0.5rem 1rem", borderRadius: "6px", border: \`1px solid \${BORDER}\`,
+          background: "transparent", color: "#94a3b8", cursor: running ? "not-allowed" : "pointer", fontSize: "0.78rem",
+        }}>
+          ↺ Сбросить
+        </button>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

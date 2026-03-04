@@ -1,0 +1,580 @@
+## 🔄 ISR — Инкрементальная статическая регенерация
+
+ISR (Incremental Static Regeneration) — это **магический компромисс** между SSG и SSR. Представь: у тебя есть статичный ресторанный меню-сайт. Меню меняется раз в неделю. SSG слишком жёсткий (нужен редеплой при каждом изменении), SSR слишком дорогой (запрос к БД при каждом посещении). ISR — идеальный баланс! 🍕
+
+```
+SSG:  [build] → [HTML] → пользователи (всегда одинаковый)
+SSR:  [запрос] → [рендер] → [HTML] → пользователь (каждый раз новый рендер)
+ISR:  [build] → [HTML] → пользователи (быстро как SSG!)
+                              ↕ каждые N секунд
+                         [регенерация] → [новый HTML] → следующий пользователь
+```
+
+---
+
+### ⏰ Временная ревалидация: `revalidate`
+
+Самый простой способ ISR — экспортировать `revalidate`:
+
+```typescript
+// app/blog/page.tsx
+// Обновлять страницу не чаще раз в 1 час
+export const revalidate = 3600;
+
+export default async function BlogPage() {
+  const posts = await fetch('https://api.blog.com/posts', {
+    next: { revalidate: 3600 }, // То же самое на уровне fetch
+  }).then(r => r.json());
+  
+  return (
+    <main>
+      <h1>Блог</h1>
+      <p>Обновляется каждый час</p>
+      {posts.map(post => <PostCard key={post.id} post={post} />)}
+    </main>
+  );
+}
+```
+
+```typescript
+// На уровне отдельного fetch (более гибко):
+export default async function ShopPage() {
+  // Товары обновляются раз в час
+  const products = await fetch('/api/products', {
+    next: { revalidate: 3600 },
+  }).then(r => r.json());
+  
+  // Цены обновляются каждые 5 минут
+  const prices = await fetch('/api/prices', {
+    next: { revalidate: 300 },
+  }).then(r => r.json());
+  
+  // Баннер никогда не обновляется (статика)
+  const banner = await fetch('/api/banner', {
+    cache: 'force-cache',
+  }).then(r => r.json());
+  
+  return <ShopLayout products={products} prices={prices} banner={banner} />;
+}
+```
+
+---
+
+### 🏷️ Теговая ревалидация: On-demand ISR
+
+Вместо ожидания таймера — сбрасываем кеш **когда данные изменились**:
+
+```typescript
+// 1. Помечаем fetch тегами
+// app/products/[id]/page.tsx
+export default async function ProductPage({ params }: Props) {
+  const { id } = await params;
+  
+  const product = await fetch(`https://api.shop.com/products/${id}`, {
+    next: { 
+      tags: ['products', `product-${id}`], // Теги для этого запроса
+    },
+  }).then(r => r.json());
+  
+  return <ProductDetail product={product} />;
+}
+
+// app/products/page.tsx
+export default async function ProductsPage() {
+  const products = await fetch('https://api.shop.com/products', {
+    next: { tags: ['products'] }, // Тот же тег 'products'
+  }).then(r => r.json());
+  
+  return <ProductsList products={products} />;
+}
+```
+
+```typescript
+// 2. Создаём API для сброса кеша
+// app/api/revalidate/route.ts
+import { revalidateTag, revalidatePath } from 'next/cache';
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function POST(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const secret = searchParams.get('secret');
+  
+  // Проверяем секрет (защита от несанкционированных сбросов)
+  if (secret !== process.env.REVALIDATION_SECRET) {
+    return NextResponse.json(
+      { error: 'Invalid secret' },
+      { status: 401 }
+    );
+  }
+  
+  const body = await request.json();
+  
+  if (body.tag) {
+    revalidateTag(body.tag); // Сбрасываем по тегу
+    return NextResponse.json({ 
+      revalidated: true, 
+      type: 'tag',
+      tag: body.tag 
+    });
+  }
+  
+  if (body.path) {
+    revalidatePath(body.path); // Сбрасываем по пути
+    return NextResponse.json({ 
+      revalidated: true, 
+      type: 'path',
+      path: body.path 
+    });
+  }
+  
+  return NextResponse.json({ error: 'No tag or path provided' }, { status: 400 });
+}
+```
+
+```typescript
+// 3. Вызываем из CMS/webhook
+// Например, Sanity CMS webhook при обновлении продукта:
+// POST /api/revalidate?secret=MY_SECRET
+// Body: { "tag": "products" }
+
+// Или для конкретного продукта:
+// Body: { "tag": "product-123" }
+
+// Пример из Server Action:
+'use server';
+import { revalidateTag } from 'next/cache';
+
+export async function updateProduct(id: string, data: ProductData) {
+  await db.product.update({ where: { id }, data });
+  
+  revalidateTag('products');     // Сбросить список всех продуктов
+  revalidateTag(`product-${id}`); // Сбросить конкретный продукт
+}
+```
+
+---
+
+### 🗂️ revalidatePath: Сброс по маршруту
+
+```typescript
+import { revalidatePath } from 'next/cache';
+
+// Сбросить конкретную страницу
+revalidatePath('/blog'); // Только /blog
+revalidatePath('/blog/hello-world'); // Только /blog/hello-world
+
+// Сбросить все страницы по маршруту
+revalidatePath('/blog/[slug]', 'page'); // Все страницы блога
+revalidatePath('/blog', 'layout'); // Layout + все дочерние страницы
+
+// Использование в Server Action
+'use server';
+export async function publishPost(id: string) {
+  await db.post.update({ 
+    where: { id }, 
+    data: { published: true, publishedAt: new Date() } 
+  });
+  
+  const post = await db.post.findUnique({ where: { id } });
+  
+  revalidatePath('/blog'); // Обновить список постов
+  revalidatePath(`/blog/${post?.slug}`); // Обновить страницу поста
+  revalidatePath('/', 'layout'); // Обновить главную (если там список постов)
+}
+```
+
+---
+
+### 🧮 unstable_cache для не-fetch данных
+
+Когда используешь ORM напрямую — нет встроенного кеша. `unstable_cache` спасает:
+
+```typescript
+import { unstable_cache } from 'next/cache';
+import { db } from '@/lib/prisma';
+
+// Создаём кешированную функцию
+const getCachedProducts = unstable_cache(
+  async (category: string) => {
+    console.log('DB query!'); // Выполнится только при кеш-мисс
+    return await db.product.findMany({
+      where: { category, published: true },
+      include: { images: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  },
+  ['products-by-category'], // Ключ кеша (уникальный идентификатор)
+  {
+    revalidate: 300,          // Обновлять каждые 5 минут
+    tags: ['products'],       // Теги для on-demand сброса
+  }
+);
+
+// Использование
+export default async function CategoryPage({ params }: Props) {
+  const { category } = await params;
+  
+  // Первый вызов: запрос к БД
+  // Последующие: из кеша (до истечения revalidate)
+  const products = await getCachedProducts(category);
+  
+  return <ProductGrid products={products} />;
+}
+```
+
+---
+
+### 🌊 Stale-While-Revalidate: Механизм ISR
+
+Понимание механизма поможет избежать сюрпризов:
+
+```
+Запрос 1 (t=0s): кеш пуст
+→ Рендерим страницу (SSG/ISR)
+→ Сохраняем в кеш
+→ Отвечаем пользователю: свежие данные ✅
+
+Запрос 2 (t=30min): кеш актуален (revalidate=3600)
+→ Отдаём из кеша: быстро ⚡
+
+Запрос 3 (t=2h): кеш устарел (>3600s)
+→ Отдаём УСТАРЕВШИЕ данные (stale): быстро ⚡
+→ В фоне: запускаем регенерацию страницы
+→ Кеш обновляется
+
+Запрос 4 (после регенерации):
+→ Отдаём из кеша: быстро ⚡ + свежие данные ✅
+```
+
+```typescript
+// ВАЖНО: ISR не гарантирует мгновенное обновление!
+// Первый запрос ПОСЛЕ истечения revalidate получит старые данные
+// + запустит регенерацию в фоне
+// Следующий запрос получит свежие данные
+
+// Если нужно мгновенное обновление — используй on-demand revalidation:
+'use server';
+export async function updateBlogPost(data: UpdatePostData) {
+  await db.post.update({ where: { id: data.id }, data });
+  
+  revalidateTag('posts'); // Мгновенный сброс кеша!
+  revalidatePath(`/blog/${data.slug}`);
+}
+```
+
+---
+
+### 📊 Сравнение ISR подходов
+
+| | Временная ревалидация | Теговая ревалидация |
+|--|----------------------|---------------------|
+| **Как** | `revalidate = N` | `revalidateTag()` / `revalidatePath()` |
+| **Когда** | Автоматически по таймеру | Вручную (при изменении данных) |
+| **Гарантия свежести** | Максимум N секунд | Почти мгновенно |
+| **Сложность** | Простая | Требует webhook/action |
+| **Лучше для** | Данные меняются регулярно | Данные меняются редко/непредсказуемо |
+
+---
+
+### 🎯 Практические паттерны
+
+```typescript
+// Паттерн 1: Разные revalidate для разных частей
+// app/shop/page.tsx
+export default async function ShopPage() {
+  const [categories, featuredProducts, banners] = await Promise.all([
+    // Категории — редко меняются
+    fetch('/api/categories', { next: { revalidate: 86400 } }).then(r => r.json()),
+    // Рекомендованные — раз в час
+    fetch('/api/featured', { next: { revalidate: 3600 } }).then(r => r.json()),
+    // Баннеры — всегда свежие (CMS driven)
+    fetch('/api/banners', { next: { tags: ['banners'] } }).then(r => r.json()),
+  ]);
+  
+  return <ShopLayout categories={categories} featured={featuredProducts} banners={banners} />;
+}
+
+// Паттерн 2: ISR + Suspense для долгих регенераций
+// app/analytics/page.tsx
+export const revalidate = 60;
+
+export default function AnalyticsPage() {
+  return (
+    <div>
+      <h1>Аналитика</h1>
+      <Suspense fallback={<ChartSkeleton />}>
+        <SlowAnalyticsChart />  {/* Может быть медленным при регенерации */}
+      </Suspense>
+    </div>
+  );
+}
+```
+
+---
+
+### 🎯 Резюме урока
+
+1. **ISR = SSG + автоматическое обновление**
+2. **`revalidate = N`** — обновлять каждые N секунд
+3. **`revalidateTag(tag)`** — мгновенный сброс кеша по тегу
+4. **`revalidatePath(path)`** — сброс по маршруту
+5. **Stale-while-revalidate** — пользователь получает быстрый ответ, обновление в фоне
+6. **unstable_cache** — кеш для ORM/не-fetch данных
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from "react";
+
+interface CacheEntry {
+  data: string;
+  generatedAt: number;
+  stale: boolean;
+  revalidating: boolean;
+}
+
+const REVALIDATE_MS = 5000; // 5 секунд для симуляции
+
+const fakeDBData = [
+  "Продукт: iPhone 16 Pro — ₽89,990",
+  "Продукт: Samsung S25 — ₽79,990",
+  "Продукт: MacBook Air M4 — ₽129,990",
+  "Продукт: iPad Pro 13\" — ₽119,990",
+];
+let dataVersion = 0;
+
+const getFreshData = async (): Promise<string> => {
+  await new Promise(r => setTimeout(r, 800));
+  return fakeDBData[dataVersion % fakeDBData.length] + \` (v\${dataVersion + 1})\`;
+};
+
+export default function App() {
+  const [cache, setCache] = useState<CacheEntry | null>(null);
+  const [requestLog, setRequestLog] = useState<string[]>([]);
+  const [tags, setTags] = useState<string[]>(["products"]);
+  const [tagInput, setTagInput] = useState("");
+  const [requestCount, setRequestCount] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const addLog = (msg: string) => {
+    const time = new Date().toLocaleTimeString('ru-RU', { hour12: false });
+    setRequestLog(prev => [\`[\${time}] \${msg}\`, ...prev].slice(0, 12));
+  };
+
+  const buildPage = async () => {
+    addLog("🏗️ npm run build — генерация страницы...");
+    const data = await getFreshData();
+    dataVersion++;
+    const entry: CacheEntry = {
+      data,
+      generatedAt: Date.now(),
+      stale: false,
+      revalidating: false,
+    };
+    setCache(entry);
+    addLog(\`✅ Страница сгенерирована: \${data}\`);
+  };
+
+  const handleRequest = async () => {
+    if (!cache) {
+      addLog("❌ Нет кеша! Сначала запусти build.");
+      return;
+    }
+
+    const count = requestCount + 1;
+    setRequestCount(count);
+    const age = Date.now() - cache.generatedAt;
+
+    if (age < REVALIDATE_MS && !cache.stale) {
+      addLog(\`⚡ Запрос #\${count}: кеш актуален (\${Math.round(age / 1000)}s < 5s) → отдаём сразу!\`);
+      return;
+    }
+
+    if (cache.stale && cache.revalidating) {
+      addLog(\`⚡ Запрос #\${count}: кеш устарел, регенерация в процессе → stale данные (быстро!)\`);
+      return;
+    }
+
+    // Stale!
+    addLog(\`⚡ Запрос #\${count}: устаревший кеш → отдаём stale, запускаем регенерацию...\`);
+    setCache(prev => prev ? { ...prev, stale: true, revalidating: true } : null);
+
+    // Background revalidation
+    getFreshData().then(newData => {
+      dataVersion++;
+      setCache({
+        data: newData,
+        generatedAt: Date.now(),
+        stale: false,
+        revalidating: false,
+      });
+      addLog(\`✅ Регенерация завершена: \${newData}\`);
+    });
+  };
+
+  const revalidateByTag = async (tag: string) => {
+    if (!tags.includes(tag)) {
+      addLog(\`⚠️ Тег "\${tag}" не используется на этой странице\`);
+      return;
+    }
+    addLog(\`🏷️ revalidateTag("\${tag}") — сброс кеша по тегу...\`);
+    setCache(prev => prev ? { ...prev, stale: true, revalidating: true } : null);
+    dataVersion++;
+    const newData = await getFreshData();
+    setCache({
+      data: newData,
+      generatedAt: Date.now(),
+      stale: false,
+      revalidating: false,
+    });
+    addLog(\`✅ Кеш обновлён: \${newData}\`);
+  };
+
+  const cacheAge = cache ? Math.round((Date.now() - cache.generatedAt) / 1000) : 0;
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTick(t => t + 1);
+      if (cache && !cache.stale) {
+        const age = Date.now() - cache.generatedAt;
+        if (age >= REVALIDATE_MS) {
+          setCache(prev => prev ? { ...prev, stale: true } : null);
+          addLog("⏰ Время кеша истекло! Следующий запрос вызовет регенерацию.");
+        }
+      }
+    }, 500);
+    return () => clearInterval(id);
+  }, [cache]);
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: 24,
+      fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ maxWidth: 640, margin: "0 auto" }}>
+        <h2 style={{ color: "#fff", fontSize: 20, marginBottom: 4 }}>
+          🔄 Симулятор ISR
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 13, marginBottom: 20 }}>
+          revalidate = 5 секунд для симуляции (в реальности — минуты/часы)
+        </p>
+
+        {/* Cache status */}
+        <div style={{
+          background: "#1e293b", borderRadius: 10, padding: 16, marginBottom: 16
+        }}>
+          <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>СОСТОЯНИЕ КЕША</div>
+          {cache ? (
+            <>
+              <div style={{
+                display: "inline-block", padding: "4px 10px", borderRadius: 6,
+                background: cache.stale ? "#451a03" : "#052e16",
+                color: cache.stale ? "#fb923c" : "#4ade80",
+                fontSize: 12, fontWeight: 600, marginBottom: 8
+              }}>
+                {cache.revalidating ? "🔄 Регенерация..." : cache.stale ? "⚠️ Устарело (stale)" : "✅ Актуально"}
+              </div>
+              <div style={{
+                color: "#94a3b8", fontSize: 13, marginBottom: 4,
+                fontFamily: "monospace"
+              }}>
+                {cache.data}
+              </div>
+              <div style={{ display: "flex", gap: 16 }}>
+                <div style={{ color: "#475569", fontSize: 12 }}>
+                  Возраст: {cacheAge}s / 5s
+                </div>
+                <div style={{
+                  width: 100, height: 6, background: "#334155",
+                  borderRadius: 3, alignSelf: "center", overflow: "hidden"
+                }}>
+                  <div style={{
+                    width: \`\${Math.min(100, (cacheAge / 5) * 100)}%\`,
+                    height: "100%", borderRadius: 3,
+                    background: cacheAge >= 5 ? "#fb923c" : "#4ade80",
+                    transition: "all 0.5s"
+                  }} />
+                </div>
+              </div>
+            </>
+          ) : (
+            <div style={{ color: "#475569", fontSize: 13 }}>Нет данных. Запусти build.</div>
+          )}
+        </div>
+
+        {/* Controls */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
+          <button
+            onClick={buildPage}
+            style={{
+              padding: "10px", borderRadius: 8, border: "none",
+              background: "#1e293b", color: "#94a3b8",
+              cursor: "pointer", fontSize: 13, fontWeight: 600
+            }}
+          >
+            🏗️ npm run build
+          </button>
+          <button
+            onClick={handleRequest}
+            disabled={!cache}
+            style={{
+              padding: "10px", borderRadius: 8, border: "none",
+              background: cache ? "#4ade80" : "#334155",
+              color: cache ? "#000" : "#64748b",
+              cursor: cache ? "pointer" : "not-allowed",
+              fontSize: 13, fontWeight: 700
+            }}
+          >
+            📨 Симулировать запрос
+          </button>
+        </div>
+
+        {/* Tags */}
+        <div style={{
+          background: "#1e293b", borderRadius: 10, padding: 14, marginBottom: 16
+        }}>
+          <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>
+            ON-DEMAND РЕВАЛИДАЦИЯ
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            {tags.map(tag => (
+              <button
+                key={tag}
+                onClick={() => revalidateByTag(tag)}
+                style={{
+                  padding: "5px 12px", borderRadius: 6, border: "none",
+                  background: "#0f172a", color: "#a78bfa",
+                  cursor: "pointer", fontSize: 12, fontFamily: "monospace"
+                }}
+              >
+                🏷️ revalidateTag("{tag}")
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Log */}
+        <div style={{
+          background: "#111827", borderRadius: 10, padding: 14, border: "1px solid #1e293b"
+        }}>
+          <div style={{ color: "#64748b", fontSize: 11, marginBottom: 10 }}>ЛОГ</div>
+          {requestLog.length === 0 ? (
+            <div style={{ color: "#334155", fontSize: 12 }}>
+              Нет событий. Запусти build и сделай запросы.
+            </div>
+          ) : (
+            requestLog.map((log, i) => (
+              <div key={i} style={{
+                color: log.includes("✅") ? "#4ade80"
+                  : log.includes("⚡") ? "#60a5fa"
+                  : log.includes("⚠️") ? "#fb923c"
+                  : "#94a3b8",
+                fontSize: 12, marginBottom: 4, fontFamily: "monospace"
+              }}>
+                {log}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

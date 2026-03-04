@@ -1,0 +1,647 @@
+## 🧪 Урок 24 — Тестирование с Vitest и @vue/test-utils
+
+Тестирование — это не просто «хорошая практика», это способ **уверенно рефакторить**, **документировать поведение** и **предотвращать регрессии**. В экосистеме Vue 3 связка Vitest + @vue/test-utils даёт первоклассный опыт разработки с поддержкой TypeScript, горячей перезагрузкой тестов и молниеносной скоростью.
+
+---
+
+## ⚙️ Установка и настройка
+
+```bash
+npm install -D vitest @vue/test-utils @vitejs/plugin-vue jsdom
+```
+
+`vite.config.ts`:
+
+```typescript
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  test: {
+    environment: 'jsdom',    // симулируем браузер
+    globals: true,           // глобальные describe/it/expect
+    setupFiles: ['./tests/setup.ts']
+  }
+})
+```
+
+`tests/setup.ts`:
+
+```typescript
+import { config } from '@vue/test-utils'
+import { createPinia } from 'pinia'
+
+// Глобальные плагины для всех тестов
+config.global.plugins = [createPinia()]
+```
+
+---
+
+## 🔩 mount vs shallowMount
+
+```typescript
+import { mount, shallowMount } from '@vue/test-utils'
+import ParentComponent from './ParentComponent.vue'
+
+// mount: рендерит ВСЕ дочерние компоненты
+// Используй для интеграционных тестов
+const wrapper = mount(ParentComponent)
+
+// shallowMount: заглушает (stub) дочерние компоненты
+// Используй для изолированного unit-тестирования
+const shallow = shallowMount(ParentComponent)
+```
+
+Разница наглядно:
+
+```typescript
+// Компонент:
+// <template>
+//   <div>
+//     <ChildA />
+//     <ChildB :data="items" />
+//   </div>
+// </template>
+
+// mount — ChildA и ChildB реально рендерятся
+const full = mount(ParentComponent)
+expect(full.findComponent(ChildA).exists()).toBe(true)
+
+// shallowMount — ChildA и ChildB заменяются на <child-a-stub>
+const stubbed = shallowMount(ParentComponent)
+expect(stubbed.find('child-a-stub').exists()).toBe(true)
+```
+
+---
+
+## ⚡ Тестирование реактивности
+
+Всегда используй `await` при изменении реактивного состояния:
+
+```typescript
+import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
+import Counter from './Counter.vue'
+
+describe('Counter', () => {
+  it('увеличивает счётчик при клике', async () => {
+    const wrapper = mount(Counter)
+
+    // Начальное состояние
+    expect(wrapper.find('.count').text()).toBe('0')
+
+    // Триггерим клик
+    await wrapper.find('button').trigger('click')
+
+    // Ждём обновления DOM
+    expect(wrapper.find('.count').text()).toBe('1')
+  })
+
+  it('принимает начальное значение через props', async () => {
+    const wrapper = mount(Counter, {
+      props: { initial: 10 }
+    })
+
+    expect(wrapper.find('.count').text()).toBe('10')
+
+    await wrapper.find('button').trigger('click')
+    expect(wrapper.find('.count').text()).toBe('11')
+  })
+
+  it('реагирует на изменение props', async () => {
+    const wrapper = mount(Counter, { props: { modelValue: 5 } })
+    expect(wrapper.text()).toContain('5')
+
+    await wrapper.setProps({ modelValue: 20 })
+    expect(wrapper.text()).toContain('20')
+  })
+})
+```
+
+---
+
+## 📡 Тестирование emit событий
+
+```typescript
+import { mount } from '@vue/test-utils'
+import SearchInput from './SearchInput.vue'
+
+describe('SearchInput', () => {
+  it('эмитит search при submit формы', async () => {
+    const wrapper = mount(SearchInput)
+
+    await wrapper.find('input').setValue('vue 3')
+    await wrapper.find('form').trigger('submit')
+
+    // Проверяем что событие было испущено
+    expect(wrapper.emitted('search')).toBeTruthy()
+
+    // Проверяем аргументы события
+    expect(wrapper.emitted('search')?.[0]).toEqual(['vue 3'])
+  })
+
+  it('эмитит update:modelValue при вводе', async () => {
+    const wrapper = mount(SearchInput)
+
+    await wrapper.find('input').setValue('тест')
+
+    const emitted = wrapper.emitted('update:modelValue')
+    expect(emitted).toBeTruthy()
+    expect(emitted?.[emitted.length - 1]).toEqual(['тест'])
+  })
+
+  it('не эмитит search если поле пустое', async () => {
+    const wrapper = mount(SearchInput)
+
+    await wrapper.find('form').trigger('submit')
+
+    expect(wrapper.emitted('search')).toBeFalsy()
+  })
+})
+```
+
+---
+
+## 🎰 Тестирование слотов
+
+```typescript
+import { mount } from '@vue/test-utils'
+import Card from './Card.vue'
+
+describe('Card со слотами', () => {
+  it('рендерит default slot', () => {
+    const wrapper = mount(Card, {
+      slots: {
+        default: '<p>Контент карточки</p>'
+      }
+    })
+
+    expect(wrapper.find('p').text()).toBe('Контент карточки')
+  })
+
+  it('рендерит named slots', () => {
+    const wrapper = mount(Card, {
+      slots: {
+        header: '<h2>Заголовок</h2>',
+        default: 'Основной контент',
+        footer: '<button>Кнопка</button>'
+      }
+    })
+
+    expect(wrapper.find('h2').text()).toBe('Заголовок')
+    expect(wrapper.find('button').text()).toBe('Кнопка')
+  })
+
+  it('scoped slot передаёт данные', () => {
+    // Компонент: <slot :items="items" :count="count" />
+    const wrapper = mount(DataList, {
+      slots: {
+        default: `
+          <template #default="{ items, count }">
+            <span data-testid="count">{{ count }}</span>
+            <span v-for="item in items" :key="item.id">{{ item.name }}</span>
+          </template>
+        `
+      },
+      props: {
+        items: [{ id: 1, name: 'Item 1' }, { id: 2, name: 'Item 2' }]
+      }
+    })
+
+    expect(wrapper.find('[data-testid="count"]').text()).toBe('2')
+  })
+})
+```
+
+---
+
+## 🍍 Мокирование Pinia stores
+
+```typescript
+import { mount } from '@vue/test-utils'
+import { createTestingPinia } from '@pinia/testing'
+import { useUserStore } from '@/stores/user'
+import UserProfile from './UserProfile.vue'
+
+describe('UserProfile', () => {
+  it('показывает имя пользователя из store', () => {
+    const wrapper = mount(UserProfile, {
+      global: {
+        plugins: [
+          createTestingPinia({
+            // Предзаполняем store начальными данными
+            initialState: {
+              user: {
+                currentUser: { name: 'Алексей', role: 'admin' },
+                isLoggedIn: true
+              }
+            }
+          })
+        ]
+      }
+    })
+
+    expect(wrapper.text()).toContain('Алексей')
+    expect(wrapper.text()).toContain('admin')
+  })
+
+  it('вызывает action при клике на кнопку логаута', async () => {
+    const wrapper = mount(UserProfile, {
+      global: {
+        plugins: [createTestingPinia({ createSpy: vi.fn })]
+      }
+    })
+
+    const store = useUserStore()
+    await wrapper.find('[data-testid="logout-btn"]').trigger('click')
+
+    expect(store.logout).toHaveBeenCalledOnce()
+  })
+
+  it('показывает скелетон пока загружаются данные', () => {
+    const wrapper = mount(UserProfile, {
+      global: {
+        plugins: [
+          createTestingPinia({
+            initialState: {
+              user: { loading: true, currentUser: null }
+            }
+          })
+        ]
+      }
+    })
+
+    expect(wrapper.find('.skeleton').exists()).toBe(true)
+  })
+})
+```
+
+---
+
+## 🛣️ Мокирование Vue Router
+
+```typescript
+import { mount } from '@vue/test-utils'
+import { createRouter, createMemoryHistory } from 'vue-router'
+import { vi } from 'vitest'
+import NavBar from './NavBar.vue'
+
+describe('NavBar', () => {
+  let router: ReturnType<typeof createRouter>
+
+  beforeEach(() => {
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: { template: '<div>Home</div>' } },
+        { path: '/dashboard', component: { template: '<div>Dashboard</div>' } }
+      ]
+    })
+  })
+
+  it('подсвечивает активный маршрут', async () => {
+    await router.push('/dashboard')
+
+    const wrapper = mount(NavBar, {
+      global: { plugins: [router] }
+    })
+
+    await router.isReady()
+
+    expect(
+      wrapper.find('[href="/dashboard"]').classes()
+    ).toContain('active')
+  })
+
+  it('навигирует при клике', async () => {
+    const wrapper = mount(NavBar, {
+      global: { plugins: [router] }
+    })
+
+    await wrapper.find('[data-testid="nav-dashboard"]').trigger('click')
+    await router.isReady()
+
+    expect(router.currentRoute.value.path).toBe('/dashboard')
+  })
+})
+```
+
+---
+
+## 📸 Snapshot тесты
+
+```typescript
+import { mount } from '@vue/test-utils'
+import { createTestingPinia } from '@pinia/testing'
+import Button from './Button.vue'
+
+describe('Button snapshots', () => {
+  it('соответствует снапшоту (primary)', () => {
+    const wrapper = mount(Button, {
+      props: { variant: 'primary', label: 'Сохранить' }
+    })
+
+    expect(wrapper.html()).toMatchSnapshot()
+  })
+
+  it('соответствует снапшоту (disabled)', () => {
+    const wrapper = mount(Button, {
+      props: { variant: 'primary', disabled: true, label: 'Сохранить' }
+    })
+
+    expect(wrapper.html()).toMatchSnapshot()
+  })
+})
+
+// Обновление снапшотов: vitest --update-snapshots
+```
+
+---
+
+## 🚀 Запуск тестов
+
+```bash
+# Запустить все тесты
+npx vitest
+
+# Watch режим (пересборка при изменениях)
+npx vitest --watch
+
+# Запустить конкретный файл
+npx vitest Counter.test.ts
+
+# С покрытием кода
+npx vitest --coverage
+
+# UI режим (красивый интерфейс)
+npx vitest --ui
+```
+
+---
+
+## 🎯 Лучшие практики
+
+**Называй тесты описательно через `it('делает X, когда Y')`:**
+
+```typescript
+// ❌ Плохо
+it('тест кнопки')
+it('работает')
+
+// ✅ Хорошо
+it('эмитит submit с данными формы при нажатии кнопки')
+it('показывает сообщение об ошибке если поле пустое')
+```
+
+**Используй `data-testid` для поиска элементов:**
+
+```vue
+<!-- В компоненте -->
+<button data-testid="submit-btn">Отправить</button>
+```
+
+```typescript
+// В тесте — устойчиво к изменению классов и текста
+wrapper.find('[data-testid="submit-btn"]')
+```
+
+**Организуй тесты по паттерну AAA (Arrange, Act, Assert):**
+
+```typescript
+it('обновляет список после добавления элемента', async () => {
+  // Arrange — подготовка
+  const wrapper = mount(TodoList)
+  expect(wrapper.findAll('.todo-item')).toHaveLength(0)
+
+  // Act — действие
+  await wrapper.find('input').setValue('Новая задача')
+  await wrapper.find('form').trigger('submit')
+
+  // Assert — проверка
+  expect(wrapper.findAll('.todo-item')).toHaveLength(1)
+  expect(wrapper.find('.todo-item').text()).toBe('Новая задача')
+})
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from "react";
+
+const VUE_GREEN = "#42b883";
+const VUE_DARK = "#35495e";
+const PASS = "#27ae60";
+const FAIL = "#e74c3c";
+const SKIP = "#95a5a6";
+
+interface TestCase {
+  id: string;
+  suite: string;
+  name: string;
+  code: string;
+  shouldPass: boolean;
+}
+
+const TEST_CASES: TestCase[] = [
+  {
+    id: "t1", suite: "Counter", shouldPass: true,
+    name: "увеличивает счётчик при клике",
+    code: \`const wrapper = mount(Counter)
+await wrapper.find('button').trigger('click')
+expect(wrapper.text()).toContain('1') // ✓\`
+  },
+  {
+    id: "t2", suite: "Counter", shouldPass: true,
+    name: "принимает initial prop",
+    code: \`const wrapper = mount(Counter, {
+  props: { initial: 10 }
+})
+expect(wrapper.text()).toContain('10') // ✓\`
+  },
+  {
+    id: "t3", suite: "SearchInput", shouldPass: true,
+    name: "эмитит search при submit",
+    code: \`await wrapper.find('input').setValue('vue')
+await wrapper.find('form').trigger('submit')
+expect(wrapper.emitted('search')?.[0]).toEqual(['vue']) // ✓\`
+  },
+  {
+    id: "t4", suite: "SearchInput", shouldPass: false,
+    name: "эмитит search при пустом поле",
+    code: \`await wrapper.find('form').trigger('submit')
+expect(wrapper.emitted('search')).toBeTruthy()
+// ✗ AssertionError: expected null to be truthy\`
+  },
+  {
+    id: "t5", suite: "Pinia Store", shouldPass: true,
+    name: "показывает имя из store",
+    code: \`mount(UserProfile, {
+  global: { plugins: [createTestingPinia({
+    initialState: { user: { name: 'Алексей' } }
+  })] }
+})
+expect(wrapper.text()).toContain('Алексей') // ✓\`
+  },
+  {
+    id: "t6", suite: "Pinia Store", shouldPass: true,
+    name: "вызывает action logout",
+    code: \`const store = useUserStore()
+await wrapper.find('[data-testid="logout"]').trigger('click')
+expect(store.logout).toHaveBeenCalledOnce() // ✓\`
+  },
+  {
+    id: "t7", suite: "Vue Router", shouldPass: true,
+    name: "подсвечивает активный маршрут",
+    code: \`await router.push('/dashboard')
+const wrapper = mount(NavBar, {
+  global: { plugins: [router] }
+})
+expect(wrapper.find('[href="/dashboard"]')
+  .classes()).toContain('active') // ✓\`
+  },
+  {
+    id: "t8", suite: "Snapshot", shouldPass: true,
+    name: "кнопка соответствует снапшоту",
+    code: \`const wrapper = mount(Button, {
+  props: { label: 'Сохранить', variant: 'primary' }
+})
+expect(wrapper.html()).toMatchSnapshot() // ✓\`
+  },
+];
+
+type TestStatus = "pending" | "running" | "pass" | "fail";
+
+export default function App() {
+  const [statuses, setStatuses] = useState<Record<string, TestStatus>>({});
+  const [running, setRunning] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  const runAll = useCallback(() => {
+    setRunning(true);
+    setStatuses({});
+    setSelected(null);
+
+    TEST_CASES.forEach((tc, i) => {
+      setTimeout(() => {
+        setStatuses(prev => ({ ...prev, [tc.id]: "running" }));
+        setTimeout(() => {
+          setStatuses(prev => ({ ...prev, [tc.id]: tc.shouldPass ? "pass" : "fail" }));
+          if (i === TEST_CASES.length - 1) setRunning(false);
+        }, 400 + Math.random() * 300);
+      }, i * 220);
+    });
+  }, []);
+
+  const runSingle = useCallback((id: string, shouldPass: boolean) => {
+    setStatuses(prev => ({ ...prev, [id]: "running" }));
+    setTimeout(() => {
+      setStatuses(prev => ({ ...prev, [id]: shouldPass ? "pass" : "fail" }));
+    }, 600);
+  }, []);
+
+  const suites = [...new Set(TEST_CASES.map(t => t.suite))];
+  const pass = Object.values(statuses).filter(s => s === "pass").length;
+  const fail = Object.values(statuses).filter(s => s === "fail").length;
+  const total = Object.keys(statuses).length;
+
+  const getIcon = (s?: TestStatus) => {
+    if (!s || s === "pending") return <span style={{ color: SKIP }}>○</span>;
+    if (s === "running") return <span style={{ display: "inline-block", width: 12, height: 12, border: "2px solid " + VUE_GREEN, borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.6s linear infinite", verticalAlign: "middle" }} />;
+    if (s === "pass") return <span style={{ color: PASS }}>✓</span>;
+    return <span style={{ color: FAIL }}>✗</span>;
+  };
+
+  const selectedTest = TEST_CASES.find(t => t.id === selected);
+
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", background: "#f5f7fa", minHeight: "100vh", padding: "1.5rem" }}>
+      <style>{"@keyframes spin { to { transform: rotate(360deg); } }"}</style>
+      <div style={{ maxWidth: 600, margin: "0 auto" }}>
+        <div style={{ background: VUE_DARK, color: "#fff", borderRadius: 12, padding: "1.25rem 1.5rem", marginBottom: "1.5rem" }}>
+          <h2 style={{ margin: 0, fontSize: 20 }}>🧪 Vitest + @vue/test-utils</h2>
+          <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 14 }}>Урок 24 — интерактивный test runner</p>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: "1rem", alignItems: "center" }}>
+          <button onClick={runAll} disabled={running} style={{
+            background: running ? "#ccc" : VUE_GREEN, color: "#fff", border: "none",
+            borderRadius: 8, padding: "10px 20px", cursor: running ? "not-allowed" : "pointer",
+            fontWeight: 700, fontSize: 14
+          }}>
+            {running ? "▶ Запуск..." : "▶ Запустить все тесты"}
+          </button>
+          {total > 0 && (
+            <div style={{ fontSize: 13, display: "flex", gap: 10 }}>
+              <span style={{ color: PASS, fontWeight: 600 }}>✓ {pass}</span>
+              <span style={{ color: FAIL, fontWeight: 600 }}>✗ {fail}</span>
+              <span style={{ color: SKIP }}>○ {TEST_CASES.length - total}</span>
+            </div>
+          )}
+        </div>
+
+        {total > 0 && (
+          <div style={{ background: "#fff", borderRadius: 8, overflow: "hidden", height: 8, marginBottom: "1rem", border: "1px solid #e8e8e8" }}>
+            <div style={{ height: "100%", display: "flex" }}>
+              <div style={{ width: (pass / TEST_CASES.length * 100) + "%", background: PASS, transition: "width 0.3s" }} />
+              <div style={{ width: (fail / TEST_CASES.length * 100) + "%", background: FAIL, transition: "width 0.3s" }} />
+            </div>
+          </div>
+        )}
+
+        {suites.map(suite => (
+          <div key={suite} style={{ background: "#fff", borderRadius: 12, marginBottom: "0.75rem", overflow: "hidden", boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+            <div style={{ background: VUE_DARK + "0e", padding: "8px 14px", borderBottom: "1px solid #f0f0f0", display: "flex", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: VUE_DARK }}>📦 {suite}</span>
+              <span style={{ fontSize: 12, color: "#888" }}>
+                {TEST_CASES.filter(t => t.suite === suite && statuses[t.id] === "pass").length}/
+                {TEST_CASES.filter(t => t.suite === suite).length}
+              </span>
+            </div>
+            {TEST_CASES.filter(t => t.suite === suite).map(tc => (
+              <div key={tc.id}
+                onClick={() => setSelected(selected === tc.id ? null : tc.id)}
+                style={{
+                  padding: "10px 14px", borderBottom: "1px solid #f8f8f8",
+                  cursor: "pointer", transition: "background 0.15s",
+                  background: selected === tc.id ? (statuses[tc.id] === "fail" ? "#fdecea" : "#f0faf6") : "transparent"
+                }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 14, minWidth: 16, textAlign: "center" }}>{getIcon(statuses[tc.id])}</span>
+                  <span style={{ fontSize: 13, color: statuses[tc.id] === "fail" ? FAIL : "#333", flex: 1 }}>
+                    {tc.name}
+                  </span>
+                  {!statuses[tc.id] && (
+                    <button
+                      onClick={e => { e.stopPropagation(); runSingle(tc.id, tc.shouldPass); }}
+                      style={{ background: "none", border: "1px solid #ddd", borderRadius: 5, padding: "2px 8px", cursor: "pointer", fontSize: 11, color: "#666" }}>
+                      ▶
+                    </button>
+                  )}
+                  {statuses[tc.id] === "pass" && <span style={{ fontSize: 11, color: PASS }}>прошёл</span>}
+                  {statuses[tc.id] === "fail" && <span style={{ fontSize: 11, color: FAIL }}>упал</span>}
+                </div>
+                {selected === tc.id && (
+                  <pre style={{
+                    margin: "8px 0 0 26px", fontSize: 11, color: "#444",
+                    background: statuses[tc.id] === "fail" ? "#fdecea" : "#f8fffe",
+                    borderRadius: 6, padding: "8px 10px", overflow: "auto",
+                    border: "1px solid " + (statuses[tc.id] === "fail" ? "#f5c6cb" : VUE_GREEN + "33"),
+                    fontFamily: "monospace", lineHeight: 1.6
+                  }}>
+                    {tc.code}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

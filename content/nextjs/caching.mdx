@@ -1,0 +1,637 @@
+## ⚡ Кэширование в Next.js: 4 слоя магии
+
+Кэширование — это когда ты однажды что-то вычислил и сохранил результат, чтобы не считать снова. Next.js имеет **4 уровня кэша**, каждый со своей ролью. Представь это как матрёшку 🪆: каждый слой быстрее предыдущего. Понять их — значит уметь делать сайты, которые летают!
+
+---
+
+### 🗺️ Карта кэшей Next.js
+
+```
+Запрос пользователя
+    ↓
+┌─────────────────────────────────────────┐
+│  4. Router Cache (client-side)          │ ← RSC payload в памяти браузера
+├─────────────────────────────────────────┤
+│  3. Full Route Cache (server-side)      │ ← HTML + RSC payload на сервере
+├─────────────────────────────────────────┤
+│  2. Data Cache (server-side)            │ ← результаты fetch() и db-запросов
+├─────────────────────────────────────────┤
+│  1. Request Memoization (per-request)   │ ← дедупликация запросов в одном рендере
+└─────────────────────────────────────────┘
+```
+
+---
+
+### 1️⃣ Request Memoization: дедупликация
+
+Самый нижний уровень — автоматическая дедупликация одинаковых `fetch()` запросов **в рамках одного рендера**:
+
+```typescript
+// Три разных компонента на одной странице запрашивают одни данные
+// Next.js делает ОДИН сетевой запрос вместо трёх!
+
+// components/UserAvatar.tsx
+async function UserAvatar({ id }: { id: string }) {
+  const user = await getUser(id); // fetch() #1
+  return <img src={user.avatar} />;
+}
+
+// components/UserName.tsx
+async function UserName({ id }: { id: string }) {
+  const user = await getUser(id); // fetch() #2 — тот же запрос!
+  return <span>{user.name}</span>;
+}
+
+// components/UserBio.tsx
+async function UserBio({ id }: { id: string }) {
+  const user = await getUser(id); // fetch() #3 — снова тот же!
+  return <p>{user.bio}</p>;
+}
+
+// Функция с fetch() — автоматически мемоизируется
+async function getUser(id: string) {
+  const res = await fetch(`https://api.example.com/users/${id}`);
+  return res.json();
+}
+// React.cache() для функций БЕЗ fetch:
+import { cache } from 'react';
+
+const getUserFromDB = cache(async (id: string) => {
+  return db.user.findUnique({ where: { id } });
+});
+```
+
+**Ключевые факты:**
+- Работает только с `fetch()` (не с Prisma/db напрямую!)
+- Только `GET`-запросы
+- Только в рамках одного серверного рендера
+- Автоматически — ничего настраивать не нужно!
+
+---
+
+### 2️⃣ Data Cache: результаты fetch на сервере
+
+Data Cache хранит результаты `fetch()` между запросами пользователей и деплоями. Настраивается через опции `fetch`:
+
+```typescript
+// По умолчанию: force-cache (Next.js 14) / no-store (Next.js 15)
+const data = await fetch('https://api.example.com/data');
+
+// ✅ КЭШИРОВАТЬ навсегда (до ручной инвалидации)
+const staticData = await fetch('https://api.example.com/config', {
+  cache: 'force-cache',
+});
+
+// ✅ НЕ кэшировать (каждый запрос — новые данные)
+const dynamicData = await fetch('https://api.example.com/prices', {
+  cache: 'no-store',
+});
+
+// ✅ Revalidate через время (ISR-стиль)
+const revalidatedData = await fetch('https://api.example.com/posts', {
+  next: { revalidate: 3600 }, // обновлять раз в час
+});
+
+// ✅ Теги для ручной инвалидации
+const taggedData = await fetch('https://api.example.com/products', {
+  next: {
+    revalidate: 86400,  // 24 часа
+    tags: ['products', 'catalog'],
+  },
+});
+```
+
+---
+
+### 🏷️ Cache Tags: точечная инвалидация
+
+```typescript
+// Теги позволяют инвалидировать только нужные данные
+
+// lib/data.ts
+export async function getProducts() {
+  return fetch('https://api.example.com/products', {
+    next: { tags: ['products'] }
+  }).then(r => r.json());
+}
+
+export async function getProduct(id: string) {
+  return fetch(`https://api.example.com/products/${id}`, {
+    next: { tags: ['products', `product-${id}`] }
+  }).then(r => r.json());
+}
+
+// app/actions/products.ts
+'use server';
+import { revalidateTag, revalidatePath } from 'next/cache';
+
+export async function updateProduct(id: string, data: FormData) {
+  await db.product.update({ where: { id }, data: Object.fromEntries(data) });
+
+  // Инвалидируем только данные этого продукта
+  revalidateTag(`product-${id}`);
+  // Инвалидируем весь список продуктов
+  revalidateTag('products');
+  // Инвалидируем конкретные страницы
+  revalidatePath(`/products/${id}`);
+  revalidatePath('/products');
+}
+```
+
+---
+
+### 3️⃣ Full Route Cache: HTML-страницы на сервере
+
+Full Route Cache хранит **скомпилированный HTML и RSC payload** для статических маршрутов:
+
+```typescript
+// ✅ Статический маршрут (кэшируется в Full Route Cache)
+// app/blog/page.tsx
+export default async function BlogPage() {
+  const posts = await fetch('https://api.example.com/posts', {
+    next: { revalidate: 3600 }, // обновляется раз в час
+  }).then(r => r.json());
+
+  return <PostList posts={posts} />;
+}
+
+// ❌ Динамический маршрут (НЕ кэшируется)
+// Причины:
+// • cookies() / headers() в компоненте
+// • cache: 'no-store' в fetch
+// • export const dynamic = 'force-dynamic'
+
+// app/dashboard/page.tsx
+import { cookies } from 'next/headers';
+
+export default async function DashboardPage() {
+  const cookieStore = await cookies(); // ← делает маршрут динамическим!
+  const userId = cookieStore.get('user-id')?.value;
+  // ...
+}
+
+// Явно управляем режимом
+export const dynamic = 'auto';          // по умолчанию
+export const dynamic = 'force-dynamic'; // всегда динамический
+export const dynamic = 'force-static';  // всегда статический (ошибка если нельзя)
+export const dynamic = 'error';         // ошибка если становится динамическим
+
+// Время жизни кэша
+export const revalidate = 3600; // в секундах (ISR)
+export const revalidate = false; // никогда не обновлять
+export const revalidate = 0;    // не кэшировать
+```
+
+---
+
+### 4️⃣ Router Cache: RSC payload в браузере
+
+Router Cache — клиентский кэш RSC payload (React Server Component payload). Браузер хранит уже загруженные страницы:
+
+```
+Пользователь переходит на /about
+→ Браузер запрашивает RSC payload
+→ Сохраняет в Router Cache
+
+Пользователь нажимает "Назад"
+→ Браузер берёт /about из Router Cache (мгновенно!)
+→ Не делает сетевой запрос ✨
+```
+
+Время жизни Router Cache:
+- **Статические маршруты**: 5 минут
+- **Динамические маршруты**: 30 секунд
+- **Prefetch**: до 5 минут
+
+Инвалидация Router Cache:
+```typescript
+// 1. router.refresh() — перезагружает текущий сегмент
+'use client';
+import { useRouter } from 'next/navigation';
+
+function RefreshButton() {
+  const router = useRouter();
+  return (
+    <button onClick={() => router.refresh()}>
+      🔄 Обновить данные
+    </button>
+  );
+}
+
+// 2. Server Action с revalidatePath — инвалидирует и сервер, и клиент
+'use server';
+import { revalidatePath } from 'next/cache';
+
+async function createPost() {
+  await db.post.create({ data: { title: '...' } });
+  revalidatePath('/blog'); // инвалидирует Full Route Cache + Router Cache
+}
+
+// 3. Навигация — автоматически обновляет при истечении времени
+```
+
+---
+
+### 🚫 no-store vs force-cache
+
+```typescript
+// ❓ Когда что использовать?
+
+// force-cache — для неизменяемых данных
+const config = await fetch('/api/config', {
+  cache: 'force-cache',
+  // Используй когда: конфиги, справочники, переведённые строки
+  // Инвалидируй: при деплое или revalidateTag()
+});
+
+// no-store — для персональных/real-time данных
+const cart = await fetch('/api/cart', {
+  cache: 'no-store',
+  // Используй когда: корзина, уведомления, real-time данные
+  // Делает маршрут ДИНАМИЧЕСКИМ
+});
+
+// revalidate — для данных с TTL
+const posts = await fetch('/api/posts', {
+  next: { revalidate: 60 * 5 }, // 5 минут
+  // Используй когда: посты, товары, новости
+  // Сочетание производительности и свежести данных
+});
+
+// Глобально для сегмента:
+// layout.tsx или page.tsx
+export const fetchCache = 'default-cache';  // кэшировать по умолчанию
+export const fetchCache = 'force-cache';    // всегда кэш
+export const fetchCache = 'force-no-store'; // никогда кэш
+```
+
+---
+
+### 🔍 Дебаггинг кэша
+
+```typescript
+// 1. Логирование (dev режим)
+const data = await fetch('https://api.example.com/data', {
+  next: { revalidate: 60 }
+});
+
+// В консоли Next.js dev сервера:
+// fetch /api/data (cache: HIT) ← из кэша
+// fetch /api/data (cache: MISS) ← сетевой запрос
+
+// 2. Заголовки ответа
+// x-nextjs-cache: HIT | MISS | STALE | REVALIDATED
+
+// 3. Принудительная очистка в dev
+// rm -rf .next/cache
+
+// 4. Переменные окружения
+NEXT_PRIVATE_DEBUG_CACHE=1 npm run dev
+
+// 5. Проверка через headers в Route Handler
+import { headers } from 'next/headers';
+
+export async function GET() {
+  const headersList = await headers();
+  const cacheControl = headersList.get('cache-control');
+  console.log('Cache-Control:', cacheControl);
+  return Response.json({ ok: true });
+}
+```
+
+---
+
+### 🏗️ Unstable_cache: кэш для БД запросов
+
+`unstable_cache` позволяет кэшировать любые асинхронные операции (не только fetch):
+
+```typescript
+import { unstable_cache } from 'next/cache';
+
+// Кэшируем Prisma запрос (работает как Data Cache для fetch)
+const getUsers = unstable_cache(
+  async () => {
+    return db.user.findMany({
+      select: { id: true, name: true, email: true },
+    });
+  },
+  ['users-list'],      // ключ кэша
+  {
+    revalidate: 3600,  // TTL в секундах
+    tags: ['users'],   // теги для инвалидации
+  }
+);
+
+// Использование
+export default async function UsersPage() {
+  const users = await getUsers(); // будет кэшироваться!
+  return <UserList users={users} />;
+}
+```
+
+---
+
+### 📋 Шпаргалка: какой кэш выбрать
+
+```
+Данные меняются раз в год?     → force-cache (или generateStaticParams)
+Данные меняются раз в час?     → revalidate: 3600
+Данные меняются раз в минуту?  → revalidate: 60
+Данные персональные?            → no-store (динамический рендер)
+Данные real-time?               → no-store + WebSocket/SSE
+Данные часто, но инвалидируем?  → тэги + revalidateTag()
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState, useEffect } from 'react';
+
+type CacheLayer = 'memoization' | 'data' | 'route' | 'router';
+type CacheStatus = 'hit' | 'miss' | 'stale' | 'revalidated' | 'empty';
+
+interface CacheEntry {
+  key: string;
+  data: unknown;
+  createdAt: number;
+  ttl: number;
+  hits: number;
+  tags: string[];
+}
+
+interface FetchLog {
+  id: number;
+  url: string;
+  layer: CacheLayer;
+  status: CacheStatus;
+  time: number;
+  timestamp: number;
+}
+
+const LAYERS: Record<CacheLayer, { label: string; color: string; desc: string }> = {
+  memoization: { label: '1. Request Memoization', color: '#c084fc', desc: 'Дедупликация в одном рендере' },
+  data: { label: '2. Data Cache', color: '#60a5fa', desc: 'fetch() результаты между запросами' },
+  route: { label: '3. Full Route Cache', color: '#fbbf24', desc: 'HTML + RSC на сервере' },
+  router: { label: '4. Router Cache', color: '#4ade80', desc: 'RSC payload в браузере' },
+};
+
+const STATUS_COLORS: Record<CacheStatus, string> = {
+  hit: '#4ade80', miss: '#f87171', stale: '#fbbf24', revalidated: '#60a5fa', empty: '#64748b',
+};
+
+let logId = 0;
+
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+const ENDPOINTS = [
+  { url: '/api/config', ttl: 86400, tags: ['config'], label: 'Конфиг (24ч)' },
+  { url: '/api/posts', ttl: 300, tags: ['posts', 'blog'], label: 'Посты (5м)' },
+  { url: '/api/user', ttl: 0, tags: [], label: 'Юзер (no-store)' },
+  { url: '/api/prices', ttl: 30, tags: ['prices', 'products'], label: 'Цены (30с)' },
+];
+
+export default function App() {
+  const [cacheStore, setCacheStore] = useState<Record<string, CacheEntry>>({});
+  const [logs, setLogs] = useState<FetchLog[]>([]);
+  const [activeLayer, setActiveLayer] = useState<CacheLayer>('data');
+  const [currentTime, setCurrentTime] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const addLog = (url: string, layer: CacheLayer, status: CacheStatus, time: number) => {
+    setLogs(prev => [{ id: ++logId, url, layer, status, time, timestamp: Date.now() }, ...prev].slice(0, 15));
+  };
+
+  const simulateFetch = async (endpoint: typeof ENDPOINTS[0]) => {
+    const existing = cacheStore[endpoint.url];
+    const now = Date.now();
+
+    if (endpoint.ttl === 0) {
+      await delay(200 + Math.random() * 300);
+      addLog(endpoint.url, 'data', 'miss', 250);
+      return;
+    }
+
+    if (existing) {
+      const age = (now - existing.createdAt) / 1000;
+
+      if (age < existing.ttl) {
+        addLog(endpoint.url, 'data', 'hit', 2);
+        setCacheStore(prev => ({
+          ...prev,
+          [endpoint.url]: { ...prev[endpoint.url], hits: prev[endpoint.url].hits + 1 }
+        }));
+        return;
+      } else {
+        addLog(endpoint.url, 'data', 'stale', 180);
+        await delay(180);
+        const newEntry: CacheEntry = {
+          key: endpoint.url,
+          data: { revalidatedAt: new Date().toISOString() },
+          createdAt: now,
+          ttl: endpoint.ttl,
+          hits: 0,
+          tags: endpoint.tags,
+        };
+        setCacheStore(prev => ({ ...prev, [endpoint.url]: newEntry }));
+        addLog(endpoint.url, 'data', 'revalidated', 180);
+        return;
+      }
+    }
+
+    await delay(300 + Math.random() * 400);
+    const entry: CacheEntry = {
+      key: endpoint.url,
+      data: { fetchedAt: new Date().toISOString(), value: Math.random().toFixed(3) },
+      createdAt: now,
+      ttl: endpoint.ttl,
+      hits: 0,
+      tags: endpoint.tags,
+    };
+    setCacheStore(prev => ({ ...prev, [endpoint.url]: entry }));
+    addLog(endpoint.url, 'data', 'miss', 350);
+  };
+
+  const invalidateByTag = (tag: string) => {
+    setCacheStore(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(key => {
+        if (next[key].tags.includes(tag)) {
+          delete next[key];
+        }
+      });
+      return next;
+    });
+    setLogs(prev => [{
+      id: ++logId, url: \`revalidateTag("\${tag}")\`, layer: 'data',
+      status: 'revalidated', time: 0, timestamp: Date.now()
+    }, ...prev].slice(0, 15));
+  };
+
+  const clearAllCache = () => {
+    setCacheStore({});
+    setLogs([]);
+  };
+
+  const getCacheAge = (entry: CacheEntry) => {
+    const age = (currentTime - entry.createdAt) / 1000;
+    return Math.round(age);
+  };
+
+  const isFresh = (entry: CacheEntry) => {
+    return getCacheAge(entry) < entry.ttl;
+  };
+
+  const allTags = [...new Set(ENDPOINTS.flatMap(e => e.tags))];
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ background: '#020617', borderBottom: '1px solid #1e293b', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ color: '#171717', background: 'white', borderRadius: 4, padding: '2px 8px', fontWeight: 900, fontSize: 13 }}>N</span>
+        <span style={{ fontWeight: 700 }}>Next.js Caching Demo</span>
+        <span style={{ color: '#64748b', fontSize: 12 }}>4 уровня кэша</span>
+        <button onClick={clearAllCache} style={{ marginLeft: 'auto', padding: '5px 12px', background: '#450a0a', color: '#f87171', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}>
+          🗑️ Очистить кэш
+        </button>
+      </div>
+
+      <div style={{ padding: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginBottom: 16 }}>
+          {(Object.entries(LAYERS) as [CacheLayer, typeof LAYERS[CacheLayer]][]).map(([key, layer]) => (
+            <button
+              key={key}
+              onClick={() => setActiveLayer(key)}
+              style={{
+                padding: '10px 8px', border: \`1px solid \${activeLayer === key ? layer.color : '#334155'}\`,
+                borderRadius: 8, cursor: 'pointer',
+                background: activeLayer === key ? \`\${layer.color}22\` : '#1e293b',
+                color: activeLayer === key ? layer.color : '#64748b',
+                fontSize: 11, textAlign: 'center', lineHeight: 1.4,
+              }}
+            >
+              <div style={{ fontWeight: 700 }}>{layer.label}</div>
+              <div style={{ opacity: 0.7, fontSize: 10, marginTop: 2 }}>{layer.desc}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div>
+            <div style={{ color: '#64748b', fontSize: 11, marginBottom: 8 }}>🌐 Симуляция fetch запросов:</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+              {ENDPOINTS.map(ep => {
+                const cached = cacheStore[ep.url];
+                const fresh = cached && isFresh(cached);
+                return (
+                  <div
+                    key={ep.url}
+                    style={{ background: '#1e293b', borderRadius: 8, padding: 10, border: \`1px solid \${fresh ? '#4ade8044' : '#334155'}\` }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700 }}>{ep.label}</span>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        {ep.ttl === 0 && <span style={{ color: '#f87171', fontSize: 10 }}>no-store</span>}
+                        {ep.ttl > 0 && <span style={{ color: '#64748b', fontSize: 10 }}>revalidate: {ep.ttl}s</span>}
+                        {cached && (
+                          <span style={{ color: fresh ? '#4ade80' : '#fbbf24', fontSize: 10 }}>
+                            {fresh ? \`✅ fresh (\${getCacheAge(cached)}s)\` : '⚠️ stale'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ color: '#64748b', fontSize: 10, marginBottom: 6 }}>
+                      {ep.url} {cached && \`· hits: \${cached.hits}\`}
+                    </div>
+                    {ep.tags.length > 0 && (
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
+                        {ep.tags.map(tag => (
+                          <span key={tag} style={{ background: '#0f172a', color: '#60a5fa', padding: '1px 6px', borderRadius: 3, fontSize: 10 }}>
+                            #{tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => simulateFetch(ep)}
+                      style={{ padding: '5px 12px', background: '#0f172a', border: '1px solid #4ade80', borderRadius: 4, cursor: 'pointer', color: '#4ade80', fontSize: 11 }}
+                    >
+                      fetch()
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ background: '#1e293b', borderRadius: 8, padding: 12 }}>
+              <div style={{ color: '#64748b', fontSize: 11, marginBottom: 8 }}>🏷️ Инвалидация по тегам (revalidateTag):</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {allTags.map(tag => (
+                  <button
+                    key={tag}
+                    onClick={() => invalidateByTag(tag)}
+                    style={{ padding: '5px 12px', background: '#1d4ed8', border: '1px solid #60a5fa', borderRadius: 4, cursor: 'pointer', color: '#93c5fd', fontSize: 11 }}
+                  >
+                    #{tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div style={{ color: '#64748b', fontSize: 11, marginBottom: 8 }}>
+              📋 Cache Logs:
+            </div>
+            {logs.length === 0 ? (
+              <div style={{ textAlign: 'center', color: '#64748b', padding: '30px 0', fontSize: 13 }}>
+                Нажми fetch() для симуляции запроса
+              </div>
+            ) : (
+              <div>
+                {logs.map(log => (
+                  <div key={log.id} style={{
+                    background: '#1e293b', borderRadius: 4, padding: '7px 10px', marginBottom: 4,
+                    borderLeft: \`3px solid \${STATUS_COLORS[log.status]}\`,
+                    display: 'flex', alignItems: 'center', gap: 8,
+                  }}>
+                    <span style={{ color: STATUS_COLORS[log.status], fontWeight: 700, fontSize: 11, minWidth: 90 }}>
+                      {log.status.toUpperCase()}
+                    </span>
+                    <span style={{ color: '#94a3b8', fontSize: 11, flex: 1 }}>{log.url}</span>
+                    <span style={{ color: '#64748b', fontSize: 10 }}>
+                      {log.status === 'hit' ? '~2ms' : log.status === 'revalidated' ? '~180ms' : log.time > 0 ? \`~\${log.time}ms\` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ marginTop: 12, background: '#1e293b', borderRadius: 8, padding: 12, border: '1px solid #334155' }}>
+              <div style={{ color: '#4ade80', fontSize: 11, fontWeight: 700, marginBottom: 8 }}>📊 Легенда статусов:</div>
+              {Object.entries(STATUS_COLORS).filter(([k]) => k !== 'empty').map(([status, color]) => (
+                <div key={status} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, fontSize: 11 }}>
+                  <div style={{ width: 8, height: 8, background: color, borderRadius: '50%' }} />
+                  <span style={{ color, fontWeight: 700 }}>{status.toUpperCase()}</span>
+                  <span style={{ color: '#64748b' }}>
+                    {status === 'hit' && '— из кэша, быстро ~2ms'}
+                    {status === 'miss' && '— нет в кэше, сетевой запрос'}
+                    {status === 'stale' && '— устаревший, нужна ревалидация'}
+                    {status === 'revalidated' && '— обновлён в фоне'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

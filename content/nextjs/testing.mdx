@@ -1,0 +1,1359 @@
+## 🧪 Тестирование Next.js приложений
+
+Привет! Сегодня мы разберём одну из самых важных тем в профессиональной разработке — **тестирование**. Многие разработчики боятся тестов или считают их «скучной работой». Но я тебе скажу кое-что: тесты — это **страховка для твоего кода**. Написал тест — можешь рефакторить без страха сломать всё! 🛡️
+
+Представь, что ты строишь мост. Ты же не скажешь: «Ну, должен держаться, поехали!» — ты проверяешь каждую балку, каждый болт. То же самое с кодом.
+
+---
+
+### 🤔 Зачем вообще тестировать?
+
+Без тестов разработка выглядит так:
+1. Написал фичу ✅
+2. Проверил вручную в браузере ✅
+3. Задеплоил в прод ✅
+4. Через неделю сломал эту же фичу другим изменением 💀
+5. Клиенты злятся, ты не спишь ночью 😱
+
+С тестами:
+1. Написал фичу ✅
+2. Написал тест ✅
+3. Задеплоил — CI автоматически прогнал все тесты ✅
+4. Через неделю изменил код — тест упал, ты сразу увидел проблему ✅
+5. Клиенты счастливы, ты спишь спокойно 😴
+
+```
+Без тестов                    │  С тестами
+──────────────────────────────┼──────────────────────────────
+Рефакторинг = страх           │  Рефакторинг = уверенность
+Баги в проде                  │  Баги поймали локально
+«Оно работало на моей машине» │  CI одинаков для всех
+Ручная проверка каждый раз    │  Автоматика за секунды
+Боишься менять старый код     │  Можешь смело переписывать
+```
+
+---
+
+### 🏛️ Пирамида тестирования
+
+Классическая пирамида Майка Кона:
+
+```
+           /\
+          /E2E\          ← Мало, дорого, медленно
+         /──────\
+        /Integr. \       ← Средне
+       /────────────\
+      /  Unit Tests  \   ← Много, дёшево, быстро
+     /────────────────\
+```
+
+**Unit тесты** — тестируют одну функцию/компонент в изоляции. Быстрые (миллисекунды), дешёвые, их должно быть больше всего.
+
+**Integration тесты** — тестируют взаимодействие нескольких компонентов вместе. Медленнее, но дают больше уверенности.
+
+**E2E (End-to-End) тесты** — тестируют весь поток от интерфейса до базы данных. Самые медленные (секунды/минуты), но максимально реалистичные.
+
+Для Next.js это выглядит так:
+
+| Уровень | Инструменты | Что тестируем |
+|---------|------------|---------------|
+| **Unit** | Jest + RTL | Компоненты, утилиты, хуки |
+| **Integration** | Jest + RTL + MSW | Страницы с API моками |
+| **E2E** | Playwright / Cypress | Полные user flows |
+
+---
+
+### ⚙️ Настройка Jest + React Testing Library
+
+Первым делом устанавливаем зависимости:
+
+```bash
+npm install --save-dev jest jest-environment-jsdom @testing-library/react @testing-library/jest-dom @testing-library/user-event ts-jest @types/jest
+```
+
+Или если используешь `next@14+`, у них есть встроенная конфигурация:
+
+```bash
+npm install --save-dev jest jest-environment-jsdom @testing-library/react @testing-library/jest-dom @testing-library/user-event
+```
+
+Создаём `jest.config.ts` в корне проекта:
+
+```typescript
+// jest.config.ts
+import type { Config } from 'jest';
+import nextJest from 'next/jest';
+
+const createJestConfig = nextJest({
+  // Путь к Next.js приложению (для загрузки next.config.js и .env файлов)
+  dir: './',
+});
+
+const config: Config = {
+  // Добавляем кастомную настройку после создания конфига Next.js
+  coverageProvider: 'v8',
+  testEnvironment: 'jsdom',
+
+  // Добавляем матчеры из @testing-library/jest-dom
+  setupFilesAfterFramework: ['<rootDir>/jest.setup.ts'],
+
+  // Паттерны для поиска тестов
+  testMatch: [
+    '**/__tests__/**/*.[jt]s?(x)',
+    '**/?(*.)+(spec|test).[jt]s?(x)',
+  ],
+
+  // Алиасы путей (как в tsconfig.json)
+  moduleNameMapper: {
+    '^@/(.*)$': '<rootDir>/$1',
+  },
+
+  // Что покрывать
+  collectCoverageFrom: [
+    'app/**/*.{ts,tsx}',
+    'components/**/*.{ts,tsx}',
+    '!**/*.d.ts',
+    '!**/node_modules/**',
+  ],
+};
+
+// createJestConfig возвращает async функцию, которая Next.js настраивает трансформы
+export default createJestConfig(config);
+```
+
+Создаём `jest.setup.ts`:
+
+```typescript
+// jest.setup.ts
+import '@testing-library/jest-dom';
+
+// Если нужно мокировать window.matchMedia
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: jest.fn().mockImplementation((query) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: jest.fn(),
+    removeListener: jest.fn(),
+    addEventListener: jest.fn(),
+    removeEventListener: jest.fn(),
+    dispatchEvent: jest.fn(),
+  })),
+});
+```
+
+В `package.json` добавляем скрипты:
+
+```json
+{
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:ci": "jest --ci --coverage"
+  }
+}
+```
+
+---
+
+### 🖥️ Тестирование Client Components
+
+Напишем простой компонент:
+
+```typescript
+// components/Counter.tsx
+'use client';
+
+import { useState } from 'react';
+
+interface CounterProps {
+  initialCount?: number;
+  max?: number;
+}
+
+export function Counter({ initialCount = 0, max = 10 }: CounterProps) {
+  const [count, setCount] = useState(initialCount);
+
+  return (
+    <div>
+      <h2>Счётчик: {count}</h2>
+      <button
+        onClick={() => setCount((c) => Math.max(0, c - 1))}
+        disabled={count === 0}
+        aria-label="Уменьшить"
+      >
+        −
+      </button>
+      <button
+        onClick={() => setCount((c) => Math.min(max, c + 1))}
+        disabled={count === max}
+        aria-label="Увеличить"
+      >
+        +
+      </button>
+      {count === max && <p>Максимум достигнут!</p>}
+    </div>
+  );
+}
+```
+
+Теперь тест:
+
+```typescript
+// components/__tests__/Counter.test.tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { Counter } from '../Counter';
+
+describe('Counter', () => {
+  it('рендерит с начальным значением', () => {
+    render(<Counter initialCount={5} />);
+    expect(screen.getByText('Счётчик: 5')).toBeInTheDocument();
+  });
+
+  it('увеличивает счётчик при клике на +', async () => {
+    const user = userEvent.setup();
+    render(<Counter />);
+
+    await user.click(screen.getByRole('button', { name: 'Увеличить' }));
+    expect(screen.getByText('Счётчик: 1')).toBeInTheDocument();
+  });
+
+  it('не уменьшает ниже нуля', async () => {
+    const user = userEvent.setup();
+    render(<Counter initialCount={0} />);
+
+    const decrementBtn = screen.getByRole('button', { name: 'Уменьшить' });
+    expect(decrementBtn).toBeDisabled();
+  });
+
+  it('показывает сообщение при достижении максимума', async () => {
+    const user = userEvent.setup();
+    render(<Counter initialCount={9} max={10} />);
+
+    await user.click(screen.getByRole('button', { name: 'Увеличить' }));
+    expect(screen.getByText('Максимум достигнут!')).toBeInTheDocument();
+  });
+
+  it('блокирует кнопку + при максимуме', async () => {
+    const user = userEvent.setup();
+    render(<Counter initialCount={10} max={10} />);
+
+    expect(screen.getByRole('button', { name: 'Увеличить' })).toBeDisabled();
+  });
+});
+```
+
+**Важные паттерны RTL:**
+
+```typescript
+// ✅ Запросы по роли (семантика!) — предпочтительный способ
+screen.getByRole('button', { name: 'Отправить' });
+screen.getByRole('heading', { level: 1 });
+screen.getByRole('textbox', { name: 'Email' });
+screen.getByRole('checkbox', { name: 'Согласен' });
+
+// ✅ По тексту
+screen.getByText('Привет, мир!');
+screen.getByText(/привет/i); // regex, case-insensitive
+
+// ✅ По label (для форм)
+screen.getByLabelText('Email адрес');
+
+// ✅ По placeholder
+screen.getByPlaceholderText('Введите email...');
+
+// ✅ По test-id (последний вариант, если нет семантики)
+screen.getByTestId('user-card');
+
+// getBy vs queryBy vs findBy
+// getBy — бросает ошибку если не найдено (синхронно)
+// queryBy — возвращает null если не найдено (для проверки отсутствия)
+// findBy — возвращает промис (для async элементов)
+
+// Проверки
+expect(element).toBeInTheDocument();
+expect(element).toBeVisible();
+expect(element).toBeDisabled();
+expect(element).toHaveValue('test@test.com');
+expect(element).toHaveClass('active');
+expect(element).toHaveTextContent('Загрузка...');
+```
+
+---
+
+### 🖥️ Тестирование Server Components
+
+Server Components — это `async` компоненты. Их тестирование немного отличается:
+
+```typescript
+// app/users/UserList.tsx (Server Component)
+import { prisma } from '@/lib/prisma';
+
+export async function UserList() {
+  const users = await prisma.user.findMany({ take: 10 });
+
+  return (
+    <ul>
+      {users.map((user) => (
+        <li key={user.id}>{user.name}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+```typescript
+// app/users/__tests__/UserList.test.tsx
+import { render, screen } from '@testing-library/react';
+import { UserList } from '../UserList';
+
+// Мокируем prisma
+jest.mock('@/lib/prisma', () => ({
+  prisma: {
+    user: {
+      findMany: jest.fn(),
+    },
+  },
+}));
+
+import { prisma } from '@/lib/prisma';
+
+describe('UserList', () => {
+  it('отображает список пользователей', async () => {
+    (prisma.user.findMany as jest.Mock).mockResolvedValue([
+      { id: '1', name: 'Яша' },
+      { id: '2', name: 'Света' },
+    ]);
+
+    // Server Component — это async функция, её нужно await
+    const Component = await UserList();
+    render(Component);
+
+    expect(screen.getByText('Яша')).toBeInTheDocument();
+    expect(screen.getByText('Света')).toBeInTheDocument();
+  });
+
+  it('отображает пустой список', async () => {
+    (prisma.user.findMany as jest.Mock).mockResolvedValue([]);
+
+    const Component = await UserList();
+    render(Component);
+
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument();
+  });
+});
+```
+
+---
+
+### 🌐 Мокирование fetch в тестах
+
+Часто компоненты делают `fetch` запросы. В тестах нам нужно их мокировать:
+
+```typescript
+// Простое мокирование через global.fetch
+describe('ProductCard', () => {
+  beforeEach(() => {
+    global.fetch = jest.fn();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('отображает данные продукта', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        id: 1,
+        name: 'Ноутбук',
+        price: 50000,
+      }),
+    });
+
+    render(<ProductCard id={1} />);
+
+    // Ждём появления асинхронного контента
+    expect(await screen.findByText('Ноутбук')).toBeInTheDocument();
+    expect(screen.getByText('50 000 ₽')).toBeInTheDocument();
+  });
+
+  it('показывает ошибку при неудачном запросе', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+    });
+
+    render(<ProductCard id={999} />);
+
+    expect(await screen.findByText('Товар не найден')).toBeInTheDocument();
+  });
+
+  it('показывает загрузку во время запроса', () => {
+    (global.fetch as jest.Mock).mockImplementation(
+      () => new Promise(() => {}) // никогда не резолвится
+    );
+
+    render(<ProductCard id={1} />);
+
+    expect(screen.getByText('Загрузка...')).toBeInTheDocument();
+  });
+});
+```
+
+---
+
+### 🧭 Мокирование next/navigation
+
+`useRouter`, `usePathname`, `useSearchParams` — всё это нужно мокировать:
+
+```typescript
+// В тесте или в jest.setup.ts
+jest.mock('next/navigation', () => ({
+  useRouter: jest.fn(),
+  usePathname: jest.fn(),
+  useSearchParams: jest.fn(),
+  useParams: jest.fn(),
+}));
+
+import { useRouter, usePathname } from 'next/navigation';
+
+describe('NavBar', () => {
+  it('подсвечивает активную ссылку', () => {
+    (usePathname as jest.Mock).mockReturnValue('/about');
+    (useRouter as jest.Mock).mockReturnValue({
+      push: jest.fn(),
+      back: jest.fn(),
+      forward: jest.fn(),
+    });
+
+    render(<NavBar />);
+
+    const aboutLink = screen.getByRole('link', { name: 'О нас' });
+    expect(aboutLink).toHaveClass('active');
+  });
+
+  it('навигирует при клике', async () => {
+    const mockPush = jest.fn();
+    (useRouter as jest.Mock).mockReturnValue({ push: mockPush });
+    (usePathname as jest.Mock).mockReturnValue('/');
+
+    const user = userEvent.setup();
+    render(<NavBar />);
+
+    await user.click(screen.getByRole('button', { name: 'Войти' }));
+    expect(mockPush).toHaveBeenCalledWith('/login');
+  });
+});
+```
+
+---
+
+### 🖼️ Мокирование next/image
+
+`next/image` использует оптимизацию изображений, что может ломать тесты. Мокируем:
+
+```typescript
+// __mocks__/next/image.tsx
+import React from 'react';
+import type { ImageProps } from 'next/image';
+
+const MockImage = ({ src, alt, ...props }: ImageProps) => {
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={src as string} alt={alt} {...props} />;
+};
+
+export default MockImage;
+```
+
+Или через jest.mock:
+
+```typescript
+jest.mock('next/image', () => ({
+  __esModule: true,
+  default: ({ src, alt }: { src: string; alt: string }) => (
+    <img src={src} alt={alt} />
+  ),
+}));
+```
+
+---
+
+### 📡 Тестирование Route Handlers
+
+Route Handlers (`app/api/...`) тоже нужно тестировать:
+
+```typescript
+// app/api/posts/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function GET(request: NextRequest) {
+  const searchParams = request.nextUrl.searchParams;
+  const page = Number(searchParams.get('page') ?? 1);
+
+  const posts = await fetchPosts(page);
+  return NextResponse.json({ posts, page });
+}
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+
+  if (!body.title || !body.content) {
+    return NextResponse.json(
+      { error: 'Поле title и content обязательны' },
+      { status: 400 }
+    );
+  }
+
+  const post = await createPost(body);
+  return NextResponse.json(post, { status: 201 });
+}
+```
+
+```typescript
+// app/api/posts/__tests__/route.test.ts
+import { GET, POST } from '../route';
+import { NextRequest } from 'next/server';
+
+jest.mock('@/lib/posts', () => ({
+  fetchPosts: jest.fn().mockResolvedValue([
+    { id: 1, title: 'Первый пост' },
+    { id: 2, title: 'Второй пост' },
+  ]),
+  createPost: jest.fn().mockResolvedValue({ id: 3, title: 'Новый пост' }),
+}));
+
+describe('GET /api/posts', () => {
+  it('возвращает список постов', async () => {
+    const request = new NextRequest('http://localhost:3000/api/posts');
+    const response = await GET(request);
+    const data = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(data.posts).toHaveLength(2);
+    expect(data.posts[0].title).toBe('Первый пост');
+  });
+
+  it('принимает параметр page', async () => {
+    const request = new NextRequest('http://localhost:3000/api/posts?page=2');
+    const response = await GET(request);
+    const data = await response.json();
+
+    expect(data.page).toBe(2);
+  });
+});
+
+describe('POST /api/posts', () => {
+  it('создаёт новый пост', async () => {
+    const request = new NextRequest('http://localhost:3000/api/posts', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Новый пост', content: 'Текст...' }),
+    });
+
+    const response = await POST(request);
+    const data = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(data.id).toBe(3);
+  });
+
+  it('возвращает 400 при отсутствии title', async () => {
+    const request = new NextRequest('http://localhost:3000/api/posts', {
+      method: 'POST',
+      body: JSON.stringify({ content: 'Текст без заголовка' }),
+    });
+
+    const response = await POST(request);
+    const data = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(data.error).toContain('title');
+  });
+});
+```
+
+---
+
+### 🎭 MSW — Mock Service Worker
+
+MSW — мощный инструмент для мокирования API на уровне сети. Работает в тестах, в браузере, и в Node.js:
+
+```bash
+npm install --save-dev msw
+```
+
+Создаём хендлеры:
+
+```typescript
+// src/mocks/handlers.ts
+import { http, HttpResponse } from 'msw';
+
+export const handlers = [
+  // Мокируем GET /api/users
+  http.get('/api/users', () => {
+    return HttpResponse.json([
+      { id: 1, name: 'Яша', email: 'yasha@example.com' },
+      { id: 2, name: 'Света', email: 'sveta@example.com' },
+    ]);
+  }),
+
+  // Мокируем POST /api/users
+  http.post('/api/users', async ({ request }) => {
+    const body = await request.json() as { name: string; email: string };
+    return HttpResponse.json(
+      { id: 3, ...body },
+      { status: 201 }
+    );
+  }),
+
+  // Мокируем с динамическим параметром
+  http.get('/api/users/:id', ({ params }) => {
+    const { id } = params;
+    if (id === '999') {
+      return HttpResponse.json(
+        { error: 'Пользователь не найден' },
+        { status: 404 }
+      );
+    }
+    return HttpResponse.json({ id, name: 'Яша' });
+  }),
+
+  // Мокируем внешний API
+  http.get('https://api.github.com/users/:username', ({ params }) => {
+    return HttpResponse.json({
+      login: params.username,
+      name: 'Test User',
+      public_repos: 42,
+    });
+  }),
+];
+```
+
+Настраиваем сервер для тестов:
+
+```typescript
+// src/mocks/server.ts
+import { setupServer } from 'msw/node';
+import { handlers } from './handlers';
+
+export const server = setupServer(...handlers);
+```
+
+Подключаем в `jest.setup.ts`:
+
+```typescript
+// jest.setup.ts
+import '@testing-library/jest-dom';
+import { server } from '@/mocks/server';
+
+// Запускаем сервер перед всеми тестами
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+
+// Сбрасываем хендлеры после каждого теста
+afterEach(() => server.resetHandlers());
+
+// Останавливаем сервер после всех тестов
+afterAll(() => server.close());
+```
+
+Теперь тесты с MSW:
+
+```typescript
+// components/__tests__/UserList.test.tsx
+import { render, screen, waitFor } from '@testing-library/react';
+import { server } from '@/mocks/server';
+import { http, HttpResponse } from 'msw';
+import { UserList } from '../UserList';
+
+describe('UserList с MSW', () => {
+  it('загружает и отображает пользователей', async () => {
+    render(<UserList />);
+
+    // Ждём загрузки
+    expect(await screen.findByText('Яша')).toBeInTheDocument();
+    expect(screen.getByText('Света')).toBeInTheDocument();
+  });
+
+  it('показывает ошибку при сбое сервера', async () => {
+    // Переопределяем хендлер только для этого теста
+    server.use(
+      http.get('/api/users', () => {
+        return HttpResponse.json(
+          { error: 'Внутренняя ошибка' },
+          { status: 500 }
+        );
+      })
+    );
+
+    render(<UserList />);
+
+    expect(await screen.findByText('Ошибка загрузки')).toBeInTheDocument();
+  });
+});
+```
+
+---
+
+### 🎭 E2E тесты с Playwright
+
+Playwright — современный инструмент для E2E тестирования от Microsoft. Быстрее Cypress, поддерживает несколько браузеров:
+
+```bash
+npm init playwright@latest
+```
+
+После установки появится `playwright.config.ts`:
+
+```typescript
+// playwright.config.ts
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './e2e',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: 'html',
+
+  use: {
+    baseURL: 'http://localhost:3000',
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
+  },
+
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+    // Мобильные
+    { name: 'Mobile Chrome', use: { ...devices['Pixel 5'] } },
+    { name: 'Mobile Safari', use: { ...devices['iPhone 12'] } },
+  ],
+
+  // Запускаем Next.js сервер перед тестами
+  webServer: {
+    command: 'npm run dev',
+    url: 'http://localhost:3000',
+    reuseExistingServer: !process.env.CI,
+  },
+});
+```
+
+Пишем первый E2E тест:
+
+```typescript
+// e2e/home.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Главная страница', () => {
+  test('отображает заголовок', async ({ page }) => {
+    await page.goto('/');
+
+    // Проверяем заголовок страницы
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    await expect(page).toHaveTitle(/Мой сайт/);
+  });
+
+  test('навигация работает', async ({ page }) => {
+    await page.goto('/');
+
+    // Кликаем на ссылку "О нас"
+    await page.getByRole('link', { name: 'О нас' }).click();
+
+    // Проверяем URL
+    await expect(page).toHaveURL('/about');
+    await expect(page.getByRole('heading', { name: 'О нас' })).toBeVisible();
+  });
+
+  test('мобильное меню', async ({ page }) => {
+    // Устанавливаем мобильный viewport
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.goto('/');
+
+    // Мобильное меню скрыто
+    await expect(page.getByRole('navigation')).not.toBeVisible();
+
+    // Кликаем бургер-кнопку
+    await page.getByRole('button', { name: 'Открыть меню' }).click();
+
+    // Меню появилось
+    await expect(page.getByRole('navigation')).toBeVisible();
+  });
+});
+```
+
+---
+
+### 📝 Playwright: тестирование форм
+
+```typescript
+// e2e/auth.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Аутентификация', () => {
+  test('успешная авторизация', async ({ page }) => {
+    await page.goto('/login');
+
+    // Заполняем форму
+    await page.getByLabel('Email').fill('test@example.com');
+    await page.getByLabel('Пароль').fill('password123');
+
+    // Отправляем
+    await page.getByRole('button', { name: 'Войти' }).click();
+
+    // Ждём редиректа
+    await expect(page).toHaveURL('/dashboard');
+    await expect(page.getByText('Добро пожаловать!')).toBeVisible();
+  });
+
+  test('показывает ошибку при неверном пароле', async ({ page }) => {
+    await page.goto('/login');
+
+    await page.getByLabel('Email').fill('test@example.com');
+    await page.getByLabel('Пароль').fill('wrongpassword');
+    await page.getByRole('button', { name: 'Войти' }).click();
+
+    // Ошибка должна появиться
+    await expect(page.getByText('Неверный email или пароль')).toBeVisible();
+    // URL не изменился
+    await expect(page).toHaveURL('/login');
+  });
+
+  test('валидация пустых полей', async ({ page }) => {
+    await page.goto('/login');
+
+    // Сразу нажимаем без заполнения
+    await page.getByRole('button', { name: 'Войти' }).click();
+
+    await expect(page.getByText('Email обязателен')).toBeVisible();
+    await expect(page.getByText('Пароль обязателен')).toBeVisible();
+  });
+
+  test('полный flow: регистрация → логин → выход', async ({ page }) => {
+    const uniqueEmail = `test-${Date.now()}@example.com`;
+
+    // Регистрация
+    await page.goto('/register');
+    await page.getByLabel('Email').fill(uniqueEmail);
+    await page.getByLabel('Пароль').fill('StrongPass123!');
+    await page.getByRole('button', { name: 'Зарегистрироваться' }).click();
+    await expect(page).toHaveURL('/dashboard');
+
+    // Выход
+    await page.getByRole('button', { name: 'Выйти' }).click();
+    await expect(page).toHaveURL('/');
+
+    // Повторный вход
+    await page.goto('/login');
+    await page.getByLabel('Email').fill(uniqueEmail);
+    await page.getByLabel('Пароль').fill('StrongPass123!');
+    await page.getByRole('button', { name: 'Войти' }).click();
+    await expect(page).toHaveURL('/dashboard');
+  });
+});
+```
+
+---
+
+### 📸 Snapshot тесты
+
+Snapshot тесты фиксируют «снимок» компонента и сравнивают при следующем запуске:
+
+```typescript
+// components/__tests__/Badge.test.tsx
+import { render } from '@testing-library/react';
+import { Badge } from '../Badge';
+
+describe('Badge snapshots', () => {
+  it('рендерит корректно (success)', () => {
+    const { container } = render(
+      <Badge variant="success">Активен</Badge>
+    );
+    expect(container).toMatchSnapshot();
+  });
+
+  it('рендерит корректно (error)', () => {
+    const { container } = render(
+      <Badge variant="error">Ошибка</Badge>
+    );
+    expect(container).toMatchSnapshot();
+  });
+});
+
+// Снапшот сохраняется в __snapshots__/Badge.test.tsx.snap
+// Если намеренно изменил — запусти: jest --updateSnapshot
+```
+
+---
+
+### 📊 Coverage отчёт
+
+```bash
+# Генерируем coverage
+npm run test:coverage
+
+# Вывод в терминале:
+# ----------------------|---------|----------|---------|---------|
+# File                  | % Stmts | % Branch | % Funcs | % Lines |
+# ----------------------|---------|----------|---------|---------|
+# All files             |   87.45 |    82.10 |   91.30 |   87.45 |
+# components/Counter.tsx|   100   |    100   |   100   |   100   |
+# components/NavBar.tsx |   75.00 |    62.50 |   83.33 |   75.00 |
+
+# HTML отчёт в ./coverage/lcov-report/index.html
+```
+
+В `jest.config.ts` устанавливаем пороги:
+
+```typescript
+const config: Config = {
+  // ...
+  coverageThreshold: {
+    global: {
+      branches: 80,
+      functions: 80,
+      lines: 80,
+      statements: 80,
+    },
+    // Для конкретных файлов
+    './components/auth/': {
+      branches: 90,
+      lines: 90,
+    },
+  },
+};
+```
+
+---
+
+### 🔄 CI/CD: GitHub Actions
+
+Создаём файл `.github/workflows/tests.yml`:
+
+```yaml
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        run: npm run test:ci
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+
+  e2e-tests:
+    name: E2E Tests (Playwright)
+    runs-on: ubuntu-latest
+    needs: unit-tests  # Запускаем только если unit тесты прошли
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Build Next.js app
+        run: npm run build
+        env:
+          DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+
+      - name: Run Playwright tests
+        run: npx playwright test
+        env:
+          CI: true
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()  # Загружаем даже при провале
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+```
+
+---
+
+### 💡 Советы и лучшие практики
+
+**1. Тестируй поведение, а не реализацию:**
+
+```typescript
+// ❌ Плохо — тестируем внутреннее состояние
+expect(component.state.isOpen).toBe(true);
+
+// ✅ Хорошо — тестируем то, что видит пользователь
+expect(screen.getByRole('dialog')).toBeVisible();
+```
+
+**2. Один тест — одна ответственность:**
+
+```typescript
+// ❌ Плохо — слишком много в одном тесте
+it('форма работает', async () => {
+  // 50 строк кода...
+});
+
+// ✅ Хорошо — каждый тест про конкретный случай
+it('показывает ошибку валидации для невалидного email');
+it('отправляет форму при валидных данных');
+it('блокирует кнопку во время отправки');
+```
+
+**3. Используй `describe` для группировки:**
+
+```typescript
+describe('LoginForm', () => {
+  describe('Валидация', () => {
+    it('требует email');
+    it('требует валидный формат email');
+    it('требует пароль минимум 8 символов');
+  });
+
+  describe('Отправка', () => {
+    it('показывает лоадер при отправке');
+    it('редиректит при успехе');
+    it('показывает ошибку сервера');
+  });
+});
+```
+
+**4. `beforeEach` для повторяющейся логики:**
+
+```typescript
+describe('UserDashboard', () => {
+  beforeEach(() => {
+    // Мокируем авторизованного пользователя перед каждым тестом
+    (useAuth as jest.Mock).mockReturnValue({
+      user: { id: '1', name: 'Яша', role: 'admin' },
+      isLoading: false,
+    });
+  });
+
+  it('показывает имя пользователя');
+  it('показывает кнопку настроек для админа');
+});
+```
+
+---
+
+### 🎯 Итог
+
+Тестирование в Next.js — это:
+
+| Инструмент | Задача |
+|-----------|--------|
+| **Jest** | Тест-раннер, моки, coverage |
+| **React Testing Library** | Тестирование компонентов |
+| **MSW** | Мокирование API запросов |
+| **Playwright** | E2E тестирование |
+
+Помни формулу: **"Напиши тест → Он красный → Напиши код → Он зелёный → Рефакторинг"** — это называется TDD (Test-Driven Development). Попробуй хоть раз — и ты оценишь! 🚀
+
+<Playground template="react" files={{ 'App.tsx': `
+import { useState, useEffect, useRef } from 'react';
+
+const TEST_SUITES = [
+  {
+    name: 'Unit Tests',
+    color: '#4ade80',
+    icon: '⚡',
+    tests: [
+      { name: 'Counter renders with initial value', status: 'pending' },
+      { name: 'Counter increments on click', status: 'pending' },
+      { name: 'Counter disables at max', status: 'pending' },
+      { name: 'Badge renders success variant', status: 'pending' },
+      { name: 'formatPrice returns correct string', status: 'pending' },
+      { name: 'validateEmail rejects invalid input', status: 'pending' },
+    ],
+  },
+  {
+    name: 'Integration Tests',
+    color: '#60a5fa',
+    icon: '🔗',
+    tests: [
+      { name: 'LoginForm submits valid credentials', status: 'pending' },
+      { name: 'LoginForm shows validation errors', status: 'pending' },
+      { name: 'UserList fetches and displays users', status: 'pending' },
+      { name: 'SearchBar filters results on input', status: 'pending' },
+    ],
+  },
+  {
+    name: 'E2E Tests',
+    color: '#f472b6',
+    icon: '🎭',
+    tests: [
+      { name: 'User can register and login', status: 'pending' },
+      { name: 'Navigation works across pages', status: 'pending' },
+      { name: 'Form submission with real API', status: 'pending' },
+    ],
+  },
+];
+
+type TestStatus = 'pending' | 'running' | 'pass' | 'fail';
+
+interface Test {
+  name: string;
+  status: TestStatus;
+  duration?: number;
+}
+
+interface Suite {
+  name: string;
+  color: string;
+  icon: string;
+  tests: Test[];
+}
+
+const FAIL_INDICES: Record<string, number[]> = {
+  'Unit Tests': [3],
+  'Integration Tests': [],
+  'E2E Tests': [2],
+};
+
+export default function App() {
+  const [suites, setSuites] = useState<Suite[]>(
+    TEST_SUITES.map(s => ({ ...s, tests: s.tests.map(t => ({ ...t })) }))
+  );
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [activeTab, setActiveTab] = useState(0);
+  const [done, setDone] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const totalTests = suites.reduce((acc, s) => acc + s.tests.length, 0);
+  const passedTests = suites.reduce(
+    (acc, s) => acc + s.tests.filter(t => t.status === 'pass').length, 0
+  );
+  const failedTests = suites.reduce(
+    (acc, s) => acc + s.tests.filter(t => t.status === 'fail').length, 0
+  );
+
+  function reset() {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setSuites(TEST_SUITES.map(s => ({ ...s, tests: s.tests.map(t => ({ ...t })) })));
+    setProgress(0);
+    setRunning(false);
+    setDone(false);
+  }
+
+  function runTests() {
+    reset();
+    setRunning(true);
+
+    const allTests: { suiteIdx: number; testIdx: number }[] = [];
+    TEST_SUITES.forEach((s, si) =>
+      s.tests.forEach((_, ti) => allTests.push({ suiteIdx: si, testIdx: ti }))
+    );
+
+    let i = 0;
+    function runNext() {
+      if (i >= allTests.length) {
+        setRunning(false);
+        setDone(true);
+        setProgress(100);
+        return;
+      }
+      const { suiteIdx, testIdx } = allTests[i];
+      const suiteName = TEST_SUITES[suiteIdx].name;
+      const willFail = (FAIL_INDICES[suiteName] || []).includes(testIdx);
+      const duration = Math.floor(Math.random() * 180) + 20;
+
+      setSuites(prev => {
+        const next = prev.map(s => ({ ...s, tests: s.tests.map(t => ({ ...t })) }));
+        next[suiteIdx].tests[testIdx].status = 'running';
+        return next;
+      });
+
+      timerRef.current = setTimeout(() => {
+        setSuites(prev => {
+          const next = prev.map(s => ({ ...s, tests: s.tests.map(t => ({ ...t })) }));
+          next[suiteIdx].tests[testIdx].status = willFail ? 'fail' : 'pass';
+          next[suiteIdx].tests[testIdx].duration = duration;
+          return next;
+        });
+        i++;
+        setProgress(Math.round((i / allTests.length) * 100));
+        timerRef.current = setTimeout(runNext, 60);
+      }, duration);
+    }
+    runNext();
+  }
+
+  const statusIcon = (s: TestStatus) =>
+    s === 'pass' ? '✓' : s === 'fail' ? '✗' : s === 'running' ? '●' : '○';
+  const statusColor = (s: TestStatus) =>
+    s === 'pass' ? '#4ade80' : s === 'fail' ? '#f87171' : s === 'running' ? '#fbbf24' : '#475569';
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: 20, fontFamily: 'monospace' }}>
+      <div style={{ maxWidth: 680, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 20 }}>
+          <div style={{ fontSize: 24, fontWeight: 900, color: '#f1f5f9', marginBottom: 4 }}>
+            🧪 Test Runner Simulator
+          </div>
+          <div style={{ color: '#64748b', fontSize: 12 }}>Jest + RTL + Playwright</div>
+        </div>
+
+        {/* Stats */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10, marginBottom: 16 }}>
+          {[
+            { label: 'Total', value: totalTests, color: '#94a3b8' },
+            { label: 'Passed', value: passedTests, color: '#4ade80' },
+            { label: 'Failed', value: failedTests, color: '#f87171' },
+            { label: 'Progress', value: \`\${progress}%\`, color: '#60a5fa' },
+          ].map(stat => (
+            <div key={stat.label} style={{ background: '#1e293b', borderRadius: 8, padding: '10px 14px', textAlign: 'center' }}>
+              <div style={{ color: stat.color, fontSize: 22, fontWeight: 900 }}>{stat.value}</div>
+              <div style={{ color: '#64748b', fontSize: 11 }}>{stat.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Progress bar */}
+        <div style={{ background: '#1e293b', borderRadius: 99, height: 8, marginBottom: 16, overflow: 'hidden' }}>
+          <div
+            style={{
+              height: '100%',
+              width: \`\${progress}%\`,
+              background: failedTests > 0 ? '#f87171' : '#4ade80',
+              borderRadius: 99,
+              transition: 'width 0.2s ease',
+            }}
+          />
+        </div>
+
+        {/* Controls */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+          <button
+            onClick={runTests}
+            disabled={running}
+            style={{
+              flex: 1, padding: '10px 0', borderRadius: 8, border: 'none', cursor: running ? 'not-allowed' : 'pointer',
+              background: running ? '#1e293b' : '#166534', color: running ? '#475569' : '#4ade80',
+              fontWeight: 700, fontSize: 14, fontFamily: 'monospace',
+            }}
+          >
+            {running ? '⏳ Выполняется...' : '▶ Запустить тесты'}
+          </button>
+          <button
+            onClick={reset}
+            style={{
+              padding: '10px 20px', borderRadius: 8, border: '1px solid #334155', cursor: 'pointer',
+              background: 'transparent', color: '#94a3b8', fontWeight: 700, fontSize: 14, fontFamily: 'monospace',
+            }}
+          >
+            ↺ Сброс
+          </button>
+        </div>
+
+        {/* Done banner */}
+        {done && (
+          <div style={{
+            background: failedTests > 0 ? '#450a0a' : '#052e16',
+            border: \`1px solid \${failedTests > 0 ? '#f87171' : '#4ade80'}\`,
+            borderRadius: 8, padding: '10px 16px', marginBottom: 16, textAlign: 'center',
+            color: failedTests > 0 ? '#f87171' : '#4ade80', fontWeight: 700, fontSize: 14,
+          }}>
+            {failedTests > 0
+              ? \`❌ \${failedTests} тест(а) провалилось. Нужно исправить!\`
+              : \`✅ Все \${totalTests} тестов прошли успешно!\`}
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          {suites.map((suite, idx) => {
+            const suiteFailed = suite.tests.some(t => t.status === 'fail');
+            const suitePassed = suite.tests.every(t => t.status === 'pass');
+            return (
+              <button
+                key={suite.name}
+                onClick={() => setActiveTab(idx)}
+                style={{
+                  flex: 1, padding: '8px 6px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  background: activeTab === idx ? '#1e293b' : 'transparent',
+                  color: suiteFailed ? '#f87171' : suitePassed ? '#4ade80' : suite.color,
+                  fontWeight: 700, fontSize: 11, fontFamily: 'monospace',
+                  borderBottom: activeTab === idx ? \`2px solid \${suite.color}\` : '2px solid transparent',
+                }}
+              >
+                {suite.icon} {suite.name}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Test list */}
+        <div style={{ background: '#1e293b', borderRadius: 10, padding: 14 }}>
+          {suites[activeTab].tests.map((test, idx) => (
+            <div
+              key={idx}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '8px 10px', borderRadius: 6, marginBottom: 4,
+                background: test.status === 'running' ? '#0f172a' : 'transparent',
+                transition: 'background 0.2s',
+              }}
+            >
+              <span style={{ color: statusColor(test.status), fontSize: 14, fontWeight: 900, minWidth: 16 }}>
+                {statusIcon(test.status)}
+              </span>
+              <span style={{ color: test.status === 'fail' ? '#fca5a5' : '#cbd5e1', fontSize: 12, flex: 1 }}>
+                {test.name}
+              </span>
+              {test.duration && (
+                <span style={{ color: '#475569', fontSize: 10 }}>{test.duration}ms</span>
+              )}
+              {test.status === 'running' && (
+                <span style={{ color: '#fbbf24', fontSize: 10 }}>running...</span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div style={{ textAlign: 'center', color: '#334155', fontSize: 11, marginTop: 14 }}>
+          Симулятор тест-раннера • Нажми «Запустить тесты» 🧪
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

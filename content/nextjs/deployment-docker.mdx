@@ -1,0 +1,1385 @@
+## 🐳 Деплой Next.js в Docker
+
+Представь, что твоё приложение — это сложный механизм: часы с десятками шестерёнок, пружин и колёсиков. Ты собрал его у себя на столе, всё работает идеально. Но стоит передать его другому человеку — что-то идёт не так. Другая версия Node.js, другие переменные окружения, другой Linux. **Docker** решает эту проблему: ты упаковываешь весь механизм вместе с инструментами, столом и освещением в один ящик — и он работает везде одинаково! 📦
+
+---
+
+### 🤔 Зачем Docker для Next.js?
+
+```
+Без Docker                           │  С Docker
+─────────────────────────────────────┼──────────────────────────────────────
+"У меня работает!" 🤷                │  Работает везде одинаково ✅
+Node.js 18 на сервере, 20 локально  │  Одна версия Node.js везде ✅
+Ручная установка зависимостей        │  Всё в образе ✅
+Сложное масштабирование              │  docker scale --replicas=5 ✅
+Зависимость от ОС сервера            │  Изолированный контейнер ✅
+Нет воспроизводимых сборок           │  Один образ = один результат ✅
+Откат версии — боль                  │  docker pull myapp:v1.2.3 ✅
+```
+
+Docker особенно полезен когда:
+- **Деплоишь на VPS** (DigitalOcean, Hetzner, AWS EC2) — полный контроль
+- **Нужен Kubernetes** — оркестрация контейнеров
+- **Несколько сервисов** — Next.js + PostgreSQL + Redis в одном compose
+- **CI/CD в компании** — единый артефакт для всех окружений
+
+---
+
+### ⚠️ output: 'standalone' — критически важно!
+
+Это первое, что нужно добавить в `next.config.mjs` перед написанием Dockerfile:
+
+```javascript
+// next.config.mjs
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'standalone',
+  // ☝️ Без этого Docker-образ будет весить 1+ ГБ!
+  // С этим — 100-200 МБ.
+
+  // Почему это работает?
+  // Next.js анализирует, какие файлы из node_modules реально нужны,
+  // и копирует только их. Плюс создаёт self-contained сервер
+  // в .next/standalone/server.js — без npm install!
+};
+
+export default nextConfig;
+```
+
+Что происходит после `next build` с `standalone`:
+
+```
+.next/
+├── standalone/           ← весь нужный код + минимум зависимостей
+│   ├── server.js         ← запускаем это!
+│   ├── node_modules/     ← только нужные пакеты (не все 847!)
+│   └── .next/
+│       └── server/       ← серверные компоненты
+├── static/               ← статические ассеты (CSS, JS, изображения)
+└── ...
+
+# Без standalone: node_modules/ = ~500 МБ в образе
+# С standalone:   node_modules/ = ~30 МБ в образе!
+```
+
+---
+
+### 🏗️ Multi-stage build — секрет маленьких образов
+
+**Multi-stage build** — это когда сборка происходит в несколько этапов, и в финальный образ попадает только то, что нужно для запуска:
+
+```
+Этап 1: deps        Устанавливаем зависимости
+   ↓
+Этап 2: builder     Собираем приложение (next build)
+   ↓
+Этап 3: runner      Только то, что нужно для запуска
+```
+
+Без multi-stage: в образ попали бы все инструменты сборки, исходники, dev-зависимости. С ним — только production-артефакты.
+
+---
+
+### 📄 Полный Dockerfile для Next.js
+
+```dockerfile
+# Dockerfile
+
+# ─── Этап 1: Установка зависимостей ───────────────────────────────────────────
+FROM node:20-alpine AS deps
+
+# Устанавливаем libc6-compat для совместимости с некоторыми npm-пакетами
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+# Копируем файлы с зависимостями
+COPY package.json package-lock.json* ./
+
+# Устанавливаем зависимости (только production в финальном образе)
+RUN npm ci
+
+
+# ─── Этап 2: Сборка приложения ────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Копируем зависимости из предыдущего этапа
+COPY --from=deps /app/node_modules ./node_modules
+
+# Копируем исходный код
+COPY . .
+
+# Переменные окружения для сборки (не секретные!)
+# Секретные передаются через --build-arg или --secret
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+
+# Сборка Next.js
+RUN npm run build
+
+
+# ─── Этап 3: Production runner ────────────────────────────────────────────────
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Создаём непривилегированного пользователя (безопасность!)
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Копируем статические ассеты
+COPY --from=builder /app/public ./public
+
+# Настраиваем права для standalone
+RUN mkdir .next
+RUN chown nextjs:nodejs .next
+
+# Копируем standalone-сервер (с нужными node_modules)
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+# Копируем статику отдельно (она не входит в standalone)
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# Переключаемся на непривилегированного пользователя
+USER nextjs
+
+# Указываем порт (документация для Docker)
+EXPOSE 3000
+
+# Переменные окружения для runtime
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+# Запуск standalone-сервера
+CMD ["node", "server.js"]
+```
+
+Разберём каждый этап детально:
+
+```dockerfile
+# Почему node:20-alpine, а не node:20?
+# alpine — минимальный Linux на базе Alpine (5 МБ vs 900 МБ для Debian)
+# Итого: node:20-alpine = ~170 МБ, node:20 = ~1 ГБ
+
+# apk add libc6-compat — некоторые npm-пакеты собраны под glibc,
+# а Alpine использует musl libc. Этот пакет обеспечивает совместимость.
+
+# npm ci vs npm install:
+# npm ci — строго по lock-файлу, быстрее, идемпотентно
+# npm install — может обновлять версии, медленнее
+
+# addgroup/adduser — запуск от непривилегированного пользователя
+# Если контейнер взломают, у хакера не будет root-прав!
+
+# NEXT_TELEMETRY_DISABLED=1 — отключаем телеметрию Next.js в образе
+```
+
+---
+
+### 🚫 .dockerignore — не копируем лишнее
+
+```dockerignore
+# .dockerignore
+
+# Зависимости (переустановим внутри контейнера)
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Сборка Next.js
+.next
+out
+
+# Git
+.git
+.gitignore
+
+# Документация
+README.md
+CHANGELOG.md
+docs/
+
+# Тесты
+__tests__
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+coverage/
+.nyc_output
+
+# IDE и редакторы
+.vscode
+.idea
+*.swp
+*.swo
+
+# Переменные окружения (НИКОГДА не копируем!)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# CI/CD
+.github
+.gitlab-ci.yml
+
+# Локальные скрипты
+Makefile
+docker-compose*.yml
+
+# OS
+.DS_Store
+Thumbs.db
+```
+
+Без `.dockerignore` каждый `COPY . .` скопирует всё, включая `node_modules` (500 МБ!), что многократно замедлит сборку.
+
+---
+
+### 🔨 Команды для работы с Docker
+
+```bash
+# ──── Сборка образа ────────────────────────────────────────────────────────────
+
+# Базовая сборка
+docker build -t my-next-app .
+
+# С тегом версии
+docker build -t my-next-app:1.0.0 .
+docker build -t my-next-app:latest .
+
+# С аргументами сборки (для build-time переменных)
+docker build \
+  --build-arg NEXT_PUBLIC_API_URL=https://api.my-app.com \
+  -t my-next-app .
+
+# Посмотреть размер образа
+docker image ls my-next-app
+
+# ──── Запуск контейнера ────────────────────────────────────────────────────────
+
+# Базовый запуск
+docker run -p 3000:3000 my-next-app
+
+# С переменными окружения
+docker run \
+  -p 3000:3000 \
+  -e DATABASE_URL=postgresql://user:pass@host:5432/db \
+  -e NEXTAUTH_SECRET=my-secret \
+  my-next-app
+
+# Из .env файла
+docker run \
+  -p 3000:3000 \
+  --env-file .env.production \
+  my-next-app
+
+# В фоне
+docker run -d \
+  --name my-next-app \
+  -p 3000:3000 \
+  --restart unless-stopped \
+  --env-file .env.production \
+  my-next-app
+
+# ──── Управление ───────────────────────────────────────────────────────────────
+
+# Статус контейнеров
+docker ps
+docker ps -a  # включая остановленные
+
+# Логи
+docker logs my-next-app
+docker logs -f my-next-app  # следить в реальном времени
+
+# Зайти внутрь контейнера
+docker exec -it my-next-app sh
+
+# Остановить/удалить
+docker stop my-next-app
+docker rm my-next-app
+
+# Очистка (удаляет неиспользуемые образы, контейнеры, сети)
+docker system prune -a
+```
+
+---
+
+### 🌍 Переменные окружения в Docker
+
+В Docker есть несколько способов передавать переменные:
+
+```bash
+# Способ 1: Флаг -e (одна переменная)
+docker run -e DATABASE_URL=postgresql://... my-next-app
+
+# Способ 2: --env-file (файл с переменными)
+docker run --env-file .env.production my-next-app
+
+# Способ 3: В docker-compose.yml (рекомендуется для разработки)
+# см. секцию ниже
+
+# Способ 4: Docker Secrets (для production!)
+echo "postgresql://user:password@db:5432/mydb" | docker secret create db_url -
+docker service create \
+  --secret db_url \
+  --name my-next-app \
+  my-next-app:latest
+```
+
+```bash
+# .env.production — НЕ коммитить в Git!
+DATABASE_URL=postgresql://user:pass@db.production.com:5432/mydb
+NEXTAUTH_SECRET=very-long-random-string-at-least-32-characters
+NEXTAUTH_URL=https://my-app.com
+STRIPE_SECRET_KEY=sk_live_...
+REDIS_URL=redis://redis:6379
+```
+
+Важно: переменные, начинающиеся с `NEXT_PUBLIC_`, встраиваются в сборку во время `next build`. Их нельзя изменить в runtime! Для runtime-переменных используй серверные переменные окружения.
+
+---
+
+### 🎵 docker-compose для локальной разработки
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: postgresql://postgres:password@db:5432/mydb
+      REDIS_URL: redis://redis:6379
+      NEXTAUTH_SECRET: local-dev-secret-not-for-production
+      NEXTAUTH_URL: http://localhost:3000
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mydb
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  postgres_data:
+  redis_data:
+```
+
+```bash
+# Запустить всё одной командой
+docker compose up -d
+
+# Посмотреть логи всех сервисов
+docker compose logs -f
+
+# Пересобрать образ (после изменений в коде)
+docker compose up -d --build
+
+# Остановить
+docker compose down
+
+# Удалить вместе с данными
+docker compose down -v
+```
+
+---
+
+### 🌐 Nginx как reverse proxy
+
+Nginx стоит перед Next.js и занимается:
+- Терминацией SSL
+- Кэшированием статики
+- Rate limiting
+- Балансировкой нагрузки
+
+```nginx
+# nginx.conf
+events {
+    worker_connections 1024;
+}
+
+http {
+    # Кэширование статики
+    proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=STATIC:10m inactive=7d use_temp_path=off;
+
+    upstream nextjs {
+        server app:3000;
+        # Для нескольких инстансов:
+        # server app1:3000;
+        # server app2:3000;
+        # server app3:3000;
+    }
+
+    server {
+        listen 80;
+        server_name my-app.com www.my-app.com;
+
+        # Редирект на HTTPS
+        return 301 https://$host$request_uri;
+    }
+
+    server {
+        listen 443 ssl;
+        server_name my-app.com www.my-app.com;
+
+        ssl_certificate     /etc/letsencrypt/live/my-app.com/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/my-app.com/privkey.pem;
+
+        # Заголовки безопасности
+        add_header X-Frame-Options SAMEORIGIN;
+        add_header X-Content-Type-Options nosniff;
+        add_header X-XSS-Protection "1; mode=block";
+        add_header Strict-Transport-Security "max-age=31536000" always;
+
+        # Статические ассеты Next.js — кэшируем агрессивно
+        location /_next/static {
+            proxy_cache STATIC;
+            proxy_pass http://nextjs;
+            add_header Cache-Control "public, max-age=31536000, immutable";
+        }
+
+        location /static {
+            proxy_cache STATIC;
+            proxy_pass http://nextjs;
+            add_header Cache-Control "public, max-age=31536000, immutable";
+        }
+
+        # Всё остальное — проксируем в Next.js
+        location / {
+            proxy_pass http://nextjs;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache_bypass $http_upgrade;
+        }
+    }
+}
+```
+
+```yaml
+# docker-compose с Nginx + Certbot (Let's Encrypt)
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    command: certonly --webroot --webroot-path=/var/www/certbot --email admin@my-app.com --agree-tos --no-eff-email -d my-app.com -d www.my-app.com
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://postgres:password@db:5432/mydb
+
+  db:
+    image: postgres:16-alpine
+    # ...
+
+volumes:
+  certbot_certs:
+  certbot_www:
+```
+
+---
+
+### 💊 Health Checks
+
+Health checks позволяют Docker знать, что контейнер действительно работает (не просто запущен):
+
+```dockerfile
+# Добавляем в Dockerfile перед CMD
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD wget -qO- http://localhost:3000/api/health || exit 1
+```
+
+```typescript
+// app/api/health/route.ts — эндпоинт для health check
+import { NextResponse } from 'next/server';
+
+export async function GET() {
+  try {
+    // Можно проверить подключение к БД
+    // await db.query('SELECT 1');
+
+    return NextResponse.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { status: 'error', error: String(error) },
+      { status: 503 }
+    );
+  }
+}
+```
+
+```yaml
+# Health check в docker-compose
+services:
+  app:
+    build: .
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/api/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+---
+
+### 📏 Оптимизация размера образа
+
+```dockerfile
+# ✅ Оптимизированный Dockerfile — приёмы:
+
+# 1. Используй alpine вместо full
+FROM node:20-alpine  # ~170 МБ vs ~1 ГБ для debian
+
+# 2. Один RUN вместо многих (меньше слоёв)
+# ❌ Плохо:
+RUN apk add --no-cache curl
+RUN apk add --no-cache git
+RUN apk add --no-cache bash
+# ✅ Хорошо:
+RUN apk add --no-cache curl git bash
+
+# 3. Очищай кэш пакетного менеджера
+RUN apk add --no-cache curl \
+    && rm -rf /var/cache/apk/*
+
+# 4. Копируй только нужные файлы
+COPY package.json package-lock.json ./  # Сначала зависимости
+RUN npm ci                              # Устанавливаем
+COPY . .                               # Потом исходники
+
+# 5. Multi-stage build (уже обсудили)
+
+# 6. .dockerignore — не копируй node_modules и .next
+```
+
+Пример анализа размеров:
+
+```bash
+# Просмотр слоёв образа
+docker history my-next-app
+
+# Анализ образа утилитой dive
+docker run --rm -it \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  wagoodman/dive:latest my-next-app
+
+# Размеры наших образов:
+# Без standalone + без multi-stage:  1.2 ГБ 😱
+# Без standalone + с multi-stage:    600 МБ
+# Со standalone + с multi-stage:     150 МБ ✅ 
+# Со standalone + distroless:         95 МБ ✅✅
+```
+
+---
+
+### 🖥️ Деплой на VPS (DigitalOcean / Hetzner)
+
+```bash
+# На локальной машине: собираем и пушим образ
+docker build -t username/my-next-app:latest .
+docker push username/my-next-app:latest
+
+# На сервере: тянем и запускаем
+ssh user@your-vps-ip
+
+# Устанавливаем Docker (один раз)
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+
+# Создаём файл с переменными окружения
+nano /home/user/app/.env.production
+# DATABASE_URL=...
+# NEXTAUTH_SECRET=...
+
+# Запускаем контейнер
+docker run -d \
+  --name my-next-app \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  --env-file /home/user/app/.env.production \
+  username/my-next-app:latest
+
+# Обновление приложения (zero-downtime с Nginx)
+docker pull username/my-next-app:latest
+docker stop my-next-app
+docker rm my-next-app
+docker run -d \
+  --name my-next-app \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  --env-file /home/user/app/.env.production \
+  username/my-next-app:latest
+```
+
+---
+
+### ⚙️ GitHub Actions — CI/CD для Docker
+
+```yaml
+# .github/workflows/docker.yml
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: username/my-next-app
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            docker pull username/my-next-app:main
+            docker stop my-next-app || true
+            docker rm my-next-app || true
+            docker run -d \
+              --name my-next-app \
+              --restart unless-stopped \
+              -p 3000:3000 \
+              --env-file /home/deploy/app/.env.production \
+              username/my-next-app:main
+            docker image prune -f
+```
+
+---
+
+### ☸️ Kubernetes — основы для Next.js
+
+Kubernetes (k8s) — это оркестратор контейнеров. Когда приложение достаточно большое, что одного Docker-compose не хватает:
+
+```yaml
+# k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: next-app
+  namespace: production
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: next-app
+  template:
+    metadata:
+      labels:
+        app: next-app
+    spec:
+      containers:
+        - name: next-app
+          image: username/my-next-app:v1.0.0
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: database-url
+          resources:
+            requests:
+              cpu: '250m'
+              memory: '256Mi'
+            limits:
+              cpu: '500m'
+              memory: '512Mi'
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+```
+
+```yaml
+# k8s/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: next-app-service
+spec:
+  selector:
+    app: next-app
+  ports:
+    - port: 80
+      targetPort: 3000
+  type: ClusterIP
+
+---
+# k8s/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: next-app-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  rules:
+    - host: my-app.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: next-app-service
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - my-app.com
+      secretName: next-app-tls
+```
+
+```bash
+# Базовые команды kubectl
+kubectl apply -f k8s/
+kubectl get pods -n production
+kubectl get deployments -n production
+kubectl rollout status deployment/next-app -n production
+
+# Rolling update (zero-downtime!)
+kubectl set image deployment/next-app \
+  next-app=username/my-next-app:v1.1.0 \
+  -n production
+
+# Откат
+kubectl rollout undo deployment/next-app -n production
+
+# Масштабирование
+kubectl scale deployment/next-app --replicas=5 -n production
+```
+
+---
+
+### 🎯 Итог: какой способ выбрать?
+
+```
+Размер проекта    │  Рекомендуется
+──────────────────┼──────────────────────────────────────────
+Хобби / MVP       │  Vercel (бесплатно, zero-config)
+Стартап           │  Vercel Pro ИЛИ Docker + DigitalOcean
+Средний бизнес    │  Docker + docker-compose + VPS
+Корпорация        │  Docker + Kubernetes (GKE/EKS/AKS)
+```
+
+Главные правила Docker для Next.js:
+1. **Всегда `output: 'standalone'`** в `next.config.mjs`
+2. **Multi-stage build** — builder → runner
+3. **Alpine-образы** — меньше размер
+4. **Непривилегированный пользователь** — безопасность
+5. **Health checks** — Docker знает когда контейнер готов
+6. **.dockerignore** — не копируй лишнее
+
+---
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+type BuildStep = {
+  stage: string;
+  stageColor: string;
+  command: string;
+  output: string[];
+  layerSize?: string;
+  isCached?: boolean;
+};
+
+const buildStepsWithStandalone: BuildStep[] = [
+  {
+    stage: 'deps',
+    stageColor: '#60a5fa',
+    command: 'FROM node:20-alpine AS deps',
+    output: ['Pulling from library/node', 'Status: Downloaded newer image for node:20-alpine', 'Image size: 170 MB'],
+    layerSize: '170 MB',
+  },
+  {
+    stage: 'deps',
+    stageColor: '#60a5fa',
+    command: 'RUN apk add --no-cache libc6-compat',
+    output: ['fetch https://dl-cdn.alpinelinux.org/...', 'OK: 8 MiB in 16 packages'],
+    layerSize: '+2 MB',
+  },
+  {
+    stage: 'deps',
+    stageColor: '#60a5fa',
+    command: 'COPY package.json package-lock.json ./',
+    output: ['Copying package.json', 'Copying package-lock.json'],
+    layerSize: '+12 KB',
+  },
+  {
+    stage: 'deps',
+    stageColor: '#60a5fa',
+    command: 'RUN npm ci',
+    output: [
+      'added 847 packages in 23.4s',
+      '143 packages are looking for funding',
+    ],
+    layerSize: '+495 MB',
+  },
+  {
+    stage: 'builder',
+    stageColor: '#fbbf24',
+    command: 'FROM node:20-alpine AS builder',
+    output: ['Using cached layer (node:20-alpine)'],
+    isCached: true,
+    layerSize: '0 B',
+  },
+  {
+    stage: 'builder',
+    stageColor: '#fbbf24',
+    command: 'COPY --from=deps /app/node_modules ./node_modules',
+    output: ['Copying node_modules from deps stage...'],
+    layerSize: '+495 MB',
+  },
+  {
+    stage: 'builder',
+    stageColor: '#fbbf24',
+    command: 'COPY . .',
+    output: ['Copying source files...', '127 files copied'],
+    layerSize: '+2.3 MB',
+  },
+  {
+    stage: 'builder',
+    stageColor: '#fbbf24',
+    command: 'RUN npm run build',
+    output: [
+      '  ▲ Next.js 15.0.0',
+      '',
+      '  Creating an optimized production build...',
+      ' ✓ Compiled successfully',
+      ' ✓ Collecting page data',
+      ' ✓ Generating static pages (24/24)',
+      '',
+      'output: standalone mode enabled!',
+      'Tracing dependencies for standalone output...',
+      'Standalone output: only 31 MB of node_modules needed!',
+    ],
+    layerSize: '+28 MB',
+  },
+  {
+    stage: 'runner',
+    stageColor: '#4ade80',
+    command: 'FROM node:20-alpine AS runner',
+    output: ['Using cached layer (node:20-alpine)'],
+    isCached: true,
+    layerSize: '0 B',
+  },
+  {
+    stage: 'runner',
+    stageColor: '#4ade80',
+    command: 'RUN addgroup && adduser nextjs',
+    output: ['Creating group nodejs (gid 1001)', 'Creating user nextjs (uid 1001)'],
+    layerSize: '+8 KB',
+  },
+  {
+    stage: 'runner',
+    stageColor: '#4ade80',
+    command: 'COPY --from=builder /app/.next/standalone ./',
+    output: ['Copying standalone output...', 'Only 31 MB of node_modules (not 495 MB!)'],
+    layerSize: '+33 MB',
+  },
+  {
+    stage: 'runner',
+    stageColor: '#4ade80',
+    command: 'COPY --from=builder /app/.next/static ./.next/static',
+    output: ['Copying static assets...', 'CSS, JS chunks, images'],
+    layerSize: '+4.2 MB',
+  },
+  {
+    stage: 'runner',
+    stageColor: '#4ade80',
+    command: 'CMD ["node", "server.js"]',
+    output: [
+      '',
+      '✅ Image build complete!',
+      '',
+      'Final image size:  ~145 MB',
+      'Base layers:       170 MB (shared, cached)',
+      'App layers:        ~37 MB',
+    ],
+    layerSize: '0 B',
+  },
+];
+
+const buildStepsWithoutStandalone: BuildStep[] = [
+  {
+    stage: 'deps',
+    stageColor: '#60a5fa',
+    command: 'FROM node:20-alpine AS deps',
+    output: ['Pulling from library/node', 'Status: Downloaded newer image for node:20-alpine'],
+    layerSize: '170 MB',
+  },
+  {
+    stage: 'deps',
+    stageColor: '#60a5fa',
+    command: 'RUN npm ci',
+    output: ['added 847 packages in 23.4s'],
+    layerSize: '+495 MB',
+  },
+  {
+    stage: 'builder',
+    stageColor: '#fbbf24',
+    command: 'RUN npm run build',
+    output: [
+      '  ▲ Next.js 15.0.0',
+      ' ✓ Compiled successfully',
+      '',
+      'WARNING: output: standalone is NOT set!',
+      'Full node_modules will be needed at runtime.',
+    ],
+    layerSize: '+28 MB',
+  },
+  {
+    stage: 'runner',
+    stageColor: '#f87171',
+    command: 'COPY node_modules ./node_modules',
+    output: ['Copying ALL 847 packages...', 'This includes devDependencies!', 'This is 495 MB just for node_modules!'],
+    layerSize: '+495 MB',
+  },
+  {
+    stage: 'runner',
+    stageColor: '#f87171',
+    command: 'CMD ["node", "server.js"]',
+    output: [
+      '',
+      '❌ Image build complete (but suboptimal!)',
+      '',
+      'Final image size:  ~850 MB',
+      'With standalone:   ~145 MB',
+      'Wasted space:      ~705 MB 😱',
+    ],
+    layerSize: '0 B',
+  },
+];
+
+export default function App() {
+  const [useStandalone, setUseStandalone] = useState(true);
+  const [currentStep, setCurrentStep] = useState(-1);
+  const [visibleOutputs, setVisibleOutputs] = useState<string[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
+  const [isDone, setIsDone] = useState(false);
+  const [totalSize, setTotalSize] = useState(0);
+  const logsRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const steps = useStandalone ? buildStepsWithStandalone : buildStepsWithoutStandalone;
+  const finalSize = useStandalone ? 145 : 850;
+
+  useEffect(() => {
+    if (logsRef.current) {
+      logsRef.current.scrollTop = logsRef.current.scrollHeight;
+    }
+  }, [visibleOutputs, currentStep]);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const sleep = (ms: number) =>
+    new Promise<void>(resolve => {
+      timerRef.current = setTimeout(resolve, ms);
+    });
+
+  const runBuild = async () => {
+    if (isRunning) return;
+    setIsRunning(true);
+    setIsDone(false);
+    setVisibleOutputs([]);
+    setCurrentStep(0);
+    setTotalSize(0);
+
+    let cumulative = 0;
+
+    for (let i = 0; i < steps.length; i++) {
+      setCurrentStep(i);
+      const step = steps[i];
+
+      await sleep(step.isCached ? 200 : 600);
+
+      for (const line of step.output) {
+        await sleep(step.isCached ? 80 : 120);
+        setVisibleOutputs(prev => [...prev, line]);
+      }
+
+      if (step.layerSize) {
+        const sizeNum = parseFloat(step.layerSize.replace(/[^0-9.]/g, ''));
+        const isAdd = step.layerSize.startsWith('+');
+        if (isAdd) {
+          cumulative += sizeNum;
+          setTotalSize(Math.round(cumulative));
+        } else {
+          cumulative = sizeNum;
+          setTotalSize(Math.round(cumulative));
+        }
+      }
+
+      if (i < steps.length - 1) await sleep(200);
+    }
+
+    setIsDone(true);
+    setIsRunning(false);
+  };
+
+  const reset = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setCurrentStep(-1);
+    setVisibleOutputs([]);
+    setIsRunning(false);
+    setIsDone(false);
+    setTotalSize(0);
+  };
+
+  const currentStage = currentStep >= 0 ? steps[currentStep]?.stage : null;
+  const stages = [...new Set(steps.map(s => s.stage))];
+
+  const stageColorMap: Record<string, string> = {};
+  steps.forEach(s => { stageColorMap[s.stage] = s.stageColor; });
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ background: '#020617', borderBottom: '1px solid #1e293b', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <div style={{ width: 12, height: 12, borderRadius: '50%', background: '#ef4444' }} />
+          <div style={{ width: 12, height: 12, borderRadius: '50%', background: '#fbbf24' }} />
+          <div style={{ width: 12, height: 12, borderRadius: '50%', background: '#22c55e' }} />
+        </div>
+        <span style={{ fontSize: 16 }}>🐳</span>
+        <span style={{ color: '#e2e8f0', fontWeight: 700, fontSize: 14 }}>Docker Build Simulator</span>
+      </div>
+
+      <div style={{ padding: 16 }}>
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, marginBottom: 16 }}>
+          <div style={{ color: '#64748b', fontSize: 11, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 1 }}>
+            Режим сборки
+          </div>
+          <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+            <button
+              onClick={() => { setUseStandalone(true); reset(); }}
+              style={{
+                flex: 1, padding: '10px 0', borderRadius: 6, border: '2px solid',
+                borderColor: useStandalone ? '#4ade80' : '#334155',
+                background: useStandalone ? '#14532d' : 'transparent',
+                color: useStandalone ? '#4ade80' : '#64748b',
+                cursor: 'pointer', fontSize: 12, fontWeight: 700,
+              }}
+            >
+              ✅ output: 'standalone'
+              <div style={{ fontSize: 10, fontWeight: 400, marginTop: 2, opacity: 0.8 }}>Итого: ~145 MB</div>
+            </button>
+            <button
+              onClick={() => { setUseStandalone(false); reset(); }}
+              style={{
+                flex: 1, padding: '10px 0', borderRadius: 6, border: '2px solid',
+                borderColor: !useStandalone ? '#f87171' : '#334155',
+                background: !useStandalone ? '#450a0a' : 'transparent',
+                color: !useStandalone ? '#f87171' : '#64748b',
+                cursor: 'pointer', fontSize: 12, fontWeight: 700,
+              }}
+            >
+              ❌ без standalone
+              <div style={{ fontSize: 10, fontWeight: 400, marginTop: 2, opacity: 0.8 }}>Итого: ~850 MB</div>
+            </button>
+          </div>
+
+          <div style={{ background: '#0f172a', borderRadius: 6, padding: 10, fontSize: 12, color: '#94a3b8', marginBottom: 12 }}>
+            <span style={{ color: '#64748b' }}># next.config.mjs</span>{'\n'}
+            <span style={{ color: '#c084fc' }}>const</span> <span style={{ color: '#60a5fa' }}>nextConfig</span> = {'{'}{'\n'}
+            {'  '}
+            {useStandalone ? (
+              <span><span style={{ color: '#4ade80' }}>output</span>: <span style={{ color: '#fbbf24' }}>'standalone'</span>, <span style={{ color: '#22c55e' }}>// ✅ включено!</span></span>
+            ) : (
+              <span style={{ color: '#64748b' }}>// output: 'standalone' — НЕ указан ❌</span>
+            )}
+            {'\n'}{'};'}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={runBuild}
+              disabled={isRunning}
+              style={{
+                flex: 1, padding: '10px 0', background: isRunning ? '#334155' : '#1d4ed8',
+                color: isRunning ? '#64748b' : '#93c5fd',
+                border: isRunning ? '1px solid #475569' : '1px solid #60a5fa',
+                borderRadius: 6, cursor: isRunning ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 700,
+              }}
+            >
+              {isRunning ? '🔨 Building...' : '🐳 docker build -t my-app .'}
+            </button>
+            {!isRunning && (isDone || currentStep >= 0) && (
+              <button
+                onClick={reset}
+                style={{ padding: '10px 16px', background: 'transparent', color: '#64748b', border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
+              >
+                Reset
+              </button>
+            )}
+          </div>
+        </div>
+
+        {currentStep >= 0 && (
+          <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, marginBottom: 16 }}>
+            <div style={{ color: '#64748b', fontSize: 11, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 1 }}>
+              Multi-stage Progress
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {stages.map(stage => {
+                const stageSteps = steps.filter(s => s.stage === stage);
+                const stageIdx = stages.indexOf(stage);
+                const currentStageIdx = stages.indexOf(currentStage || '');
+                const isDoneStage = stageIdx < currentStageIdx || isDone;
+                const isActive = stage === currentStage;
+                const color = stageColorMap[stage];
+
+                return (
+                  <div key={stage} style={{
+                    flex: 1, background: '#0f172a', borderRadius: 6, padding: '10px 8px',
+                    border: '1px solid ' + (isActive || isDoneStage ? color : '#334155'),
+                    opacity: stageIdx > currentStageIdx && !isDone ? 0.4 : 1,
+                    transition: 'all 0.3s',
+                  }}>
+                    <div style={{ color: isDoneStage ? color : isActive ? color : '#64748b', fontWeight: 700, fontSize: 12, marginBottom: 4 }}>
+                      {isDoneStage ? '✓' : isActive ? '▶' : '○'} {stage}
+                    </div>
+                    <div style={{ color: '#475569', fontSize: 10 }}>{stageSteps.length} steps</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {currentStep >= 0 && (
+          <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+            <div style={{ background: '#1e293b', borderRadius: 8, padding: 12, flex: 1, minWidth: 120, textAlign: 'center' }}>
+              <div style={{ color: '#64748b', fontSize: 10, marginBottom: 4 }}>CURRENT LAYER</div>
+              <div style={{ color: '#fbbf24', fontWeight: 700, fontSize: 18 }}>
+                {currentStep + 1}/{steps.length}
+              </div>
+            </div>
+            <div style={{ background: '#1e293b', borderRadius: 8, padding: 12, flex: 1, minWidth: 120, textAlign: 'center' }}>
+              <div style={{ color: '#64748b', fontSize: 10, marginBottom: 4 }}>CUMUL. SIZE</div>
+              <div style={{ color: totalSize > 500 ? '#f87171' : '#4ade80', fontWeight: 700, fontSize: 18 }}>
+                ~{totalSize} MB
+              </div>
+            </div>
+            <div style={{ background: '#1e293b', borderRadius: 8, padding: 12, flex: 1, minWidth: 120, textAlign: 'center' }}>
+              <div style={{ color: '#64748b', fontSize: 10, marginBottom: 4 }}>FINAL SIZE</div>
+              <div style={{ color: isDone ? (finalSize < 300 ? '#4ade80' : '#f87171') : '#475569', fontWeight: 700, fontSize: 18 }}>
+                {isDone ? '~' + finalSize + ' MB' : '...'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {currentStep >= 0 && (
+          <div style={{ background: '#020617', borderRadius: 8, border: '1px solid #1e293b', overflow: 'hidden' }}>
+            <div style={{ background: '#1e293b', padding: '8px 14px', borderBottom: '1px solid #0f172a', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 13 }}>📋</span>
+              <span style={{ color: '#94a3b8', fontSize: 12 }}>
+                {currentStep < steps.length
+                  ? 'Step ' + (currentStep + 1) + '/' + steps.length + ': ' + (steps[currentStep]?.command || '')
+                  : 'Build complete'}
+              </span>
+            </div>
+
+            <div style={{ borderBottom: '1px solid #1e293b', padding: '8px 14px', background: '#0a0f1a' }}>
+              {steps.map((step, i) => (
+                <div key={i} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, margin: '2px',
+                  padding: '2px 8px', borderRadius: 4, fontSize: 10,
+                  background: i === currentStep ? step.stageColor + '22' : 'transparent',
+                  border: '1px solid ' + (i <= currentStep ? step.stageColor : '#1e293b'),
+                  color: i <= currentStep ? step.stageColor : '#334155',
+                }}>
+                  {i < currentStep ? '✓' : i === currentStep ? '▶' : '○'}
+                  {' '}{step.stage}
+                </div>
+              ))}
+            </div>
+
+            <div ref={logsRef} style={{ padding: 14, height: 200, overflowY: 'auto', fontSize: 12, lineHeight: 1.8 }}>
+              {visibleOutputs.map((line, i) => (
+                <div key={i} style={{
+                  color: line.startsWith('✅') ? '#4ade80'
+                       : line.startsWith('❌') ? '#f87171'
+                       : line.startsWith('WARNING') ? '#fbbf24'
+                       : line.includes('standalone') ? '#4ade80'
+                       : line.includes('MB') ? '#c084fc'
+                       : '#94a3b8',
+                }}>
+                  {line || '\u00A0'}
+                </div>
+              ))}
+              {isRunning && (
+                <div style={{ display: 'inline-block', width: 8, height: 14, background: '#60a5fa', animation: 'pulse 0.8s ease-in-out infinite', verticalAlign: 'text-bottom' }} />
+              )}
+            </div>
+          </div>
+        )}
+
+        {isDone && (
+          <div style={{
+            background: finalSize < 300 ? '#14532d' : '#450a0a',
+            border: '1px solid ' + (finalSize < 300 ? '#4ade80' : '#f87171'),
+            borderRadius: 8, padding: 14, marginTop: 16,
+          }}>
+            <div style={{ color: finalSize < 300 ? '#4ade80' : '#f87171', fontWeight: 700, fontSize: 15, marginBottom: 8 }}>
+              {finalSize < 300 ? '✅ Отличный образ!' : '⚠️ Образ слишком большой!'}
+            </div>
+            <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.8 }}>
+              <div>Финальный размер: <span style={{ color: finalSize < 300 ? '#4ade80' : '#f87171', fontWeight: 700 }}>~{finalSize} MB</span></div>
+              {finalSize >= 300 && (
+                <div style={{ color: '#fbbf24', marginTop: 6 }}>
+                  💡 Добавь <code style={{ background: '#1e293b', padding: '1px 6px', borderRadius: 3 }}>output: 'standalone'</code> в next.config.mjs!<br />
+                  Сэкономишь ~{finalSize - 145} MB ({Math.round((finalSize - 145) / finalSize * 100)}% от размера образа).
+                </div>
+              )}
+              {finalSize < 300 && (
+                <div style={{ color: '#86efac', marginTop: 6 }}>
+                  🎉 Multi-stage build + standalone = идеальный Docker-образ!<br />
+                  В 6 раз меньше, чем без оптимизаций.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <style>{"@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }"}</style>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

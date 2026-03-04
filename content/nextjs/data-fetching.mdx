@@ -1,0 +1,640 @@
+## 📡 Получение данных в Next.js
+
+Получение данных — сердце любого приложения. В Next.js App Router это кардинально проще и мощнее, чем в обычном React. Никаких `useEffect(() => { fetch... }, [])` — данные приходят там, где нужны! 🎯
+
+```
+Обычный React:                 Next.js (App Router):
+────────────────               ──────────────────────
+useEffect                      async функция-компонент
+→ setState(loading)            → const data = await fetch(...)
+→ fetch('/api/data')           → return <div>{data}</div>
+→ setState(data)               
+→ render с данными             Сервер отдаёт готовый HTML!
+→ клиент видит spinner
+→ клиент видит данные
+```
+
+---
+
+### 🚀 Базовый fetch в Server Components
+
+```typescript
+// app/posts/page.tsx
+export default async function PostsPage() {
+  // fetch прямо в компоненте — без useEffect!
+  const response = await fetch('https://jsonplaceholder.typicode.com/posts');
+  const posts = await response.json();
+  
+  return (
+    <main>
+      <h1>Посты ({posts.length})</h1>
+      <ul>
+        {posts.slice(0, 10).map((post: any) => (
+          <li key={post.id}>
+            <strong>{post.title}</strong>
+            <p>{post.body}</p>
+          </li>
+        ))}
+      </ul>
+    </main>
+  );
+}
+```
+
+**Но это работает с любым источником данных:**
+
+```typescript
+// 1. Внешний API
+const data = await fetch('https://api.example.com/data').then(r => r.json());
+
+// 2. Прямой запрос к базе данных (ORM)
+import { db } from '@/lib/prisma';
+const users = await db.user.findMany({ where: { active: true } });
+
+// 3. Файловая система
+import { readFile } from 'fs/promises';
+const content = await readFile('./data/posts.json', 'utf-8');
+const posts = JSON.parse(content);
+
+// 4. SDK/сторонние сервисы
+import Stripe from 'stripe';
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+const products = await stripe.products.list({ limit: 10 });
+```
+
+---
+
+### ⚡ Параллельная загрузка данных
+
+Избегай водопадов! Запускай независимые запросы **одновременно**:
+
+```typescript
+// ❌ ПЛОХО: Последовательные запросы (водопад)
+export default async function Dashboard() {
+  const user = await getUser();        // 100ms
+  const posts = await getPosts();      // 100ms
+  const stats = await getStats();      // 100ms
+  // Итого: 300ms последовательно!
+  
+  return <div>...</div>;
+}
+
+// ✅ ХОРОШО: Параллельные запросы с Promise.all
+export default async function Dashboard() {
+  const [user, posts, stats] = await Promise.all([
+    getUser(),    // ┐
+    getPosts(),   // ├─ Все три запроса параллельно!
+    getStats(),   // ┘
+  ]);
+  // Итого: ~100ms (максимум из трёх)!
+  
+  return (
+    <div>
+      <UserCard user={user} />
+      <PostsList posts={posts} />
+      <StatsGrid stats={stats} />
+    </div>
+  );
+}
+```
+
+```typescript
+// Параллельные запросы с именованными переменными (читаемее)
+export default async function DashboardPage() {
+  // Стартуем все запросы одновременно
+  const userPromise = db.user.findUnique({ where: { id: userId } });
+  const postsPromise = db.post.findMany({ where: { authorId: userId }, take: 5 });
+  const statsPromise = getAnalytics(userId);
+  
+  // Ждём все
+  const [user, posts, stats] = await Promise.all([
+    userPromise,
+    postsPromise,
+    statsPromise,
+  ]);
+  
+  return <Dashboard user={user} posts={posts} stats={stats} />;
+}
+```
+
+---
+
+### 🔗 Последовательная загрузка (когда нужна)
+
+Иногда данные зависят друг от друга:
+
+```typescript
+// Последовательно — когда результат одного запроса нужен для следующего
+export default async function UserPostsPage({
+  params,
+}: {
+  params: Promise<{ userId: string }>;
+}) {
+  const { userId } = await params;
+  
+  // Сначала получаем пользователя
+  const user = await db.user.findUnique({ where: { id: userId } });
+  
+  if (!user) notFound();
+  
+  // Потом его посты (нужен user.teamId из первого запроса)
+  const posts = await db.post.findMany({
+    where: {
+      authorId: user.id,
+      teamId: user.teamId, // Зависит от первого запроса!
+    },
+  });
+  
+  return (
+    <div>
+      <h1>Посты {user.name}</h1>
+      <PostsList posts={posts} />
+    </div>
+  );
+}
+```
+
+---
+
+### 🗃️ Кеширование fetch()
+
+Next.js расширяет встроенный `fetch` с поддержкой кеширования:
+
+```typescript
+// 1. Кешировать навсегда (ISR / Static)
+// Данные запрашиваются один раз при сборке, потом из кеша
+const data = await fetch('https://api.example.com/static-data', {
+  cache: 'force-cache', // По умолчанию в Next.js 14 (изменилось в 15!)
+});
+
+// 2. Никогда не кешировать (SSR)
+// Свежие данные при каждом запросе
+const data = await fetch('https://api.example.com/live-data', {
+  cache: 'no-store',
+});
+
+// 3. Кешировать с периодическим обновлением (ISR)
+const data = await fetch('https://api.example.com/data', {
+  next: { revalidate: 3600 }, // Обновлять каждый час
+});
+
+// 4. Кешировать с тегами (on-demand revalidation)
+const posts = await fetch('https://api.example.com/posts', {
+  next: { tags: ['posts'] }, // Можно сбросить тег программно!
+});
+```
+
+**Важно для Next.js 15:** кеширование изменилось!
+
+```typescript
+// Next.js 14 — кешировалось по умолчанию
+const data = await fetch('/api/data'); // → force-cache
+
+// Next.js 15 — НЕ кешируется по умолчанию!
+const data = await fetch('/api/data'); // → no-store
+
+// Если нужен кеш — указывай явно:
+const data = await fetch('/api/data', { cache: 'force-cache' });
+// или
+const data = await fetch('/api/data', { next: { revalidate: 60 } });
+```
+
+---
+
+### 🔁 Ревалидация: Обновление кешированных данных
+
+```typescript
+// Метод 1: Временная ревалидация
+// app/blog/page.tsx
+export const revalidate = 3600; // Страница обновляется каждый час
+
+export default async function BlogPage() {
+  const posts = await fetch('https://api.blog.com/posts').then(r => r.json());
+  return <PostsList posts={posts} />;
+}
+
+// Метод 2: Теговая ревалидация (on-demand)
+// app/api/revalidate/route.ts
+import { revalidateTag } from 'next/cache';
+import { NextRequest } from 'next/server';
+
+export async function POST(request: NextRequest) {
+  const { tag, secret } = await request.json();
+  
+  // Проверяем секрет (безопасность!)
+  if (secret !== process.env.REVALIDATION_SECRET) {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  
+  revalidateTag(tag); // Сбросить кеш для этого тега
+  return Response.json({ revalidated: true, tag });
+}
+
+// Webhook от CMS: когда обновляется контент → POST /api/revalidate { tag: 'posts' }
+```
+
+---
+
+### 🎭 Suspense + Streaming
+
+Streaming позволяет отправлять HTML по частям, не дожидаясь всех данных:
+
+```typescript
+// app/dashboard/page.tsx
+import { Suspense } from 'react';
+
+export default function DashboardPage() {
+  return (
+    <div>
+      <h1>Дашборд</h1>
+      
+      {/* Быстрые данные — рендерятся сразу */}
+      <UserGreeting />
+      
+      {/* Медленные данные — не блокируют страницу */}
+      <Suspense fallback={<StatsSkeleton />}>
+        <SlowStats />  {/* Загружается параллельно! */}
+      </Suspense>
+      
+      <Suspense fallback={<ChartSkeleton />}>
+        <RevenueChart />  {/* Загружается параллельно! */}
+      </Suspense>
+      
+      <Suspense fallback={<TableSkeleton />}>
+        <TransactionsTable />  {/* Загружается параллельно! */}
+      </Suspense>
+    </div>
+  );
+}
+
+// Каждый компонент загружает свои данные независимо!
+async function SlowStats() {
+  const stats = await getStats(); // Медленный запрос
+  return <StatsGrid stats={stats} />;
+}
+
+async function RevenueChart() {
+  const revenue = await getRevenue(); // Другой медленный запрос
+  return <Chart data={revenue} />;
+}
+```
+
+```
+Без Streaming:
+[===========================] 3s → Страница готова
+
+С Streaming:
+[=====] 0.5s → Базовый HTML
+[=========] 1s  → SlowStats готов
+[==============] 1.5s → RevenueChart готов
+[====================] 2s → TransactionsTable готов
+```
+
+---
+
+### 🔒 unstable_cache: Кеширование не-fetch запросов
+
+Для ORM и прямых запросов к БД:
+
+```typescript
+import { unstable_cache } from 'next/cache';
+
+// Кешируем функцию с тегами
+const getCachedPosts = unstable_cache(
+  async (userId: string) => {
+    return await db.post.findMany({
+      where: { authorId: userId },
+      include: { author: true },
+    });
+  },
+  ['user-posts'], // ключ кеша
+  {
+    revalidate: 3600, // обновлять каждый час
+    tags: ['posts'],  // тег для on-demand сброса
+  }
+);
+
+// Использование
+export default async function UserPostsPage({ params }) {
+  const { userId } = await params;
+  const posts = await getCachedPosts(userId); // Кешируется!
+  return <PostsList posts={posts} />;
+}
+```
+
+---
+
+### 📝 useFormState и Server Actions (бонус)
+
+Формы с данными с сервера:
+
+```typescript
+// app/actions.ts
+'use server';
+
+export async function searchPosts(prevState: any, formData: FormData) {
+  const query = formData.get('query') as string;
+  
+  if (!query || query.length < 2) {
+    return { error: 'Введите минимум 2 символа', posts: [] };
+  }
+  
+  const posts = await db.post.findMany({
+    where: {
+      OR: [
+        { title: { contains: query, mode: 'insensitive' } },
+        { content: { contains: query, mode: 'insensitive' } },
+      ],
+    },
+    take: 10,
+  });
+  
+  return { posts, query, error: null };
+}
+
+// app/search/page.tsx
+'use client';
+import { useActionState } from 'react'; // React 19
+import { searchPosts } from '../actions';
+
+export default function SearchPage() {
+  const [state, formAction, isPending] = useActionState(searchPosts, {
+    posts: [],
+    error: null,
+    query: '',
+  });
+  
+  return (
+    <div>
+      <form action={formAction}>
+        <input name="query" placeholder="Поиск..." />
+        <button type="submit" disabled={isPending}>
+          {isPending ? 'Ищем...' : 'Найти'}
+        </button>
+      </form>
+      
+      {state.error && <p style={{ color: 'red' }}>{state.error}</p>}
+      
+      {state.posts.map(post => (
+        <div key={post.id}>{post.title}</div>
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
+### 🎯 Резюме урока
+
+1. **fetch() в Server Components** — async/await прямо в компоненте
+2. **Promise.all()** — параллельные запросы, избегай водопадов
+3. **Кеширование** — `cache: 'force-cache'` / `next: { revalidate: N }`
+4. **Теговая ревалидация** — on-demand сброс кеша
+5. **Suspense + Streaming** — не жди медленных данных, стримь HTML
+6. **unstable_cache** — кеш для ORM и не-fetch запросов
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect } from "react";
+
+type DataStatus = "idle" | "loading" | "success" | "error";
+type FetchStrategy = "sequential" | "parallel" | "streaming";
+
+const fakeDelay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+interface DataBlock {
+  id: string;
+  label: string;
+  delay: number;
+  color: string;
+  data: string;
+}
+
+const blocks: DataBlock[] = [
+  { id: "user", label: "Пользователь", delay: 400, color: "#4ade80", data: "Иван Иванов" },
+  { id: "posts", label: "Посты", delay: 800, color: "#60a5fa", data: "42 поста" },
+  { id: "stats", label: "Статистика", delay: 1200, color: "#a78bfa", data: "12,543 просмотра" },
+  { id: "revenue", label: "Доходы", delay: 1600, color: "#fb923c", data: "$1,234.56" },
+];
+
+export default function App() {
+  const [strategy, setStrategy] = useState<FetchStrategy>("sequential");
+  const [statuses, setStatuses] = useState<Record<string, DataStatus>>({});
+  const [running, setRunning] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [cacheMode, setCacheMode] = useState<"no-store" | "force-cache">("no-store");
+  const [cachedData, setCachedData] = useState<Record<string, string>>({});
+
+  const reset = () => {
+    setStatuses({});
+    setElapsed(0);
+    setRunning(false);
+  };
+
+  const run = async () => {
+    if (running) return;
+    setRunning(true);
+    setStatuses({});
+    const start = Date.now();
+
+    if (cacheMode === "force-cache" && Object.keys(cachedData).length === blocks.length) {
+      // Cache hit!
+      const s: Record<string, DataStatus> = {};
+      blocks.forEach(b => { s[b.id] = "loading"; });
+      setStatuses({ ...s });
+      await fakeDelay(80);
+      blocks.forEach(b => { s[b.id] = "success"; });
+      setStatuses({ ...s });
+      setElapsed(Date.now() - start);
+      setRunning(false);
+      return;
+    }
+
+    if (strategy === "sequential") {
+      for (const block of blocks) {
+        setStatuses(prev => ({ ...prev, [block.id]: "loading" }));
+        await fakeDelay(block.delay);
+        setStatuses(prev => ({ ...prev, [block.id]: "success" }));
+        if (cacheMode === "force-cache") {
+          setCachedData(prev => ({ ...prev, [block.id]: block.data }));
+        }
+      }
+    } else if (strategy === "parallel") {
+      const all = blocks.map(async block => {
+        setStatuses(prev => ({ ...prev, [block.id]: "loading" }));
+        await fakeDelay(block.delay);
+        setStatuses(prev => ({ ...prev, [block.id]: "success" }));
+        if (cacheMode === "force-cache") {
+          setCachedData(prev => ({ ...prev, [block.id]: block.data }));
+        }
+      });
+      await Promise.all(all);
+    } else {
+      // streaming
+      blocks.forEach(async block => {
+        setStatuses(prev => ({ ...prev, [block.id]: "loading" }));
+        await fakeDelay(block.delay);
+        setStatuses(prev => ({ ...prev, [block.id]: "success" }));
+        if (cacheMode === "force-cache") {
+          setCachedData(prev => ({ ...prev, [block.id]: block.data }));
+        }
+      });
+      const maxDelay = Math.max(...blocks.map(b => b.delay));
+      await fakeDelay(maxDelay + 100);
+    }
+
+    setElapsed(Date.now() - start);
+    setRunning(false);
+  };
+
+  const hasCachedData = Object.keys(cachedData).length === blocks.length;
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: 24,
+      fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ maxWidth: 620, margin: "0 auto" }}>
+        <h2 style={{ color: "#fff", fontSize: 20, marginBottom: 4 }}>
+          📡 Симулятор получения данных
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 13, marginBottom: 20 }}>
+          Сравни стратегии загрузки в Next.js
+        </p>
+
+        {/* Strategy selector */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          {([
+            { value: "sequential", label: "⛓️ Последовательно", desc: "await one by one" },
+            { value: "parallel", label: "⚡ Параллельно", desc: "Promise.all()" },
+            { value: "streaming", label: "🌊 Streaming", desc: "Suspense + stream" },
+          ] as const).map(s => (
+            <button
+              key={s.value}
+              onClick={() => { setStrategy(s.value); reset(); }}
+              style={{
+                padding: "8px 14px", borderRadius: 8, border: "none",
+                background: strategy === s.value ? "#000" : "#1e293b",
+                color: strategy === s.value ? "#4ade80" : "#64748b",
+                fontWeight: strategy === s.value ? 700 : 400,
+                cursor: "pointer", fontSize: 12,
+                borderBottom: strategy === s.value ? "2px solid #4ade80" : "2px solid transparent"
+              }}
+            >
+              {s.label}
+              <div style={{ fontSize: 10, color: "#475569" }}>{s.desc}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* Cache mode */}
+        <div style={{
+          background: "#1e293b", borderRadius: 8, padding: 12,
+          marginBottom: 16, display: "flex", alignItems: "center", gap: 12
+        }}>
+          <span style={{ color: "#94a3b8", fontSize: 13 }}>Кеш:</span>
+          {(["no-store", "force-cache"] as const).map(mode => (
+            <button
+              key={mode}
+              onClick={() => { setCacheMode(mode); if (mode === "no-store") setCachedData({}); reset(); }}
+              style={{
+                padding: "5px 12px", borderRadius: 6, border: "none",
+                background: cacheMode === mode ? "#334155" : "transparent",
+                color: cacheMode === mode ? "#fff" : "#475569",
+                cursor: "pointer", fontSize: 12, fontFamily: "monospace"
+              }}
+            >
+              {mode}
+            </button>
+          ))}
+          {hasCachedData && cacheMode === "force-cache" && (
+            <span style={{ color: "#4ade80", fontSize: 12 }}>✅ Кеш заполнен</span>
+          )}
+        </div>
+
+        {/* Run button */}
+        <button
+          onClick={run}
+          disabled={running}
+          style={{
+            width: "100%", padding: "12px", borderRadius: 8, border: "none",
+            background: running ? "#334155" : "#4ade80",
+            color: running ? "#64748b" : "#000",
+            fontWeight: 700, cursor: running ? "not-allowed" : "pointer",
+            fontSize: 14, marginBottom: 20
+          }}
+        >
+          {running ? "Загружаем данные..." : hasCachedData && cacheMode === "force-cache" ? "▶ Из кеша (мгновенно!)" : "▶ Запустить загрузку"}
+        </button>
+
+        {/* Data blocks */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {blocks.map(block => {
+            const status = statuses[block.id] || "idle";
+            const fromCache = hasCachedData && cacheMode === "force-cache";
+
+            return (
+              <div
+                key={block.id}
+                style={{
+                  display: "flex", alignItems: "center", gap: 14,
+                  padding: "12px 16px", borderRadius: 8,
+                  background: status === "success" ? block.color + "15" : "#1e293b",
+                  border: \`1px solid \${status === "success" ? block.color : "#1e293b"}\`,
+                  transition: "all 0.4s"
+                }}
+              >
+                <div style={{
+                  width: 32, height: 32, borderRadius: "50%",
+                  background: status === "success" ? block.color : "#334155",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 16, transition: "all 0.3s"
+                }}>
+                  {status === "loading" ? "⏳" : status === "success" ? "✅" : "○"}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#e2e8f0", fontSize: 14, fontWeight: 500 }}>
+                    {block.label}
+                  </div>
+                  <div style={{ color: "#475569", fontSize: 12 }}>
+                    {status === "idle" && "Ожидание..."}
+                    {status === "loading" && (
+                      <span style={{ color: "#94a3b8" }}>Загружаем... ({block.delay}ms)</span>
+                    )}
+                    {status === "success" && (
+                      <span style={{ color: block.color }}>
+                        {fromCache ? cachedData[block.id] : block.data}
+                        {fromCache && " (из кеша ⚡)"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {strategy === "streaming" && status === "success" && (
+                  <span style={{
+                    fontSize: 10, color: "#fb923c", background: "#fb923c22",
+                    padding: "2px 6px", borderRadius: 4
+                  }}>
+                    STREAMED
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {elapsed > 0 && (
+          <div style={{
+            marginTop: 16, padding: "12px 16px", borderRadius: 8,
+            background: "#052e16", border: "1px solid #4ade80",
+            color: "#4ade80", fontSize: 14, textAlign: "center"
+          }}>
+            ⏱️ Итого: <strong>{elapsed}мс</strong>
+            {strategy === "sequential" && \` (сумма всех задержек ~\${blocks.reduce((a, b) => a + b.delay, 0)}мс)\`}
+            {strategy === "parallel" && \` (максимум ~\${Math.max(...blocks.map(b => b.delay))}мс)\`}
+            {strategy === "streaming" && " (пользователь видел прогресс!  ✨)"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,692 @@
+## 🗺️ App Router vs Pages Router
+
+Это, пожалуй, **самый важный выбор** при работе с Next.js сегодня. Два поколения системы маршрутизации, два разных подхода к архитектуре. Давай разберём всё по-честному! 🎯
+
+```
+Next.js 1-12             Next.js 13+
+────────────────────     ────────────────────────────
+pages/                   app/
+  index.tsx     →          page.tsx
+  about.tsx     →          about/page.tsx
+  blog/                    blog/
+    [slug].tsx  →            [slug]/page.tsx
+  _app.tsx      →          layout.tsx
+  _document.tsx →          layout.tsx (root)
+  api/          →          api/ (route.ts)
+```
+
+---
+
+### 📚 Pages Router: Старый добрый способ
+
+Pages Router появился в Next.js 1.0 и работал вплоть до Next.js 12. Это проверенная система, которую знают миллионы разработчиков:
+
+```typescript
+// pages/index.tsx — главная страница
+export default function HomePage({ posts }) {
+  return (
+    <div>
+      <h1>Мой блог</h1>
+      {posts.map(post => <PostCard key={post.id} post={post} />)}
+    </div>
+  );
+}
+
+// getServerSideProps — данные при каждом запросе (SSR)
+export async function getServerSideProps() {
+  const posts = await fetch('https://api.example.com/posts').then(r => r.json());
+  return { props: { posts } };
+}
+```
+
+```typescript
+// pages/blog/[slug].tsx — динамический роут
+export default function BlogPost({ post }) {
+  return <article>{post.content}</article>;
+}
+
+// getStaticProps — данные при сборке (SSG)
+export async function getStaticProps({ params }) {
+  const post = await getPost(params.slug);
+  return { props: { post }, revalidate: 60 }; // ISR!
+}
+
+// getStaticPaths — какие slug генерировать при сборке
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  return {
+    paths: posts.map(p => ({ params: { slug: p.slug } })),
+    fallback: 'blocking'
+  };
+}
+```
+
+```typescript
+// pages/_app.tsx — глобальная обёртка
+import type { AppProps } from 'next/app';
+import '../styles/globals.css';
+
+export default function MyApp({ Component, pageProps }: AppProps) {
+  return (
+    <AuthProvider>
+      <Layout>
+        <Component {...pageProps} />
+      </Layout>
+    </AuthProvider>
+  );
+}
+```
+
+---
+
+### 🆕 App Router: Новая эра (Next.js 13+)
+
+App Router построен на **React Server Components** и меняет всё:
+
+```typescript
+// app/page.tsx — главная страница
+// Server Component по умолчанию — нет 'use client'!
+export default async function HomePage() {
+  // Данные прямо в компоненте, без getServerSideProps!
+  const posts = await fetch('https://api.example.com/posts').then(r => r.json());
+  
+  return (
+    <div>
+      <h1>Мой блог</h1>
+      {posts.map(post => <PostCard key={post.id} post={post} />)}
+    </div>
+  );
+}
+```
+
+```typescript
+// app/blog/[slug]/page.tsx — динамический роут
+export default async function BlogPost({ 
+  params 
+}: { 
+  params: Promise<{ slug: string }> // Next.js 15: params async!
+}) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+  
+  return <article>{post.content}</article>;
+}
+
+// Больше нет getStaticPaths — используем generateStaticParams
+export async function generateStaticParams() {
+  const posts = await getAllPosts();
+  return posts.map(post => ({ slug: post.slug }));
+}
+
+// ISR через экспорт переменной
+export const revalidate = 60;
+```
+
+```typescript
+// app/layout.tsx — root layout (заменяет _app.tsx и _document.tsx)
+import type { Metadata } from 'next';
+
+export const metadata: Metadata = {
+  title: 'Мой блог',
+  description: 'Описание сайта',
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="ru">
+      <body>
+        <AuthProvider>
+          <Header />
+          <main>{children}</main>
+          <Footer />
+        </AuthProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### 📂 Файловые конвенции App Router
+
+В App Router каждый файл имеет специальное назначение:
+
+```
+app/
+├── layout.tsx          # Обёртка — остаётся при навигации
+├── template.tsx        # Обёртка — пересоздаётся при навигации
+├── page.tsx            # Страница — отображается по URL
+├── loading.tsx         # Skeleton/spinner во время загрузки
+├── error.tsx           # UI ошибки (Error Boundary)
+├── not-found.tsx       # UI для 404
+├── global-error.tsx    # Ошибки в root layout
+└── route.ts            # API endpoint (Route Handler)
+```
+
+**Подробнее о каждом:**
+
+```typescript
+// app/dashboard/layout.tsx — layout для /dashboard и всех дочерних роутов
+export default function DashboardLayout({ 
+  children 
+}: { 
+  children: React.ReactNode 
+}) {
+  return (
+    <div className="dashboard">
+      <DashboardSidebar />
+      <main>{children}</main>
+    </div>
+  );
+}
+```
+
+```typescript
+// app/dashboard/loading.tsx — автоматически показывается пока page.tsx грузится
+export default function DashboardLoading() {
+  return (
+    <div className="skeleton">
+      <div className="skeleton-title" />
+      <div className="skeleton-line" />
+      <div className="skeleton-line" />
+    </div>
+  );
+}
+// Next.js автоматически оборачивает page.tsx в <Suspense fallback={<DashboardLoading />}>
+```
+
+```typescript
+// app/dashboard/error.tsx — обработчик ошибок
+'use client'; // Error boundaries должны быть Client Components!
+
+export default function DashboardError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  return (
+    <div>
+      <h2>Что-то пошло не так!</h2>
+      <p>{error.message}</p>
+      <button onClick={reset}>Попробовать снова</button>
+    </div>
+  );
+}
+```
+
+```typescript
+// app/blog/[slug]/not-found.tsx — показывается при вызове notFound()
+import Link from 'next/link';
+
+export default function PostNotFound() {
+  return (
+    <div>
+      <h1>Пост не найден 😔</h1>
+      <p>Этот пост был удалён или никогда не существовал.</p>
+      <Link href="/blog">← Вернуться в блог</Link>
+    </div>
+  );
+}
+
+// app/blog/[slug]/page.tsx
+import { notFound } from 'next/navigation';
+
+export default async function BlogPost({ params }) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+  
+  if (!post) notFound(); // Вызовет not-found.tsx
+  
+  return <article>{post.content}</article>;
+}
+```
+
+---
+
+### ⚖️ Сравнительная таблица
+
+| Фича | Pages Router | App Router |
+|------|-------------|------------|
+| **Папка** | `pages/` | `app/` |
+| **Данные SSR** | `getServerSideProps` | `async` компонент + `fetch` |
+| **Данные SSG** | `getStaticProps` | `async` компонент + `generateStaticParams` |
+| **ISR** | `revalidate` в `getStaticProps` | `export const revalidate = N` |
+| **Layout** | `_app.tsx` (один на всё) | `layout.tsx` (вложенные!) |
+| **Loading UI** | Вручную с `useState` | `loading.tsx` автоматически |
+| **Error UI** | Вручную | `error.tsx` автоматически |
+| **Server Components** | ❌ | ✅ По умолчанию |
+| **Server Actions** | ❌ | ✅ |
+| **Стриминг** | ❌ | ✅ |
+| **Metadata API** | Вручную через `Head` | `export const metadata` |
+| **Параллельные роуты** | ❌ | ✅ |
+| **Перехватывающие роуты** | ❌ | ✅ |
+
+---
+
+### 🔄 Сосуществование: Pages + App вместе
+
+Хорошая новость: можно использовать оба роутера **одновременно**! Это полезно для постепенной миграции:
+
+```
+my-app/
+├── app/                    # Новые страницы — App Router
+│   ├── layout.tsx
+│   ├── about/
+│   │   └── page.tsx        # /about → App Router
+│   └── dashboard/
+│       └── page.tsx        # /dashboard → App Router
+│
+├── pages/                  # Старые страницы — Pages Router
+│   ├── _app.tsx
+│   ├── index.tsx           # / → Pages Router
+│   └── blog/
+│       └── [slug].tsx      # /blog/:slug → Pages Router
+```
+
+**Правила сосуществования:**
+- App Router имеет приоритет над Pages Router для одинаковых роутов
+- Нельзя иметь `app/about/page.tsx` и `pages/about.tsx` одновременно
+- `_app.tsx` и `_document.tsx` в Pages Router НЕ влияют на App Router
+
+---
+
+### 🚀 Когда использовать что?
+
+**App Router (рекомендуется для новых проектов):**
+
+```typescript
+// ✅ Используй App Router если:
+// 1. Новый проект
+// 2. Нужны Server Components для производительности
+// 3. Хочешь Server Actions вместо API routes
+// 4. Нужны вложенные layouts
+// 5. Нужен streaming/Suspense
+
+// Пример: полноценный Server Component
+// app/products/page.tsx
+async function ProductsPage() {
+  const products = await db.product.findMany(); // Прямо в компоненте!
+  return <ProductGrid products={products} />;
+}
+```
+
+**Pages Router (если...):**
+
+```typescript
+// ⚠️ Оставайся на Pages Router если:
+// 1. Большой легаси-проект — миграция дорого стоит
+// 2. Используешь библиотеки несовместимые с RSC
+// 3. Команда не готова изучать новую парадигму
+// 4. Нужна стабильность: Pages Router более зрелый
+
+// pages/products.tsx
+export default function ProductsPage({ products }) {
+  return <ProductGrid products={products} />;
+}
+
+export async function getServerSideProps() {
+  const products = await db.product.findMany();
+  return { props: { products } };
+}
+```
+
+---
+
+### 📐 Вложенные layouts: суперсила App Router
+
+Это одна из лучших фич App Router! Каждый сегмент может иметь свой layout:
+
+```typescript
+// app/layout.tsx — root layout (всё приложение)
+export default function RootLayout({ children }) {
+  return (
+    <html lang="ru">
+      <body>
+        <GlobalNav />
+        {children}
+        <Footer />
+      </body>
+    </html>
+  );
+}
+
+// app/dashboard/layout.tsx — layout для /dashboard/*
+export default function DashboardLayout({ children }) {
+  return (
+    <div className="dashboard-container">
+      <DashboardSidebar />
+      <div className="dashboard-content">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// app/dashboard/settings/layout.tsx — layout для /dashboard/settings/*
+export default function SettingsLayout({ children }) {
+  return (
+    <div>
+      <SettingsTabs />
+      {children}
+    </div>
+  );
+}
+
+// app/dashboard/settings/profile/page.tsx
+// Получит: RootLayout > DashboardLayout > SettingsLayout > ProfilePage
+```
+
+Результирующее дерево компонентов:
+
+```
+<RootLayout>          ← app/layout.tsx
+  <DashboardLayout>   ← app/dashboard/layout.tsx
+    <SettingsLayout>  ← app/dashboard/settings/layout.tsx
+      <ProfilePage>   ← app/dashboard/settings/profile/page.tsx
+    </SettingsLayout>
+  </DashboardLayout>
+</RootLayout>
+```
+
+---
+
+### 🎯 Резюме урока
+
+**App Router** — будущее Next.js. Если начинаешь новый проект — используй его.
+
+**Pages Router** — всё ещё поддерживается и отлично работает для существующих проектов.
+
+Ключевые файловые конвенции App Router:
+- `page.tsx` — страница
+- `layout.tsx` — обёртка (персистентная)
+- `loading.tsx` — UI загрузки
+- `error.tsx` — UI ошибки
+- `not-found.tsx` — UI 404
+- `route.ts` — API endpoint
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+type RouterType = "app" | "pages";
+type ActivePage = "home" | "dashboard" | "settings" | "blog";
+
+const pagesFiles = {
+  "pages/_app.tsx": \`// Глобальная обёртка для всего приложения
+export default function App({ Component, pageProps }) {
+  return (
+    <Layout>
+      <Component {...pageProps} />
+    </Layout>
+  );
+}\`,
+  "pages/index.tsx": \`// Страница /
+export default function Home({ posts }) {
+  return <h1>Главная</h1>;
+}
+
+// Данные — отдельная функция
+export async function getServerSideProps() {
+  const data = await fetch('/api/data');
+  return { props: { posts: data } };
+}\`,
+  "pages/dashboard/index.tsx": \`// Страница /dashboard
+// Нет отдельного layout для дашборда!
+// Нужно импортировать DashboardLayout вручную
+import DashboardLayout from '../../components/DashboardLayout';
+
+export default function Dashboard() {
+  return (
+    <DashboardLayout>
+      <h1>Дашборд</h1>
+    </DashboardLayout>
+  );
+}\`,
+  "pages/dashboard/settings.tsx": \`// Страница /dashboard/settings
+// Снова нужно импортировать DashboardLayout!
+import DashboardLayout from '../../components/DashboardLayout';
+
+export default function Settings() {
+  return (
+    <DashboardLayout>
+      <h1>Настройки</h1>
+    </DashboardLayout>
+  );
+}\`,
+  "pages/blog/[slug].tsx": \`// Страница /blog/:slug
+export default function BlogPost({ post }) {
+  return <article>{post.content}</article>;
+}
+
+export async function getStaticProps({ params }) {
+  const post = await getPost(params.slug);
+  return { props: { post }, revalidate: 60 };
+}
+
+export async function getStaticPaths() {
+  return { paths: [...], fallback: 'blocking' };
+}\`,
+};
+
+const appFiles = {
+  "app/layout.tsx": \`// Root layout — один раз для всего приложения
+// Заменяет _app.tsx и _document.tsx
+export default function RootLayout({ children }) {
+  return (
+    <html lang="ru">
+      <body>
+        <GlobalNav />
+        {children}
+        <Footer />
+      </body>
+    </html>
+  );
+}\`,
+  "app/page.tsx": \`// Страница /
+// Server Component по умолчанию!
+export default async function Home() {
+  // Данные прямо здесь — без getServerSideProps!
+  const posts = await fetchPosts();
+  return <h1>Главная</h1>;
+}\`,
+  "app/dashboard/layout.tsx": \`// Layout только для /dashboard/*
+// Автоматически применяется ко всем дочерним страницам!
+export default function DashboardLayout({ children }) {
+  return (
+    <div className="dashboard">
+      <DashboardSidebar />
+      <main>{children}</main>
+    </div>
+  );
+}\`,
+  "app/dashboard/page.tsx": \`// Страница /dashboard
+// DashboardLayout применяется автоматически!
+export default async function Dashboard() {
+  return <h1>Дашборд</h1>;
+}\`,
+  "app/dashboard/settings/page.tsx": \`// Страница /dashboard/settings
+// Получит: RootLayout > DashboardLayout > Settings
+export default function Settings() {
+  return <h1>Настройки</h1>;
+}\`,
+  "app/blog/[slug]/page.tsx": \`// Страница /blog/:slug
+export default async function BlogPost({ params }) {
+  const { slug } = await params; // Next.js 15: async params!
+  const post = await getPost(slug);
+  if (!post) notFound();
+  return <article>{post.content}</article>;
+}
+
+export async function generateStaticParams() {
+  const posts = await getAllPosts();
+  return posts.map(p => ({ slug: p.slug }));
+}
+
+export const revalidate = 60;\`,
+};
+
+const layoutTree = {
+  app: [
+    { label: "RootLayout (app/layout.tsx)", depth: 0, active: true },
+    { label: "DashboardLayout (app/dashboard/layout.tsx)", depth: 1, active: false },
+    { label: "SettingsPage (app/dashboard/settings/page.tsx)", depth: 2, active: false },
+  ],
+  pages: [
+    { label: "_app.tsx (глобальная обёртка)", depth: 0, active: true },
+    { label: "DashboardLayout (вручную в компоненте)", depth: 1, active: false },
+    { label: "Settings (pages/dashboard/settings.tsx)", depth: 2, active: false },
+  ],
+};
+
+export default function App() {
+  const [router, setRouter] = useState<RouterType>("app");
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+
+  const files = router === "app" ? appFiles : pagesFiles;
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: 20,
+      fontFamily: "monospace", color: "#e2e8f0"
+    }}>
+      <div style={{ maxWidth: 800, margin: "0 auto" }}>
+        <h2 style={{ color: "#fff", fontFamily: "sans-serif", fontSize: 18, marginBottom: 4 }}>
+          🗺️ App Router vs Pages Router
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 12, fontFamily: "sans-serif", marginBottom: 16 }}>
+          Выбери роутер и исследуй файловую структуру
+        </p>
+
+        {/* Toggle */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          {(["app", "pages"] as RouterType[]).map(r => (
+            <button
+              key={r}
+              onClick={() => { setRouter(r); setSelectedFile(null); }}
+              style={{
+                padding: "10px 24px", borderRadius: 8, border: "none",
+                background: router === r ? (r === "app" ? "#000" : "#1e3a5f") : "#1e293b",
+                color: router === r ? (r === "app" ? "#fff" : "#60a5fa") : "#64748b",
+                fontWeight: 700, cursor: "pointer", fontSize: 14,
+                borderBottom: router === r ? \`3px solid \${r === "app" ? "#4ade80" : "#60a5fa"}\` : "3px solid transparent"
+              }}
+            >
+              {r === "app" ? "✨ App Router" : "📄 Pages Router"}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "240px 1fr", gap: 12 }}>
+          {/* File tree */}
+          <div style={{
+            background: "#111827", borderRadius: 10, padding: 12,
+            border: "1px solid #1e293b"
+          }}>
+            <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>
+              ФАЙЛОВАЯ СТРУКТУРА
+            </div>
+            {Object.keys(files).map(file => (
+              <div
+                key={file}
+                onClick={() => setSelectedFile(file)}
+                style={{
+                  padding: "6px 8px", borderRadius: 6, cursor: "pointer",
+                  background: selectedFile === file ? "#1e293b" : "transparent",
+                  color: selectedFile === file ? "#fff" : "#94a3b8",
+                  fontSize: 11, marginBottom: 2,
+                  borderLeft: selectedFile === file
+                    ? \`2px solid \${router === "app" ? "#4ade80" : "#60a5fa"}\`
+                    : "2px solid transparent"
+                }}
+              >
+                📄 {file.split("/").pop()}
+                <div style={{ color: "#475569", fontSize: 10 }}>
+                  {file.split("/").slice(0, -1).join("/")}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Code viewer */}
+          <div style={{
+            background: "#111827", borderRadius: 10, padding: 16,
+            border: "1px solid #1e293b", minHeight: 300
+          }}>
+            {selectedFile ? (
+              <>
+                <div style={{
+                  color: router === "app" ? "#4ade80" : "#60a5fa",
+                  fontSize: 12, marginBottom: 12, fontFamily: "sans-serif"
+                }}>
+                  {selectedFile}
+                </div>
+                <pre style={{
+                  color: "#cbd5e1", fontSize: 12, lineHeight: 1.7,
+                  margin: 0, whiteSpace: "pre-wrap"
+                }}>
+                  {files[selectedFile as keyof typeof files]}
+                </pre>
+              </>
+            ) : (
+              <div style={{
+                display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center",
+                height: 200, color: "#334155", fontFamily: "sans-serif"
+              }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>
+                  {router === "app" ? "✨" : "📄"}
+                </div>
+                Выбери файл для просмотра
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Layout nesting visualization */}
+        <div style={{
+          background: "#111827", borderRadius: 10, padding: 16,
+          border: "1px solid #1e293b", marginTop: 12
+        }}>
+          <div style={{ color: "#64748b", fontSize: 11, marginBottom: 12, fontFamily: "sans-serif" }}>
+            ДЕРЕВО КОМПОНЕНТОВ для /dashboard/settings
+          </div>
+          {layoutTree[router].map((item, i) => (
+            <div key={i} style={{
+              marginLeft: item.depth * 24,
+              padding: "8px 12px", borderRadius: 6,
+              background: "#0f172a", marginBottom: 4,
+              borderLeft: \`3px solid \${router === "app" ? "#4ade80" : "#60a5fa"}88\`,
+              fontSize: 12, color: "#cbd5e1"
+            }}>
+              {"  ".repeat(item.depth)}{item.depth > 0 ? "└─ " : ""}{item.label}
+            </div>
+          ))}
+          {router === "pages" && (
+            <div style={{
+              marginTop: 8, padding: "8px 12px",
+              background: "#451a1a", borderRadius: 6,
+              color: "#fca5a5", fontSize: 11, fontFamily: "sans-serif"
+            }}>
+              ⚠️ В Pages Router нет автоматических вложенных layouts — нужно импортировать вручную в каждом компоненте
+            </div>
+          )}
+          {router === "app" && (
+            <div style={{
+              marginTop: 8, padding: "8px 12px",
+              background: "#052e16", borderRadius: 6,
+              color: "#86efac", fontSize: 11, fontFamily: "sans-serif"
+            }}>
+              ✅ В App Router layouts вкладываются автоматически по структуре папок!
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

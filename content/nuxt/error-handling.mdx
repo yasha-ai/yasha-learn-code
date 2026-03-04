@@ -1,0 +1,659 @@
+## 🚨 Обработка ошибок в Nuxt 3
+
+Nuxt предоставляет комплексную систему обработки ошибок как на клиенте, так и на сервере. Понимание этой системы критически важно для создания надёжных приложений.
+
+---
+
+## 📄 Файл error.vue
+
+`error.vue` — глобальная страница ошибок Nuxt. Она показывается вместо всего приложения при фатальных ошибках:
+
+```vue
+<!-- error.vue -->
+<script setup lang="ts">
+import type { NuxtError } from '#app'
+
+const props = defineProps<{
+  error: NuxtError
+}>()
+
+const handleError = () => clearError({ redirect: '/' })
+
+const errorMessages = {
+  404: 'Страница не найдена',
+  403: 'Доступ запрещён',
+  500: 'Внутренняя ошибка сервера',
+  503: 'Сервис недоступен'
+}
+
+const message = computed(() =>
+  errorMessages[props.error.statusCode] || props.error.message
+)
+</script>
+
+<template>
+  <div class="error-page">
+    <div class="error-code">{{ error.statusCode }}</div>
+    <h1>{{ message }}</h1>
+    <p v-if="error.statusCode !== 404">{{ error.message }}</p>
+    <button @click="handleError">
+      Вернуться на главную
+    </button>
+  </div>
+</template>
+```
+
+---
+
+## 🔍 useError()
+
+`useError()` возвращает реактивное состояние текущей ошибки:
+
+```vue
+<script setup lang="ts">
+const error = useError()
+
+// Проверка наличия ошибки
+if (error.value) {
+  console.log('Код ошибки:', error.value.statusCode)
+  console.log('Сообщение:', error.value.message)
+  console.log('Стек:', error.value.stack)
+}
+</script>
+
+<template>
+  <div v-if="error">
+    Ошибка: {{ error.statusCode }}
+  </div>
+</template>
+```
+
+---
+
+## 🔨 createError()
+
+`createError()` создаёт ошибку с полным контролем над её свойствами:
+
+```typescript
+// В API-маршруте (server/api/users/[id].ts)
+export default defineEventHandler(async (event) => {
+  const id = getRouterParam(event, 'id')
+  const user = await findUser(id)
+
+  if (!user) {
+    throw createError({
+      statusCode: 404,
+      statusMessage: 'Not Found',
+      message: `Пользователь с ID ${id} не найден`,
+      data: { userId: id }
+    })
+  }
+
+  return user
+})
+```
+
+```vue
+<!-- В компоненте страницы -->
+<script setup lang="ts">
+const { data, error } = await useFetch('/api/users/123')
+
+if (error.value) {
+  throw createError({
+    statusCode: error.value.statusCode,
+    message: error.value.message,
+    fatal: true // делает ошибку фатальной — показывает error.vue
+  })
+}
+</script>
+```
+
+---
+
+## 📢 showError()
+
+`showError()` программно показывает страницу ошибки:
+
+```typescript
+// В composable
+export function useRequireAuth() {
+  const user = useUser()
+
+  if (!user.value) {
+    showError({
+      statusCode: 401,
+      message: 'Необходима авторизация'
+    })
+  }
+}
+```
+
+```vue
+<script setup lang="ts">
+const handleDelete = async (id: string) => {
+  try {
+    await $fetch(`/api/items/${id}`, { method: 'DELETE' })
+  } catch (err) {
+    // Показать страницу ошибки
+    showError({
+      statusCode: err.statusCode || 500,
+      message: 'Не удалось удалить элемент'
+    })
+  }
+}
+</script>
+```
+
+---
+
+## 🧹 clearError()
+
+`clearError()` сбрасывает ошибку и опционально выполняет редирект:
+
+```typescript
+// Сброс без редиректа
+await clearError()
+
+// Сброс с редиректом на главную
+await clearError({ redirect: '/' })
+
+// В компоненте
+const handleRetry = async () => {
+  await clearError({ redirect: '/dashboard' })
+}
+```
+
+```vue
+<!-- error.vue -->
+<template>
+  <div>
+    <h1>{{ error.statusCode }}</h1>
+    <div class="actions">
+      <button @click="clearError()">Попробовать снова</button>
+      <button @click="clearError({ redirect: '/' })">На главную</button>
+    </div>
+  </div>
+</template>
+```
+
+---
+
+## 🪝 onErrorCaptured
+
+Vue-хук для перехвата ошибок из дочерних компонентов:
+
+```vue
+<script setup lang="ts">
+onErrorCaptured((err, instance, info) => {
+  console.error('Перехвачена ошибка:', err)
+  console.log('Компонент:', instance?.$options.name)
+  console.log('Откуда:', info)
+
+  // Отправка в Sentry
+  $sentry.captureException(err, {
+    extra: { component: instance?.$options.name, info }
+  })
+
+  // Вернуть false — предотвратить дальнейшее распространение
+  return false
+})
+</script>
+```
+
+---
+
+## 🌐 Ошибки сервера vs клиента
+
+Поведение ошибок отличается в зависимости от контекста:
+
+### Серверные ошибки (SSR)
+
+```typescript
+// server/api/data.ts
+export default defineEventHandler(async (event) => {
+  // Ошибка на сервере
+  throw createError({
+    statusCode: 500,
+    message: 'Ошибка базы данных'
+  })
+  // → Показывает error.vue с серверной стороны
+})
+```
+
+```vue
+<!-- pages/data.vue — ошибка во время SSR -->
+<script setup lang="ts">
+const { data } = await useFetch('/api/data')
+// Если useFetch бросает fatal error → error.vue во время SSR
+</script>
+```
+
+### Клиентские ошибки
+
+```vue
+<script setup lang="ts">
+// Ошибка при взаимодействии пользователя
+const handleAction = async () => {
+  try {
+    await riskyOperation()
+  } catch (err) {
+    // Мягкая ошибка — показываем в UI
+    errorMessage.value = err.message
+    // или
+    // Жёсткая ошибка — показываем error.vue
+    showError({ statusCode: 500, message: err.message })
+  }
+}
+</script>
+```
+
+---
+
+## 📄 Кастомная страница 404
+
+Для кастомного 404 создайте файл `error.vue` с обработкой кода 404:
+
+```vue
+<!-- error.vue -->
+<script setup lang="ts">
+const props = defineProps<{ error: NuxtError }>()
+
+const is404 = computed(() => props.error.statusCode === 404)
+</script>
+
+<template>
+  <!-- Специальный дизайн для 404 -->
+  <div v-if="is404" class="not-found">
+    <h1>404 — Страница не найдена</h1>
+    <p>Возможно, страница была перемещена или удалена.</p>
+    <NuxtLink to="/">Вернуться на главную</NuxtLink>
+  </div>
+
+  <!-- Общий дизайн для других ошибок -->
+  <div v-else class="error-generic">
+    <h1>Ошибка {{ error.statusCode }}</h1>
+    <p>{{ error.message }}</p>
+    <button @click="clearError({ redirect: '/' })">Попробовать снова</button>
+  </div>
+</template>
+```
+
+---
+
+## 🔒 Обработка ошибок в composables
+
+```typescript
+// composables/useApiData.ts
+export function useApiData<T>(endpoint: string) {
+  const data = ref<T | null>(null)
+  const error = ref<string | null>(null)
+  const loading = ref(false)
+
+  const fetch = async () => {
+    loading.value = true
+    error.value = null
+    try {
+      data.value = await $fetch<T>(endpoint)
+    } catch (err: any) {
+      if (err.statusCode === 401) {
+        await navigateTo('/login')
+      } else if (err.statusCode === 404) {
+        error.value = 'Данные не найдены'
+      } else if (err.statusCode >= 500) {
+        // Критическая ошибка — показываем error.vue
+        throw createError({
+          statusCode: err.statusCode,
+          message: err.message,
+          fatal: true
+        })
+      } else {
+        error.value = err.message || 'Неизвестная ошибка'
+      }
+    } finally {
+      loading.value = false
+    }
+  }
+
+  return { data, error, loading, fetch }
+}
+```
+
+---
+
+## 🛡️ NuxtErrorBoundary
+
+Компонент для перехвата ошибок в части страницы без показа error.vue:
+
+```vue
+<template>
+  <NuxtErrorBoundary @error="handleError">
+    <!-- Основной контент -->
+    <template #default>
+      <ComplexWidget />
+    </template>
+
+    <!-- Fallback при ошибке -->
+    <template #error="{ error, clearError }">
+      <div class="widget-error">
+        <p>Виджет недоступен: {{ error.message }}</p>
+        <button @click="clearError()">Повторить</button>
+      </div>
+    </template>
+  </NuxtErrorBoundary>
+</template>
+
+<script setup lang="ts">
+const handleError = (error: Error) => {
+  console.error('Ошибка виджета:', error)
+  // Не пробрасываем выше — ошибка изолирована
+}
+</script>
+```
+
+---
+
+## 📊 Таблица методов обработки ошибок
+
+| Метод | Когда использовать | Поведение |
+|-------|-------------------|-----------|
+| `createError()` | Создание структурированной ошибки | Бросает или возвращает |
+| `showError()` | Показать error.vue программно | Показывает error.vue |
+| `clearError()` | Сброс текущей ошибки | Убирает ошибку, опц. редирект |
+| `useError()` | Читать текущую ошибку | Реактивное состояние ошибки |
+| `NuxtErrorBoundary` | Изолировать ошибки компонента | Локальный fallback |
+| `onErrorCaptured` | Vue lifecycle хук | Перехват из дочерних |
+
+---
+
+<Playground
+  template="react"
+  files={{
+    '/App.tsx': `import { useState } from 'react'
+
+const ERROR_TYPES = [
+  {
+    code: 200,
+    label: 'Успех',
+    icon: '✅',
+    color: '#00dc82',
+    description: 'Запрос выполнен успешно',
+    handling: 'Нет ошибки — отображаем данные'
+  },
+  {
+    code: 400,
+    label: 'Bad Request',
+    icon: '⚠️',
+    color: '#f59e0b',
+    description: 'Некорректные данные запроса',
+    handling: 'createError({ statusCode: 400 }) — показываем форму с ошибкой'
+  },
+  {
+    code: 401,
+    label: 'Unauthorized',
+    icon: '🔐',
+    color: '#8b5cf6',
+    description: 'Требуется авторизация',
+    handling: 'navigateTo("/login") — перенаправление'
+  },
+  {
+    code: 403,
+    label: 'Forbidden',
+    icon: '🚫',
+    color: '#ef4444',
+    description: 'Доступ запрещён',
+    handling: 'showError({ statusCode: 403 }) — error.vue'
+  },
+  {
+    code: 404,
+    label: 'Not Found',
+    icon: '🔍',
+    color: '#60a5fa',
+    description: 'Страница или ресурс не найден',
+    handling: 'error.vue с кастомным дизайном 404'
+  },
+  {
+    code: 500,
+    label: 'Server Error',
+    icon: '💥',
+    color: '#ef4444',
+    description: 'Внутренняя ошибка сервера',
+    handling: 'createError({ fatal: true }) — error.vue'
+  },
+  {
+    code: 503,
+    label: 'Service Unavailable',
+    icon: '🔧',
+    color: '#f97316',
+    description: 'Сервис временно недоступен',
+    handling: 'abortNavigation + error.vue для maintenance'
+  }
+]
+
+export default function App() {
+  const [selectedCode, setSelectedCode] = useState(null)
+  const [simulating, setSimulating] = useState(false)
+  const [result, setResult] = useState(null)
+
+  const simulate = async (errType) => {
+    setSimulating(true)
+    setResult(null)
+    await new Promise(r => setTimeout(r, 600))
+    setResult(errType)
+    setSimulating(false)
+  }
+
+  const sel = selectedCode ? ERROR_TYPES.find(e => e.code === selectedCode) : null
+
+  const getCodeSnippet = (code) => {
+    const snippets = {
+      200: \`// useFetch вернул данные
+const { data } = await useFetch('/api/users')
+// data.value содержит результат\`,
+      400: \`throw createError({
+  statusCode: 400,
+  message: 'Некорректные данные',
+  data: { field: 'email' }
+})\`,
+      401: \`// В middleware/auth.ts
+if (!user.value) {
+  return navigateTo('/login', {
+    query: { redirect: to.fullPath }
+  })
+}\`,
+      403: \`showError({
+  statusCode: 403,
+  message: 'Недостаточно прав доступа'
+})\`,
+      404: \`// error.vue
+const is404 = props.error.statusCode === 404\`,
+      500: \`throw createError({
+  statusCode: 500,
+  message: 'Ошибка базы данных',
+  fatal: true // → показывает error.vue
+})\`,
+      503: \`// middleware/maintenance.global.ts
+return abortNavigation({
+  statusCode: 503,
+  message: 'Технические работы'
+})\`
+    }
+    return snippets[code] || ''
+  }
+
+  return (
+    <div style={{
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '24px',
+      fontFamily: 'system-ui, sans-serif',
+      color: '#e2e8f0'
+    }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>🚨</div>
+          <h1 style={{ color: '#00dc82', fontSize: 24, fontWeight: 700, margin: 0 }}>
+            Error Handling
+          </h1>
+          <p style={{ color: '#94a3b8', marginTop: 6, fontSize: 14 }}>
+            Выберите тип ошибки для симуляции
+          </p>
+        </div>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(4, 1fr)',
+          gap: 10,
+          marginBottom: 20
+        }}>
+          {ERROR_TYPES.map(err => (
+            <div
+              key={err.code}
+              onClick={() => {
+                setSelectedCode(err.code)
+                simulate(err)
+              }}
+              style={{
+                background: selectedCode === err.code ? err.color + '22' : '#1a1a2e',
+                borderRadius: 10,
+                padding: '12px 10px',
+                border: '1px solid',
+                borderColor: selectedCode === err.code ? err.color : '#1e293b',
+                cursor: 'pointer',
+                textAlign: 'center',
+                transition: 'all 0.2s'
+              }}
+            >
+              <div style={{ fontSize: 20, marginBottom: 4 }}>{err.icon}</div>
+              <div style={{
+                fontSize: 18,
+                fontWeight: 800,
+                color: err.color,
+                fontFamily: 'monospace'
+              }}>{err.code}</div>
+              <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>{err.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {simulating && (
+          <div style={{
+            background: '#1a1a2e',
+            borderRadius: 10,
+            padding: 20,
+            border: '1px solid #334155',
+            textAlign: 'center',
+            marginBottom: 16
+          }}>
+            <div style={{ fontSize: 24, animation: 'spin 1s linear infinite' }}>⏳</div>
+            <div style={{ color: '#94a3b8', marginTop: 8, fontSize: 13 }}>
+              Обработка запроса...
+            </div>
+          </div>
+        )}
+
+        {result && !simulating && (
+          <div style={{
+            background: '#1a1a2e',
+            borderRadius: 12,
+            padding: 20,
+            border: \`1px solid \${result.color}\`,
+            marginBottom: 16
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+              <span style={{ fontSize: 28 }}>{result.icon}</span>
+              <div>
+                <div style={{
+                  fontSize: 20,
+                  fontWeight: 800,
+                  color: result.color,
+                  fontFamily: 'monospace'
+                }}>{result.code} {result.label}</div>
+                <div style={{ fontSize: 12, color: '#94a3b8' }}>{result.description}</div>
+              </div>
+            </div>
+
+            <div style={{
+              background: 'rgba(0,220,130,0.08)',
+              borderRadius: 8,
+              padding: 12,
+              marginBottom: 14,
+              border: '1px solid rgba(0,220,130,0.2)'
+            }}>
+              <div style={{ fontSize: 11, color: '#00dc82', marginBottom: 4, fontWeight: 600 }}>
+                💡 Стратегия обработки
+              </div>
+              <div style={{ fontSize: 13, color: '#e2e8f0' }}>{result.handling}</div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
+                📄 Код обработки:
+              </div>
+              <pre style={{
+                background: '#0a0f1e',
+                borderRadius: 8,
+                padding: 14,
+                fontSize: 12,
+                color: '#e2e8f0',
+                margin: 0,
+                overflow: 'auto',
+                lineHeight: 1.6
+              }}>{getCodeSnippet(result.code)}</pre>
+            </div>
+          </div>
+        )}
+
+        <div style={{
+          background: '#1a1a2e',
+          borderRadius: 10,
+          padding: 16,
+          border: '1px solid #1e293b'
+        }}>
+          <div style={{ fontSize: 12, color: '#64748b', marginBottom: 12 }}>
+            🗺️ Поток обработки ошибок
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {[
+              { label: 'Запрос', icon: '🌐' },
+              { label: '→' },
+              { label: 'Middleware', icon: '🛡️' },
+              { label: '→' },
+              { label: 'API/Page', icon: '📄' },
+              { label: '→' },
+              { label: 'createError', icon: '🔨' },
+              { label: '→' },
+              { label: 'error.vue', icon: '🚨' }
+            ].map((step, i) => (
+              <span key={i} style={{
+                color: step.icon ? '#e2e8f0' : '#334155',
+                fontSize: step.icon ? 12 : 16,
+                background: step.icon ? '#0f172a' : 'transparent',
+                padding: step.icon ? '4px 10px' : 0,
+                borderRadius: 6,
+                border: step.icon ? '1px solid #1e293b' : 'none'
+              }}>
+                {step.icon ? \`\${step.icon} \${step.label}\` : step.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+`
+  }}
+/>
+
+---
+
+## 🚀 Итоги
+
+Система обработки ошибок Nuxt 3 предоставляет:
+
+- **`error.vue`** — глобальная страница ошибок (замена всего приложения)
+- **`NuxtErrorBoundary`** — локальная изоляция ошибок компонента
+- **`createError()`** — создание структурированных ошибок
+- **`showError()` / `clearError()`** — управление состоянием ошибки
+- **`useError()`** — реактивное чтение текущей ошибки
+- **`onErrorCaptured`** — Vue-хук перехвата из дочерних компонентов

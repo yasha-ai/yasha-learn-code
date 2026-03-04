@@ -1,0 +1,642 @@
+## 🔐 Аутентификация в Nuxt 3
+
+Аутентификация — одна из ключевых задач любого веб-приложения. Nuxt 3 предлагает несколько подходов: от готовых модулей до реализации с нуля через composables и server routes.
+
+---
+
+## 📦 nuxt-auth-utils
+
+Официальный минималистичный модуль от команды Nuxt для управления сессиями:
+
+```bash
+npx nuxi module add auth-utils
+```
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['nuxt-auth-utils']
+})
+```
+
+```bash
+# .env
+NUXT_SESSION_PASSWORD=at-least-32-chars-long-secret-key!!
+```
+
+### Настройка OAuth провайдеров
+
+```typescript
+// server/routes/auth/github.get.ts
+export default defineOAuthGitHubEventHandler({
+  config: {
+    clientId: process.env.GITHUB_CLIENT_ID,
+    clientSecret: process.env.GITHUB_CLIENT_SECRET
+  },
+  async onSuccess(event, { user, tokens }) {
+    await setUserSession(event, {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatar: user.avatar_url,
+        provider: 'github'
+      }
+    })
+    return sendRedirect(event, '/dashboard')
+  },
+  onError(event, error) {
+    console.error('GitHub OAuth error:', error)
+    return sendRedirect(event, '/login?error=github')
+  }
+})
+```
+
+```typescript
+// server/routes/auth/google.get.ts
+export default defineOAuthGoogleEventHandler({
+  config: {
+    clientId: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    scope: ['openid', 'email', 'profile']
+  },
+  async onSuccess(event, { user }) {
+    await setUserSession(event, {
+      user: {
+        id: user.sub,
+        name: user.name,
+        email: user.email,
+        avatar: user.picture,
+        provider: 'google'
+      }
+    })
+    return sendRedirect(event, '/dashboard')
+  }
+})
+```
+
+---
+
+## 🔑 useUserSession()
+
+```vue
+<script setup lang="ts">
+const { loggedIn, user, session, fetch, clear } = useUserSession()
+
+// loggedIn — boolean, авторизован ли пользователь
+// user — данные пользователя
+// session — полная сессия
+// fetch — перезагрузить сессию
+// clear — выйти
+</script>
+
+<template>
+  <div v-if="loggedIn">
+    <img :src="user.avatar" />
+    <p>Привет, {{ user.name }}!</p>
+    <button @click="clear">Выйти</button>
+  </div>
+  <div v-else>
+    <NuxtLink to="/login">Войти</NuxtLink>
+  </div>
+</template>
+```
+
+---
+
+## 🏗️ @sidebase/nuxt-auth
+
+Мощный модуль с поддержкой NextAuth.js / Auth.js:
+
+```bash
+npx nuxi module add @sidebase/nuxt-auth
+```
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  modules: ['@sidebase/nuxt-auth'],
+  auth: {
+    provider: {
+      type: 'authjs'
+    },
+    globalAppMiddleware: {
+      isEnabled: true
+    }
+  }
+})
+```
+
+### Настройка Auth.js
+
+```typescript
+// server/api/auth/[...].ts
+import { NuxtAuthHandler } from '#auth'
+import GithubProvider from 'next-auth/providers/github'
+import GoogleProvider from 'next-auth/providers/google'
+import CredentialsProvider from 'next-auth/providers/credentials'
+import { PrismaAdapter } from '@auth/prisma-adapter'
+import { prisma } from '~/server/utils/prisma'
+
+export default NuxtAuthHandler({
+  adapter: PrismaAdapter(prisma),
+  secret: process.env.NEXTAUTH_SECRET,
+  providers: [
+    GithubProvider({
+      clientId: process.env.GITHUB_CLIENT_ID,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET
+    }),
+    GoogleProvider({
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET
+    }),
+    CredentialsProvider({
+      name: 'credentials',
+      credentials: {
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Пароль', type: 'password' }
+      },
+      async authorize(credentials) {
+        const user = await prisma.user.findUnique({
+          where: { email: credentials.email }
+        })
+        if (user && await bcrypt.compare(credentials.password, user.password)) {
+          return { id: user.id, email: user.email, name: user.name }
+        }
+        return null
+      }
+    })
+  ],
+  callbacks: {
+    jwt({ token, user }) {
+      if (user) {
+        token.id = user.id
+        token.role = user.role
+      }
+      return token
+    },
+    session({ session, token }) {
+      session.user.id = token.id as string
+      session.user.role = token.role as string
+      return session
+    }
+  },
+  pages: {
+    signIn: '/auth/login',
+    error: '/auth/error'
+  }
+})
+```
+
+---
+
+## 🪝 useAuth()
+
+```vue
+<script setup lang="ts">
+const { status, data, signIn, signOut, getCsrfToken } = useAuth()
+
+// status: 'authenticated' | 'unauthenticated' | 'loading'
+// data: сессия с данными пользователя
+
+const handleSignIn = () => {
+  signIn('github', { callbackUrl: '/dashboard' })
+}
+
+const handleSignOut = () => {
+  signOut({ callbackUrl: '/' })
+}
+</script>
+
+<template>
+  <div>
+    <div v-if="status === 'loading'">Загрузка...</div>
+    <div v-else-if="status === 'authenticated'">
+      <p>{{ data.user.name }}</p>
+      <button @click="handleSignOut">Выйти</button>
+    </div>
+    <div v-else>
+      <button @click="handleSignIn">Войти через GitHub</button>
+    </div>
+  </div>
+</template>
+```
+
+---
+
+## 🛡️ Защита маршрутов через middleware
+
+```typescript
+// middleware/auth.ts
+export default defineNuxtRouteMiddleware((to) => {
+  const { status } = useAuth()
+
+  if (status.value === 'unauthenticated') {
+    return navigateTo({
+      path: '/auth/login',
+      query: { redirect: to.fullPath }
+    })
+  }
+})
+```
+
+```typescript
+// middleware/admin.ts
+export default defineNuxtRouteMiddleware((to) => {
+  const { data } = useAuth()
+
+  if (data.value?.user?.role !== 'admin') {
+    return navigateTo('/403')
+  }
+})
+```
+
+```vue
+<!-- pages/admin/index.vue -->
+<script setup>
+definePageMeta({
+  middleware: ['auth', 'admin']
+})
+</script>
+```
+
+---
+
+## 🎟️ JWT аутентификация вручную
+
+Реализация JWT без внешних модулей:
+
+```typescript
+// server/utils/jwt.ts
+import jwt from 'jsonwebtoken'
+
+const SECRET = process.env.JWT_SECRET!
+
+export function signToken(payload: object) {
+  return jwt.sign(payload, SECRET, { expiresIn: '15m' })
+}
+
+export function signRefreshToken(payload: object) {
+  return jwt.sign(payload, SECRET + '_refresh', { expiresIn: '7d' })
+}
+
+export function verifyToken(token: string) {
+  return jwt.verify(token, SECRET) as jwt.JwtPayload
+}
+
+export function verifyRefreshToken(token: string) {
+  return jwt.verify(token, SECRET + '_refresh') as jwt.JwtPayload
+}
+```
+
+```typescript
+// server/api/auth/login.post.ts
+export default defineEventHandler(async (event) => {
+  const { email, password } = await readBody(event)
+
+  const user = await prisma.user.findUnique({ where: { email } })
+  if (!user || !await bcrypt.compare(password, user.password)) {
+    throw createError({ statusCode: 401, message: 'Неверные учётные данные' })
+  }
+
+  const accessToken = signToken({ id: user.id, email: user.email, role: user.role })
+  const refreshToken = signRefreshToken({ id: user.id })
+
+  // Сохраняем refresh token в httpOnly cookie
+  setCookie(event, 'refresh_token', refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 60 * 60 * 24 * 7 // 7 дней
+  })
+
+  return { accessToken, user: { id: user.id, name: user.name, email: user.email } }
+})
+```
+
+---
+
+## 🔄 Refresh Tokens
+
+```typescript
+// server/api/auth/refresh.post.ts
+export default defineEventHandler(async (event) => {
+  const refreshToken = getCookie(event, 'refresh_token')
+
+  if (!refreshToken) {
+    throw createError({ statusCode: 401, message: 'Refresh token отсутствует' })
+  }
+
+  try {
+    const payload = verifyRefreshToken(refreshToken)
+    const user = await prisma.user.findUnique({ where: { id: payload.id } })
+
+    if (!user) {
+      throw createError({ statusCode: 401, message: 'Пользователь не найден' })
+    }
+
+    const newAccessToken = signToken({
+      id: user.id,
+      email: user.email,
+      role: user.role
+    })
+
+    return { accessToken: newAccessToken }
+  } catch {
+    deleteCookie(event, 'refresh_token')
+    throw createError({ statusCode: 401, message: 'Недействительный refresh token' })
+  }
+})
+```
+
+---
+
+## 📋 Сравнение подходов
+
+| Подход | Сложность | Гибкость | Когда использовать |
+|--------|-----------|----------|-------------------|
+| `nuxt-auth-utils` | ⭐ Низкая | 🔧 Средняя | OAuth, быстрый старт |
+| `@sidebase/nuxt-auth` | ⭐⭐ Средняя | 🔧🔧 Высокая | Комплексные проекты |
+| JWT вручную | ⭐⭐⭐ Высокая | 🔧🔧🔧 Полная | Кастомная логика |
+| Lucia Auth | ⭐⭐ Средняя | 🔧🔧 Высокая | Типобезопасность |
+
+---
+
+<Playground
+  template="react"
+  files={{
+    '/App.tsx': `import { useState } from 'react'
+
+const PROVIDERS = [
+  { id: 'github', name: 'GitHub', icon: '🐙', color: '#6e40c9' },
+  { id: 'google', name: 'Google', icon: '🔵', color: '#4285f4' },
+  { id: 'credentials', name: 'Email/Пароль', icon: '📧', color: '#00dc82' }
+]
+
+const MOCK_USER = {
+  name: 'Александр Иванов',
+  email: 'alex@example.com',
+  avatar: '👨‍💻',
+  role: 'admin',
+  provider: 'github'
+}
+
+export default function App() {
+  const [screen, setScreen] = useState('login')
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [email, setEmail] = useState('alex@example.com')
+  const [password, setPassword] = useState('••••••••')
+  const [error, setError] = useState(null)
+  const [token, setToken] = useState(null)
+
+  const login = async (provider) => {
+    setLoading(true)
+    setError(null)
+    await new Promise(r => setTimeout(r, 800))
+    if (provider === 'credentials' && email !== 'alex@example.com') {
+      setError('Неверный email или пароль')
+      setLoading(false)
+      return
+    }
+    const fakeToken = 'eyJhbGci.OiJIUzI1NiJ9.' + Math.random().toString(36).substr(2, 20)
+    setToken(fakeToken)
+    setUser({ ...MOCK_USER, provider })
+    setScreen('dashboard')
+    setLoading(false)
+  }
+
+  const logout = async () => {
+    setLoading(true)
+    await new Promise(r => setTimeout(r, 400))
+    setUser(null)
+    setToken(null)
+    setScreen('login')
+    setLoading(false)
+  }
+
+  const refreshToken = async () => {
+    setLoading(true)
+    await new Promise(r => setTimeout(r, 500))
+    const newToken = 'eyJhbGci.OiJIUzI1NiJ9.' + Math.random().toString(36).substr(2, 20)
+    setToken(newToken)
+    setLoading(false)
+  }
+
+  return (
+    <div style={{
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '24px',
+      fontFamily: 'system-ui, sans-serif',
+      color: '#e2e8f0',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center'
+    }}>
+      <div style={{ width: '100%', maxWidth: 420 }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>🔐</div>
+          <h1 style={{ color: '#00dc82', fontSize: 22, fontWeight: 700, margin: 0 }}>
+            Nuxt Auth Demo
+          </h1>
+          <p style={{ color: '#94a3b8', marginTop: 6, fontSize: 13 }}>
+            {screen === 'login' ? 'Выберите способ входа' : \`Добро пожаловать!\`}
+          </p>
+        </div>
+
+        {screen === 'login' ? (
+          <div style={{
+            background: '#1a1a2e',
+            borderRadius: 14,
+            padding: 24,
+            border: '1px solid #1e293b'
+          }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+              {PROVIDERS.filter(p => p.id !== 'credentials').map(provider => (
+                <button
+                  key={provider.id}
+                  onClick={() => login(provider.id)}
+                  disabled={loading}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '12px 16px',
+                    borderRadius: 10,
+                    border: '1px solid #334155',
+                    background: '#0f172a',
+                    color: '#e2e8f0',
+                    cursor: loading ? 'wait' : 'pointer',
+                    fontSize: 14,
+                    fontWeight: 500,
+                    transition: 'all 0.2s',
+                    width: '100%'
+                  }}
+                >
+                  <span style={{ fontSize: 20 }}>{provider.icon}</span>
+                  <span>Войти через {provider.name}</span>
+                </button>
+              ))}
+            </div>
+
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              marginBottom: 20
+            }}>
+              <div style={{ flex: 1, height: 1, background: '#1e293b' }} />
+              <span style={{ color: '#475569', fontSize: 12 }}>или</span>
+              <div style={{ flex: 1, height: 1, background: '#1e293b' }} />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <input
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="Email"
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: 8,
+                  border: '1px solid #334155',
+                  background: '#0f172a',
+                  color: '#e2e8f0',
+                  fontSize: 14,
+                  outline: 'none'
+                }}
+              />
+              <input
+                value={password}
+                type="password"
+                onChange={e => setPassword(e.target.value)}
+                placeholder="Пароль"
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: 8,
+                  border: '1px solid #334155',
+                  background: '#0f172a',
+                  color: '#e2e8f0',
+                  fontSize: 14,
+                  outline: 'none'
+                }}
+              />
+              {error && (
+                <div style={{ color: '#ef4444', fontSize: 13, padding: '8px 12px', background: '#ef444415', borderRadius: 8 }}>
+                  ⚠️ {error}
+                </div>
+              )}
+              <button
+                onClick={() => login('credentials')}
+                disabled={loading}
+                style={{
+                  padding: '12px',
+                  borderRadius: 10,
+                  border: 'none',
+                  background: loading ? '#334155' : '#00dc82',
+                  color: loading ? '#64748b' : '#0f172a',
+                  cursor: loading ? 'wait' : 'pointer',
+                  fontSize: 14,
+                  fontWeight: 700,
+                  transition: 'all 0.2s'
+                }}
+              >
+                {loading ? '⏳ Входим...' : '→ Войти'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div style={{
+              background: '#1a1a2e',
+              borderRadius: 14,
+              padding: 20,
+              border: '1px solid #00dc82',
+              textAlign: 'center'
+            }}>
+              <div style={{ fontSize: 48, marginBottom: 10 }}>{user.avatar}</div>
+              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>{user.name}</div>
+              <div style={{ color: '#64748b', fontSize: 13, marginBottom: 10 }}>{user.email}</div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+                <span style={{
+                  padding: '4px 12px', borderRadius: 20,
+                  background: 'rgba(0,220,130,0.1)', color: '#00dc82',
+                  fontSize: 12, fontWeight: 600
+                }}>✓ {user.role}</span>
+                <span style={{
+                  padding: '4px 12px', borderRadius: 20,
+                  background: '#1e293b', color: '#94a3b8',
+                  fontSize: 12
+                }}>via {user.provider}</span>
+              </div>
+            </div>
+
+            <div style={{
+              background: '#1a1a2e',
+              borderRadius: 10,
+              padding: 14,
+              border: '1px solid #1e293b'
+            }}>
+              <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>JWT Access Token</div>
+              <div style={{
+                fontFamily: 'monospace',
+                fontSize: 10,
+                color: '#00dc82',
+                wordBreak: 'break-all',
+                lineHeight: 1.4,
+                marginBottom: 10
+              }}>{token}</div>
+              <button
+                onClick={refreshToken}
+                disabled={loading}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: 8,
+                  border: '1px solid #334155',
+                  background: 'transparent',
+                  color: loading ? '#475569' : '#94a3b8',
+                  cursor: 'pointer',
+                  fontSize: 12
+                }}
+              >
+                {loading ? '⏳' : '🔄'} Обновить токен
+              </button>
+            </div>
+
+            <button
+              onClick={logout}
+              disabled={loading}
+              style={{
+                padding: '12px',
+                borderRadius: 10,
+                border: '1px solid #ef4444',
+                background: 'transparent',
+                color: '#ef4444',
+                cursor: 'pointer',
+                fontSize: 14,
+                fontWeight: 600
+              }}
+            >
+              {loading ? '⏳' : '←'} Выйти
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+`
+  }}
+/>
+
+---
+
+## 🚀 Итоги
+
+Аутентификация в Nuxt 3:
+
+- **`nuxt-auth-utils`** — минималистичное решение для OAuth и сессий
+- **`@sidebase/nuxt-auth`** — полнофункциональный Auth.js провайдер
+- **JWT вручную** — максимальный контроль и гибкость
+- **Middleware** — декларативная защита маршрутов
+- **Refresh tokens** — безопасное обновление сессий через httpOnly cookies

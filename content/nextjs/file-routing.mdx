@@ -1,0 +1,692 @@
+## 🛣️ Файловая маршрутизация в Next.js
+
+Забудь о конфигах роутов. В Next.js маршрут определяется **структурой папок** в директории `app/`. Это одна из самых элегантных идей фреймворка: **код организован так же, как URL**. 📁
+
+```
+Файловая структура          →    URL
+─────────────────────────────────────────────────
+app/page.tsx                →    /
+app/about/page.tsx          →    /about
+app/blog/page.tsx           →    /blog
+app/blog/[slug]/page.tsx    →    /blog/:slug
+app/shop/[...path]/page.tsx →    /shop/a/b/c/...
+```
+
+---
+
+### 📌 Статические сегменты
+
+Самый простой случай — папка с именем сегмента:
+
+```
+app/
+├── page.tsx                →  /
+├── about/
+│   └── page.tsx            →  /about
+├── contact/
+│   └── page.tsx            →  /contact
+└── services/
+    ├── page.tsx            →  /services
+    ├── design/
+    │   └── page.tsx        →  /services/design
+    └── development/
+        └── page.tsx        →  /services/development
+```
+
+```typescript
+// app/about/page.tsx
+export default function AboutPage() {
+  return (
+    <main>
+      <h1>О нас</h1>
+      <p>Мы команда разработчиков...</p>
+    </main>
+  );
+}
+
+// Можно добавить метаданные прямо в файле!
+export const metadata = {
+  title: 'О нас | Мой сайт',
+  description: 'Узнайте о нашей команде',
+};
+```
+
+---
+
+### 🔀 Динамические сегменты `[slug]`
+
+Квадратные скобки в имени папки = динамический параметр:
+
+```
+app/blog/[slug]/page.tsx    →  /blog/hello-world
+                            →  /blog/next-js-guide
+                            →  /blog/anything-here
+```
+
+```typescript
+// app/blog/[slug]/page.tsx
+// params содержит { slug: 'hello-world' }
+
+interface BlogPostProps {
+  params: Promise<{ slug: string }>; // Next.js 15: Promise!
+}
+
+export default async function BlogPost({ params }: BlogPostProps) {
+  const { slug } = await params; // Ожидаем Promise
+  
+  const post = await getPostBySlug(slug);
+  
+  if (!post) {
+    notFound(); // Показывает not-found.tsx
+  }
+  
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <p>Слаг: {slug}</p>
+      <div dangerouslySetInnerHTML={{ __html: post.content }} />
+    </article>
+  );
+}
+
+// Генерация статических путей при сборке
+export async function generateStaticParams() {
+  const posts = await getAllPosts();
+  
+  return posts.map(post => ({
+    slug: post.slug,
+  }));
+}
+```
+
+**Несколько динамических сегментов:**
+
+```
+app/[lang]/[country]/page.tsx  →  /en/us, /ru/ru, /de/de
+```
+
+```typescript
+// app/[lang]/[country]/page.tsx
+interface Props {
+  params: Promise<{ lang: string; country: string }>;
+}
+
+export default async function LocalePage({ params }: Props) {
+  const { lang, country } = await params;
+  
+  return <p>Язык: {lang}, Страна: {country}</p>;
+}
+```
+
+---
+
+### 📡 Catch-all сегменты `[...slug]`
+
+Три точки захватывают **один или более** сегментов пути:
+
+```
+app/docs/[...slug]/page.tsx  →  /docs/intro
+                             →  /docs/api/users
+                             →  /docs/api/users/create
+                             →  НЕ /docs (нужен хотя бы один сегмент!)
+```
+
+```typescript
+// app/docs/[...slug]/page.tsx
+interface Props {
+  params: Promise<{ slug: string[] }>; // Массив сегментов!
+}
+
+export default async function DocsPage({ params }: Props) {
+  const { slug } = await params;
+  // /docs/api/users → slug = ['api', 'users']
+  // /docs/intro     → slug = ['intro']
+  
+  const path = slug.join('/'); // 'api/users'
+  const doc = await getDoc(path);
+  
+  return (
+    <div>
+      <Breadcrumbs segments={slug} />
+      <article>{doc.content}</article>
+    </div>
+  );
+}
+
+// Генерация всех возможных путей
+export async function generateStaticParams() {
+  const docs = await getAllDocs();
+  
+  return docs.map(doc => ({
+    slug: doc.path.split('/'), // ['api', 'users']
+  }));
+}
+```
+
+---
+
+### 🎯 Опциональные catch-all `[[...slug]]`
+
+Двойные скобки захватывают **ноль или более** сегментов:
+
+```
+app/[[...slug]]/page.tsx  →  /          (slug = undefined!)
+                          →  /blog      (slug = ['blog'])
+                          →  /blog/post (slug = ['blog', 'post'])
+```
+
+```typescript
+// app/shop/[[...filters]]/page.tsx
+interface Props {
+  params: Promise<{ filters?: string[] }>; // Может быть undefined!
+}
+
+export default async function ShopPage({ params }: Props) {
+  const { filters } = await params;
+  
+  // /shop           → filters = undefined
+  // /shop/clothing  → filters = ['clothing']
+  // /shop/clothing/summer → filters = ['clothing', 'summer']
+  
+  const category = filters?.[0];
+  const subcategory = filters?.[1];
+  
+  const products = await getProducts({ category, subcategory });
+  
+  return (
+    <div>
+      <h1>
+        {!filters ? 'Все товары' : filters.join(' → ')}
+      </h1>
+      <ProductGrid products={products} />
+    </div>
+  );
+}
+```
+
+---
+
+### 🗂️ Группы роутов `(group)`
+
+Папки в круглых скобках **не влияют на URL** — только организуют код:
+
+```
+app/
+├── (marketing)/        ← НЕ добавляет /marketing к URL
+│   ├── layout.tsx      ← Layout только для маркетинговых страниц
+│   ├── page.tsx        → /
+│   ├── about/
+│   │   └── page.tsx    → /about
+│   └── pricing/
+│       └── page.tsx    → /pricing
+│
+└── (dashboard)/        ← НЕ добавляет /dashboard к URL
+    ├── layout.tsx      ← Layout только для дашборда
+    ├── analytics/
+    │   └── page.tsx    → /analytics
+    └── settings/
+        └── page.tsx    → /settings
+```
+
+```typescript
+// app/(marketing)/layout.tsx
+// Layout применяется только к marketing страницам
+export default function MarketingLayout({ children }) {
+  return (
+    <>
+      <MarketingNav />  {/* Только для маркетинга */}
+      {children}
+      <MarketingFooter />
+    </>
+  );
+}
+
+// app/(dashboard)/layout.tsx
+export default function DashboardLayout({ children }) {
+  return (
+    <div className="dashboard">
+      <DashboardSidebar />
+      {children}
+    </div>
+  );
+}
+```
+
+**Несколько root layouts:**
+
+```typescript
+// app/(marketing)/layout.tsx
+export default function MarketingLayout({ children }) {
+  return (
+    <html lang="ru">
+      <body className="marketing-theme">{children}</body>
+    </html>
+  );
+}
+
+// app/(dashboard)/layout.tsx
+export default function DashboardLayout({ children }) {
+  return (
+    <html lang="ru">
+      <body className="dashboard-theme">{children}</body>
+    </html>
+  );
+}
+// Каждый layout может иметь свой <html> и <body>!
+```
+
+---
+
+### ⚡ Параллельные роуты `@slot`
+
+Папки с символом `@` создают именованные слоты для одновременного рендеринга нескольких страниц:
+
+```
+app/
+└── dashboard/
+    ├── layout.tsx           ← Получает @analytics и @team
+    ├── page.tsx             → /dashboard
+    ├── @analytics/
+    │   ├── page.tsx         → Слот аналитики
+    │   └── revenue/
+    │       └── page.tsx
+    └── @team/
+        ├── page.tsx         → Слот команды
+        └── members/
+            └── page.tsx
+```
+
+```typescript
+// app/dashboard/layout.tsx
+interface DashboardLayoutProps {
+  children: React.ReactNode;
+  analytics: React.ReactNode; // Слот @analytics
+  team: React.ReactNode;       // Слот @team
+}
+
+export default function DashboardLayout({
+  children,
+  analytics,
+  team,
+}: DashboardLayoutProps) {
+  return (
+    <div className="dashboard-grid">
+      <div className="main">{children}</div>
+      <div className="analytics">{analytics}</div>
+      <div className="team">{team}</div>
+    </div>
+  );
+}
+// /dashboard → рендерит все три слота одновременно!
+```
+
+---
+
+### 🎭 Перехватывающие роуты `(.)`, `(..)`, `(...)`
+
+Перехватывают навигацию для показа контента в модальном окне (без потери контекста):
+
+```
+app/
+├── photos/
+│   ├── page.tsx              → /photos (галерея)
+│   └── [id]/
+│       └── page.tsx          → /photos/123 (полный экран)
+│
+└── @modal/
+    └── (.)photos/
+        └── [id]/
+            └── page.tsx      → Перехватывает /photos/123 → показывает модалку!
+```
+
+```typescript
+// app/photos/[id]/page.tsx — полная страница
+export default async function PhotoPage({ params }) {
+  const { id } = await params;
+  const photo = await getPhoto(id);
+  
+  return (
+    <div>
+      <img src={photo.url} alt={photo.title} />
+      <h1>{photo.title}</h1>
+      <p>{photo.description}</p>
+    </div>
+  );
+}
+
+// app/@modal/(.)photos/[id]/page.tsx — модальное окно
+export default async function PhotoModal({ params }) {
+  const { id } = await params;
+  const photo = await getPhoto(id);
+  
+  return (
+    <Modal>
+      <img src={photo.url} alt={photo.title} />
+    </Modal>
+  );
+}
+// При клике из /photos → показывает модалку
+// При прямом переходе → показывает полную страницу
+```
+
+**Синтаксис перехвата:**
+- `(.)` — перехватить сегмент на том же уровне
+- `(..)` — перехватить сегмент на уровень выше
+- `(..)(..)` — на два уровня выше
+- `(...)` — перехватить из корня app
+
+---
+
+### 🔗 Компонент Link
+
+`next/link` — основной способ навигации в Next.js:
+
+```typescript
+import Link from 'next/link';
+
+// Базовое использование
+<Link href="/about">О нас</Link>
+
+// Динамический роут
+<Link href={`/blog/${post.slug}`}>
+  {post.title}
+</Link>
+
+// С объектом href
+<Link href={{ pathname: '/blog/[slug]', query: { slug: post.slug } }}>
+  {post.title}
+</Link>
+
+// Prefetch (по умолчанию true для видимых ссылок)
+<Link href="/about" prefetch={false}>
+  О нас (без prefetch)
+</Link>
+
+// replace — не добавляет в history
+<Link href="/login" replace>
+  Войти
+</Link>
+
+// scroll — скролл в начало страницы (по умолчанию true)
+<Link href="/about" scroll={false}>
+  О нас
+</Link>
+
+// Программная навигация
+import { useRouter } from 'next/navigation';
+
+function MyComponent() {
+  const router = useRouter();
+  
+  const handleClick = () => {
+    router.push('/about');
+    // router.replace('/about');
+    // router.back();
+    // router.forward();
+    // router.refresh(); // обновить текущую страницу
+    // router.prefetch('/about'); // предзагрузить
+  };
+}
+```
+
+---
+
+### 📊 Таблица всех типов роутов
+
+| Синтаксис | Пример | URL |
+|-----------|--------|-----|
+| `segment/` | `app/about/` | `/about` |
+| `[param]/` | `app/blog/[slug]/` | `/blog/:slug` |
+| `[...slug]/` | `app/docs/[...slug]/` | `/docs/a/b/c` |
+| `[[...slug]]/` | `app/[[...all]]/` | `/` или `/a/b` |
+| `(group)/` | `app/(marketing)/` | без влияния на URL |
+| `@slot/` | `app/@modal/` | параллельный слот |
+| `(.)segment/` | `app/@modal/(.)photo/` | перехват |
+
+---
+
+### 🎯 Резюме урока
+
+Файловая маршрутизация — это сердце Next.js App Router. Запомни:
+
+1. **Папка** = сегмент URL
+2. **`[param]`** = динамический параметр
+3. **`[...slug]`** = catch-all (1+)
+4. **`[[...slug]]`** = optional catch-all (0+)
+5. **`(group)`** = организация без URL
+6. **`@slot`** = параллельный рендеринг
+7. **`(.)`** = перехват навигации
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+type Route = {
+  pattern: string;
+  example: string;
+  url: string;
+  type: string;
+  color: string;
+  description: string;
+};
+
+const routes: Route[] = [
+  {
+    pattern: "app/page.tsx",
+    example: "/",
+    url: "/",
+    type: "Статический",
+    color: "#4ade80",
+    description: "Корневая страница сайта",
+  },
+  {
+    pattern: "app/about/page.tsx",
+    example: "/about",
+    url: "/about",
+    type: "Статический",
+    color: "#4ade80",
+    description: "Фиксированный URL-сегмент",
+  },
+  {
+    pattern: "app/blog/[slug]/page.tsx",
+    example: "/blog/hello-world",
+    url: "/blog/:slug",
+    type: "Динамический",
+    color: "#60a5fa",
+    description: "params.slug = 'hello-world'",
+  },
+  {
+    pattern: "app/[lang]/[country]/page.tsx",
+    example: "/en/us",
+    url: "/:lang/:country",
+    type: "Мульти-динамический",
+    color: "#818cf8",
+    description: "Несколько параметров",
+  },
+  {
+    pattern: "app/docs/[...slug]/page.tsx",
+    example: "/docs/api/users/create",
+    url: "/docs/*",
+    type: "Catch-all",
+    color: "#fb923c",
+    description: "slug = ['api','users','create']",
+  },
+  {
+    pattern: "app/[[...filters]]/page.tsx",
+    example: "/shop или /shop/clothes",
+    url: "/* (0+)",
+    type: "Optional catch-all",
+    color: "#f472b6",
+    description: "filters = undefined | string[]",
+  },
+  {
+    pattern: "app/(marketing)/about/page.tsx",
+    example: "/about",
+    url: "/about",
+    type: "Route Group",
+    color: "#34d399",
+    description: "(marketing) не влияет на URL",
+  },
+];
+
+export default function App() {
+  const [input, setInput] = useState("/blog/my-first-post");
+  const [selected, setSelected] = useState<Route | null>(null);
+
+  const matchRoute = (url: string): Route | null => {
+    const clean = url.trim().replace(/\\/+$/, "") || "/";
+    const parts = clean.split("/").filter(Boolean);
+
+    for (const route of routes) {
+      if (route.pattern.includes("[[...")) {
+        return route;
+      }
+      if (route.pattern.includes("[...")) {
+        const prefix = route.url.replace("/*", "").replace(/\\/+$/, "");
+        if (clean.startsWith(prefix)) return route;
+      }
+      if (route.url === clean) return route;
+      if (route.url.includes(":")) {
+        const routeParts = route.url.split("/").filter(Boolean);
+        if (routeParts.length === parts.length) {
+          const match = routeParts.every(
+            (p, i) => p.startsWith(":") || p === parts[i]
+          );
+          if (match) return route;
+        }
+      }
+    }
+    return null;
+  };
+
+  const matched = matchRoute(input);
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: 24,
+      fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ maxWidth: 680, margin: "0 auto" }}>
+        <h2 style={{ color: "#fff", fontSize: 20, marginBottom: 4 }}>
+          🛣️ Симулятор файловой маршрутизации
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 13, marginBottom: 20 }}>
+          Введи URL и посмотри, какой файл его обработает
+        </p>
+
+        {/* URL input */}
+        <div style={{
+          background: "#1e293b", borderRadius: 10, padding: 16, marginBottom: 20
+        }}>
+          <label style={{ color: "#94a3b8", fontSize: 12, display: "block", marginBottom: 6 }}>
+            Введи URL для матчинга:
+          </label>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            style={{
+              width: "100%", padding: "10px 14px", borderRadius: 8,
+              background: "#0f172a", border: "1px solid #334155",
+              color: "#fff", fontSize: 15, fontFamily: "monospace",
+              outline: "none", boxSizing: "border-box"
+            }}
+            placeholder="/blog/my-post"
+          />
+          {matched ? (
+            <div style={{
+              marginTop: 10, padding: "8px 12px", borderRadius: 6,
+              background: "#052e16", borderLeft: \`3px solid \${matched.color}\`
+            }}>
+              <span style={{ color: matched.color, fontSize: 13, fontWeight: 600 }}>
+                ✅ Совпадение: {matched.pattern}
+              </span>
+              <div style={{ color: "#6ee7b7", fontSize: 12, marginTop: 4 }}>
+                {matched.description}
+              </div>
+            </div>
+          ) : (
+            <div style={{
+              marginTop: 10, padding: "8px 12px", borderRadius: 6,
+              background: "#2d1515", color: "#f87171", fontSize: 13
+            }}>
+              ❌ 404 — нет совпадений
+            </div>
+          )}
+        </div>
+
+        {/* Quick test buttons */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ color: "#64748b", fontSize: 12, marginBottom: 8 }}>Примеры:</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {["/", "/about", "/blog/hello", "/docs/api/users", "/en/us", "/shop/clothes/summer"].map(url => (
+              <button
+                key={url}
+                onClick={() => setInput(url)}
+                style={{
+                  padding: "4px 10px", borderRadius: 6, border: "1px solid #334155",
+                  background: "#1e293b", color: "#94a3b8", cursor: "pointer",
+                  fontSize: 12, fontFamily: "monospace"
+                }}
+              >
+                {url}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Routes table */}
+        <div style={{ background: "#111827", borderRadius: 10, overflow: "hidden", border: "1px solid #1e293b" }}>
+          <div style={{
+            display: "grid", gridTemplateColumns: "1fr 100px 1fr",
+            padding: "8px 14px", background: "#1e293b",
+            color: "#64748b", fontSize: 11
+          }}>
+            <span>ФАЙЛ</span>
+            <span>ТИП</span>
+            <span>URL ПАТТЕРН</span>
+          </div>
+          {routes.map((route, i) => (
+            <div
+              key={i}
+              onClick={() => setSelected(selected?.pattern === route.pattern ? null : route)}
+              style={{
+                display: "grid", gridTemplateColumns: "1fr 100px 1fr",
+                padding: "10px 14px", cursor: "pointer",
+                background: matched?.pattern === route.pattern
+                  ? route.color + "15"
+                  : selected?.pattern === route.pattern
+                    ? "#1e293b"
+                    : i % 2 === 0 ? "#0f172a" : "#111827",
+                borderLeft: matched?.pattern === route.pattern
+                  ? \`3px solid \${route.color}\`
+                  : "3px solid transparent",
+                transition: "all 0.2s"
+              }}
+            >
+              <span style={{ color: "#e2e8f0", fontSize: 12, fontFamily: "monospace" }}>
+                {route.pattern.replace("app/", "").replace("/page.tsx", "")}
+              </span>
+              <span style={{
+                color: route.color, fontSize: 11,
+                background: route.color + "22",
+                padding: "2px 6px", borderRadius: 4,
+                height: "fit-content"
+              }}>
+                {route.type}
+              </span>
+              <span style={{ color: "#94a3b8", fontSize: 12, fontFamily: "monospace" }}>
+                {route.url}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{
+          background: "#171717", borderRadius: 8, padding: 12,
+          fontSize: 12, color: "#475569", textAlign: "center", marginTop: 12
+        }}>
+          Next.js находит первый совпадающий маршрут по специфичности
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

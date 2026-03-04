@@ -1,0 +1,774 @@
+## Props и Emits — общение компонентов 📡
+
+Компоненты — это изолированные острова. Как острова общаются между собой? Через мосты! В Vue: **props** — данные текут СВЕРХУ ВНИЗ от родителя к ребёнку, **emits** — события летят СНИЗУ ВВЕРХ от ребёнка к родителю. Этот однонаправленный поток делает приложение предсказуемым и лёгким для дебага! 🌊
+
+---
+
+### Однонаправленный поток данных 🌊
+
+```
+Родитель
+   │  props (данные вниз ⬇️)
+   ▼
+Ребёнок
+   │  emit (события вверх ⬆️)
+   ▼
+Родитель
+
+Никогда напрямую НЕ меняй props!
+props.value = 'новое' — ❌ нарушение однонаправленного потока!
+```
+
+---
+
+### defineProps — объявление props 📥
+
+#### Generic синтаксис (рекомендуется в Vue 3)
+
+```vue
+<script setup lang="ts">
+// Способ 1: Простой интерфейс
+const props = defineProps<{
+  title: string
+  count: number
+  isVisible?: boolean    // ? = опциональный
+  items: string[]
+  user: {
+    id: number
+    name: string
+    email: string
+  }
+}>()
+
+// Способ 2: Импортированный интерфейс (Vue 3.3+)
+import type { User, Product } from '@/types'
+
+const props = defineProps<{
+  user: User
+  products: Product[]
+  selectedId?: number
+}>()
+</script>
+```
+
+#### withDefaults — значения по умолчанию
+
+```vue
+<script setup lang="ts">
+import { withDefaults } from 'vue'
+
+interface ButtonProps {
+  label: string
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost'
+  size?: 'sm' | 'md' | 'lg'
+  disabled?: boolean
+  loading?: boolean
+  icon?: string
+}
+
+const props = withDefaults(defineProps<ButtonProps>(), {
+  variant: 'primary',        // строка
+  size: 'md',                // строка
+  disabled: false,           // boolean
+  loading: false,            // boolean
+  icon: undefined            // явно undefined
+
+  // ⚠️ Объекты и массивы — ВСЕГДА фабрика!
+  // items: () => [],
+  // config: () => ({ timeout: 3000 })
+})
+
+// TypeScript знает точные типы (без undefined):
+// props.variant — 'primary' | 'secondary' | 'danger' | 'ghost'
+// props.size — 'sm' | 'md' | 'lg'
+</script>
+```
+
+#### Runtime синтаксис (без TypeScript)
+
+```javascript
+// Для проектов без TypeScript или с runtime валидацией
+const props = defineProps({
+  // Простой тип
+  title: String,
+
+  // Несколько типов
+  id: [String, Number],
+
+  // С опциями
+  user: {
+    type: Object,
+    required: true
+  },
+
+  count: {
+    type: Number,
+    default: 0,
+    validator(value) {
+      return value >= 0  // только неотрицательные числа
+    }
+  },
+
+  status: {
+    type: String,
+    default: 'active',
+    validator(value) {
+      return ['active', 'inactive', 'pending'].includes(value)
+    }
+  }
+})
+```
+
+---
+
+### Работа с props в шаблоне и скрипте
+
+```vue
+<script setup lang="ts">
+import { computed, toRefs } from 'vue'
+
+const props = defineProps<{
+  firstName: string
+  lastName: string
+  age: number
+}>()
+
+// ✅ Читаем через props.xxx
+console.log(props.firstName)
+
+// ✅ toRefs для деструктуризации с реактивностью
+const { firstName, lastName } = toRefs(props)
+
+// ✅ Вычисляем на основе props
+const fullName = computed(() => `${props.firstName} ${props.lastName}`)
+const isAdult = computed(() => props.age >= 18)
+
+// ❌ НИКОГДА не изменяй props!
+// props.firstName = 'Иван'  // Warning + игнорируется Vue
+
+// ✅ Если нужно изменяемое локальное состояние — копируй!
+import { ref } from 'vue'
+const localCount = ref(props.age)  // локальная копия
+</script>
+
+<template>
+  <!-- Props доступны в шаблоне напрямую -->
+  <h2>{{ firstName }} {{ lastName }}</h2>
+  <p>Возраст: {{ age }}</p>
+  <p>{{ fullName }} — {{ isAdult ? 'совершеннолетний' : 'несовершеннолетний' }}</p>
+</template>
+```
+
+---
+
+### Prop drilling и проброс атрибутов 🎁
+
+```vue
+<!-- Родитель -->
+<template>
+  <!-- class, id, data-* автоматически передаются в корневой элемент дочернего -->
+  <UserCard
+    :user="user"
+    class="featured"
+    data-testid="user-card-main"
+  />
+</template>
+
+<!-- UserCard.vue — класс 'featured' прилетит в корневой div -->
+<template>
+  <div class="user-card">  <!-- ← получит class="user-card featured" -->
+    <p>{{ user.name }}</p>
+  </div>
+</template>
+
+<!-- Отключить наследование + ручное управление -->
+<script setup lang="ts">
+import { useAttrs } from 'vue'
+defineOptions({ inheritAttrs: false })
+const attrs = useAttrs()
+</script>
+
+<template>
+  <div class="wrapper">
+    <!-- Передаём attrs только на нужный элемент -->
+    <input v-bind="attrs" />
+  </div>
+</template>
+```
+
+---
+
+### defineEmits — объявление событий 📤
+
+```vue
+<script setup lang="ts">
+// Современный callable синтаксис (Vue 3.3+) — рекомендуется
+const emit = defineEmits<{
+  // событие без данных
+  click: []
+
+  // событие с данными (именованные параметры)
+  change: [value: string]
+  update: [id: number, data: Partial<User>]
+  delete: [userId: number]
+
+  // kebab-case событие
+  'item-selected': [item: MenuItem]
+  'update:modelValue': [value: string]  // для v-model!
+}>()
+
+// Использование
+const handleSave = () => {
+  emit('click')
+  emit('change', newValue)
+  emit('update', user.id, { name: 'Новое имя' })
+  emit('update:modelValue', inputValue.value)
+}
+</script>
+```
+
+---
+
+### v-model с кастомными компонентами 🔄
+
+`v-model` — это синтаксический сахар над prop + emit:
+
+```vue
+<!-- Что пишем -->
+<MyInput v-model="searchText" />
+
+<!-- Что Vue разворачивает в -->
+<MyInput
+  :modelValue="searchText"
+  @update:modelValue="searchText = $event"
+/>
+```
+
+#### Реализация компонента с v-model
+
+```vue
+<!-- MyInput.vue -->
+<template>
+  <div class="input-wrapper">
+    <label v-if="label">{{ label }}</label>
+    <input
+      :value="modelValue"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      v-bind="$attrs"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+defineOptions({ inheritAttrs: false })
+
+defineProps<{
+  modelValue: string
+  label?: string
+}>()
+
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+}>()
+</script>
+```
+
+---
+
+### Множественные v-model (Vue 3!) 🎯
+
+```vue
+<!-- Родитель -->
+<template>
+  <UserForm
+    v-model:firstName="user.firstName"
+    v-model:lastName="user.lastName"
+    v-model:email="user.email"
+  />
+</template>
+
+<!-- UserForm.vue — несколько v-model -->
+<template>
+  <div>
+    <input
+      :value="firstName"
+      @input="emit('update:firstName', $event.target.value)"
+    />
+    <input
+      :value="lastName"
+      @input="emit('update:lastName', $event.target.value)"
+    />
+    <input
+      :value="email"
+      @input="emit('update:email', $event.target.value)"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+defineProps<{
+  firstName: string
+  lastName: string
+  email: string
+}>()
+
+const emit = defineEmits<{
+  'update:firstName': [value: string]
+  'update:lastName': [value: string]
+  'update:email': [value: string]
+}>()
+</script>
+```
+
+---
+
+### v-model модификаторы 🔧
+
+```vue
+<!-- Встроенные модификаторы -->
+<input v-model.trim="text" />       <!-- обрезать пробелы -->
+<input v-model.number="count" />    <!-- преобразовать в number -->
+<input v-model.lazy="search" />     <!-- обновлять по blur -->
+
+<!-- Кастомный модификатор -->
+<MyInput v-model.capitalize="text" />
+```
+
+```vue
+<!-- MyInput.vue — поддержка кастомного модификатора -->
+<script setup lang="ts">
+const props = defineProps<{
+  modelValue: string
+  modelModifiers?: { capitalize?: boolean; trim?: boolean }
+}>()
+
+const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
+
+const handleInput = (event: Event) => {
+  let value = (event.target as HTMLInputElement).value
+
+  // Применяем модификаторы
+  if (props.modelModifiers?.capitalize) {
+    value = value.charAt(0).toUpperCase() + value.slice(1)
+  }
+  if (props.modelModifiers?.trim) {
+    value = value.trim()
+  }
+
+  emit('update:modelValue', value)
+}
+</script>
+
+<template>
+  <input :value="modelValue" @input="handleInput" />
+</template>
+```
+
+---
+
+### Prop валидация — паттерны 🛡️
+
+```typescript
+// Полная валидация props (runtime синтаксис)
+const props = defineProps({
+  // Валидатор с сообщением
+  age: {
+    type: Number,
+    required: true,
+    validator: (value: number) => {
+      if (value < 0) {
+        console.warn(`age не может быть отрицательным: ${value}`)
+        return false
+      }
+      if (value > 150) {
+        console.warn(`age кажется нереальным: ${value}`)
+        return false
+      }
+      return true
+    }
+  },
+
+  // Enum validator
+  status: {
+    type: String,
+    default: 'active',
+    validator: (value: string) =>
+      ['active', 'inactive', 'pending', 'banned'].includes(value)
+  },
+
+  // Объект с обязательными полями
+  config: {
+    type: Object,
+    default: () => ({ timeout: 3000, retries: 3 }),
+    validator: (value: object) => 'timeout' in value
+  }
+})
+```
+
+---
+
+### Реальный пример: Форма регистрации 📝
+
+```vue
+<!-- RegistrationForm.vue -->
+<template>
+  <form @submit.prevent="handleSubmit" class="form">
+    <BaseInput
+      v-model="form.email"
+      label="Email"
+      type="email"
+      :error="errors.email"
+      required
+    />
+
+    <BaseInput
+      v-model="form.password"
+      label="Пароль"
+      type="password"
+      :error="errors.password"
+      required
+    />
+
+    <BaseCheckbox
+      v-model="form.acceptTerms"
+      label="Принимаю условия использования"
+      :error="errors.acceptTerms"
+    />
+
+    <BaseButton
+      type="submit"
+      :loading="isSubmitting"
+      :disabled="!isValid"
+    >
+      Зарегистрироваться
+    </BaseButton>
+  </form>
+</template>
+
+<script setup lang="ts">
+import { reactive, computed } from 'vue'
+
+const emit = defineEmits<{
+  success: [userId: number]
+  error: [message: string]
+}>()
+
+const form = reactive({
+  email: '',
+  password: '',
+  acceptTerms: false
+})
+
+const isSubmitting = ref(false)
+
+const errors = computed(() => {
+  const e: Record<string, string> = {}
+  if (!form.email.includes('@')) e.email = 'Некорректный email'
+  if (form.password.length < 8) e.password = 'Минимум 8 символов'
+  if (!form.acceptTerms) e.acceptTerms = 'Необходимо принять условия'
+  return e
+})
+
+const isValid = computed(() => Object.keys(errors.value).length === 0)
+
+const handleSubmit = async () => {
+  if (!isValid.value) return
+
+  isSubmitting.value = true
+  try {
+    const { userId } = await register(form)
+    emit('success', userId)
+  } catch (e) {
+    emit('error', e.message)
+  } finally {
+    isSubmitting.value = false
+  }
+}
+</script>
+```
+
+---
+
+### Резюме 📡
+
+Props и Emits:
+- **`defineProps<T>()`** — типизированные входные данные
+- **`withDefaults()`** — значения по умолчанию для generic props
+- **Props readonly!** — никогда не изменяй props напрямую
+- **`defineEmits<T>()`** — типизированные исходящие события
+- **`v-model`** — `modelValue` prop + `update:modelValue` emit
+- **Несколько v-model** — `v-model:firstName`, `v-model:lastName`
+- **Кастомные модификаторы** — `modelModifiers` prop
+- **Однонаправленный поток** — props вниз ⬇️, events вверх ⬆️
+
+Следующий урок — Слоты! 🎰
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState } from "react";
+
+// Интерактивная демонстрация Props и Emits
+// Симулируем компонент BaseButton с props
+function BaseButton({ label, variant = "primary", size = "md", disabled = false, loading = false, onClick }) {
+  const colors = {
+    primary: { bg: "#42b883", color: "#0f172a" },
+    secondary: { bg: "#35495e", color: "#42b883" },
+    danger: { bg: "#ef4444", color: "white" },
+    ghost: { bg: "transparent", color: "#42b883" }
+  };
+  const sizes = {
+    sm: { padding: "4px 10px", fontSize: "11px" },
+    md: { padding: "8px 16px", fontSize: "13px" },
+    lg: { padding: "12px 24px", fontSize: "15px" }
+  };
+
+  const c = colors[variant] || colors.primary;
+  const s = sizes[size] || sizes.md;
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled || loading}
+      style={{
+        ...s, borderRadius: "8px", border: variant === "ghost" ? "1px solid #42b883" : "none",
+        cursor: (disabled || loading) ? "not-allowed" : "pointer",
+        background: c.bg, color: c.color,
+        fontWeight: "bold", opacity: (disabled || loading) ? 0.5 : 1,
+        transition: "all 0.2s"
+      }}
+    >
+      {loading ? "⏳ " : ""}{label}
+    </button>
+  );
+}
+
+// Симулируем компонент с v-model
+function CustomInput({ modelValue, onChange, label, error }) {
+  return (
+    <div style={{ marginBottom: "8px" }}>
+      {label && <label style={{ display: "block", fontSize: "12px", color: "#94a3b8", marginBottom: "4px" }}>{label}</label>}
+      <input
+        value={modelValue}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          width: "100%", padding: "8px 12px", borderRadius: "6px",
+          background: "#0f172a", color: "#e2e8f0", fontSize: "13px",
+          border: \`1px solid \${error ? "#ef4444" : "#42b883"}\`,
+          boxSizing: "border-box"
+        }}
+      />
+      {error && <span style={{ fontSize: "11px", color: "#ef4444" }}>{error}</span>}
+    </div>
+  );
+}
+
+export default function PropsEmitsDemo() {
+  const [tab, setTab] = useState("props");
+  const [emitLog, setEmitLog] = useState([]);
+
+  // Props playground
+  const [btnVariant, setBtnVariant] = useState("primary");
+  const [btnSize, setBtnSize] = useState("md");
+  const [btnDisabled, setBtnDisabled] = useState(false);
+  const [btnLoading, setBtnLoading] = useState(false);
+  const [clickCount, setClickCount] = useState(0);
+
+  // v-model demo
+  const [firstName, setFirstName] = useState("Яша");
+  const [lastName, setLastName] = useState("Смирнов");
+  const [email, setEmail] = useState("");
+
+  const emailError = email && !email.includes("@") ? "Некорректный email" : "";
+
+  const logEmit = (event, data) => {
+    setEmitLog(prev => [...prev.slice(-4), \`emit('\${event}', \${JSON.stringify(data)})\`]);
+  };
+
+  const handleBtnClick = () => {
+    setClickCount(c => c + 1);
+    logEmit("click", null);
+  };
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: "20px",
+      fontFamily: "system-ui, sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ textAlign: "center", marginBottom: "20px" }}>
+        <span style={{ fontSize: "40px" }}>📡</span>
+        <h2 style={{ margin: "8px 0 4px", color: "#42b883" }}>Props и Emits</h2>
+        <p style={{ color: "#64748b", margin: 0, fontSize: "13px" }}>
+          Однонаправленный поток данных Vue 3
+        </p>
+      </div>
+
+      <div style={{ display: "flex", gap: "4px", marginBottom: "16px", justifyContent: "center" }}>
+        {[["props", "defineProps"], ["vmodel", "v-model"], ["flow", "Поток данных"]].map(([val, label]) => (
+          <button key={val} onClick={() => setTab(val)} style={{
+            padding: "8px 14px", borderRadius: "8px", border: "none",
+            cursor: "pointer", fontSize: "12px", fontWeight: "bold",
+            background: tab === val ? "#42b883" : "#1e293b",
+            color: tab === val ? "#0f172a" : "#94a3b8"
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {tab === "props" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{
+            background: "#1e293b", borderRadius: "12px", padding: "16px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "12px" }}>
+              🔵 BaseButton — настройка props
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "12px" }}>
+              <div>
+                <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "4px" }}>variant</div>
+                <select value={btnVariant} onChange={e => setBtnVariant(e.target.value)} style={{
+                  width: "100%", padding: "6px", borderRadius: "6px",
+                  background: "#0f172a", border: "1px solid #334155",
+                  color: "#e2e8f0", fontSize: "12px"
+                }}>
+                  {["primary", "secondary", "danger", "ghost"].map(v => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "4px" }}>size</div>
+                <select value={btnSize} onChange={e => setBtnSize(e.target.value)} style={{
+                  width: "100%", padding: "6px", borderRadius: "6px",
+                  background: "#0f172a", border: "1px solid #334155",
+                  color: "#e2e8f0", fontSize: "12px"
+                }}>
+                  {["sm", "md", "lg"].map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#94a3b8", cursor: "pointer" }}>
+                <input type="checkbox" checked={btnDisabled} onChange={e => setBtnDisabled(e.target.checked)} />
+                disabled
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#94a3b8", cursor: "pointer" }}>
+                <input type="checkbox" checked={btnLoading} onChange={e => setBtnLoading(e.target.checked)} />
+                loading
+              </label>
+            </div>
+
+            <div style={{ textAlign: "center", marginBottom: "12px" }}>
+              <BaseButton
+                label={"Нажми меня! (" + clickCount + ")"}
+                variant={btnVariant}
+                size={btnSize}
+                disabled={btnDisabled}
+                loading={btnLoading}
+                onClick={handleBtnClick}
+              />
+            </div>
+
+            <div style={{ background: "#0f172a", borderRadius: "8px", padding: "10px", fontFamily: "monospace" }}>
+              <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "4px" }}>Vue шаблон:</div>
+              <pre style={{ margin: 0, fontSize: "11px", color: "#e2e8f0" }}>
+{"<BaseButton\n  label=\"Нажми меня!\"\n  variant=\"" + btnVariant + "\"\n  size=\"" + btnSize + "\"" + (btnDisabled ? "\n  :disabled=\"true\"" : "") + (btnLoading ? "\n  :loading=\"true\"" : "") + "\n  @click=\"handleClick\"\n/>"}
+              </pre>
+            </div>
+          </div>
+
+          {emitLog.length > 0 && (
+            <div style={{ background: "#0f172a", borderRadius: "8px", padding: "10px", border: "1px solid #1e293b" }}>
+              <div style={{ fontSize: "11px", color: "#475569", marginBottom: "4px" }}>📤 Emit лог:</div>
+              {emitLog.map((l, i) => (
+                <div key={i} style={{ fontSize: "11px", color: "#42b883", fontFamily: "monospace" }}>{l}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "vmodel" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{
+            background: "#1e293b", borderRadius: "12px", padding: "16px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "12px" }}>
+              🔄 Несколько v-model на одном компоненте
+            </div>
+            <CustomInput modelValue={firstName} onChange={setFirstName} label="v-model:firstName" />
+            <CustomInput modelValue={lastName} onChange={setLastName} label="v-model:lastName" />
+            <CustomInput modelValue={email} onChange={setEmail} label="v-model:email" error={emailError} />
+
+            <div style={{
+              marginTop: "12px", padding: "10px", background: "#0f172a",
+              borderRadius: "8px", border: "1px solid #334155"
+            }}>
+              <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "6px" }}>Результат:</div>
+              <div style={{ fontSize: "14px", color: "#e2e8f0" }}>
+                {firstName} {lastName}
+              </div>
+              {email && <div style={{ fontSize: "13px", color: emailError ? "#ef4444" : "#42b883" }}>{email}</div>}
+            </div>
+          </div>
+
+          <div style={{ background: "#0f172a", borderRadius: "10px", padding: "12px", border: "1px solid #1e293b" }}>
+            <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "6px" }}>Vue синтаксис:</div>
+            <pre style={{ margin: 0, fontSize: "11px", color: "#e2e8f0" }}>
+{"<UserForm\n  v-model:firstName=\"user.firstName\"\n  v-model:lastName=\"user.lastName\"\n  v-model:email=\"user.email\"\n/>\n\n<!-- Что Vue разворачивает: -->\n<UserForm\n  :firstName=\"user.firstName\"\n  @update:firstName=\"user.firstName = $event\"\n  :lastName=\"user.lastName\"\n  @update:lastName=\"user.lastName = $event\"\n  :email=\"user.email\"\n  @update:email=\"user.email = $event\"\n/>"}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {tab === "flow" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {[
+            {
+              title: "⬇️ Props — данные сверху вниз",
+              code: "// Родитель передаёт данные\n<UserCard :user=\"currentUser\" :theme=\"'dark'\" />",
+              desc: "Родитель КОНТРОЛИРУЕТ данные ребёнка через props",
+              color: "#42b883"
+            },
+            {
+              title: "⬆️ Emits — события снизу вверх",
+              code: "// Ребёнок сообщает о действиях\n<UserCard @follow=\"handleFollow\" @delete=\"handleDelete\" />",
+              desc: "Ребёнок НЕ меняет данные — он emit-ит события, родитель реагирует",
+              color: "#f59e0b"
+            },
+            {
+              title: "🔄 v-model — двусторонний сахар",
+              code: "// Сокращение для prop + emit:\n<MyInput v-model=\"text\" />\n// = :modelValue + @update:modelValue",
+              desc: "v-model — удобный способ синхронизации без ручного @update",
+              color: "#a78bfa"
+            },
+            {
+              title: "❌ Анти-паттерн — прямая мутация",
+              code: "// НИКОГДА так не делай!\nconst props = defineProps<{ user: User }>()\nprops.user.name = 'Иван'  // ❌ Warning!",
+              desc: "Мутация props нарушает однонаправленный поток и делает код непредсказуемым",
+              color: "#ef4444"
+            }
+          ].map((item, i) => (
+            <div key={i} style={{
+              background: "#1e293b", borderRadius: "10px", padding: "12px",
+              border: \`1px solid \${item.color}44\`
+            }}>
+              <div style={{ fontSize: "13px", fontWeight: "bold", color: item.color, marginBottom: "8px" }}>
+                {item.title}
+              </div>
+              <pre style={{ margin: "0 0 8px", fontSize: "11px", color: "#e2e8f0", lineHeight: 1.6 }}>
+                {item.code}
+              </pre>
+              <div style={{ fontSize: "11px", color: "#64748b" }}>{item.desc}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

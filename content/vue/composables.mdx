@@ -1,0 +1,727 @@
+## 🎣 Composables в Vue 3
+
+Composables — это **переиспользуемые функции с реактивным состоянием**. Если React придумал хуки, Vue сделал то же самое, только назвал иначе. Composable — это функция, которая использует Composition API (`ref`, `watch`, `onMounted` и т.д.) внутри себя и возвращает реактивные данные и методы 🚀
+
+---
+
+## Почему composables?
+
+До Composition API Vue использовал **mixins** — и это было ужасно:
+
+```
+Проблемы с mixins:
+❌ Непонятно, откуда взялось this.someData
+❌ Конфликты имён между миксинами
+❌ Невозможно передать параметры
+❌ Плохая типизация в TypeScript
+
+Composables решают всё это:
+✅ Явный импорт — видно, откуда данные
+✅ Нет конфликтов (у каждого вызова своё замыкание)
+✅ Параметры через аргументы функции
+✅ Отличная TypeScript поддержка
+```
+
+---
+
+## Соглашение об именовании: use*
+
+Все composables начинаются с `use`. Это конвенция (не правило), но её все соблюдают:
+
+```
+✅ useCounter
+✅ useFetch
+✅ useLocalStorage
+✅ useDebounce
+✅ useMousePosition
+
+❌ getCounter     // не composable — нет реактивности
+❌ mouseTracker   // нарушение конвенции
+```
+
+---
+
+## useMouse — отслеживание мыши
+
+Классический первый composable. Инкапсулирует логику отслеживания позиции мыши:
+
+```typescript
+// composables/useMouse.ts
+import { ref, onMounted, onUnmounted } from 'vue'
+
+export function useMouse() {
+  const x = ref(0)
+  const y = ref(0)
+
+  function update(event: MouseEvent) {
+    x.value = event.pageX
+    y.value = event.pageY
+  }
+
+  onMounted(() => {
+    window.addEventListener('mousemove', update)
+  })
+
+  onUnmounted(() => {
+    window.removeEventListener('mousemove', update)
+  })
+
+  return { x, y }
+}
+```
+
+```vue
+<!-- Использование — КРАСОТА! -->
+<script setup lang="ts">
+import { useMouse } from '@/composables/useMouse'
+
+const { x, y } = useMouse()
+</script>
+
+<template>
+  <p>Мышь: {{ x }}, {{ y }}</p>
+</template>
+```
+
+Обрати внимание: `onMounted` и `onUnmounted` внутри composable привязываются к компоненту, который его вызывает. Магия! ✨
+
+---
+
+## useLocalStorage — персистентное состояние
+
+```typescript
+// composables/useLocalStorage.ts
+import { ref, watch } from 'vue'
+
+export function useLocalStorage<T>(key: string, initialValue: T) {
+  // Пытаемся получить значение из localStorage
+  const stored = localStorage.getItem(key)
+  const parsed = stored ? (JSON.parse(stored) as T) : initialValue
+
+  const state = ref<T>(parsed)
+
+  // Синхронизируем с localStorage при изменении
+  watch(
+    state,
+    (newValue) => {
+      if (newValue === null || newValue === undefined) {
+        localStorage.removeItem(key)
+      } else {
+        localStorage.setItem(key, JSON.stringify(newValue))
+      }
+    },
+    { deep: true } // Для объектов!
+  )
+
+  return state
+}
+```
+
+```vue
+<script setup lang="ts">
+import { useLocalStorage } from '@/composables/useLocalStorage'
+
+// Значение автоматически сохраняется в localStorage!
+const username = useLocalStorage('username', '')
+const theme = useLocalStorage<'light' | 'dark'>('theme', 'dark')
+const settings = useLocalStorage('settings', {
+  notifications: true,
+  sound: false,
+})
+</script>
+
+<template>
+  <input v-model="username" placeholder="Твоё имя" />
+  <!-- username сохранится даже после перезагрузки страницы -->
+</template>
+```
+
+---
+
+## useFetch — загрузка данных
+
+```typescript
+// composables/useFetch.ts
+import { ref, watch, toValue, type MaybeRefOrGetter } from 'vue'
+
+interface FetchState<T> {
+  data: T | null
+  loading: boolean
+  error: Error | null
+}
+
+export function useFetch<T>(url: MaybeRefOrGetter<string>) {
+  const data = ref<T | null>(null)
+  const loading = ref(false)
+  const error = ref<Error | null>(null)
+  let abortController: AbortController | null = null
+
+  async function fetchData() {
+    // Отменяем предыдущий запрос
+    abortController?.abort()
+    abortController = new AbortController()
+
+    loading.value = true
+    error.value = null
+
+    try {
+      const response = await fetch(toValue(url), {
+        signal: abortController.signal
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+
+      data.value = await response.json()
+    } catch (e) {
+      if (e instanceof Error && e.name !== 'AbortError') {
+        error.value = e
+      }
+    } finally {
+      loading.value = false
+    }
+  }
+
+  // Перезапускаем при изменении URL
+  watch(() => toValue(url), fetchData, { immediate: true })
+
+  return { data, loading, error, refresh: fetchData }
+}
+```
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import { useFetch } from '@/composables/useFetch'
+
+interface Post {
+  id: number
+  title: string
+  body: string
+}
+
+const postId = ref(1)
+
+// URL реактивен — при изменении postId автоматически перезагружается!
+const { data: post, loading, error, refresh } = useFetch<Post>(
+  computed(() => `https://jsonplaceholder.typicode.com/posts/${postId.value}`)
+)
+</script>
+
+<template>
+  <div>
+    <button @click="postId--" :disabled="postId <= 1">← Пред</button>
+    <button @click="postId++">След →</button>
+    <button @click="refresh">🔄 Обновить</button>
+
+    <div v-if="loading">⏳ Загрузка поста #{{ postId }}...</div>
+    <div v-else-if="error">❌ {{ error.message }}</div>
+    <article v-else-if="post">
+      <h2>{{ post.title }}</h2>
+      <p>{{ post.body }}</p>
+    </article>
+  </div>
+</template>
+```
+
+---
+
+## useDebounce — дебаунс ввода
+
+```typescript
+// composables/useDebounce.ts
+import { ref, watch, type Ref } from 'vue'
+
+export function useDebounce<T>(value: Ref<T>, delay = 300) {
+  const debouncedValue = ref<T>(value.value) as Ref<T>
+  let timeout: ReturnType<typeof setTimeout>
+
+  watch(value, (newValue) => {
+    clearTimeout(timeout)
+    timeout = setTimeout(() => {
+      debouncedValue.value = newValue
+    }, delay)
+  })
+
+  return debouncedValue
+}
+```
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+import { useDebounce } from '@/composables/useDebounce'
+import { useFetch } from '@/composables/useFetch'
+
+const searchQuery = ref('')
+const debouncedQuery = useDebounce(searchQuery, 500)
+
+// Запрос запустится только через 500мс после остановки ввода
+const { data: results, loading } = useFetch(
+  computed(() =>
+    debouncedQuery.value
+      ? `https://api.example.com/search?q=${debouncedQuery.value}`
+      : ''
+  )
+)
+</script>
+```
+
+---
+
+## Composables с аргументами
+
+Composables могут принимать как обычные значения, так и ref'ы:
+
+```typescript
+// composables/useCounter.ts
+import { ref, computed } from 'vue'
+
+interface CounterOptions {
+  min?: number
+  max?: number
+  step?: number
+}
+
+export function useCounter(initial = 0, options: CounterOptions = {}) {
+  const { min = -Infinity, max = Infinity, step = 1 } = options
+
+  const count = ref(initial)
+
+  const increment = () => {
+    count.value = Math.min(count.value + step, max)
+  }
+
+  const decrement = () => {
+    count.value = Math.max(count.value - step, min)
+  }
+
+  const reset = () => {
+    count.value = initial
+  }
+
+  const isMin = computed(() => count.value <= min)
+  const isMax = computed(() => count.value >= max)
+
+  return {
+    count,
+    increment,
+    decrement,
+    reset,
+    isMin,
+    isMax,
+  }
+}
+```
+
+```vue
+<script setup lang="ts">
+import { useCounter } from '@/composables/useCounter'
+
+const cart = useCounter(0, { min: 0, max: 99 })
+const steps = useCounter(1, { min: 1, max: 10, step: 1 })
+</script>
+
+<template>
+  <div>
+    <button @click="cart.decrement" :disabled="cart.isMin.value">−</button>
+    {{ cart.count.value }}
+    <button @click="cart.increment" :disabled="cart.isMax.value">+</button>
+  </div>
+</template>
+```
+
+---
+
+## VueUse — библиотека готовых composables
+
+[VueUse](https://vueuse.org) — это коллекция из **200+ готовых composables**. Не изобретай велосипед! 🚲
+
+```bash
+npm install @vueuse/core
+```
+
+### Самые полезные composables из VueUse:
+
+```typescript
+import {
+  // Браузер
+  useLocalStorage,      // Персистентное состояние
+  useSessionStorage,    // Сессионное хранилище
+  useCookies,           // Работа с куками
+  useClipboard,         // Буфер обмена
+  useGeolocation,       // Геолокация
+  usePermission,        // Разрешения браузера
+  useFullscreen,        // Полноэкранный режим
+  useWakeLock,          // Блокировка сна экрана
+
+  // Сенсоры
+  useMouse,             // Позиция мыши
+  useMouseInElement,    // Мышь в элементе
+  useScroll,            // Скролл
+  useIntersectionObserver, // Видимость элемента
+  useResizeObserver,    // Изменение размера
+  useKeyModifier,       // Клавиши-модификаторы
+  useKeyboard,          // Клавиатура
+  useGamepad,           // Геймпад!
+
+  // Состояние
+  useRefHistory,        // История изменений ref
+  useUndoRedo,          // Undo/Redo
+  useDebounceFn,        // Дебаунс функции
+  useThrottleFn,        // Throttle функции
+  useToggle,            // Переключатель
+  useCounter,           // Счётчик
+
+  // Сеть
+  useFetch,             // HTTP запросы
+  useWebSocket,         // WebSocket
+  useEventSource,       // Server-Sent Events
+  useOnline,            // Онлайн статус
+
+  // Анимация
+  useTransition,        // Анимация чисел
+  useAnimate,           // Web Animations API
+
+  // Утилиты
+  useTimeAgo,           // "5 минут назад"
+  useDateFormat,        // Форматирование дат
+  useCloned,            // Глубокое клонирование
+} from '@vueuse/core'
+```
+
+### Пример использования VueUse:
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+import {
+  useClipboard,
+  useOnline,
+  useTimeAgo,
+  useIntersectionObserver
+} from '@vueuse/core'
+
+// Буфер обмена
+const { copy, copied, text } = useClipboard()
+
+// Статус сети
+const isOnline = useOnline()
+
+// Время "5 минут назад"
+const date = ref(new Date('2024-01-15'))
+const timeAgo = useTimeAgo(date)
+
+// Lazy loading
+const target = ref<HTMLElement | null>(null)
+const isVisible = ref(false)
+
+useIntersectionObserver(target, ([entry]) => {
+  isVisible.value = entry.isIntersecting
+})
+</script>
+
+<template>
+  <div>
+    <p>{{ isOnline ? '🟢 Online' : '🔴 Offline' }}</p>
+    <p>{{ timeAgo }}</p>
+
+    <button @click="copy('Hello Vue!')">
+      {{ copied ? '✅ Скопировано!' : '📋 Копировать' }}
+    </button>
+
+    <div ref="target">
+      <img v-if="isVisible" src="/heavy-image.jpg" />
+      <div v-else>Загрузится когда станет видимым</div>
+    </div>
+  </div>
+</template>
+```
+
+---
+
+## Composable vs Mixin vs Service
+
+```
+┌─────────────┬──────────────┬────────────────┬──────────────────┐
+│             │   Mixin      │  Composable    │    Service       │
+├─────────────┼──────────────┼────────────────┼──────────────────┤
+│ Синтаксис   │ Options API  │ Composition API│  Обычный класс   │
+│ Реактивность│ ✅ через this │ ✅ ref/reactive │ ❌ нет           │
+│ Lifecycle   │ ✅ да         │ ✅ да           │ ❌ нет           │
+│ Параметры   │ ❌ нет        │ ✅ аргументы   │ ✅ constructor    │
+│ TypeScript  │ 😢 плохо     │ ✅ отлично     │ ✅ отлично        │
+│ Конфликты   │ ❌ возможны   │ ✅ нет          │ ✅ нет           │
+│ Тестировать │ 😢 сложно    │ ✅ легко        │ ✅ легко          │
+└─────────────┴──────────────┴────────────────┴──────────────────┘
+
+Вывод: Composable — лучший выбор для Vue 3!
+Service (через provide/inject) — для глобальных singleton'ов без реактивности.
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, useCallback } from 'react';
+
+const BG = '#0f172a';
+const GREEN = '#42b883';
+const DARK = '#35495e';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+
+// ---- Симуляция composables ----
+
+function useMouse() {
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  useEffect(() => {
+    const handler = (e: MouseEvent) => setPos({ x: e.clientX, y: e.clientY });
+    window.addEventListener('mousemove', handler);
+    return () => window.removeEventListener('mousemove', handler);
+  }, []);
+  return pos;
+}
+
+function useLocalStorage<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(() => {
+    try { return JSON.parse(localStorage.getItem(key) || '') as T; }
+    catch { return initial; }
+  });
+  const set = useCallback((v: T) => {
+    setValue(v);
+    localStorage.setItem(key, JSON.stringify(v));
+  }, [key]);
+  return [value, set] as const;
+}
+
+function useDebounce<T>(value: T, delay = 300): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
+function useCounter(initial = 0, min = -Infinity, max = Infinity) {
+  const [count, setCount] = useState(initial);
+  return {
+    count,
+    increment: () => setCount(c => Math.min(c + 1, max)),
+    decrement: () => setCount(c => Math.max(c - 1, min)),
+    reset: () => setCount(initial),
+    isMin: count <= min,
+    isMax: count >= max,
+  };
+}
+
+function useOnline() {
+  const [online, setOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+  }, []);
+  return online;
+}
+
+// ---- App ----
+
+type Demo = 'mouse' | 'localStorage' | 'fetch' | 'debounce' | 'counter';
+
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('mouse');
+  const mouse = useMouse();
+  const [name, setName] = useLocalStorage('demo-name', 'Яша');
+  const [query, setQuery] = useState('');
+  const debouncedQuery = useDebounce(query, 500);
+  const counter = useCounter(0, 0, 10);
+  const isOnline = useOnline();
+  const [fetchData, setFetchData] = useState<any>(null);
+  const [fetching, setFetching] = useState(false);
+
+  useEffect(() => {
+    if (!debouncedQuery) { setFetchData(null); return; }
+    setFetching(true);
+    fetch(\`https://jsonplaceholder.typicode.com/posts/\${Math.ceil(Math.random() * 5)}\`)
+      .then(r => r.json())
+      .then(d => { setFetchData(d); setFetching(false); })
+      .catch(() => setFetching(false));
+  }, [debouncedQuery]);
+
+  const demos: { key: Demo; label: string; icon: string }[] = [
+    { key: 'mouse', label: 'useMouse', icon: '🖱️' },
+    { key: 'localStorage', label: 'useLocalStorage', icon: '💾' },
+    { key: 'fetch', label: 'useFetch + useDebounce', icon: '🌐' },
+    { key: 'debounce', label: 'useDebounce', icon: '⏱️' },
+    { key: 'counter', label: 'useCounter', icon: '🔢' },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: GREEN, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🎣 Composables Playground</h2>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', fontSize: '0.78rem' }}>
+        <span style={{ color: isOnline ? GREEN : '#ef4444' }}>● {isOnline ? 'Online' : 'Offline'}</span>
+        <span style={{ color: '#334155' }}>|</span>
+        <span style={{ color: '#64748b' }}>useOnline() из VueUse</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
+        {demos.map(d => (
+          <button key={d.key} onClick={() => setDemo(d.key)} style={{
+            padding: '0.4rem 0.75rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+            background: demo === d.key ? GREEN : CARD,
+            color: demo === d.key ? '#0f172a' : '#94a3b8',
+            fontWeight: demo === d.key ? 700 : 400, fontSize: '0.78rem',
+          }}>
+            {d.icon} {d.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1.25rem' }}>
+        {/* useMouse */}
+        {demo === 'mouse' && (
+          <div>
+            <div style={{ color: '#64748b', fontSize: '0.78rem', marginBottom: '1rem' }}>
+              {'// composables/useMouse.ts — отслеживание позиции курсора'}
+            </div>
+            <div style={{ background: '#0a0f1e', padding: '1.5rem', borderRadius: '8px', textAlign: 'center', marginBottom: '1rem', minHeight: '120px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '0.5rem' }}>🖱️</div>
+              <div style={{ color: GREEN, fontSize: '1.5rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                x: {mouse.x}, y: {mouse.y}
+              </div>
+              <div style={{ color: '#475569', fontSize: '0.78rem', marginTop: '0.25rem' }}>
+                Двигай мышью по экрану!
+              </div>
+            </div>
+            <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.78rem' }}>
+              <span style={{ color: '#7c3aed' }}>const </span>
+              <span style={{ color: '#60a5fa' }}>{'{ x, y }'}</span>
+              <span style={{ color: '#e2e8f0' }}> = </span>
+              <span style={{ color: GREEN }}>useMouse()</span>
+              <span style={{ color: '#94a3b8' }}>{' // onMounted + onUnmounted внутри!'}</span>
+            </div>
+          </div>
+        )}
+
+        {/* useLocalStorage */}
+        {demo === 'localStorage' && (
+          <div>
+            <div style={{ color: '#64748b', fontSize: '0.78rem', marginBottom: '1rem' }}>
+              {'// Значение сохраняется даже после перезагрузки!'}
+            </div>
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={{ color: '#94a3b8', fontSize: '0.8rem', display: 'block', marginBottom: '0.4rem' }}>Твоё имя:</label>
+              <input
+                value={name}
+                onChange={e => setName(e.target.value)}
+                style={{
+                  width: '100%', padding: '0.6rem', borderRadius: '6px',
+                  border: \`1px solid \${BORDER}\`, background: '#0a0f1e', color: '#e2e8f0',
+                  fontSize: '1rem', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.82rem' }}>
+              <span style={{ color: '#64748b' }}>localStorage['demo-name'] = </span>
+              <span style={{ color: GREEN }}>"{name}"</span>
+            </div>
+            <p style={{ color: '#475569', fontSize: '0.78rem', marginTop: '0.75rem' }}>
+              💡 Перезагрузи страницу — имя сохранится! Это useLocalStorage в действии.
+            </p>
+          </div>
+        )}
+
+        {/* useFetch + useDebounce */}
+        {demo === 'fetch' && (
+          <div>
+            <div style={{ color: '#64748b', fontSize: '0.78rem', marginBottom: '0.75rem' }}>
+              {'// useFetch + useDebounce — запрос через 500мс после остановки ввода'}
+            </div>
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Введи что-нибудь для поиска..."
+              style={{
+                width: '100%', padding: '0.6rem', borderRadius: '6px',
+                border: \`1px solid \${BORDER}\`, background: '#0a0f1e', color: '#e2e8f0',
+                fontSize: '0.9rem', marginBottom: '0.75rem', boxSizing: 'border-box',
+              }}
+            />
+            {fetching && <div style={{ color: '#f59e0b', fontSize: '0.82rem' }}>⏳ Запрос...</div>}
+            {fetchData && !fetching && (
+              <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px' }}>
+                <div style={{ color: GREEN, fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.4rem' }}>{fetchData.title}</div>
+                <div style={{ color: '#64748b', fontSize: '0.78rem' }}>{fetchData.body?.slice(0, 100)}...</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* useDebounce standalone */}
+        {demo === 'debounce' && (
+          <div>
+            <div style={{ color: '#64748b', fontSize: '0.78rem', marginBottom: '0.75rem' }}>
+              {'// Реальное vs debounced (500мс) значение'}
+            </div>
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Быстро набирай текст..."
+              style={{
+                width: '100%', padding: '0.6rem', borderRadius: '6px',
+                border: \`1px solid \${BORDER}\`, background: '#0a0f1e', color: '#e2e8f0',
+                fontSize: '0.9rem', marginBottom: '1rem', boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+              <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px' }}>
+                <div style={{ color: '#ef4444', fontSize: '0.7rem', marginBottom: '0.3rem' }}>Текущее (каждое нажатие):</div>
+                <div style={{ color: '#e2e8f0', fontSize: '0.85rem', minHeight: '1.2em' }}>{query || '...'}</div>
+              </div>
+              <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px' }}>
+                <div style={{ color: GREEN, fontSize: '0.7rem', marginBottom: '0.3rem' }}>Debounced (через 500мс):</div>
+                <div style={{ color: GREEN, fontSize: '0.85rem', minHeight: '1.2em' }}>{debouncedQuery || '...'}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* useCounter */}
+        {demo === 'counter' && (
+          <div>
+            <div style={{ color: '#64748b', fontSize: '0.78rem', marginBottom: '1rem' }}>
+              {'// useCounter(0, { min: 0, max: 10 }) — счётчик с ограничениями'}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '1rem', marginBottom: '1.5rem' }}>
+              <button onClick={counter.decrement} disabled={counter.isMin} style={{
+                width: '44px', height: '44px', borderRadius: '8px', border: \`1px solid \${BORDER}\`,
+                background: counter.isMin ? '#1a2540' : DARK, color: counter.isMin ? '#334155' : '#fff',
+                fontSize: '1.4rem', cursor: counter.isMin ? 'not-allowed' : 'pointer',
+              }}>−</button>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ color: GREEN, fontSize: '3rem', fontWeight: 900, lineHeight: 1 }}>{counter.count}</div>
+                <div style={{ color: '#475569', fontSize: '0.72rem' }}>min: 0 · max: 10</div>
+              </div>
+              <button onClick={counter.increment} disabled={counter.isMax} style={{
+                width: '44px', height: '44px', borderRadius: '8px', border: \`1px solid \${BORDER}\`,
+                background: counter.isMax ? '#1a2540' : GREEN, color: counter.isMax ? '#334155' : '#0f172a',
+                fontSize: '1.4rem', cursor: counter.isMax ? 'not-allowed' : 'pointer', fontWeight: 700,
+              }}>+</button>
+            </div>
+            <button onClick={counter.reset} style={{
+              width: '100%', padding: '0.5rem', borderRadius: '6px', border: 'none',
+              background: BORDER, color: '#94a3b8', cursor: 'pointer', fontSize: '0.82rem',
+            }}>
+              🔄 Сбросить
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

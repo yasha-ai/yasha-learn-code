@@ -1,0 +1,604 @@
+## 🛡️ Middleware маршрутов в Nuxt 3
+
+Middleware маршрутов позволяют выполнять код перед переходом на страницу. Это ключевой механизм для защиты маршрутов, редиректов, логирования навигации и проверки прав доступа.
+
+---
+
+## 📁 Виды middleware
+
+Nuxt поддерживает три вида middleware:
+
+```
+middleware/
+├── auth.ts              # именованный middleware
+├── admin.ts             # именованный middleware
+├── log.global.ts        # глобальный (выполняется для всех страниц)
+└── analytics.global.ts  # глобальный
+```
+
+### 1. Именованные middleware
+Подключаются явно через `definePageMeta`:
+
+```vue
+<script setup>
+definePageMeta({
+  middleware: ['auth', 'admin']
+})
+</script>
+```
+
+### 2. Глобальные middleware (*.global.ts)
+Выполняются автоматически при каждой навигации:
+
+```typescript
+// middleware/log.global.ts
+export default defineNuxtRouteMiddleware((to, from) => {
+  console.log(`Навигация: ${from.path} → ${to.path}`)
+})
+```
+
+### 3. Инлайн middleware
+Определяются прямо в компоненте страницы:
+
+```vue
+<script setup>
+definePageMeta({
+  middleware: defineNuxtRouteMiddleware((to, from) => {
+    // Логика прямо в компоненте
+  })
+})
+</script>
+```
+
+---
+
+## 🔐 Middleware аутентификации
+
+Самый распространённый паттерн — защита маршрутов:
+
+```typescript
+// middleware/auth.ts
+export default defineNuxtRouteMiddleware((to, from) => {
+  const user = useSupabaseUser()
+  // или
+  const { status } = useAuth()
+
+  if (!user.value) {
+    return navigateTo('/login', {
+      redirectCode: 301,
+      query: { redirect: to.fullPath }
+    })
+  }
+})
+```
+
+```vue
+<!-- pages/dashboard.vue -->
+<script setup lang="ts">
+definePageMeta({
+  middleware: 'auth'
+})
+</script>
+```
+
+---
+
+## ↩️ navigateTo
+
+`navigateTo` — утилита для программной навигации внутри middleware:
+
+```typescript
+// middleware/redirect.ts
+export default defineNuxtRouteMiddleware((to, from) => {
+  // Простой редирект
+  if (to.path === '/old-path') {
+    return navigateTo('/new-path')
+  }
+
+  // Редирект с кодом статуса
+  if (to.path === '/moved') {
+    return navigateTo('https://new-site.com', {
+      external: true,
+      redirectCode: 301
+    })
+  }
+
+  // Редирект с сохранением query-параметров
+  if (!to.query.ref) {
+    return navigateTo({
+      path: to.path,
+      query: { ...to.query, ref: 'default' }
+    })
+  }
+})
+```
+
+---
+
+## 🚫 abortNavigation
+
+Останавливает навигацию без редиректа:
+
+```typescript
+// middleware/maintenance.ts
+export default defineNuxtRouteMiddleware((to) => {
+  const config = useRuntimeConfig()
+
+  if (config.public.maintenanceMode) {
+    // Остановить навигацию с кодом ошибки
+    return abortNavigation({
+      statusCode: 503,
+      message: 'Сайт на техническом обслуживании'
+    })
+  }
+})
+```
+
+```typescript
+// middleware/access.ts
+export default defineNuxtRouteMiddleware((to) => {
+  const user = useUser()
+
+  if (to.meta.requiresAdmin && !user.value?.isAdmin) {
+    // Просто отменить переход
+    return abortNavigation()
+  }
+})
+```
+
+---
+
+## 🔑 Middleware проверки ролей
+
+```typescript
+// middleware/admin.ts
+export default defineNuxtRouteMiddleware(async (to) => {
+  const { $auth } = useNuxtApp()
+
+  if (!$auth.isAuthenticated) {
+    return navigateTo('/login')
+  }
+
+  if (!$auth.user?.roles.includes('admin')) {
+    return navigateTo('/403')
+  }
+})
+```
+
+```typescript
+// middleware/permissions.ts
+export default defineNuxtRouteMiddleware((to) => {
+  const userStore = useUserStore()
+  const requiredPermission = to.meta.permission as string
+
+  if (requiredPermission && !userStore.hasPermission(requiredPermission)) {
+    return abortNavigation({
+      statusCode: 403,
+      message: `Недостаточно прав: требуется "${requiredPermission}"`
+    })
+  }
+})
+```
+
+Использование:
+
+```vue
+<!-- pages/users/manage.vue -->
+<script setup lang="ts">
+definePageMeta({
+  middleware: ['auth', 'permissions'],
+  permission: 'users:manage'
+})
+</script>
+```
+
+---
+
+## 🌍 Глобальные middleware
+
+```typescript
+// middleware/analytics.global.ts
+export default defineNuxtRouteMiddleware((to, from) => {
+  // Отправка события в аналитику при каждом переходе
+  if (process.client) {
+    const { $gtag } = useNuxtApp()
+    $gtag?.('event', 'page_view', {
+      page_title: document.title,
+      page_path: to.fullPath
+    })
+  }
+})
+```
+
+```typescript
+// middleware/locale.global.ts
+export default defineNuxtRouteMiddleware((to) => {
+  const { locale, availableLocales, defaultLocale } = useI18n()
+
+  // Определение языка из URL
+  const pathLocale = to.path.split('/')[1]
+  if (availableLocales.includes(pathLocale)) {
+    locale.value = pathLocale
+  } else {
+    locale.value = defaultLocale
+  }
+})
+```
+
+---
+
+## ⏱️ Порядок выполнения middleware
+
+Важно понимать порядок выполнения при нескольких middleware:
+
+```
+1. Глобальные middleware (в алфавитном порядке)
+2. Именованные middleware (в порядке объявления в массиве)
+3. Инлайн middleware
+```
+
+```vue
+<script setup lang="ts">
+definePageMeta({
+  // Порядок: сначала auth, потом admin
+  middleware: ['auth', 'admin']
+})
+</script>
+```
+
+---
+
+## 🖥️ Серверный middleware vs Route Middleware
+
+В Nuxt 3 существуют два разных типа middleware:
+
+### Route Middleware (клиент + SSR)
+Файлы в `middleware/` — выполняются перед навигацией.
+
+### Server Middleware (только сервер)
+Файлы в `server/middleware/` — выполняются для каждого HTTP-запроса:
+
+```typescript
+// server/middleware/cors.ts
+export default defineEventHandler((event) => {
+  setResponseHeaders(event, {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+  })
+
+  if (getMethod(event) === 'OPTIONS') {
+    event.node.res.statusCode = 204
+    return null
+  }
+})
+```
+
+```typescript
+// server/middleware/auth.ts
+export default defineEventHandler(async (event) => {
+  const token = getHeader(event, 'authorization')?.replace('Bearer ', '')
+
+  if (event.path.startsWith('/api/protected')) {
+    if (!token) {
+      throw createError({
+        statusCode: 401,
+        message: 'Требуется авторизация'
+      })
+    }
+
+    try {
+      const payload = verifyToken(token)
+      event.context.user = payload
+    } catch {
+      throw createError({
+        statusCode: 401,
+        message: 'Недействительный токен'
+      })
+    }
+  }
+})
+```
+
+---
+
+## 🧪 Тестирование middleware
+
+```typescript
+// tests/middleware/auth.test.ts
+import { describe, it, expect, vi } from 'vitest'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+
+const { useUser } = await mockNuxtImport('useUser', () => ({
+  useUser: vi.fn()
+}))
+
+describe('auth middleware', () => {
+  it('redirects unauthenticated users to /login', async () => {
+    useUser.mockReturnValue(ref(null))
+    
+    const middleware = await import('~/middleware/auth')
+    const to = { path: '/dashboard', fullPath: '/dashboard' }
+    const from = { path: '/' }
+    
+    const result = middleware.default(to, from)
+    expect(result).toEqual(expect.objectContaining({
+      path: '/login'
+    }))
+  })
+})
+```
+
+---
+
+## 📌 Паттерны использования
+
+| Паттерн | Middleware | Применение |
+|---------|-----------|-----------|
+| Проверка авторизации | `auth.ts` | Защита всех приватных страниц |
+| Проверка ролей | `admin.ts` | Разграничение доступа |
+| Редирект | `redirect.ts` | Переадресация устаревших URLs |
+| Аналитика | `analytics.global.ts` | Трекинг всех переходов |
+| Техобслуживание | `maintenance.global.ts` | Режим обслуживания |
+| Локаль | `locale.global.ts` | Определение языка |
+
+---
+
+<Playground
+  template="react"
+  files={{
+    '/App.tsx': `import { useState } from 'react'
+
+const ROUTES = [
+  { path: '/', label: 'Главная', icon: '🏠', middleware: [] },
+  { path: '/about', label: 'О нас', icon: 'ℹ️', middleware: [] },
+  { path: '/dashboard', label: 'Дашборд', icon: '📊', middleware: ['auth'] },
+  { path: '/profile', label: 'Профиль', icon: '👤', middleware: ['auth'] },
+  { path: '/admin', label: 'Администрация', icon: '⚙️', middleware: ['auth', 'admin'] },
+  { path: '/settings', label: 'Настройки', icon: '🔧', middleware: ['auth'] },
+  { path: '/reports', label: 'Отчёты', icon: '📈', middleware: ['auth', 'permissions'] },
+]
+
+const MIDDLEWARE = {
+  'auth': { color: '#00dc82', label: 'Auth', description: 'Проверка авторизации' },
+  'admin': { color: '#f59e0b', label: 'Admin', description: 'Проверка роли администратора' },
+  'permissions': { color: '#8b5cf6', label: 'Permissions', description: 'Проверка прав доступа' },
+}
+
+export default function App() {
+  const [isAuth, setIsAuth] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [navigating, setNavigating] = useState(false)
+  const [currentPath, setCurrentPath] = useState('/')
+  const [log, setLog] = useState([])
+
+  const addLog = (msg, type = 'info') => {
+    setLog(prev => [{
+      msg,
+      type,
+      time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    }, ...prev].slice(0, 6))
+  }
+
+  const navigate = async (route) => {
+    setNavigating(true)
+    const newLog = []
+
+    // Симуляция глобального middleware
+    addLog('🌍 analytics.global.ts — отслеживание перехода', 'global')
+
+    // Проверка именованных middleware
+    for (const mw of route.middleware) {
+      await new Promise(r => setTimeout(r, 200))
+
+      if (mw === 'auth' && !isAuth) {
+        addLog(\`🔐 auth.ts — пользователь не авторизован → /login\`, 'error')
+        addLog(\`↩️ navigateTo('/login') — переход отменён\`, 'redirect')
+        setNavigating(false)
+        return
+      }
+      if (mw === 'admin' && !isAdmin) {
+        addLog(\`👑 admin.ts — недостаточно прав → /403\`, 'error')
+        addLog(\`↩️ navigateTo('/403') — переход отменён\`, 'redirect')
+        setNavigating(false)
+        return
+      }
+      if (mw === 'permissions') {
+        addLog(\`🔑 permissions.ts — права проверены ✓\`, 'success')
+      } else {
+        addLog(\`✅ \${mw}.ts — проверка пройдена\`, 'success')
+      }
+    }
+
+    await new Promise(r => setTimeout(r, 300))
+    addLog(\`✨ Переход на \${route.path} завершён\`, 'success')
+    setCurrentPath(route.path)
+    setNavigating(false)
+  }
+
+  const logColors = {
+    info: '#94a3b8',
+    success: '#00dc82',
+    error: '#ef4444',
+    redirect: '#f59e0b',
+    global: '#8b5cf6'
+  }
+
+  return (
+    <div style={{
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '24px',
+      fontFamily: 'system-ui, sans-serif',
+      color: '#e2e8f0'
+    }}>
+      <div style={{ maxWidth: 720, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>🛡️</div>
+          <h1 style={{ color: '#00dc82', fontSize: 24, fontWeight: 700, margin: 0 }}>
+            Route Middleware
+          </h1>
+          <p style={{ color: '#94a3b8', marginTop: 6, fontSize: 14 }}>
+            Симулятор работы middleware — нажмите на маршрут
+          </p>
+        </div>
+
+        <div style={{
+          background: '#1a1a2e',
+          borderRadius: 12,
+          padding: 16,
+          marginBottom: 16,
+          border: '1px solid #1e293b'
+        }}>
+          <div style={{ fontSize: 12, color: '#64748b', marginBottom: 12 }}>Состояние пользователя</div>
+          <div style={{ display: 'flex', gap: 12 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <div
+                onClick={() => setIsAuth(!isAuth)}
+                style={{
+                  width: 40, height: 22, borderRadius: 11,
+                  background: isAuth ? '#00dc82' : '#334155',
+                  position: 'relative', cursor: 'pointer',
+                  transition: 'background 0.2s'
+                }}
+              >
+                <div style={{
+                  width: 18, height: 18, borderRadius: '50%',
+                  background: 'white', position: 'absolute',
+                  top: 2, left: isAuth ? 20 : 2,
+                  transition: 'left 0.2s'
+                }} />
+              </div>
+              <span style={{ fontSize: 13, color: isAuth ? '#00dc82' : '#64748b' }}>
+                {isAuth ? '✓ Авторизован' : '✗ Не авторизован'}
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <div
+                onClick={() => setIsAdmin(!isAdmin)}
+                style={{
+                  width: 40, height: 22, borderRadius: 11,
+                  background: isAdmin ? '#f59e0b' : '#334155',
+                  position: 'relative', cursor: 'pointer',
+                  transition: 'background 0.2s'
+                }}
+              >
+                <div style={{
+                  width: 18, height: 18, borderRadius: '50%',
+                  background: 'white', position: 'absolute',
+                  top: 2, left: isAdmin ? 20 : 2,
+                  transition: 'left 0.2s'
+                }} />
+              </div>
+              <span style={{ fontSize: 13, color: isAdmin ? '#f59e0b' : '#64748b' }}>
+                {isAdmin ? '✓ Администратор' : '✗ Обычный пользователь'}
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(2, 1fr)',
+          gap: 10,
+          marginBottom: 16
+        }}>
+          {ROUTES.map(route => {
+            const isCurrent = currentPath === route.path
+            return (
+              <div
+                key={route.path}
+                onClick={() => !navigating && navigate(route)}
+                style={{
+                  background: isCurrent ? 'rgba(0,220,130,0.1)' : '#1a1a2e',
+                  borderRadius: 10,
+                  padding: '12px 14px',
+                  border: '1px solid',
+                  borderColor: isCurrent ? '#00dc82' : '#1e293b',
+                  cursor: navigating ? 'wait' : 'pointer',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 16 }}>{route.icon}</span>
+                  {isCurrent && (
+                    <span style={{ fontSize: 10, color: '#00dc82', fontWeight: 600 }}>● текущая</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{route.label}</div>
+                <div style={{ fontFamily: 'monospace', fontSize: 11, color: '#64748b', marginBottom: 6 }}>
+                  {route.path}
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {route.middleware.length === 0
+                    ? <span style={{ fontSize: 10, color: '#334155' }}>без middleware</span>
+                    : route.middleware.map(mw => (
+                        <span key={mw} style={{
+                          fontSize: 10,
+                          padding: '2px 7px',
+                          borderRadius: 8,
+                          background: MIDDLEWARE[mw].color + '22',
+                          color: MIDDLEWARE[mw].color,
+                          fontWeight: 600
+                        }}>{mw}</span>
+                      ))
+                  }
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        <div style={{
+          background: '#1a1a2e',
+          borderRadius: 10,
+          padding: 16,
+          border: '1px solid #1e293b'
+        }}>
+          <div style={{ fontSize: 12, color: '#64748b', marginBottom: 10 }}>
+            📋 Лог middleware ({log.length} записей)
+          </div>
+          {log.length === 0 ? (
+            <div style={{ fontSize: 12, color: '#334155', textAlign: 'center', padding: '12px 0' }}>
+              Нажмите на маршрут чтобы увидеть работу middleware
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {log.map((entry, i) => (
+                <div key={i} style={{
+                  display: 'flex',
+                  gap: 10,
+                  alignItems: 'flex-start',
+                  padding: '4px 0',
+                  borderBottom: '1px solid #0f172a'
+                }}>
+                  <span style={{ fontSize: 10, color: '#475569', fontFamily: 'monospace', flexShrink: 0 }}>
+                    {entry.time}
+                  </span>
+                  <span style={{ fontSize: 12, color: logColors[entry.type] }}>
+                    {entry.msg}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+`
+  }}
+/>
+
+---
+
+## 🚀 Итоги
+
+Route Middleware в Nuxt 3 — мощный инструмент для:
+
+- **Защиты маршрутов** — проверка авторизации и ролей
+- **Редиректов** — управление потоком навигации через `navigateTo`
+- **Отмены переходов** — `abortNavigation` с кастомными ошибками
+- **Глобальных действий** — аналитика, локализация через `*.global.ts`
+- **Типобезопасности** — полная поддержка TypeScript

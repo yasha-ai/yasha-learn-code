@@ -1,0 +1,709 @@
+## Реактивность Vue 3: ref и reactive ⚡
+
+Реактивность — это сердце Vue. Когда данные меняются, интерфейс обновляется **автоматически**. Не нужно вручную обновлять DOM — Vue делает это за тебя. Но чтобы Vue «видел» изменения, данные нужно обернуть в `ref()` или `reactive()`. Давай разберёмся, когда что использовать! 🎯
+
+---
+
+### ref() — реактивная ссылка 📦
+
+`ref()` — универсальный способ сделать любое значение реактивным:
+
+```typescript
+import { ref } from 'vue'
+
+// Примитивы
+const count = ref(0)
+const message = ref('Привет')
+const isVisible = ref(true)
+
+// Объекты (тоже работает!)
+const user = ref({ name: 'Яша', age: 25 })
+
+// Массивы
+const items = ref<string[]>([])
+
+// null (для async данных)
+const data = ref<User | null>(null)
+```
+
+#### .value — обязательный доступ в скрипте
+
+```typescript
+// В скрипте — всегда через .value
+console.log(count.value)    // 0
+count.value = 42            // изменяем
+count.value++               // инкремент
+
+// Объекты через .value
+user.value.name = 'Иван'   // изменяем свойство
+user.value = { name: 'Пётр', age: 30 }  // заменяем весь объект
+```
+
+```html
+<!-- В шаблоне — .value НЕ нужен! Vue распаковывает автоматически -->
+<template>
+  <p>{{ count }}</p>           <!-- не count.value! -->
+  <p>{{ user.name }}</p>       <!-- не user.value.name! -->
+  <input v-model="message" />  <!-- не message.value! -->
+</template>
+```
+
+**Почему .value в скрипте, но не в шаблоне?**
+
+В шаблоне Vue автоматически распаковывает (unwrap) ref. В скрипте — JavaScript не знает про Vue, поэтому нужен явный `.value`.
+
+---
+
+### reactive() — реактивный объект 🗂️
+
+`reactive()` делает объект (или массив) реактивным без `.value`:
+
+```typescript
+import { reactive } from 'vue'
+
+const user = reactive({
+  name: 'Яша',
+  age: 25,
+  address: {
+    city: 'Москва',
+    street: 'Пушкина'
+  }
+})
+
+// Работа как с обычным объектом!
+user.name = 'Иван'           // ✅ реактивно
+user.age++                   // ✅ реактивно
+user.address.city = 'СПб'    // ✅ реактивно (глубокая реактивность!)
+```
+
+```html
+<template>
+  <p>{{ user.name }}, {{ user.age }} лет</p>
+  <p>Город: {{ user.address.city }}</p>
+</template>
+```
+
+#### ⚠️ Деструктуризация ломает реактивность!
+
+```typescript
+const user = reactive({ name: 'Яша', age: 25 })
+
+// ❌ ПЛОХО — деструктуризация теряет реактивность!
+const { name, age } = user
+// name и age — обычные примитивы, не реактивны
+// Изменение user.name НЕ обновит name
+
+// ✅ ХОРОШО — toRefs сохраняет реактивность
+import { toRefs } from 'vue'
+const { name, age } = toRefs(user)
+// name.value и age.value — реактивны!
+// Изменение user.name ОБНОВИТ name.value ✅
+```
+
+#### ⚠️ reactive нельзя заменить целиком!
+
+```typescript
+let state = reactive({ count: 0 })
+
+// ❌ Заменяем весь объект — реактивность потеряна!
+state = reactive({ count: 1 })  // переменная теперь новый объект
+                                 // старые ссылки никуда не делись
+
+// ✅ Правильно — обновляем свойства
+state.count = 1
+
+// ✅ Или используй ref для замены объекта целиком
+const state = ref({ count: 0 })
+state.value = { count: 1 }  // ✅ работает!
+```
+
+---
+
+### ref vs reactive — когда что? 🤔
+
+```
+✅ Используй ref() для:
+├── Примитивов (number, string, boolean)
+├── Когда нужно передавать реактивное значение в функции
+├── Когда нужно заменять объект целиком
+└── Composables (возвращать из функций)
+
+✅ Используй reactive() для:
+├── Объектов с несколькими связанными свойствами
+├── Когда не нужна деструктуризация
+└── Состояния формы (group of related fields)
+
+💡 Правило Эвана Ю (создатель Vue):
+   Используй ref() везде, где не уверен — это безопаснее!
+```
+
+```typescript
+// reactive — хорошо для форм
+const form = reactive({
+  email: '',
+  password: '',
+  rememberMe: false
+})
+
+// ref — хорошо для отдельных значений и composables
+const count = ref(0)
+const isLoading = ref(false)
+const user = ref<User | null>(null)
+```
+
+---
+
+### readonly() — неизменяемый реактивный объект 🔒
+
+```typescript
+import { ref, reactive, readonly } from 'vue'
+
+const original = reactive({ count: 0 })
+const readonlyOriginal = readonly(original)
+
+readonlyOriginal.count = 1  // ⚠️ Warning в dev, ничего не происходит
+
+// Если original меняется, readonlyOriginal тоже обновляется
+// Но через readonlyOriginal изменить нельзя!
+original.count = 5
+console.log(readonlyOriginal.count)  // 5 — синхронизируется!
+
+// Типичное применение: expose readonly внутри composable
+const useCounter = () => {
+  const count = ref(0)
+  const increment = () => count.value++
+
+  return {
+    count: readonly(count),  // нельзя изменить снаружи
+    increment                // можно только через increment
+  }
+}
+```
+
+---
+
+### shallowRef() и shallowReactive() — поверхностная реактивность 🏔️
+
+По умолчанию Vue делает **глубокую** реактивность — отслеживает изменения на всех уровнях вложенности. `shallow` варианты отслеживают только верхний уровень:
+
+```typescript
+import { shallowRef, shallowReactive } from 'vue'
+
+// shallowRef — реактивна только замена .value целиком
+const bigList = shallowRef([{ id: 1, name: 'Яша' }])
+
+// ❌ Не реактивно — вложенное изменение
+bigList.value[0].name = 'Иван'  // шаблон НЕ обновится
+
+// ✅ Реактивно — замена .value
+bigList.value = [...bigList.value, { id: 2, name: 'Иван' }]
+
+// shallowReactive — реактивны только свойства верхнего уровня
+const state = shallowReactive({
+  user: { name: 'Яша' },  // ← только эта ссылка отслеживается
+  count: 0                // ← отслеживается
+})
+
+state.count++             // ✅ реактивно
+state.user = { name: 'Иван' }  // ✅ реактивно (замена ссылки)
+state.user.name = 'Пётр' // ❌ НЕ реактивно (вложенное)
+```
+
+**Когда использовать shallow?**
+
+```typescript
+// Большие массивы с immutable данными (производительность!)
+const hugeList = shallowRef<HugeDataItem[]>([])
+
+// Данные обновляются только заменой всего массива
+const refresh = async () => {
+  hugeList.value = await fetchHugeList()  // ← только это реактивно
+}
+```
+
+---
+
+### toRef() и toRefs() — мосты к реактивности 🌉
+
+```typescript
+import { reactive, toRef, toRefs } from 'vue'
+
+const user = reactive({
+  name: 'Яша',
+  age: 25,
+  email: 'yasha@example.com'
+})
+
+// toRef() — создаёт ref на конкретное свойство reactive
+const nameRef = toRef(user, 'name')
+nameRef.value = 'Иван'  // изменяет user.name!
+console.log(user.name)  // 'Иван' — синхронизировано!
+
+// toRefs() — создаёт объект с refs на все свойства
+const { name, age, email } = toRefs(user)
+// Теперь можно деструктурировать с сохранением реактивности!
+name.value = 'Пётр'     // изменяет user.name!
+```
+
+**Главный use-case toRefs — в composables:**
+
+```typescript
+// composables/useUser.ts
+export function useUser() {
+  const user = reactive({
+    name: 'Яша',
+    role: 'admin',
+    isActive: true
+  })
+
+  // Возвращаем через toRefs — потребитель может деструктурировать!
+  return {
+    ...toRefs(user),
+    // Методы возвращаем как есть
+    updateUser: (data: Partial<User>) => Object.assign(user, data)
+  }
+}
+
+// В компоненте
+const { name, role, isActive, updateUser } = useUser()
+// name, role, isActive — реактивные refs! ✅
+```
+
+---
+
+### isRef(), isReactive(), unref() — утилиты 🔧
+
+```typescript
+import { ref, reactive, isRef, isReactive, unref } from 'vue'
+
+const count = ref(0)
+const user = reactive({ name: 'Яша' })
+
+// isRef() — проверка, является ли значение ref
+isRef(count)    // true
+isRef(0)        // false
+isRef(user)     // false
+
+// isReactive() — проверка реактивного объекта
+isReactive(user)   // true
+isReactive(count)  // false (ref, не reactive)
+
+// unref() — безопасно распаковывает ref (или возвращает значение как есть)
+unref(count)   // 0 (как count.value)
+unref(42)      // 42 (обычное число, не ref)
+unref('hello') // 'hello'
+
+// Полезно в composables, которые принимают ref ИЛИ значение
+function useDouble(value: number | Ref<number>) {
+  return computed(() => unref(value) * 2)
+}
+useDouble(5)          // работает!
+useDouble(ref(5))     // тоже работает!
+```
+
+---
+
+### Паттерны работы с реактивностью 💡
+
+#### Паттерн 1: Инициализация async данных
+
+```typescript
+import { ref, onMounted } from 'vue'
+
+interface User { id: number; name: string }
+
+const user = ref<User | null>(null)
+const loading = ref(false)
+const error = ref<string | null>(null)
+
+const loadUser = async (id: number) => {
+  loading.value = true
+  error.value = null
+  try {
+    const response = await fetch(`/api/users/${id}`)
+    user.value = await response.json()
+  } catch (e) {
+    error.value = 'Не удалось загрузить пользователя'
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(() => loadUser(1))
+```
+
+#### Паттерн 2: Состояние формы
+
+```typescript
+import { reactive } from 'vue'
+
+const form = reactive({
+  email: '',
+  password: '',
+  confirmPassword: '',
+  acceptTerms: false
+})
+
+const errors = reactive<Record<string, string>>({})
+
+const validate = () => {
+  if (!form.email) errors.email = 'Email обязателен'
+  if (form.password.length < 8) errors.password = 'Минимум 8 символов'
+  if (form.password !== form.confirmPassword) {
+    errors.confirmPassword = 'Пароли не совпадают'
+  }
+}
+
+const resetForm = () => {
+  Object.assign(form, { email: '', password: '', confirmPassword: '', acceptTerms: false })
+  Object.keys(errors).forEach(key => delete errors[key])
+}
+```
+
+#### Паттерн 3: Список с операциями
+
+```typescript
+import { ref, computed } from 'vue'
+
+interface Todo {
+  id: number
+  text: string
+  done: boolean
+}
+
+const todos = ref<Todo[]>([])
+const filter = ref<'all' | 'active' | 'done'>('all')
+
+const filteredTodos = computed(() => {
+  if (filter.value === 'active') return todos.value.filter(t => !t.done)
+  if (filter.value === 'done') return todos.value.filter(t => t.done)
+  return todos.value
+})
+
+const addTodo = (text: string) => {
+  todos.value.push({ id: Date.now(), text, done: false })
+}
+
+const toggleTodo = (id: number) => {
+  const todo = todos.value.find(t => t.id === id)
+  if (todo) todo.done = !todo.done
+}
+
+const removeTodo = (id: number) => {
+  todos.value = todos.value.filter(t => t.id !== id)
+}
+```
+
+---
+
+### Ref unwrapping — автораспаковка 🎁
+
+Vue автоматически распаковывает refs в нескольких контекстах:
+
+```typescript
+const count = ref(0)
+const state = reactive({ count })  // ref в reactive!
+
+// Внутри reactive — .value не нужен!
+state.count   // 0 (не state.count.value!)
+state.count = 5  // изменяет count.value!
+
+// Но только для верхнего уровня reactive
+const nested = reactive({ inner: { count } })
+nested.inner.count.value  // здесь .value нужен (не верхний уровень!)
+```
+
+В шаблоне все refs распаковываются:
+
+```html
+<template>
+  <!-- Всё это работает без .value в шаблоне -->
+  {{ count }}           <!-- ref<number> -->
+  {{ user.name }}       <!-- ref<User> — Vue распакует user, потом .name -->
+  {{ title }}           <!-- ref<string> -->
+</template>
+```
+
+---
+
+### Резюме ⚡
+
+Система реактивности Vue 3:
+- **`ref()`** — для примитивов и замены целых объектов, доступ через `.value`
+- **`reactive()`** — для объектов, доступ напрямую, но нельзя деструктурировать
+- **`readonly()`** — неизменяемая обёртка, синхронизируется с источником
+- **`shallowRef/shallowReactive`** — для производительности с большими данными
+- **`toRef/toRefs`** — мосты между reactive и ref, для composables
+- **`isRef/unref`** — утилиты для работы в composables
+
+Следующий шаг — computed и watch! 🔄
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from "react";
+
+// Симуляция ref() и reactive() поведения
+function useRef(initial) {
+  const [value, setValue] = useState(initial);
+  return { get value() { return value; }, setValue };
+}
+
+function useReactive(initial) {
+  const [state, setState] = useState(initial);
+  const set = (key, val) => setState(prev => ({ ...prev, [key]: val }));
+  return [state, set];
+}
+
+export default function ReactivityDemo() {
+  const [tab, setTab] = useState("ref");
+
+  // ref симуляция
+  const [count, setCount] = useState(0);
+  const [message, setMessage] = useState("Привет Vue!");
+  const [isVisible, setIsVisible] = useState(true);
+
+  // reactive симуляция
+  const [user, setUser] = useState({ name: "Яша", age: 25, city: "Москва" });
+  const setUserField = (key, val) => setUser(prev => ({ ...prev, [key]: val }));
+
+  // shallowRef симуляция
+  const [bigList, setBigList] = useState([
+    { id: 1, name: "Элемент 1" },
+    { id: 2, name: "Элемент 2" }
+  ]);
+  const [shallowLog, setShallowLog] = useState([]);
+
+  const tryShallowMutation = () => {
+    // Это не вызовет обновление в shallowRef
+    bigList[0].name = "Изменено (не сработает)";
+    setShallowLog(prev => [
+      ...prev.slice(-3),
+      "❌ bigList[0].name = '...' → НЕ реактивно в shallowRef"
+    ]);
+  };
+
+  const replaceShallowList = () => {
+    setBigList(prev => [
+      ...prev,
+      { id: Date.now(), name: "Новый элемент " + (prev.length + 1) }
+    ]);
+    setShallowLog(prev => [
+      ...prev.slice(-3),
+      "✅ bigList.value = [...] → реактивно!"
+    ]);
+  };
+
+  const tabs = [
+    { id: "ref", label: "ref()", icon: "📦" },
+    { id: "reactive", label: "reactive()", icon: "🗂️" },
+    { id: "shallow", label: "shallowRef()", icon: "🏔️" },
+    { id: "utils", label: "Утилиты", icon: "🔧" },
+  ];
+
+  const utilsData = [
+    { fn: "isRef(count)", result: "true", color: "#42b883" },
+    { fn: "isRef(42)", result: "false", color: "#ef4444" },
+    { fn: "isReactive(user)", result: "true", color: "#42b883" },
+    { fn: "unref(count)", result: String(count), color: "#f59e0b" },
+    { fn: "unref(42)", result: "42", color: "#f59e0b" },
+    { fn: "readonly(count)", result: "ReadonlyRef", color: "#a78bfa" },
+  ];
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: "20px",
+      fontFamily: "system-ui, sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ textAlign: "center", marginBottom: "20px" }}>
+        <span style={{ fontSize: "40px" }}>⚡</span>
+        <h2 style={{ margin: "8px 0 4px", color: "#42b883" }}>Реактивность Vue 3</h2>
+        <p style={{ color: "#64748b", margin: 0, fontSize: "13px" }}>
+          ref, reactive, readonly, shallowRef — интерактивная демонстрация
+        </p>
+      </div>
+
+      <div style={{ display: "flex", gap: "4px", marginBottom: "16px", flexWrap: "wrap", justifyContent: "center" }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            padding: "8px 14px", borderRadius: "8px", border: "none",
+            cursor: "pointer", fontSize: "12px", fontWeight: "bold",
+            background: tab === t.id ? "#42b883" : "#1e293b",
+            color: tab === t.id ? "#0f172a" : "#94a3b8"
+          }}>{t.icon} {t.label}</button>
+        ))}
+      </div>
+
+      {tab === "ref" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{
+            background: "#1e293b", borderRadius: "12px", padding: "16px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "12px" }}>
+              📦 ref() — реактивные примитивы
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
+              <code style={{ color: "#a78bfa", fontSize: "12px", minWidth: "80px" }}>count</code>
+              <div style={{
+                flex: 1, padding: "6px 12px", background: "#0f172a",
+                borderRadius: "6px", border: "1px solid #334155",
+                fontSize: "18px", fontWeight: "bold", color: "#42b883", textAlign: "center"
+              }}>{count}</div>
+              <button onClick={() => setCount(c => c - 1)} style={{
+                width: "32px", height: "32px", borderRadius: "6px", border: "none",
+                cursor: "pointer", background: "#ef4444", color: "white"
+              }}>−</button>
+              <button onClick={() => setCount(c => c + 1)} style={{
+                width: "32px", height: "32px", borderRadius: "6px", border: "none",
+                cursor: "pointer", background: "#42b883", color: "#0f172a"
+              }}>+</button>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
+              <code style={{ color: "#a78bfa", fontSize: "12px", minWidth: "80px" }}>message</code>
+              <input
+                value={message}
+                onChange={e => setMessage(e.target.value)}
+                style={{
+                  flex: 1, padding: "6px 12px", background: "#0f172a",
+                  borderRadius: "6px", border: "1px solid #42b883",
+                  color: "#e2e8f0", fontSize: "13px"
+                }}
+              />
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <code style={{ color: "#a78bfa", fontSize: "12px", minWidth: "80px" }}>isVisible</code>
+              <div style={{
+                flex: 1, padding: "6px 12px", background: "#0f172a",
+                borderRadius: "6px", border: "1px solid #334155",
+                color: isVisible ? "#42b883" : "#ef4444", fontSize: "13px"
+              }}>{String(isVisible)}</div>
+              <button onClick={() => setIsVisible(v => !v)} style={{
+                padding: "6px 12px", borderRadius: "6px", border: "none",
+                cursor: "pointer", background: "#334155", color: "#94a3b8", fontSize: "12px"
+              }}>toggle</button>
+            </div>
+          </div>
+
+          <div style={{
+            background: "#0f172a", borderRadius: "10px", padding: "12px",
+            border: "1px solid #1e293b", fontSize: "12px", color: "#94a3b8"
+          }}>
+            💡 В шаблоне: <code style={{ color: "#42b883" }}>{"\u007B\u007B count \u007D\u007D"}</code> — без .value!
+            В скрипте: <code style={{ color: "#f59e0b" }}>count.value</code>
+          </div>
+        </div>
+      )}
+
+      {tab === "reactive" && (
+        <div style={{
+          background: "#1e293b", borderRadius: "12px", padding: "16px",
+          border: "1px solid #334155"
+        }}>
+          <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "12px" }}>
+            🗂️ reactive() — реактивный объект user
+          </div>
+          {Object.entries(user).map(([key, val]) => (
+            <div key={key} style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px" }}>
+              <code style={{ color: "#f59e0b", fontSize: "12px", minWidth: "60px" }}>user.{key}</code>
+              <input
+                value={String(val)}
+                onChange={e => setUserField(key, e.target.value)}
+                style={{
+                  flex: 1, padding: "6px 12px", background: "#0f172a",
+                  borderRadius: "6px", border: "1px solid #42b88344",
+                  color: "#e2e8f0", fontSize: "13px"
+                }}
+              />
+            </div>
+          ))}
+          <div style={{
+            marginTop: "12px", background: "#0f172a", borderRadius: "8px",
+            padding: "10px", border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "6px" }}>Результат в шаблоне:</div>
+            <div style={{ fontSize: "14px", color: "#e2e8f0" }}>
+              {user.name}, {user.age} лет, г. {user.city}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "shallow" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{
+            background: "#1e293b", borderRadius: "12px", padding: "16px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "12px" }}>
+              🏔️ shallowRef() — только замена .value реактивна
+            </div>
+            {bigList.map(item => (
+              <div key={item.id} style={{
+                padding: "6px 10px", marginBottom: "4px",
+                background: "#0f172a", borderRadius: "6px",
+                border: "1px solid #334155", fontSize: "12px", color: "#94a3b8"
+              }}>
+                #{item.id} {item.name}
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+              <button onClick={tryShallowMutation} style={{
+                flex: 1, padding: "8px", borderRadius: "6px", border: "none",
+                cursor: "pointer", background: "#ef444422", color: "#ef4444", fontSize: "11px"
+              }}>❌ bigList[0].name = '...'</button>
+              <button onClick={replaceShallowList} style={{
+                flex: 1, padding: "8px", borderRadius: "6px", border: "none",
+                cursor: "pointer", background: "#42b88322", color: "#42b883", fontSize: "11px"
+              }}>✅ bigList.value = [...]</button>
+            </div>
+          </div>
+          {shallowLog.length > 0 && (
+            <div style={{ background: "#0f172a", borderRadius: "8px", padding: "10px" }}>
+              {shallowLog.map((l, i) => (
+                <div key={i} style={{ fontSize: "12px", color: "#94a3b8", padding: "2px 0" }}>{l}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "utils" && (
+        <div style={{
+          background: "#1e293b", borderRadius: "12px",
+          border: "1px solid #334155", overflow: "hidden"
+        }}>
+          <div style={{
+            background: "#0f172a", padding: "10px 16px",
+            borderBottom: "1px solid #334155"
+          }}>
+            <span style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold" }}>
+              🔧 Утилиты реактивности
+            </span>
+          </div>
+          {utilsData.map((item, i) => (
+            <div key={i} style={{
+              display: "flex", alignItems: "center",
+              padding: "10px 16px",
+              borderBottom: "1px solid #0f172a",
+              background: i % 2 === 0 ? "#1e293b" : "#162032"
+            }}>
+              <code style={{ flex: 1, fontSize: "13px", color: "#e2e8f0" }}>{item.fn}</code>
+              <span style={{
+                padding: "2px 10px", borderRadius: "12px",
+                fontSize: "12px", fontWeight: "bold",
+                background: item.color + "22", color: item.color
+              }}>{item.result}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

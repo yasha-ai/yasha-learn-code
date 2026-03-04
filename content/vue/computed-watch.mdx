@@ -1,0 +1,724 @@
+## computed и watch — вычисления и наблюдатели 🔄
+
+В Vue 3 есть два мощных инструмента для работы с реактивными данными: `computed` — для **вычисленных значений** (кешируется, не делает побочных эффектов), и `watch` — для **реакции на изменения** (делает побочные эффекты: запросы, сохранение, логирование). Важно не путать их назначение! 🎯
+
+---
+
+### computed() — кешированные вычисления 🧮
+
+Представь computed как «умную формулу»: пересчитывается только когда зависимости изменились:
+
+```typescript
+import { ref, computed } from 'vue'
+
+const firstName = ref('Яша')
+const lastName = ref('Смирнов')
+const items = ref([1, 2, 3, 4, 5])
+
+// Простой computed — только getter
+const fullName = computed(() => {
+  console.log('Пересчёт fullName...')
+  return `${firstName.value} ${lastName.value}`
+})
+
+// Computed от массива
+const sum = computed(() => items.value.reduce((a, b) => a + b, 0))
+const evenItems = computed(() => items.value.filter(n => n % 2 === 0))
+
+// Computed возвращает ComputedRef<T>
+console.log(fullName.value)  // 'Яша Смирнов'
+console.log(sum.value)       // 15
+```
+
+#### Кеширование — главное преимущество
+
+```typescript
+const count = ref(0)
+
+// ✅ computed — кешируется!
+const doubled = computed(() => {
+  console.log('expensive calculation!')
+  return count.value * 2
+})
+
+// В шаблоне можно использовать 100 раз — вычислится ОДИН раз
+// {{ doubled }}  {{ doubled }}  {{ doubled }}  // только 1 вызов!
+
+// ❌ Метод — вызывается КАЖДЫЙ раз при рендере
+const getDoubled = () => {
+  console.log('expensive calculation!')
+  return count.value * 2
+}
+// {{ getDoubled() }}  {{ getDoubled() }}  // 2 вызова при каждом рендере!
+```
+
+---
+
+### computed с getter и setter 🔧
+
+```typescript
+import { ref, computed } from 'vue'
+
+const firstName = ref('Яша')
+const lastName = ref('Смирнов')
+
+// Computed с getter + setter
+const fullName = computed({
+  // getter — читаем computed
+  get() {
+    return `${firstName.value} ${lastName.value}`
+  },
+  // setter — записываем в computed
+  set(newValue: string) {
+    const parts = newValue.split(' ')
+    firstName.value = parts[0] || ''
+    lastName.value = parts.slice(1).join(' ') || ''
+  }
+})
+
+// Чтение
+console.log(fullName.value)  // 'Яша Смирнов'
+
+// Запись — вызывает setter!
+fullName.value = 'Иван Петров'
+console.log(firstName.value)  // 'Иван'
+console.log(lastName.value)   // 'Петров'
+```
+
+**Применение в v-model:**
+
+```html
+<template>
+  <!-- v-model на computed с setter! -->
+  <input v-model="fullName" />
+  <p>Имя: {{ firstName }}, Фамилия: {{ lastName }}</p>
+</template>
+```
+
+---
+
+### Lazy computed с производительностью 🚀
+
+```typescript
+import { ref, computed } from 'vue'
+
+const hugeList = ref<number[]>(Array.from({ length: 10000 }, (_, i) => i))
+const sortOrder = ref<'asc' | 'desc'>('asc')
+
+// Computed пересчитывается только когда hugeList или sortOrder изменятся
+const sortedList = computed(() => {
+  return [...hugeList.value].sort((a, b) =>
+    sortOrder.value === 'asc' ? a - b : b - a
+  )
+})
+
+// Первое обращение — вычисляем
+console.log(sortedList.value)  // [0, 1, 2, ..., 9999]
+
+// Второе обращение без изменений — КЕSH, не вычисляем!
+console.log(sortedList.value)  // из кеша мгновенно ✅
+
+// Изменяем зависимость — пересчитываем
+sortOrder.value = 'desc'
+console.log(sortedList.value)  // [9999, ..., 1, 0] — пересчёт
+```
+
+---
+
+### watch() — наблюдатели ⌚
+
+`watch` реагирует на изменения и выполняет побочные эффекты:
+
+```typescript
+import { ref, watch } from 'vue'
+
+const count = ref(0)
+const searchQuery = ref('')
+
+// Простой watch — одна переменная
+watch(count, (newValue, oldValue) => {
+  console.log(`count: ${oldValue} → ${newValue}`)
+  // Здесь можно: fetch, localStorage, логирование
+})
+
+// Watch строки с дебаунсом
+let timeout: ReturnType<typeof setTimeout>
+watch(searchQuery, (query) => {
+  clearTimeout(timeout)
+  timeout = setTimeout(() => {
+    fetchResults(query)
+  }, 300)
+})
+```
+
+#### Опции watch: immediate и deep
+
+```typescript
+import { ref, reactive, watch } from 'vue'
+
+const userId = ref(1)
+const user = reactive({ name: 'Яша', settings: { theme: 'dark' } })
+
+// immediate: true — вызвать СРАЗУ при монтировании
+watch(userId, async (id) => {
+  user.name = await fetchUserName(id)
+}, { immediate: true })
+
+// deep: true — отслеживать вложенные изменения в объекте
+watch(user, (newUser) => {
+  localStorage.setItem('user', JSON.stringify(newUser))
+}, { deep: true })
+
+// Без deep — user.settings.theme не вызовет watcher!
+watch(() => user.settings.theme, (theme) => {
+  document.body.className = theme
+})
+```
+
+#### Watch нескольких источников
+
+```typescript
+import { ref, watch } from 'vue'
+
+const firstName = ref('Яша')
+const lastName = ref('Смирнов')
+const age = ref(25)
+
+// Массив источников — вызывается если ЛЮБОЙ из них изменился
+watch([firstName, lastName], ([newFirst, newLast], [oldFirst, oldLast]) => {
+  console.log(`Имя: ${oldFirst} ${oldLast} → ${newFirst} ${newLast}`)
+})
+
+// С getter функциями
+watch(
+  [() => firstName.value, () => age.value],
+  ([name, age]) => {
+    updateProfile(name, age)
+  }
+)
+```
+
+#### Остановка watcher
+
+```typescript
+import { ref, watch, onUnmounted } from 'vue'
+
+const count = ref(0)
+
+// watch возвращает функцию остановки
+const stopWatcher = watch(count, (val) => {
+  console.log('count changed:', val)
+})
+
+// Останавливаем через 5 секунд
+setTimeout(stopWatcher, 5000)
+
+// Или при размонтировании компонента (делается автоматически!)
+// Но если создаёшь watcher асинхронно — нужно останавливать вручную
+let watcher: (() => void) | null = null
+
+const startWatching = async () => {
+  await someAsyncOperation()
+  // Этот watcher НЕ будет автоматически остановлен!
+  watcher = watch(count, (val) => console.log(val))
+}
+
+onUnmounted(() => {
+  watcher?.()  // останавливаем вручную
+})
+```
+
+---
+
+### watchEffect() — авто-отслеживание зависимостей ✨
+
+`watchEffect` запускается сразу и автоматически отслеживает все refs внутри:
+
+```typescript
+import { ref, watchEffect } from 'vue'
+
+const userId = ref(1)
+const user = ref(null)
+
+// Запускается СРАЗУ (не нужен immediate: true!)
+// Автоматически отслеживает userId и перезапускается при изменении
+watchEffect(async () => {
+  // userId.value используется внутри — Vue видит зависимость!
+  user.value = await fetchUser(userId.value)
+})
+```
+
+**Когда use watchEffect вместо watch?**
+
+```typescript
+// watch — когда знаешь источник и хочешь старое значение
+watch(count, (newVal, oldVal) => {
+  console.log(`${oldVal} → ${newVal}`)
+})
+
+// watchEffect — когда несколько источников и не нужно oldVal
+watchEffect(() => {
+  document.title = `${firstName.value} ${lastName.value} | Моё приложение`
+  // Автоматически перезапустится при изменении firstName ИЛИ lastName
+})
+```
+
+---
+
+### watchPostEffect() и onWatcherCleanup() 🧹
+
+```typescript
+import { ref, watchEffect, watchPostEffect, onWatcherCleanup } from 'vue'
+
+const searchQuery = ref('')
+
+// watchPostEffect — запускается ПОСЛЕ обновления DOM
+watchPostEffect(() => {
+  // Здесь DOM уже обновлён!
+  const element = document.querySelector('.search-results')
+  element?.scrollTo({ top: 0 })
+})
+
+// Cleanup — очистка при следующем запуске или размонтировании
+watchEffect(() => {
+  const controller = new AbortController()
+
+  fetch(`/api/search?q=${searchQuery.value}`, {
+    signal: controller.signal
+  })
+  .then(r => r.json())
+  .then(data => { /* обновляем результаты */ })
+
+  // onWatcherCleanup — отменяем предыдущий запрос!
+  onWatcherCleanup(() => {
+    controller.abort()  // отменяем fetch при новом запросе
+  })
+})
+```
+
+---
+
+### Практические паттерны 💡
+
+#### Паттерн 1: Fetch при изменении route параметра
+
+```typescript
+import { ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+
+const route = useRoute()
+const post = ref(null)
+const loading = ref(false)
+
+watch(
+  () => route.params.id,
+  async (id) => {
+    if (!id) return
+    loading.value = true
+    post.value = await fetchPost(id)
+    loading.value = false
+  },
+  { immediate: true }  // загрузить сразу при монтировании
+)
+```
+
+#### Паттерн 2: Синхронизация с localStorage
+
+```typescript
+import { ref, watch } from 'vue'
+
+const theme = ref<'light' | 'dark'>(
+  (localStorage.getItem('theme') as 'light' | 'dark') || 'light'
+)
+
+// Автоматически сохраняем в localStorage при изменении
+watch(theme, (newTheme) => {
+  localStorage.setItem('theme', newTheme)
+  document.documentElement.setAttribute('data-theme', newTheme)
+}, { immediate: true })  // применяем сразу при загрузке
+```
+
+#### Паттерн 3: Дебаунс поиска
+
+```typescript
+import { ref, watch } from 'vue'
+
+const searchQuery = ref('')
+const results = ref([])
+const isSearching = ref(false)
+
+watch(searchQuery, (query) => {
+  if (!query.trim()) {
+    results.value = []
+    return
+  }
+  isSearching.value = true
+})
+
+// Дебаунс через watchEffect
+let searchTimeout: ReturnType<typeof setTimeout>
+watchEffect(() => {
+  const query = searchQuery.value
+
+  clearTimeout(searchTimeout)
+  searchTimeout = setTimeout(async () => {
+    if (!query.trim()) return
+    const data = await searchAPI(query)
+    results.value = data
+    isSearching.value = false
+  }, 300)
+})
+```
+
+#### Паттерн 4: Computed с валидацией формы
+
+```typescript
+import { reactive, computed } from 'vue'
+
+const form = reactive({
+  email: '',
+  password: '',
+  confirmPassword: ''
+})
+
+const errors = computed(() => {
+  const errs: Record<string, string> = {}
+
+  if (!form.email.includes('@')) {
+    errs.email = 'Некорректный email'
+  }
+
+  if (form.password.length < 8) {
+    errs.password = 'Минимум 8 символов'
+  }
+
+  if (form.password !== form.confirmPassword) {
+    errs.confirmPassword = 'Пароли не совпадают'
+  }
+
+  return errs
+})
+
+const isValid = computed(() => Object.keys(errors.value).length === 0)
+
+const hasError = (field: string) => computed(() => !!errors.value[field])
+```
+
+---
+
+### computed vs watch — итоговая таблица 📊
+
+| Критерий | computed | watch |
+|---------|---------|-------|
+| **Цель** | Вычислить значение | Реагировать на изменения |
+| **Кеш** | ✅ Да | ❌ Нет |
+| **Побочные эффекты** | ❌ Нельзя (fetch, DOM) | ✅ Основное применение |
+| **Старое значение** | ❌ Нет | ✅ Второй аргумент |
+| **immediate** | Всегда вычисляется | По умолчанию нет |
+| **Async** | ⚠️ Не рекомендуется | ✅ Отлично |
+| **Несколько источников** | Автоматически | Массив источников |
+
+---
+
+### Резюме 🎯
+
+- **`computed()`** — для вычислений без побочных эффектов, кешируется
+- **`computed({ get, set })`** — вычисление с setter для v-model
+- **`watch(source, handler, options)`** — реакция на конкретные изменения
+- **`watchEffect(fn)`** — автоматическое отслеживание, запуск сразу
+- **`watchPostEffect(fn)`** — после обновления DOM
+- **`onWatcherCleanup(fn)`** — очистка ресурсов (отмена fetch, etc.)
+
+Следующий урок — шаблоны и директивы! 📄
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useCallback, useMemo } from "react";
+
+// Симуляция computed и watch из Vue 3
+
+export default function ComputedWatchDemo() {
+  const [tab, setTab] = useState("computed");
+
+  // computed demo
+  const [firstName, setFirstName] = useState("Яша");
+  const [lastName, setLastName] = useState("Смирнов");
+  const [items, setItems] = useState([10, 20, 30, 40, 50]);
+  const [sortDir, setSortDir] = useState("asc");
+  const [computedLog, setComputedLog] = useState([]);
+
+  // Симуляция computed с "кешем"
+  const [lastFullName, setLastFullName] = useState("");
+  const fullName = useMemo(() => {
+    const result = \`\${firstName} \${lastName}\`;
+    setComputedLog(prev => [...prev.slice(-4),
+      \`✅ fullName пересчитан: "\${result}"\`
+    ]);
+    return result;
+  }, [firstName, lastName]);
+
+  const sortedItems = useMemo(() => {
+    return [...items].sort((a, b) => sortDir === "asc" ? a - b : b - a);
+  }, [items, sortDir]);
+
+  const total = useMemo(() => items.reduce((a, b) => a + b, 0), [items]);
+
+  // watch demo
+  const [searchQuery, setSearchQuery] = useState("");
+  const [watchLog, setWatchLog] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [userId, setUserId] = useState(1);
+  const [loadedUser, setLoadedUser] = useState(null);
+
+  // Симуляция watch с debounce
+  useEffect(() => {
+    if (!searchQuery) return;
+    setIsSearching(true);
+    setWatchLog(prev => [...prev.slice(-4),
+      \`👀 watch вызван: query = "\${searchQuery}"\`
+    ]);
+    const timer = setTimeout(() => {
+      setIsSearching(false);
+      setWatchLog(prev => [...prev.slice(-4),
+        \`✅ fetchResults("\${searchQuery}") выполнен\`
+      ]);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Симуляция watch с immediate
+  useEffect(() => {
+    setWatchLog(prev => [...prev.slice(-4),
+      \`🚀 watch(userId, { immediate: true }): загружаем user #\${userId}\`
+    ]);
+    const timer = setTimeout(() => {
+      setLoadedUser({ id: userId, name: \`Пользователь #\${userId}\`, role: "user" });
+      setWatchLog(prev => [...prev.slice(-4),
+        \`✅ user #\${userId} загружен!\`
+      ]);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [userId]);
+
+  const addItem = () => {
+    const newVal = Math.floor(Math.random() * 100);
+    setItems(prev => [...prev, newVal]);
+  };
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: "20px",
+      fontFamily: "system-ui, sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ textAlign: "center", marginBottom: "20px" }}>
+        <span style={{ fontSize: "40px" }}>🔄</span>
+        <h2 style={{ margin: "8px 0 4px", color: "#42b883" }}>computed и watch</h2>
+        <p style={{ color: "#64748b", margin: 0, fontSize: "13px" }}>
+          Вычисления и наблюдатели Vue 3
+        </p>
+      </div>
+
+      <div style={{ display: "flex", gap: "4px", marginBottom: "16px", justifyContent: "center" }}>
+        {[["computed", "computed()"], ["watch", "watch()"], ["watchEffect", "watchEffect()"]].map(([val, label]) => (
+          <button key={val} onClick={() => setTab(val)} style={{
+            padding: "8px 16px", borderRadius: "8px", border: "none",
+            cursor: "pointer", fontSize: "12px", fontWeight: "bold",
+            background: tab === val ? "#42b883" : "#1e293b",
+            color: tab === val ? "#0f172a" : "#94a3b8"
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {tab === "computed" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{
+            background: "#1e293b", borderRadius: "12px", padding: "16px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "12px" }}>
+              🧮 computed() — изменяй имена, увидишь пересчёт
+            </div>
+            <div style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
+              <input value={firstName} onChange={e => setFirstName(e.target.value)}
+                placeholder="Имя" style={{
+                  flex: 1, padding: "6px", borderRadius: "6px",
+                  background: "#0f172a", border: "1px solid #42b883",
+                  color: "#e2e8f0", fontSize: "13px"
+                }} />
+              <input value={lastName} onChange={e => setLastName(e.target.value)}
+                placeholder="Фамилия" style={{
+                  flex: 1, padding: "6px", borderRadius: "6px",
+                  background: "#0f172a", border: "1px solid #42b883",
+                  color: "#e2e8f0", fontSize: "13px"
+                }} />
+            </div>
+            <div style={{
+              padding: "10px 14px", background: "#0f172a",
+              borderRadius: "8px", border: "1px solid #334155"
+            }}>
+              <span style={{ color: "#64748b", fontSize: "12px" }}>fullName.value: </span>
+              <span style={{ color: "#42b883", fontWeight: "bold" }}>{fullName}</span>
+            </div>
+          </div>
+
+          <div style={{
+            background: "#1e293b", borderRadius: "12px", padding: "16px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "10px" }}>
+              📊 computed от массива: total = {total}, sorted {sortDir}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px" }}>
+              {sortedItems.map((n, i) => (
+                <span key={i} style={{
+                  padding: "4px 10px", borderRadius: "20px",
+                  background: "#35495e", color: "#42b883",
+                  fontSize: "13px", fontWeight: "bold"
+                }}>{n}</span>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <button onClick={addItem} style={{
+                flex: 1, padding: "8px", borderRadius: "6px", border: "none",
+                cursor: "pointer", background: "#42b883", color: "#0f172a", fontSize: "12px"
+              }}>+ Добавить</button>
+              <button onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")} style={{
+                flex: 1, padding: "8px", borderRadius: "6px", border: "none",
+                cursor: "pointer", background: "#35495e", color: "#42b883", fontSize: "12px"
+              }}>Сортировка: {sortDir}</button>
+            </div>
+          </div>
+
+          <div style={{ background: "#0f172a", borderRadius: "8px", padding: "10px", border: "1px solid #1e293b" }}>
+            <div style={{ fontSize: "11px", color: "#475569", marginBottom: "6px" }}>Лог computed:</div>
+            {computedLog.slice(-3).map((l, i) => (
+              <div key={i} style={{ fontSize: "11px", color: "#64748b", padding: "2px 0" }}>{l}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === "watch" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{
+            background: "#1e293b", borderRadius: "12px", padding: "16px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "10px" }}>
+              🔍 watch(searchQuery) с debounce 300ms
+            </div>
+            <div style={{ position: "relative" }}>
+              <input
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Введи запрос для поиска..."
+                style={{
+                  width: "100%", padding: "8px 36px 8px 12px",
+                  borderRadius: "6px", border: "1px solid #42b883",
+                  background: "#0f172a", color: "#e2e8f0",
+                  fontSize: "13px", boxSizing: "border-box"
+                }}
+              />
+              {isSearching && (
+                <span style={{
+                  position: "absolute", right: "10px", top: "50%",
+                  transform: "translateY(-50%)", fontSize: "14px"
+                }}>⏳</span>
+              )}
+            </div>
+          </div>
+
+          <div style={{
+            background: "#1e293b", borderRadius: "12px", padding: "16px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "10px" }}>
+              👤 watch(userId, {"{"} immediate: true {"}"})
+            </div>
+            <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
+              {[1, 2, 3, 4].map(id => (
+                <button key={id} onClick={() => setUserId(id)} style={{
+                  flex: 1, padding: "8px", borderRadius: "6px", border: "none",
+                  cursor: "pointer",
+                  background: userId === id ? "#42b883" : "#0f172a",
+                  color: userId === id ? "#0f172a" : "#94a3b8",
+                  fontSize: "12px", fontWeight: "bold"
+                }}>User #{id}</button>
+              ))}
+            </div>
+            {loadedUser && (
+              <div style={{
+                padding: "10px", background: "#0f172a",
+                borderRadius: "6px", border: "1px solid #334155"
+              }}>
+                <span style={{ color: "#64748b", fontSize: "12px" }}>Загружен: </span>
+                <span style={{ color: "#42b883", fontSize: "12px" }}>{loadedUser.name}</span>
+              </div>
+            )}
+          </div>
+
+          <div style={{ background: "#0f172a", borderRadius: "8px", padding: "10px" }}>
+            <div style={{ fontSize: "11px", color: "#475569", marginBottom: "6px" }}>Лог watch:</div>
+            {watchLog.slice(-4).map((l, i) => (
+              <div key={i} style={{ fontSize: "11px", color: "#64748b", padding: "2px 0" }}>{l}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === "watchEffect" && (
+        <div style={{
+          background: "#1e293b", borderRadius: "12px", padding: "16px",
+          border: "1px solid #334155"
+        }}>
+          <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "12px" }}>
+            ✨ watchEffect vs watch — сравнение
+          </div>
+          {[
+            {
+              title: "watch(source, handler)",
+              code: "watch(userId, async (id) => {\n  user.value = await fetchUser(id)\n})",
+              pros: ["Знает старое значение", "Явный источник", "Lazy по умолчанию"],
+              cons: ["Нужно указывать источник", "immediate: true для сразу"]
+            },
+            {
+              title: "watchEffect(fn)",
+              code: "watchEffect(async () => {\n  // userId используется внутри\n  user.value = await fetchUser(userId.value)\n})",
+              pros: ["Запускается сразу", "Автоотслеживание зависимостей"],
+              cons: ["Нет старого значения", "Неявные зависимости"]
+            }
+          ].map((item, i) => (
+            <div key={i} style={{
+              background: "#0f172a", borderRadius: "8px",
+              padding: "12px", marginBottom: "10px",
+              border: "1px solid #334155"
+            }}>
+              <div style={{ fontSize: "12px", fontWeight: "bold", color: "#42b883", marginBottom: "8px" }}>
+                {item.title}
+              </div>
+              <pre style={{ margin: "0 0 8px", fontSize: "11px", color: "#e2e8f0", lineHeight: 1.6 }}>
+                {item.code}
+              </pre>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <div style={{ flex: 1 }}>
+                  {item.pros.map((p, j) => (
+                    <div key={j} style={{ fontSize: "11px", color: "#42b883" }}>✅ {p}</div>
+                  ))}
+                </div>
+                <div style={{ flex: 1 }}>
+                  {item.cons.map((c, j) => (
+                    <div key={j} style={{ fontSize: "11px", color: "#94a3b8" }}>⚠️ {c}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

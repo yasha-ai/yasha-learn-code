@@ -1,0 +1,713 @@
+## 🔌 Плагины в Nuxt 3
+
+Плагины — это мощный механизм расширения функциональности Nuxt-приложения. Они позволяют подключать Vue-плагины, регистрировать глобальные компоненты, добавлять вспомогательные функции в контекст приложения и инициализировать сторонние библиотеки.
+
+---
+
+## 📁 Структура директории plugins/
+
+Все плагины Nuxt 3 располагаются в директории `plugins/`. Nuxt автоматически обнаруживает и загружает файлы из этой директории:
+
+```
+plugins/
+├── my-plugin.ts          # загружается на клиенте и сервере
+├── analytics.client.ts   # только на клиенте
+├── db.server.ts          # только на сервере
+└── 01.init.ts            # порядок загрузки через префикс
+```
+
+---
+
+## 🛠️ Создание плагина с defineNuxtPlugin
+
+Основа любого плагина — функция `defineNuxtPlugin`. Она принимает callback, который получает экземпляр Nuxt-приложения:
+
+```typescript
+// plugins/my-plugin.ts
+export default defineNuxtPlugin((nuxtApp) => {
+  console.log('Плагин инициализирован!')
+})
+```
+
+`defineNuxtPlugin` обеспечивает типизацию и интеграцию с системой плагинов Nuxt.
+
+---
+
+## 💉 Инъекция в контекст приложения
+
+Одна из ключевых возможностей плагинов — предоставление вспомогательных функций, доступных через `useNuxtApp()`:
+
+```typescript
+// plugins/api.ts
+export default defineNuxtPlugin((nuxtApp) => {
+  const api = {
+    async get(url: string) {
+      return await $fetch(url)
+    },
+    async post(url: string, data: any) {
+      return await $fetch(url, { method: 'POST', body: data })
+    }
+  }
+
+  return {
+    provide: {
+      api
+    }
+  }
+})
+```
+
+Теперь в компонентах можно использовать `$api`:
+
+```vue
+<script setup lang="ts">
+const { $api } = useNuxtApp()
+
+const data = await $api.get('/api/users')
+</script>
+```
+
+---
+
+## 🎯 Типизация инъекций
+
+Для полноценной TypeScript-поддержки нужно объявить типы инъекций:
+
+```typescript
+// plugins/format.ts
+export default defineNuxtPlugin(() => {
+  const formatDate = (date: Date): string => {
+    return new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric'
+    }).format(date)
+  }
+
+  const formatCurrency = (amount: number, currency = 'RUB'): string => {
+    return new Intl.NumberFormat('ru-RU', {
+      style: 'currency',
+      currency
+    }).format(amount)
+  }
+
+  return {
+    provide: {
+      formatDate,
+      formatCurrency
+    }
+  }
+})
+```
+
+```typescript
+// types/nuxt.d.ts или index.d.ts
+declare module '#app' {
+  interface NuxtApp {
+    $formatDate: (date: Date) => string
+    $formatCurrency: (amount: number, currency?: string) => string
+  }
+}
+
+export {}
+```
+
+---
+
+## 🖥️ Серверные плагины (.server.ts)
+
+Файлы с суффиксом `.server.ts` выполняются только на стороне сервера:
+
+```typescript
+// plugins/database.server.ts
+import { PrismaClient } from '@prisma/client'
+
+export default defineNuxtPlugin(() => {
+  const prisma = new PrismaClient()
+
+  return {
+    provide: {
+      prisma
+    }
+  }
+})
+```
+
+Это полезно для:
+- Подключения к базам данных
+- Инициализации серверных SDK
+- Настройки логгирования на сервере
+- Работы с файловой системой
+
+---
+
+## 💻 Клиентские плагины (.client.ts)
+
+Файлы с суффиксом `.client.ts` выполняются только в браузере:
+
+```typescript
+// plugins/analytics.client.ts
+export default defineNuxtPlugin(() => {
+  // Инициализация аналитики только в браузере
+  if (typeof window !== 'undefined') {
+    window.dataLayer = window.dataLayer || []
+    
+    const gtag = (...args: any[]) => {
+      window.dataLayer.push(args)
+    }
+    
+    gtag('js', new Date())
+    gtag('config', 'GA_MEASUREMENT_ID')
+
+    return {
+      provide: {
+        gtag
+      }
+    }
+  }
+})
+```
+
+```typescript
+// plugins/toast.client.ts
+import { toast } from 'vue-toastification'
+import 'vue-toastification/dist/index.css'
+
+export default defineNuxtPlugin((nuxtApp) => {
+  nuxtApp.vueApp.use(toast, {
+    position: 'top-right',
+    timeout: 3000
+  })
+
+  return {
+    provide: {
+      toast
+    }
+  }
+})
+```
+
+---
+
+## 📊 Порядок загрузки плагинов
+
+Nuxt загружает плагины в алфавитном порядке. Для явного управления порядком используйте числовые префиксы:
+
+```
+plugins/
+├── 01.sentry.ts      # загружается первым
+├── 02.store.ts       # загружается вторым
+├── 03.router.ts      # загружается третьим
+└── analytics.ts      # загружается последним (по алфавиту)
+```
+
+```typescript
+// plugins/01.sentry.ts — инициализация до всего остального
+import * as Sentry from '@sentry/vue'
+
+export default defineNuxtPlugin((nuxtApp) => {
+  Sentry.init({
+    app: nuxtApp.vueApp,
+    dsn: 'YOUR_DSN',
+    tracesSampleRate: 1.0
+  })
+})
+```
+
+---
+
+## 🔗 Регистрация Vue-плагинов
+
+Через Nuxt-плагины можно регистрировать любые Vue-плагины:
+
+```typescript
+// plugins/vue-query.ts
+import { VueQueryPlugin, QueryClient } from '@tanstack/vue-query'
+
+export default defineNuxtPlugin((nuxtApp) => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 5 * 60 * 1000, // 5 минут
+        retry: 2
+      }
+    }
+  })
+
+  nuxtApp.vueApp.use(VueQueryPlugin, { queryClient })
+
+  return {
+    provide: {
+      queryClient
+    }
+  }
+})
+```
+
+```typescript
+// plugins/directives.ts
+export default defineNuxtPlugin((nuxtApp) => {
+  // Регистрация кастомной директивы
+  nuxtApp.vueApp.directive('focus', {
+    mounted(el) {
+      el.focus()
+    }
+  })
+
+  nuxtApp.vueApp.directive('click-outside', {
+    mounted(el, binding) {
+      el.clickOutsideEvent = (event: Event) => {
+        if (!(el === event.target || el.contains(event.target as Node))) {
+          binding.value()
+        }
+      }
+      document.addEventListener('click', el.clickOutsideEvent)
+    },
+    unmounted(el) {
+      document.removeEventListener('click', el.clickOutsideEvent)
+    }
+  })
+})
+```
+
+---
+
+## ⚡ Async плагины
+
+Плагины могут быть асинхронными — Nuxt дождётся их инициализации перед рендерингом:
+
+```typescript
+// plugins/config.ts
+export default defineNuxtPlugin(async (nuxtApp) => {
+  // Загрузка конфигурации перед стартом приложения
+  const config = await $fetch('/api/app-config')
+  
+  return {
+    provide: {
+      appConfig: config
+    }
+  }
+})
+```
+
+> ⚠️ **Осторожно:** асинхронные плагины блокируют рендеринг. Используйте их только когда данные действительно нужны перед первым рендером.
+
+---
+
+## 🪝 Хуки плагинов
+
+Плагины могут подписываться на жизненный цикл приложения:
+
+```typescript
+// plugins/lifecycle.ts
+export default defineNuxtPlugin((nuxtApp) => {
+  // Вызывается при монтировании Vue-приложения
+  nuxtApp.hook('app:mounted', () => {
+    console.log('Приложение смонтировано')
+  })
+
+  // Вызывается при каждой навигации
+  nuxtApp.hook('page:start', () => {
+    console.log('Начало загрузки страницы')
+  })
+
+  nuxtApp.hook('page:finish', () => {
+    console.log('Страница загружена')
+  })
+
+  // Обработка ошибок
+  nuxtApp.hook('vue:error', (error, instance, info) => {
+    console.error('Vue ошибка:', error)
+    // Отправка в Sentry или другой сервис
+  })
+})
+```
+
+---
+
+## 🔧 Доступ к плагинам через useNuxtApp
+
+```vue
+<script setup lang="ts">
+const nuxtApp = useNuxtApp()
+
+// Доступ к инъекциям
+const { $api, $formatDate, $toast } = nuxtApp
+
+// Использование
+const handleSubmit = async (data: FormData) => {
+  try {
+    const result = await $api.post('/api/submit', data)
+    $toast.success('Успешно отправлено!')
+  } catch (error) {
+    $toast.error('Ошибка при отправке')
+  }
+}
+</script>
+```
+
+---
+
+## 📝 Практический пример: плагин авторизации
+
+```typescript
+// plugins/auth.ts
+export default defineNuxtPlugin(async (nuxtApp) => {
+  const token = useCookie('auth_token')
+  const user = useState('user', () => null)
+
+  if (token.value) {
+    try {
+      const userData = await $fetch('/api/auth/me', {
+        headers: {
+          Authorization: `Bearer \${token.value}`
+        }
+      })
+      user.value = userData
+    } catch {
+      token.value = null
+    }
+  }
+
+  const auth = {
+    async login(credentials: { email: string; password: string }) {
+      const response = await $fetch('/api/auth/login', {
+        method: 'POST',
+        body: credentials
+      })
+      token.value = response.token
+      user.value = response.user
+    },
+    async logout() {
+      token.value = null
+      user.value = null
+      await navigateTo('/login')
+    },
+    get isAuthenticated() {
+      return !!user.value
+    }
+  }
+
+  return {
+    provide: { auth }
+  }
+})
+```
+
+---
+
+## 🧪 Тестирование плагинов
+
+```typescript
+// tests/plugins/format.test.ts
+import { describe, it, expect } from 'vitest'
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import TestComponent from './TestComponent.vue'
+
+describe('format plugin', () => {
+  it('formats date correctly', async () => {
+    const wrapper = await mountSuspended(TestComponent)
+    expect(wrapper.text()).toContain('01 января 2024 г.')
+  })
+})
+```
+
+---
+
+## 📌 Лучшие практики
+
+| Практика | Описание |
+|----------|----------|
+| Разделяй по окружению | Используй `.client.ts` и `.server.ts` суффиксы |
+| Контролируй порядок | Числовые префиксы для зависимых плагинов |
+| Типизируй инъекции | Объявляй типы в `declare module '#app'` |
+| Избегай тяжёлых async | Блокируют рендеринг страницы |
+| Используй хуки | Подписывайся на lifecycle события |
+| Один плагин — одна задача | Принцип единственной ответственности |
+
+---
+
+<Playground
+  template="react"
+  files={{
+    '/App.tsx': `import { useState } from 'react'
+
+const PLUGINS = [
+  {
+    name: '01.sentry.ts',
+    type: 'universal',
+    order: 1,
+    description: 'Инициализация мониторинга ошибок',
+    injection: null,
+    icon: '🛡️'
+  },
+  {
+    name: 'api.ts',
+    type: 'universal',
+    order: 2,
+    description: 'HTTP клиент для API запросов',
+    injection: '$api',
+    icon: '🌐'
+  },
+  {
+    name: 'analytics.client.ts',
+    type: 'client',
+    order: 3,
+    description: 'Google Analytics (только браузер)',
+    injection: '$gtag',
+    icon: '📊'
+  },
+  {
+    name: 'database.server.ts',
+    type: 'server',
+    order: 4,
+    description: 'Prisma клиент (только сервер)',
+    injection: '$prisma',
+    icon: '🗄️'
+  },
+  {
+    name: 'format.ts',
+    type: 'universal',
+    order: 5,
+    description: 'Форматирование дат и валют',
+    injection: '$formatDate, $formatCurrency',
+    icon: '🔤'
+  },
+  {
+    name: 'toast.client.ts',
+    type: 'client',
+    order: 6,
+    description: 'Уведомления (только браузер)',
+    injection: '$toast',
+    icon: '🔔'
+  }
+]
+
+const TYPE_CONFIG = {
+  universal: { label: 'Universal', color: '#00dc82', bg: 'rgba(0,220,130,0.15)' },
+  client: { label: 'Client Only', color: '#60a5fa', bg: 'rgba(96,165,250,0.15)' },
+  server: { label: 'Server Only', color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' }
+}
+
+export default function App() {
+  const [selected, setSelected] = useState(null)
+  const [environment, setEnvironment] = useState('both')
+
+  const filtered = PLUGINS.filter(p => {
+    if (environment === 'client') return p.type !== 'server'
+    if (environment === 'server') return p.type !== 'client'
+    return true
+  })
+
+  const sel = selected !== null ? PLUGINS.find(p => p.name === selected) : null
+
+  return (
+    <div style={{
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '24px',
+      fontFamily: 'system-ui, sans-serif',
+      color: '#e2e8f0'
+    }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>🔌</div>
+          <h1 style={{ color: '#00dc82', fontSize: 24, fontWeight: 700, margin: 0 }}>
+            Nuxt 3 Plugin System
+          </h1>
+          <p style={{ color: '#94a3b8', marginTop: 6, fontSize: 14 }}>
+            Визуализация системы плагинов
+          </p>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20, justifyContent: 'center' }}>
+          {['both', 'client', 'server'].map(env => (
+            <button
+              key={env}
+              onClick={() => setEnvironment(env)}
+              style={{
+                padding: '8px 18px',
+                borderRadius: 20,
+                border: '1px solid',
+                borderColor: environment === env ? '#00dc82' : '#334155',
+                background: environment === env ? 'rgba(0,220,130,0.15)' : 'transparent',
+                color: environment === env ? '#00dc82' : '#94a3b8',
+                cursor: 'pointer',
+                fontSize: 13,
+                fontWeight: 500,
+                transition: 'all 0.2s'
+              }}
+            >
+              {env === 'both' ? '🌍 Все' : env === 'client' ? '💻 Браузер' : '🖥️ Сервер'}
+            </button>
+          ))}
+        </div>
+
+        <div style={{
+          background: '#1a1a2e',
+          borderRadius: 12,
+          padding: 16,
+          marginBottom: 20,
+          border: '1px solid #1e293b'
+        }}>
+          <div style={{ fontSize: 12, color: '#64748b', marginBottom: 12, fontFamily: 'monospace' }}>
+            📁 plugins/
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {filtered.map((plugin, i) => {
+              const cfg = TYPE_CONFIG[plugin.type]
+              const isSelected = selected === plugin.name
+              return (
+                <div
+                  key={plugin.name}
+                  onClick={() => setSelected(isSelected ? null : plugin.name)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '10px 14px',
+                    borderRadius: 8,
+                    border: '1px solid',
+                    borderColor: isSelected ? '#00dc82' : '#1e293b',
+                    background: isSelected ? 'rgba(0,220,130,0.08)' : '#0f172a',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  <span style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: '50%',
+                    background: '#1a1a2e',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 11,
+                    color: '#00dc82',
+                    fontWeight: 700,
+                    flexShrink: 0
+                  }}>{plugin.order}</span>
+                  <span style={{ fontSize: 18 }}>{plugin.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontFamily: 'monospace', fontSize: 13, color: '#e2e8f0' }}>
+                      {plugin.name}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                      {plugin.description}
+                    </div>
+                  </div>
+                  <span style={{
+                    padding: '3px 10px',
+                    borderRadius: 20,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: cfg.color,
+                    background: cfg.bg
+                  }}>{cfg.label}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {sel && (
+          <div style={{
+            background: '#1a1a2e',
+            borderRadius: 12,
+            padding: 20,
+            border: '1px solid #00dc82',
+            marginBottom: 20
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#00dc82', marginBottom: 12 }}>
+              {sel.icon} {sel.name}
+            </div>
+            <pre style={{
+              background: '#0a0f1e',
+              borderRadius: 8,
+              padding: 16,
+              fontSize: 12,
+              color: '#e2e8f0',
+              overflow: 'auto',
+              margin: 0,
+              lineHeight: 1.6
+            }}>{sel.injection
+  ? \`export default defineNuxtPlugin(() => {
+  // \${sel.description}
+  return {
+    provide: {
+      \${sel.injection.split(', ').map(i => \`\${i.replace('$','')}: ...\`).join(',\\n      ')}
+    }
+  }
+})\`
+  : \`export default defineNuxtPlugin((nuxtApp) => {
+  // \${sel.description}
+  // Нет инъекций в контекст
+})\`}</pre>
+            {sel.injection && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>
+                  Доступно в компонентах:
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {sel.injection.split(', ').map(inj => (
+                    <span key={inj} style={{
+                      padding: '4px 10px',
+                      background: 'rgba(0,220,130,0.1)',
+                      border: '1px solid rgba(0,220,130,0.3)',
+                      borderRadius: 6,
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: '#00dc82'
+                    }}>{inj}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, 1fr)',
+          gap: 12
+        }}>
+          {Object.entries(TYPE_CONFIG).map(([type, cfg]) => (
+            <div key={type} style={{
+              background: '#1a1a2e',
+              borderRadius: 10,
+              padding: 14,
+              border: '1px solid #1e293b',
+              textAlign: 'center'
+            }}>
+              <div style={{ fontSize: 20, marginBottom: 6 }}>
+                {type === 'universal' ? '🌍' : type === 'client' ? '💻' : '🖥️'}
+              </div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: cfg.color }}>
+                {cfg.label}
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#e2e8f0', marginTop: 4 }}>
+                {PLUGINS.filter(p => p.type === type).length}
+              </div>
+              <div style={{ fontSize: 10, color: '#64748b' }}>плагинов</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+`
+  }}
+/>
+
+---
+
+## 🚀 Итоги
+
+Плагины — фундаментальная часть архитектуры Nuxt 3. Они обеспечивают:
+
+- **Инъекцию зависимостей** — через `provide` и `useNuxtApp()`
+- **Изоляцию окружений** — `.client.ts` и `.server.ts`
+- **Контроль порядка** — числовые префиксы
+- **Vue интеграцию** — регистрация плагинов, директив, компонентов
+- **Lifecycle хуки** — подписка на события приложения

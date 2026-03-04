@@ -1,0 +1,744 @@
+## 🖥️ Server Routes — API в Nuxt 3
+
+Nuxt 3 через Nitro предоставляет встроенный полноценный HTTP сервер. Создаёшь файл в `server/api/` — получаешь API endpoint. Никакого Express, никакого Fastify. Просто файлы.
+
+---
+
+### Как работают Server Routes 🔮
+
+```
+server/
+├── api/                    ← Маршруты с префиксом /api/
+│   ├── users.get.ts        → GET /api/users
+│   ├── users.post.ts       → POST /api/users
+│   ├── users/
+│   │   ├── index.get.ts    → GET /api/users
+│   │   └── [id].get.ts     → GET /api/users/:id
+│   └── auth/
+│       ├── login.post.ts   → POST /api/auth/login
+│       └── logout.post.ts  → POST /api/auth/logout
+└── routes/                 ← Маршруты без префикса
+    ├── sitemap.xml.ts      → GET /sitemap.xml
+    └── robots.txt.ts       → GET /robots.txt
+```
+
+---
+
+### Первый Server Route 🚀
+
+```typescript
+// server/api/hello.ts
+export default defineEventHandler((event) => {
+  return {
+    message: 'Привет от Nitro!'
+  }
+})
+```
+
+```bash
+# Теперь доступно:
+GET http://localhost:3000/api/hello
+# → { "message": "Привет от Nitro!" }
+```
+
+---
+
+### HTTP методы — именование файлов 📝
+
+```
+# Через суффикс в имени файла:
+users.get.ts      → только GET
+users.post.ts     → только POST
+users.put.ts      → только PUT
+users.patch.ts    → только PATCH
+users.delete.ts   → только DELETE
+users.ts          → все методы (обрабатываешь сам)
+```
+
+```typescript
+// server/api/users.get.ts — только GET
+export default defineEventHandler(async (event) => {
+  const users = await db.users.findMany()
+  return users
+})
+```
+
+```typescript
+// server/api/users.post.ts — только POST
+export default defineEventHandler(async (event) => {
+  const body = await readBody(event)
+  const user = await db.users.create({ data: body })
+  return user
+})
+```
+
+---
+
+### H3 Event Handlers — основные утилиты 🛠️
+
+```typescript
+// server/api/users/[id].ts
+import { getQuery, readBody, getHeader, getCookie, setCookie, setHeader } from 'h3'
+
+export default defineEventHandler(async (event) => {
+  // Параметры маршрута
+  const { id } = event.context.params!
+  // или:
+  const id = getRouterParam(event, 'id')
+
+  // Query строка: /api/users?page=1&limit=10
+  const query = getQuery(event)
+  // query.page, query.limit
+
+  // Тело запроса (POST/PUT)
+  const body = await readBody(event)
+
+  // Заголовки запроса
+  const authHeader = getHeader(event, 'authorization')
+  const contentType = getHeader(event, 'content-type')
+
+  // Cookies
+  const sessionId = getCookie(event, 'session_id')
+
+  // Установка ответных заголовков
+  setHeader(event, 'X-Custom-Header', 'value')
+
+  // Установка cookies
+  setCookie(event, 'token', 'jwt-value', {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'strict',
+    maxAge: 60 * 60 * 24 * 7, // 7 дней
+  })
+
+  // Метод запроса
+  const method = getMethod(event)
+
+  // URL
+  const url = getRequestURL(event)
+
+  return { id, method }
+})
+```
+
+---
+
+### Динамические маршруты 🔄
+
+```typescript
+// server/api/posts/[id].ts
+export default defineEventHandler(async (event) => {
+  const id = getRouterParam(event, 'id')
+
+  if (!id) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: 'ID обязателен',
+    })
+  }
+
+  const post = await db.posts.findUnique({
+    where: { id: Number(id) }
+  })
+
+  if (!post) {
+    throw createError({
+      statusCode: 404,
+      statusMessage: 'Пост не найден',
+    })
+  }
+
+  return post
+})
+```
+
+---
+
+### Catch-all маршруты 🌐
+
+```typescript
+// server/api/[...path].ts
+export default defineEventHandler((event) => {
+  const path = event.context.params!.path
+  // path — это массив сегментов URL
+  return {
+    path: path,
+    message: \`Получен запрос к /api/\${path.join('/')}\`
+  }
+})
+```
+
+---
+
+### Работа с базой данных 🗄️
+
+```typescript
+// server/utils/db.ts — утилиты доступны в server/
+import { PrismaClient } from '@prisma/client'
+
+const prisma = new PrismaClient()
+
+export default prisma
+```
+
+```typescript
+// server/api/products.get.ts
+export default defineEventHandler(async (event) => {
+  const query = getQuery(event)
+
+  const page = Number(query.page) || 1
+  const limit = Number(query.limit) || 10
+  const search = String(query.search || '')
+
+  const [products, total] = await Promise.all([
+    db.products.findMany({
+      where: {
+        name: { contains: search, mode: 'insensitive' }
+      },
+      skip: (page - 1) * limit,
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+    }),
+    db.products.count({
+      where: {
+        name: { contains: search, mode: 'insensitive' }
+      }
+    })
+  ])
+
+  return {
+    data: products,
+    meta: {
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
+    }
+  }
+})
+```
+
+---
+
+### Валидация через Zod 🔍
+
+```typescript
+// server/api/users.post.ts
+import { z } from 'zod'
+
+const CreateUserSchema = z.object({
+  name: z.string().min(2).max(50),
+  email: z.string().email(),
+  age: z.number().min(18).optional(),
+})
+
+export default defineEventHandler(async (event) => {
+  const body = await readBody(event)
+
+  // Валидация
+  const result = CreateUserSchema.safeParse(body)
+  if (!result.success) {
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'Validation Error',
+      data: result.error.errors,
+    })
+  }
+
+  const { name, email, age } = result.data
+
+  const user = await db.users.create({
+    data: { name, email, age }
+  })
+
+  setResponseStatus(event, 201)
+  return user
+})
+```
+
+---
+
+### Аутентификация в Server Routes 🔐
+
+```typescript
+// server/api/me.get.ts
+export default defineEventHandler(async (event) => {
+  // Получаем сессию
+  const session = await getUserSession(event)
+
+  if (!session.user) {
+    throw createError({
+      statusCode: 401,
+      statusMessage: 'Не авторизован',
+    })
+  }
+
+  return session.user
+})
+```
+
+```typescript
+// server/api/admin/stats.get.ts
+export default defineEventHandler(async (event) => {
+  const session = await getUserSession(event)
+
+  // Проверяем права
+  if (session.user?.role !== 'admin') {
+    throw createError({
+      statusCode: 403,
+      statusMessage: 'Доступ запрещён',
+    })
+  }
+
+  return await getAdminStats()
+})
+```
+
+---
+
+### Middleware в серверных роутах 🛡️
+
+```typescript
+// server/middleware/auth.ts
+export default defineEventHandler(async (event) => {
+  // Исключаем публичные маршруты
+  const publicPaths = ['/api/auth/login', '/api/auth/register']
+  if (publicPaths.includes(event.path)) return
+
+  // Только для /api/admin/**
+  if (!event.path.startsWith('/api/admin')) return
+
+  // Проверяем аутентификацию
+  const token = getCookie(event, 'auth-token')
+  if (!token) {
+    throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
+  }
+
+  // Добавляем данные пользователя в контекст
+  event.context.user = await verifyToken(token)
+})
+```
+
+---
+
+### Возвращаемые типы и статус коды 📊
+
+```typescript
+// server/api/items/[id].delete.ts
+export default defineEventHandler(async (event) => {
+  const id = getRouterParam(event, 'id')
+
+  const item = await db.items.findUnique({ where: { id: Number(id) } })
+
+  if (!item) {
+    throw createError({
+      statusCode: 404,
+      message: 'Элемент не найден',
+    })
+  }
+
+  await db.items.delete({ where: { id: Number(id) } })
+
+  // Установить статус 204 (No Content)
+  setResponseStatus(event, 204)
+  return null
+})
+```
+
+```typescript
+// Специальные ответы
+export default defineEventHandler((event) => {
+  // Редирект
+  sendRedirect(event, '/new-url', 302)
+
+  // Стрим
+  return sendStream(event, fileStream)
+
+  // HTML
+  return sendHTML(event, '<h1>Hello</h1>')
+
+  // Proxy
+  return proxyRequest(event, 'https://api.external.com/data')
+})
+```
+
+---
+
+### Server Utils — переиспользуемый код 🔧
+
+```typescript
+// server/utils/auth.ts — авто-импортируется в server/
+export const requireAuth = async (event: H3Event) => {
+  const token = getCookie(event, 'auth-token')
+    || getHeader(event, 'authorization')?.replace('Bearer ', '')
+
+  if (!token) {
+    throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
+  }
+
+  const user = await verifyJWT(token)
+  if (!user) {
+    throw createError({ statusCode: 401, statusMessage: 'Invalid token' })
+  }
+
+  return user
+}
+
+export const requireRole = async (event: H3Event, role: string) => {
+  const user = await requireAuth(event)
+  if (user.role !== role) {
+    throw createError({ statusCode: 403, statusMessage: 'Forbidden' })
+  }
+  return user
+}
+```
+
+```typescript
+// server/api/admin/users.get.ts
+export default defineEventHandler(async (event) => {
+  // requireRole авто-импортирован из server/utils/!
+  const admin = await requireRole(event, 'admin')
+  return await db.users.findMany()
+})
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState } from "react";
+
+// Симуляция базы данных
+let mockDb = {
+  users: [
+    { id: 1, name: "Алиса Иванова", email: "alice@example.com", role: "admin" },
+    { id: 2, name: "Борис Петров", email: "boris@example.com", role: "user" },
+    { id: 3, name: "Вера Сидорова", email: "vera@example.com", role: "user" },
+  ],
+  nextId: 4,
+};
+
+// Симуляция server routes
+const serverRoutes = {
+  "GET /api/users": async () => {
+    await delay(300);
+    return { status: 200, data: mockDb.users };
+  },
+  "POST /api/users": async (body) => {
+    await delay(400);
+    if (!body.name || !body.email) {
+      return { status: 422, data: { error: "name и email обязательны" } };
+    }
+    const user = { id: mockDb.nextId++, ...body, role: "user" };
+    mockDb.users.push(user);
+    return { status: 201, data: user };
+  },
+  "DELETE /api/users/:id": async (id) => {
+    await delay(200);
+    const idx = mockDb.users.findIndex(u => u.id === Number(id));
+    if (idx === -1) return { status: 404, data: { error: "Пользователь не найден" } };
+    const [deleted] = mockDb.users.splice(idx, 1);
+    return { status: 200, data: deleted };
+  },
+};
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+const routes = [
+  { method: "GET", path: "/api/users", desc: "Получить всех пользователей", color: "#00dc82" },
+  { method: "POST", path: "/api/users", desc: "Создать пользователя", color: "#00b4d8" },
+  { method: "GET", path: "/api/users/:id", desc: "Получить по ID", color: "#00dc82" },
+  { method: "PUT", path: "/api/users/:id", desc: "Обновить пользователя", color: "#f59e0b" },
+  { method: "DELETE", path: "/api/users/:id", desc: "Удалить пользователя", color: "#ef4444" },
+];
+
+const methodColors = {
+  GET: "#00dc82", POST: "#00b4d8", PUT: "#f59e0b", PATCH: "#f59e0b", DELETE: "#ef4444"
+};
+
+export default function App() {
+  const [users, setUsers] = useState(mockDb.users);
+  const [loading, setLoading] = useState(false);
+  const [log, setLog] = useState([]);
+  const [newUser, setNewUser] = useState({ name: "", email: "" });
+  const [tab, setTab] = useState("demo");
+
+  const addLog = (method, path, status, data) => {
+    const entry = {
+      id: Date.now(),
+      method,
+      path,
+      status,
+      time: new Date().toLocaleTimeString(),
+      data: JSON.stringify(data, null, 2),
+    };
+    setLog(prev => [entry, ...prev].slice(0, 10));
+  };
+
+  const fetchUsers = async () => {
+    setLoading(true);
+    const result = await serverRoutes["GET /api/users"]();
+    setUsers(result.data);
+    addLog("GET", "/api/users", result.status, result.data);
+    setLoading(false);
+  };
+
+  const createUser = async () => {
+    if (!newUser.name && !newUser.email) {
+      setNewUser({ name: "Григорий Новый", email: "grigoriy@example.com" });
+      return;
+    }
+    setLoading(true);
+    const result = await serverRoutes["POST /api/users"](newUser);
+    if (result.status === 201) {
+      setUsers([...mockDb.users]);
+      setNewUser({ name: "", email: "" });
+    }
+    addLog("POST", "/api/users", result.status, result.data);
+    setLoading(false);
+  };
+
+  const deleteUser = async (id) => {
+    setLoading(true);
+    const result = await serverRoutes["DELETE /api/users/:id"](id);
+    if (result.status === 200) setUsers([...mockDb.users]);
+    addLog("DELETE", \`/api/users/\${id}\`, result.status, result.data);
+    setLoading(false);
+  };
+
+  return (
+    <div style={{
+      background: "#0f172a",
+      minHeight: "100vh",
+      padding: "20px",
+      fontFamily: "'Segoe UI', sans-serif",
+      color: "#e2e8f0",
+    }}>
+      <div style={{ textAlign: "center", marginBottom: "20px" }}>
+        <h1 style={{ color: "#00dc82", margin: 0, fontSize: "22px" }}>🖥️ Server Routes — API демо</h1>
+        <p style={{ color: "#64748b", fontSize: "12px", margin: "4px 0 0" }}>
+          Симуляция Nitro сервера
+        </p>
+      </div>
+
+      <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+        {["demo", "routes"].map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            padding: "6px 14px",
+            borderRadius: "999px",
+            border: "none",
+            cursor: "pointer",
+            background: tab === t ? "#00dc82" : "#1a1a2e",
+            color: tab === t ? "#0f172a" : "#94a3b8",
+            fontWeight: 600, fontSize: "12px",
+          }}>
+            {t === "demo" ? "🚀 API Playground" : "📋 Маршруты"}
+          </button>
+        ))}
+      </div>
+
+      {tab === "demo" && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+          <div>
+            {/* Actions */}
+            <div style={{
+              background: "#1a1a2e",
+              borderRadius: "10px",
+              padding: "14px",
+              marginBottom: "12px",
+            }}>
+              <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "12px" }}>Действия</div>
+              <button onClick={fetchUsers} disabled={loading} style={{
+                display: "block",
+                width: "100%",
+                background: "#00dc8222",
+                color: "#00dc82",
+                border: "1px solid #00dc8244",
+                borderRadius: "8px",
+                padding: "8px",
+                cursor: "pointer",
+                fontSize: "12px",
+                fontWeight: 700,
+                marginBottom: "8px",
+              }}>
+                GET /api/users
+              </button>
+
+              <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+                <input
+                  value={newUser.name}
+                  onChange={e => setNewUser(p => ({ ...p, name: e.target.value }))}
+                  placeholder="Имя"
+                  style={{
+                    flex: 1, background: "#0f172a", border: "1px solid #ffffff22",
+                    borderRadius: "6px", padding: "6px 8px", color: "#e2e8f0", fontSize: "11px",
+                  }}
+                />
+                <input
+                  value={newUser.email}
+                  onChange={e => setNewUser(p => ({ ...p, email: e.target.value }))}
+                  placeholder="Email"
+                  style={{
+                    flex: 1, background: "#0f172a", border: "1px solid #ffffff22",
+                    borderRadius: "6px", padding: "6px 8px", color: "#e2e8f0", fontSize: "11px",
+                  }}
+                />
+              </div>
+              <button onClick={createUser} disabled={loading} style={{
+                display: "block",
+                width: "100%",
+                background: "#00b4d822",
+                color: "#00b4d8",
+                border: "1px solid #00b4d844",
+                borderRadius: "8px",
+                padding: "8px",
+                cursor: "pointer",
+                fontSize: "12px",
+                fontWeight: 700,
+              }}>
+                POST /api/users
+                {(!newUser.name && !newUser.email) && " (нажми снова с данными)"}
+              </button>
+            </div>
+
+            {/* Users list */}
+            <div style={{ background: "#1a1a2e", borderRadius: "10px", padding: "14px" }}>
+              <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "10px" }}>
+                Пользователи ({users.length})
+              </div>
+              {users.map(user => (
+                <div key={user.id} style={{
+                  background: "#0f172a",
+                  borderRadius: "6px",
+                  padding: "8px 10px",
+                  marginBottom: "6px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                }}>
+                  <div style={{
+                    width: "28px", height: "28px",
+                    borderRadius: "50%",
+                    background: user.role === "admin" ? "#00dc8222" : "#1e293b",
+                    border: \`1px solid \${user.role === "admin" ? "#00dc8244" : "#ffffff11"}\`,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: "12px", color: user.role === "admin" ? "#00dc82" : "#94a3b8",
+                    fontWeight: 700,
+                  }}>
+                    {user.name[0]}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: "12px", fontWeight: 600, color: "#e2e8f0" }}>{user.name}</div>
+                    <div style={{ fontSize: "11px", color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.email}</div>
+                  </div>
+                  <span style={{
+                    fontSize: "10px", padding: "2px 6px", borderRadius: "4px",
+                    background: user.role === "admin" ? "#00dc8222" : "#ffffff11",
+                    color: user.role === "admin" ? "#00dc82" : "#64748b",
+                  }}>{user.role}</span>
+                  <button onClick={() => deleteUser(user.id)} disabled={loading} style={{
+                    background: "#ef444422", color: "#ef4444", border: "none",
+                    borderRadius: "4px", padding: "3px 6px", cursor: "pointer", fontSize: "11px",
+                  }}>DEL</button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Log */}
+          <div style={{ background: "#1a1a2e", borderRadius: "10px", padding: "14px" }}>
+            <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "10px" }}>
+              📋 Лог запросов {log.length > 0 && \`(\${log.length})\`}
+            </div>
+            {log.length === 0 ? (
+              <div style={{ color: "#475569", textAlign: "center", padding: "20px", fontSize: "12px" }}>
+                Сделай первый запрос →
+              </div>
+            ) : log.map(entry => (
+              <div key={entry.id} style={{
+                background: "#0f172a",
+                borderRadius: "6px",
+                padding: "8px 10px",
+                marginBottom: "6px",
+                borderLeft: \`3px solid \${methodColors[entry.method] || "#64748b"}\`,
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    <span style={{
+                      color: methodColors[entry.method],
+                      fontWeight: 700, fontSize: "11px",
+                    }}>{entry.method}</span>
+                    <code style={{ color: "#94a3b8", fontSize: "11px" }}>{entry.path}</code>
+                  </div>
+                  <span style={{
+                    color: entry.status < 300 ? "#00dc82" : entry.status < 400 ? "#f59e0b" : "#ef4444",
+                    fontSize: "11px", fontWeight: 700,
+                  }}>{entry.status}</span>
+                </div>
+                <div style={{ color: "#475569", fontSize: "10px" }}>{entry.time}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === "routes" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          {routes.map(r => (
+            <div key={r.method + r.path} style={{
+              background: "#1a1a2e",
+              borderRadius: "8px",
+              padding: "12px 14px",
+              display: "flex",
+              alignItems: "center",
+              gap: "12px",
+            }}>
+              <span style={{
+                color: r.color,
+                fontWeight: 800,
+                fontSize: "12px",
+                minWidth: "60px",
+                background: r.color + "22",
+                padding: "3px 8px",
+                borderRadius: "4px",
+                textAlign: "center",
+              }}>{r.method}</span>
+              <code style={{ color: "#e2e8f0", fontSize: "12px", flex: 1 }}>{r.path}</code>
+              <span style={{ color: "#64748b", fontSize: "11px" }}>{r.desc}</span>
+            </div>
+          ))}
+
+          <div style={{
+            background: "#1a1a2e",
+            borderRadius: "10px",
+            padding: "14px",
+            marginTop: "8px",
+            borderLeft: "3px solid #00dc82",
+          }}>
+            <div style={{ color: "#00dc82", fontWeight: 700, marginBottom: "8px", fontSize: "13px" }}>
+              💡 Именование файлов
+            </div>
+            {[
+              ["server/api/users.get.ts", "→ GET /api/users"],
+              ["server/api/users.post.ts", "→ POST /api/users"],
+              ["server/api/users/[id].get.ts", "→ GET /api/users/:id"],
+              ["server/api/users/[id].delete.ts", "→ DELETE /api/users/:id"],
+              ["server/routes/sitemap.xml.ts", "→ GET /sitemap.xml"],
+            ].map(([file, result]) => (
+              <div key={file} style={{
+                display: "flex", gap: "12px", marginBottom: "5px", fontSize: "11px",
+              }}>
+                <code style={{ color: "#94a3b8", minWidth: "220px" }}>{file}</code>
+                <span style={{ color: "#00dc82" }}>{result}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>
