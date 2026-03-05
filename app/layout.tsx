@@ -2,6 +2,7 @@ import { Footer, Layout, Navbar } from 'nextra-theme-docs'
 import { Head } from 'nextra/components'
 import { getPageMap } from 'nextra/page-map'
 import { PrefetchThrottle } from '../components/PrefetchThrottle'
+import FeedbackButton from '../components/FeedbackButton'
 import 'nextra-theme-docs/style.css'
 import '../styles/mermaid-theme.css'
 
@@ -75,6 +76,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         >
           {children}
         </Layout>
+        <FeedbackButton />
       </body>
     </html>
   )
