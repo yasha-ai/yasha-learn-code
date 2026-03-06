@@ -1,0 +1,534 @@
+import { Playground } from '../../components/Playground'
+
+# Полноценный блог на Astro
+
+Этот урок — финальный проект: мы разберём архитектуру настоящего блога с content collections, RSS-лентой, тёмной темой и поиском.
+
+## Архитектура проекта
+
+```
+src/
+├── content/
+│   ├── config.ts          ← Схемы коллекций
+│   └── blog/
+│       ├── first-post.md
+│       └── second-post.mdx
+├── layouts/
+│   ├── BaseLayout.astro   ← HTML-обёртка
+│   ├── BlogLayout.astro   ← Шапка + навигация
+│   └── PostLayout.astro   ← Разметка поста
+├── pages/
+│   ├── index.astro        ← Главная
+│   ├── blog/
+│   │   ├── index.astro    ← Список постов
+│   │   └── [slug].astro   ← Страница поста
+│   └── rss.xml.ts         ← RSS-лента
+└── components/
+    ├── PostCard.astro
+    ├── TagCloud.astro
+    └── SearchBar.astro    ← (React, client:load)
+```
+
+## Content Collections — схема
+
+```ts
+// src/content/config.ts
+import { defineCollection, z } from 'astro:content';
+
+const blog = defineCollection({
+  type: 'content',
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    pubDate: z.date(),
+    updatedDate: z.date().optional(),
+    heroImage: z.string().optional(),
+    tags: z.array(z.string()).default([]),
+    author: z.string().default('Редакция'),
+    draft: z.boolean().default(false),
+    readingTime: z.number().optional(),
+  }),
+});
+
+export const collections = { blog };
+```
+
+## Получение и сортировка постов
+
+```ts
+// src/pages/blog/index.astro
+---
+import { getCollection } from 'astro:content';
+
+const allPosts = await getCollection('blog', ({ data }) => {
+  return import.meta.env.PROD ? !data.draft : true;
+});
+
+const posts = allPosts.sort((a, b) =>
+  b.data.pubDate.valueOf() - a.data.pubDate.valueOf()
+);
+
+const tags = [...new Set(posts.flatMap(p => p.data.tags))];
+---
+```
+
+## Страница поста со временем чтения
+
+```ts
+// src/pages/blog/[slug].astro
+---
+import { getCollection, getEntry } from 'astro:content';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog');
+  return posts.map(post => ({
+    params: { slug: post.slug },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props;
+const { Content, headings } = await post.render();
+
+// Подсчёт времени чтения
+const words = post.body.split(/\s+/).length;
+const readingTime = Math.ceil(words / 200); // ~200 слов/мин
+---
+```
+
+## Предыдущий / следующий пост
+
+```astro
+---
+const currentIndex = posts.findIndex(p => p.slug === post.slug);
+const prevPost = posts[currentIndex + 1] ?? null;
+const nextPost = posts[currentIndex - 1] ?? null;
+---
+
+<nav class="post-navigation">
+  {prevPost && (
+    <a href={'/blog/' + prevPost.slug} class="prev">
+      ← {prevPost.data.title}
+    </a>
+  )}
+  {nextPost && (
+    <a href={'/blog/' + nextPost.slug} class="next">
+      {nextPost.data.title} →
+    </a>
+  )}
+</nav>
+```
+
+## RSS-лента
+
+```ts
+// src/pages/rss.xml.ts
+import rss from '@astrojs/rss';
+import { getCollection } from 'astro:content';
+
+export async function GET(context) {
+  const posts = await getCollection('blog');
+  return rss({
+    title: 'Мой Astro блог',
+    description: 'Статьи о веб-разработке',
+    site: context.site,
+    items: posts.map(post => ({
+      title: post.data.title,
+      pubDate: post.data.pubDate,
+      description: post.data.description,
+      link: '/blog/' + post.slug,
+    })),
+  });
+}
+```
+
+## Sitemap
+
+```js
+// astro.config.mjs
+import sitemap from '@astrojs/sitemap';
+
+export default defineConfig({
+  site: 'https://my-blog.com',
+  integrations: [sitemap()],
+});
+// Генерирует /sitemap-index.xml и /sitemap-0.xml автоматически
+```
+
+## Тёмная тема
+
+```astro
+<script is:inline>
+  const theme = localStorage.getItem('theme')
+    ?? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', theme);
+</script>
+```
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const C = {
+  astroBg:    '#0f172a',
+  astroCard:  '#1e293b',
+  astroBorder:'#334155',
+  astroText:  '#e2e8f0',
+  astroMuted: '#64748b',
+  astroOrange:'#FF5D01',
+  lightBg:    '#f8fafc',
+  lightCard:  '#ffffff',
+  lightBorder:'#e2e8f0',
+  lightText:  '#0f172a',
+  lightMuted: '#64748b',
+  green:      '#22c55e',
+  blue:       '#3b82f6',
+  purple:     '#a855f7',
+};
+
+const POSTS = [
+  {
+    id: 1, slug: 'getting-started',
+    title: 'Начало работы с Astro 4.0',
+    excerpt: 'Полное руководство по установке и первым шагам в Astro 4. Разбираемся с проектной структурой, компонентами и Islands Architecture.',
+    content: 'Astro 4.0 принёс множество улучшений: View Transitions API, улучшенная производительность сборки, новый тулбар для разработки. В этой статье мы шаг за шагом создадим первый Astro-проект.\\n\\nУстановка:\\n\\nnpm create astro@latest\\n\\nПосле запуска этой команды CLI предложит выбрать шаблон — для начала отлично подойдёт "blog". Astro создаст структуру проекта с примерами компонентов.\\n\\nПервое, что стоит изучить — файлы .astro. Они состоят из двух частей: frontmatter (серверный JS между тире) и HTML-шаблон.',
+    tags: ['astro', 'tutorial', 'javascript'],
+    date: '15 янв 2024', readTime: 5,
+    author: 'Алекс Иванов', featured: true,
+    color: C.astroOrange,
+  },
+  {
+    id: 2, slug: 'content-collections',
+    title: 'Content Collections: типобезопасный контент',
+    excerpt: 'Как использовать Content Collections для организации Markdown-контента с валидацией через Zod и автодополнением в IDE.',
+    content: 'Content Collections — это способ организовать и валидировать контент в Astro. Вы определяете схему с помощью Zod, и TypeScript автоматически проверяет ваш Markdown-контент.\\n\\nСоздайте файл src/content/config.ts и определите схему:\\n\\nconst blog = defineCollection({\\n  schema: z.object({\\n    title: z.string(),\\n    tags: z.array(z.string()),\\n  })\\n});\\n\\nТеперь каждый .md-файл в папке content/blog/ будет валидироваться по этой схеме.',
+    tags: ['astro', 'content', 'typescript'],
+    date: '22 янв 2024', readTime: 7,
+    author: 'Мария Смирнова', featured: false,
+    color: C.blue,
+  },
+  {
+    id: 3, slug: 'islands-architecture',
+    title: 'Islands Architecture: меньше JS — больше скорости',
+    excerpt: 'Глубокое погружение в концепцию островков. Когда и как использовать client:load, client:visible, client:idle и client:only.',
+    content: 'Islands Architecture — ключевая идея Astro. Вся страница — статический HTML, и только отдельные "острова" получают JavaScript.\\n\\nclient:load — загружается сразу при загрузке страницы\\nclient:visible — загружается когда элемент виден\\nclient:idle — загружается когда браузер не занят\\nclient:media — загружается по media-запросу\\nclient:only — только клиент, без SSR\\n\\nПравильный выбор директивы может значительно улучшить производительность.',
+    tags: ['astro', 'performance', 'architecture'],
+    date: '1 фев 2024', readTime: 9,
+    author: 'Алекс Иванов', featured: false,
+    color: C.purple,
+  },
+  {
+    id: 4, slug: 'view-transitions',
+    title: 'View Transitions: анимированная навигация',
+    excerpt: 'Добавляем плавные переходы между страницами с помощью View Transitions API. Astro делает это предельно просто.',
+    content: 'View Transitions API позволяет анимировать переходы между страницами без SPA-сложности. В Astro достаточно добавить один компонент:\\n\\nimport { ViewTransitions } from "astro:transitions";\\n\\n<head>\\n  <ViewTransitions />\\n</head>\\n\\nТеперь браузер автоматически анимирует переходы. Можно задать имена для конкретных элементов:\\n\\n<h1 transition:name="post-title">Заголовок</h1>',
+    tags: ['astro', 'animations', 'ux'],
+    date: '10 фев 2024', readTime: 6,
+    author: 'Денис Козлов', featured: false,
+    color: C.green,
+  },
+  {
+    id: 5, slug: 'astro-db',
+    title: 'Astro DB: встроенная база данных',
+    excerpt: 'Обзор Astro DB — нового решения для хранения данных. Настройка, схемы, запросы с Drizzle ORM и деплой на Turso.',
+    content: 'Astro DB — это встроенное решение для работы с базой данных, основанное на LibSQL (fork SQLite) и Turso. Настройка занимает минуты:\\n\\n1. npx astro add db\\n2. Определите таблицы в db/config.ts\\n3. Используйте db() в серверных компонентах\\n\\nAstro DB поставляется с Drizzle ORM для типобезопасных запросов.',
+    tags: ['astro', 'database', 'backend'],
+    date: '18 фев 2024', readTime: 8,
+    author: 'Мария Смирнова', featured: false,
+    color: C.astroOrange,
+  },
+  {
+    id: 6, slug: 'seo-optimization',
+    title: 'SEO в Astro: мета-теги, Open Graph и структурированные данные',
+    excerpt: 'Полный гайд по SEO для Astro-сайтов: sitemap, robots.txt, canonical URL, Open Graph, Twitter Cards и JSON-LD.',
+    content: 'Astro идеален для SEO — он генерирует чистый HTML без лишнего JavaScript. Добавим правильные мета-теги:\\n\\n<meta name="description" content={description} />\\n<meta property="og:title" content={title} />\\n<meta property="og:image" content={heroImage} />\\n\\nДля sitemap используйте официальную интеграцию @astrojs/sitemap.',
+    tags: ['astro', 'seo', 'marketing'],
+    date: '25 фев 2024', readTime: 10,
+    author: 'Алекс Иванов', featured: false,
+    color: C.blue,
+  },
+];
+
+const ALL_TAGS = [...new Set(POSTS.flatMap(p => p.tags))];
+
+function useTheme() {
+  const [dark, setDark] = useState(true);
+  const bg =     dark ? C.astroBg     : C.lightBg;
+  const card =   dark ? C.astroCard   : C.lightCard;
+  const border = dark ? C.astroBorder : C.lightBorder;
+  const text =   dark ? C.astroText   : C.lightText;
+  const muted =  dark ? C.astroMuted  : C.lightMuted;
+  return { dark, setDark, bg, card, border, text, muted };
+}
+
+function TagBadge({ tag, active, onClick, color, dark }) {
+  const border = dark ? C.astroBorder : C.lightBorder;
+  const muted = dark ? C.astroMuted : C.lightMuted;
+  return (
+    <button onClick={() => onClick(tag)} style={{
+      padding: '3px 10px', borderRadius: 12, border: '1px solid',
+      borderColor: active ? (color || C.astroOrange) : border,
+      background: active ? (color || C.astroOrange) + '25' : 'transparent',
+      color: active ? (color || C.astroOrange) : muted,
+      cursor: 'pointer', fontSize: 11, transition: 'all 0.2s'
+    }}>#{tag}</button>
+  );
+}
+
+function ReadingProgress({ dark }) {
+  const [progress, setProgress] = useState(0);
+  useEffect(() => {
+    let p = 0;
+    const iv = setInterval(() => {
+      p += 0.8;
+      if (p > 100) p = 100;
+      setProgress(p);
+    }, 80);
+    return () => clearInterval(iv);
+  }, []);
+  return (
+    <div style={{ position: 'sticky', top: 0, left: 0, right: 0, height: 3, background: dark ? C.astroBorder : C.lightBorder, zIndex: 100 }}>
+      <div style={{ height: '100%', width: progress + '%', background: C.astroOrange, transition: 'width 0.1s linear', borderRadius: '0 2px 2px 0' }} />
+    </div>
+  );
+}
+
+function PostCard({ post, onRead, th }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => onRead(post)}
+      style={{
+        background: hovered ? post.color + '12' : th.card,
+        borderRadius: 14, padding: 20,
+        border: '1px solid ' + (hovered ? post.color + '60' : th.border),
+        cursor: 'pointer', transition: 'all 0.2s'
+      }}
+    >
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+        {post.tags.map(t => (
+          <span key={t} style={{ fontSize: 10, padding: '2px 7px', background: post.color + '20', color: post.color, borderRadius: 8 }}>#{t}</span>
+        ))}
+      </div>
+      <h3 style={{ margin: '0 0 8px', fontSize: 16, fontWeight: 700, color: th.text, lineHeight: 1.4 }}>{post.title}</h3>
+      <p style={{ margin: '0 0 14px', fontSize: 13, color: th.muted, lineHeight: 1.6 }}>{post.excerpt}</p>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ width: 24, height: 24, borderRadius: '50%', background: post.color + '30', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>
+            {post.author[0]}
+          </div>
+          <span style={{ fontSize: 11, color: th.muted }}>{post.author}</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 11, color: th.muted }}>{post.date}</span>
+          <span style={{ fontSize: 11, color: post.color }}>📖 {post.readTime} мин</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HeroPost({ post, onRead, th }) {
+  return (
+    <div onClick={() => onRead(post)} style={{
+      background: 'linear-gradient(135deg, ' + post.color + '20 0%, ' + th.card + ' 100%)',
+      borderRadius: 16, padding: 28,
+      border: '1px solid ' + post.color + '40',
+      cursor: 'pointer', marginBottom: 24, transition: 'transform 0.2s'
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <span style={{ fontSize: 11, padding: '3px 10px', background: post.color, color: '#0f172a', borderRadius: 10, fontWeight: 700 }}>⭐ Рекомендуем</span>
+        <span style={{ fontSize: 11, color: post.color }}>📖 {post.readTime} мин чтения</span>
+      </div>
+      <h2 style={{ margin: '0 0 12px', fontSize: 22, fontWeight: 800, color: th.text, lineHeight: 1.3 }}>{post.title}</h2>
+      <p style={{ margin: '0 0 16px', fontSize: 14, color: th.muted, lineHeight: 1.7, maxWidth: 600 }}>{post.excerpt}</p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {post.tags.map(t => (
+            <span key={t} style={{ fontSize: 11, padding: '2px 8px', background: post.color + '25', color: post.color, borderRadius: 8 }}>#{t}</span>
+          ))}
+        </div>
+        <span style={{ fontSize: 12, color: th.muted }}>{post.author} · {post.date}</span>
+      </div>
+    </div>
+  );
+}
+
+function PostDetail({ post, onBack, th }) {
+  const prevIdx = POSTS.findIndex(p => p.id === post.id) + 1;
+  const nextIdx = POSTS.findIndex(p => p.id === post.id) - 1;
+  const prev = prevIdx < POSTS.length ? POSTS[prevIdx] : null;
+  const next = nextIdx >= 0 ? POSTS[nextIdx] : null;
+
+  return (
+    <div>
+      <ReadingProgress dark={th.dark} />
+      <div style={{ padding: '20px 20px 0' }}>
+        <button onClick={onBack} style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          background: 'none', border: '1px solid ' + th.border,
+          color: th.muted, cursor: 'pointer', padding: '6px 12px', borderRadius: 8, fontSize: 12, marginBottom: 20
+        }}>← Все статьи</button>
+
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+          {post.tags.map(t => (
+            <span key={t} style={{ fontSize: 11, padding: '2px 8px', background: post.color + '20', color: post.color, borderRadius: 8 }}>#{t}</span>
+          ))}
+        </div>
+
+        <h1 style={{ margin: '0 0 12px', fontSize: 24, fontWeight: 800, color: th.text, lineHeight: 1.3 }}>{post.title}</h1>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 24, padding: '10px 0', borderBottom: '1px solid ' + th.border }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <div style={{ width: 30, height: 30, borderRadius: '50%', background: post.color + '30', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 13, color: post.color }}>
+              {post.author[0]}
+            </div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: th.text }}>{post.author}</div>
+              <div style={{ fontSize: 11, color: th.muted }}>{post.date}</div>
+            </div>
+          </div>
+          <span style={{ fontSize: 12, color: post.color, marginLeft: 'auto' }}>📖 {post.readTime} мин</span>
+        </div>
+
+        <div style={{ fontSize: 14, color: th.text, lineHeight: 1.9, whiteSpace: 'pre-wrap', marginBottom: 32 }}>{post.content}</div>
+
+        <div style={{ display: 'flex', gap: 12, borderTop: '1px solid ' + th.border, paddingTop: 20, marginBottom: 20 }}>
+          {prev && (
+            <div onClick={() => onBack()} style={{ flex: 1, padding: 14, background: th.card, borderRadius: 10, border: '1px solid ' + th.border, cursor: 'pointer' }}>
+              <div style={{ fontSize: 10, color: th.muted, marginBottom: 4 }}>← Предыдущая</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: th.text }}>{prev.title}</div>
+            </div>
+          )}
+          {next && (
+            <div onClick={() => onBack()} style={{ flex: 1, padding: 14, background: th.card, borderRadius: 10, border: '1px solid ' + th.border, cursor: 'pointer', textAlign: 'right' }}>
+              <div style={{ fontSize: 10, color: th.muted, marginBottom: 4 }}>Следующая →</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: th.text }}>{next.title}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const th = useTheme();
+  const [view, setView] = useState('list');
+  const [selectedPost, setSelectedPost] = useState(null);
+  const [search, setSearch] = useState('');
+  const [activeTag, setActiveTag] = useState(null);
+
+  const openPost = (post) => { setSelectedPost(post); setView('post'); };
+  const goBack = () => { setSelectedPost(null); setView('list'); };
+
+  const filtered = POSTS.filter(p => {
+    const matchSearch = !search || p.title.toLowerCase().includes(search.toLowerCase()) || p.excerpt.toLowerCase().includes(search.toLowerCase());
+    const matchTag = !activeTag || p.tags.includes(activeTag);
+    return matchSearch && matchTag;
+  });
+
+  const featured = POSTS.find(p => p.featured);
+  const regular = filtered.filter(p => !p.featured || activeTag || search);
+
+  const toggleTag = (tag) => setActiveTag(t => t === tag ? null : tag);
+
+  return (
+    <div style={{ background: th.bg, minHeight: '100vh', fontFamily: '"Inter", system-ui, sans-serif', color: th.text }}>
+      {/* Navbar */}
+      <div style={{ background: th.dark ? th.bg + 'ee' : th.card + 'ee', borderBottom: '1px solid ' + th.border, padding: '12px 20px', position: 'sticky', top: 0, zIndex: 50, backdropFilter: 'blur(8px)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <button onClick={goBack} style={{ display: 'flex', alignItems: 'center', gap: 7, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+            <span style={{ fontSize: 20 }}>🚀</span>
+            <span style={{ fontWeight: 800, fontSize: 16, color: C.astroOrange }}>AstroBlog</span>
+          </button>
+          <div style={{ flex: 1 }} />
+          <div style={{ position: 'relative' }}>
+            <input
+              value={search}
+              onChange={e => { setSearch(e.target.value); setView('list'); }}
+              placeholder="Поиск..."
+              style={{
+                padding: '6px 12px 6px 30px', borderRadius: 20,
+                border: '1px solid ' + th.border, background: th.card,
+                color: th.text, fontSize: 12, outline: 'none', width: 160
+              }}
+            />
+            <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', fontSize: 12, color: th.muted }}>🔍</span>
+          </div>
+          <button onClick={() => th.setDark(d => !d)} style={{
+            padding: '6px 12px', borderRadius: 20, border: '1px solid ' + th.border,
+            background: th.card, color: th.text, cursor: 'pointer', fontSize: 12
+          }}>
+            {th.dark ? '☀️ Светлая' : '🌙 Тёмная'}
+          </button>
+        </div>
+      </div>
+
+      {view === 'post' && selectedPost ? (
+        <PostDetail post={selectedPost} onBack={goBack} th={th} />
+      ) : (
+        <div style={{ padding: 20 }}>
+          {/* Tags */}
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 20 }}>
+            <button onClick={() => setActiveTag(null)} style={{
+              padding: '4px 12px', borderRadius: 12, border: '1px solid',
+              borderColor: !activeTag ? C.astroOrange : th.border,
+              background: !activeTag ? C.astroOrange + '20' : 'transparent',
+              color: !activeTag ? C.astroOrange : th.muted,
+              cursor: 'pointer', fontSize: 11
+            }}>Все</button>
+            {ALL_TAGS.map(tag => (
+              <TagBadge key={tag} tag={tag} active={activeTag === tag} onClick={toggleTag} dark={th.dark} />
+            ))}
+          </div>
+
+          {/* Hero */}
+          {featured && !search && !activeTag && (
+            <HeroPost post={featured} onRead={openPost} th={th} />
+          )}
+
+          {/* Search results indicator */}
+          {(search || activeTag) && (
+            <div style={{ marginBottom: 16, fontSize: 13, color: th.muted }}>
+              Найдено: <span style={{ color: C.astroOrange, fontWeight: 700 }}>{regular.length}</span> статей
+              {activeTag && <span> по тегу <span style={{ color: C.astroOrange }}>#{activeTag}</span></span>}
+              {search && <span> по запросу «<span style={{ color: C.astroOrange }}>{search}</span>»</span>}
+            </div>
+          )}
+
+          {/* Grid */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16 }}>
+            {regular.map(post => (
+              <PostCard key={post.id} post={post} onRead={openPost} th={th} />
+            ))}
+          </div>
+
+          {regular.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '40px 20px', color: th.muted }}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>🔍</div>
+              <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Ничего не найдено</div>
+              <div style={{ fontSize: 13 }}>Попробуйте другой запрос или тег</div>
+            </div>
+          )}
+
+          {/* Footer */}
+          <div style={{ marginTop: 32, padding: '20px 0', borderTop: '1px solid ' + th.border, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+            <span style={{ fontSize: 12, color: th.muted }}>© 2024 AstroBlog — Built with Astro 🚀</span>
+            <div style={{ display: 'flex', gap: 12 }}>
+              <span style={{ fontSize: 12, color: C.astroOrange, cursor: 'pointer' }}>RSS</span>
+              <span style={{ fontSize: 12, color: C.astroOrange, cursor: 'pointer' }}>Sitemap</span>
+              <span style={{ fontSize: 12, color: C.astroOrange, cursor: 'pointer' }}>GitHub</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

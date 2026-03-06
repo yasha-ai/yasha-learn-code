@@ -1,0 +1,404 @@
+import { Playground } from '../../components/Playground'
+
+# Astro Actions
+
+Astro Actions (добавлены в v4.15) — это типобезопасный способ вызывать серверные функции прямо из клиентских компонентов. Никаких ручных `fetch` и `JSON.parse` — только чистый TypeScript.
+
+## Что такое Astro Actions?
+
+Actions решают задачу: «как клиентский код безопасно общается с сервером?». Вместо того чтобы писать API-маршруты вручную, вы определяете функции в специальном файле — и Astro автоматически создаёт типизированный клиент.
+
+## Определение действий
+
+Создайте файл `src/actions/index.ts`:
+
+```ts
+import { defineAction, ActionError } from 'astro:actions';
+import { z } from 'astro:schema';
+
+export const server = {
+  contact: defineAction({
+    input: z.object({
+      name: z.string().min(2, 'Имя слишком короткое'),
+      email: z.string().email('Неверный email'),
+      message: z.string().min(10, 'Сообщение слишком короткое'),
+    }),
+    handler: async ({ name, email, message }) => {
+      // Серверный код: отправка email, запись в БД...
+      await sendEmail({ to: 'admin@site.com', name, email, message });
+      return { success: true, id: crypto.randomUUID() };
+    },
+  }),
+};
+```
+
+## Использование в клиентском компоненте
+
+```tsx
+import { actions } from 'astro:actions';
+
+// Вызов action
+const result = await actions.contact({
+  name: 'Алекс',
+  email: 'alex@example.com',
+  message: 'Хочу узнать подробнее...',
+});
+
+if (result.error) {
+  console.error(result.error.message);
+} else {
+  console.log('Отправлено! ID:', result.data.id);
+}
+```
+
+## Использование в HTML-формах
+
+Astro Actions поддерживают нативные HTML-формы без JavaScript:
+
+```astro
+---
+import { actions } from 'astro:actions';
+const result = Astro.getActionResult(actions.contact);
+---
+
+<form method="POST" action={actions.contact}>
+  <input name="name" type="text" required />
+  <input name="email" type="email" required />
+  <textarea name="message" required></textarea>
+  <button type="submit">Отправить</button>
+</form>
+
+{result?.error && <p class="error">{result.error.message}</p>}
+{result?.data?.success && <p class="success">Отправлено!</p>}
+```
+
+## Обработка ошибок с ActionError
+
+```ts
+import { defineAction, ActionError } from 'astro:actions';
+
+handler: async ({ email }) => {
+  const user = await db.findUser(email);
+
+  if (!user) {
+    throw new ActionError({
+      code: 'NOT_FOUND',       // Стандартные HTTP-коды
+      message: 'Пользователь не найден',
+    });
+  }
+
+  if (!user.isVerified) {
+    throw new ActionError({
+      code: 'FORBIDDEN',
+      message: 'Email не подтверждён',
+    });
+  }
+
+  return user;
+}
+```
+
+## Валидация с Zod
+
+Astro Actions используют **Zod** для валидации входных данных. Ошибки валидации автоматически возвращаются клиенту:
+
+```ts
+input: z.object({
+  age: z.number().min(18, 'Только для взрослых'),
+  username: z.string()
+    .min(3)
+    .max(20)
+    .regex(/^[a-z0-9_]+$/, 'Только a-z, 0-9, _'),
+  tags: z.array(z.string()).max(5, 'Максимум 5 тегов'),
+}),
+```
+
+## Оптимистичные обновления UI
+
+```tsx
+import { actions, isInputError } from 'astro:actions';
+
+const [optimistic, setOptimistic] = useState(null);
+
+const handleSubmit = async (data) => {
+  // Мгновенно показываем результат
+  setOptimistic({ ...data, pending: true });
+
+  const result = await actions.createPost(data);
+
+  if (result.error) {
+    setOptimistic(null); // Откатываем
+    showError(result.error);
+  } else {
+    setOptimistic({ ...result.data, pending: false });
+  }
+};
+```
+
+## Типобезопасность
+
+Astro генерирует TypeScript-типы автоматически. Ваша IDE показывает автодополнение для входных данных и результата:
+
+```ts
+// Типы генерируются из вашей Zod-схемы
+type ContactInput = {
+  name: string;    // z.string().min(2)
+  email: string;   // z.string().email()
+  message: string; // z.string().min(10)
+};
+
+type ContactResult = {
+  success: boolean;
+  id: string;
+};
+```
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const ASTRO = '#FF5D01';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const BORDER = '#334155';
+const GREEN = '#22c55e';
+const RED = '#ef4444';
+const YELLOW = '#eab308';
+const BLUE = '#3b82f6';
+
+function validate(fields) {
+  const errors = {};
+  if (!fields.name || fields.name.length < 2) errors.name = 'Имя: минимум 2 символа';
+  if (!fields.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fields.email)) errors.email = 'Введите корректный email';
+  if (!fields.message || fields.message.length < 10) errors.message = 'Сообщение: минимум 10 символов';
+  return errors;
+}
+
+const TS_TYPES = [
+  '// Автогенерированные типы из Zod-схемы',
+  '',
+  'type ContactInput = {',
+  '  name: string;    // min(2)',
+  '  email: string;   // email()',
+  '  message: string; // min(10)',
+  '};',
+  '',
+  'type ContactResult = {',
+  '  success: true;',
+  '  id: string;',
+  '  timestamp: string;',
+  '};',
+  '',
+  'type ContactError = ActionError<{',
+  '  code: "VALIDATION_ERROR" | "SERVER_ERROR";',
+  '  fieldErrors?: Partial<ContactInput>;',
+  '}>;',
+];
+
+const ZOD_SCHEMA = [
+  'contact: defineAction({',
+  '  input: z.object({',
+  '    name: z.string().min(2),',
+  '    email: z.string().email(),',
+  '    message: z.string().min(10),',
+  '  }),',
+  '  handler: async (input) => {',
+  '    await sendEmail(input);',
+  '    return {',
+  '      success: true,',
+  '      id: crypto.randomUUID(),',
+  '      timestamp: new Date().toISOString(),',
+  '    };',
+  '  },',
+  '}),',
+];
+
+function Field({ label, value, onChange, error, type, placeholder, multiline }) {
+  const hasVal = value.length > 0;
+  const isValid = hasVal && !error;
+  const borderColor = error ? RED : isValid ? GREEN : BORDER;
+  const Tag = multiline ? 'textarea' : 'input';
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{ display: 'block', fontSize: 12, color: MUTED, marginBottom: 5, fontWeight: 600 }}>{label}</label>
+      <Tag
+        type={type || 'text'}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={multiline ? 3 : undefined}
+        style={{
+          width: '100%', padding: '9px 12px', borderRadius: 8,
+          border: '1px solid ' + borderColor,
+          background: BG, color: TEXT, fontSize: 13,
+          outline: 'none', resize: multiline ? 'vertical' : undefined,
+          boxSizing: 'border-box', transition: 'border-color 0.2s',
+          fontFamily: 'system-ui, sans-serif'
+        }}
+      />
+      {error && <div style={{ fontSize: 11, color: RED, marginTop: 4 }}>⚠ {error}</div>}
+      {isValid && <div style={{ fontSize: 11, color: GREEN, marginTop: 4 }}>✓ OK</div>}
+    </div>
+  );
+}
+
+function Step({ n, label, active, done, color }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{
+        width: 24, height: 24, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: done ? GREEN : active ? color : BORDER,
+        fontSize: 11, fontWeight: 700, color: done || active ? '#0f172a' : MUTED,
+        transition: 'background 0.3s'
+      }}>{done ? '✓' : n}</div>
+      <span style={{ fontSize: 12, color: active || done ? TEXT : MUTED }}>{label}</span>
+    </div>
+  );
+}
+
+export default function App() {
+  const [fields, setFields] = useState({ name: '', email: '', message: '' });
+  const [touched, setTouched] = useState({});
+  const [state, setState] = useState('idle'); // idle | loading | success | error
+  const [result, setResult] = useState(null);
+  const [tab, setTab] = useState('form'); // form | schema | types
+
+  const set = (key, val) => {
+    setFields(f => ({ ...f, [key]: val }));
+    setTouched(t => ({ ...t, [key]: true }));
+  };
+
+  const errors = validate(fields);
+  const touchedErrors = Object.fromEntries(Object.entries(errors).filter(([k]) => touched[k]));
+  const isValid = Object.keys(errors).length === 0;
+
+  const submit = () => {
+    setTouched({ name: true, email: true, message: true });
+    if (!isValid) return;
+
+    setState('loading');
+    setTimeout(() => {
+      const success = Math.random() > 0.3;
+      if (success) {
+        setState('success');
+        setResult({ success: true, id: 'msg_' + Math.random().toString(36).slice(2, 9), timestamp: new Date().toISOString() });
+      } else {
+        setState('error');
+        setResult({ error: { code: 'SERVER_ERROR', message: 'Не удалось отправить сообщение. Попробуйте ещё раз.' } });
+      }
+    }, 1500);
+  };
+
+  const reset = () => { setState('idle'); setResult(null); setFields({ name: '', email: '', message: '' }); setTouched({}); };
+
+  const step1 = state !== 'idle';
+  const step2 = state === 'loading' || state === 'success' || state === 'error';
+  const step3 = state === 'success' || state === 'error';
+
+  const tabs = [
+    { id: 'form',   label: '📝 Форма' },
+    { id: 'schema', label: '🔷 Zod схема' },
+    { id: 'types',  label: '📘 TS типы' },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <h2 style={{ color: ASTRO, margin: '0 0 4px', fontSize: 20 }}>⚡ Astro Actions — Contact Form</h2>
+      <p style={{ color: MUTED, fontSize: 13, margin: '0 0 20px' }}>Симуляция формы с серверными actions, Zod-валидацией и TypeScript-типами</p>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            padding: '6px 14px', borderRadius: 8, border: '1px solid',
+            borderColor: tab === t.id ? ASTRO : BORDER,
+            background: tab === t.id ? ASTRO + '20' : 'transparent',
+            color: tab === t.id ? ASTRO : MUTED, cursor: 'pointer', fontSize: 12
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {tab === 'form' && (
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 260px' }}>
+            {state === 'success' ? (
+              <div style={{ background: GREEN + '15', border: '1px solid ' + GREEN, borderRadius: 12, padding: 20, textAlign: 'center' }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: GREEN, marginBottom: 4 }}>Отправлено!</div>
+                <div style={{ fontSize: 12, color: MUTED, marginBottom: 12 }}>ID: {result.id}</div>
+                <div style={{ fontSize: 11, color: MUTED, marginBottom: 16 }}>{result.timestamp}</div>
+                <button onClick={reset} style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: ASTRO, color: BG, cursor: 'pointer', fontWeight: 700, fontSize: 13 }}>Новое сообщение</button>
+              </div>
+            ) : state === 'error' ? (
+              <div style={{ background: RED + '15', border: '1px solid ' + RED, borderRadius: 12, padding: 20, textAlign: 'center' }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>❌</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: RED, marginBottom: 8 }}>Ошибка</div>
+                <div style={{ fontSize: 12, color: MUTED, marginBottom: 16 }}>{result.error.message}</div>
+                <button onClick={reset} style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: CARD, color: TEXT, cursor: 'pointer', fontWeight: 600, fontSize: 13, border: '1px solid ' + BORDER }}>Попробовать снова</button>
+              </div>
+            ) : (
+              <div style={{ background: CARD, borderRadius: 12, padding: 18, border: '1px solid ' + BORDER }}>
+                <Field label="Имя" value={fields.name} onChange={v => set('name', v)} error={touchedErrors.name} placeholder="Ваше имя" />
+                <Field label="Email" value={fields.email} onChange={v => set('email', v)} error={touchedErrors.email} type="email" placeholder="email@example.com" />
+                <Field label="Сообщение" value={fields.message} onChange={v => set('message', v)} error={touchedErrors.message} multiline placeholder="Ваше сообщение (минимум 10 символов)..." />
+                <button onClick={submit} style={{
+                  width: '100%', padding: '10px', borderRadius: 8, border: 'none',
+                  background: state === 'loading' ? MUTED : isValid ? ASTRO : BORDER,
+                  color: state === 'loading' || !isValid ? TEXT : BG,
+                  cursor: state === 'loading' || !isValid ? 'default' : 'pointer',
+                  fontWeight: 700, fontSize: 14, transition: 'all 0.2s'
+                }}>
+                  {state === 'loading' ? '⏳ Отправка...' : 'Отправить через Action'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div style={{ flex: '1 1 200px' }}>
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 1 }}>Цикл запроса</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, background: CARD, borderRadius: 12, padding: 14, border: '1px solid ' + BORDER }}>
+              <Step n="1" label="Валидация (Zod)"  active={step1} done={step2} color={BLUE} />
+              <div style={{ width: 2, height: 16, background: step2 ? GREEN : BORDER, marginLeft: 11, transition: 'background 0.3s' }} />
+              <Step n="2" label="Запрос к серверу" active={step2} done={step3} color={ASTRO} />
+              <div style={{ width: 2, height: 16, background: step3 ? (state === 'success' ? GREEN : RED) : BORDER, marginLeft: 11, transition: 'background 0.3s' }} />
+              <Step n="3" label={state === 'error' ? 'ActionError' : 'Результат'} active={step3} done={false} color={state === 'error' ? RED : GREEN} />
+            </div>
+            <div style={{ marginTop: 10, padding: 10, background: CARD, borderRadius: 8, border: '1px solid ' + BORDER }}>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Статус валидации</div>
+              {Object.entries({ name: fields.name, email: fields.email, message: fields.message }).map(([k, v]) => {
+                const err = errors[k];
+                return (
+                  <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', borderBottom: '1px solid ' + BORDER }}>
+                    <span style={{ fontSize: 10, color: !err && v ? GREEN : err ? RED : MUTED }}>{!err && v ? '✓' : err ? '✗' : '○'}</span>
+                    <span style={{ fontSize: 11, color: TEXT }}>{k}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === 'schema' && (
+        <div style={{ background: '#0d1117', borderRadius: 12, padding: 16, border: '1px solid ' + BORDER, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.7 }}>
+          {ZOD_SCHEMA.map((line, i) => (
+            <div key={i} style={{ color: line.startsWith('//') ? MUTED : line.includes('z.') ? BLUE : TEXT }}>{line || '\u00A0'}</div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'types' && (
+        <div style={{ background: '#0d1117', borderRadius: 12, padding: 16, border: '1px solid ' + BORDER, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.7 }}>
+          {TS_TYPES.map((line, i) => (
+            <div key={i} style={{ color: line.startsWith('//') ? MUTED : line.includes('type ') || line.includes('string') || line.includes('true') ? BLUE : TEXT }}>{line || '\u00A0'}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>
