@@ -1,0 +1,250 @@
+import { Playground } from '../../components/Playground'
+
+# Middleware в Prisma
+
+Middleware в Prisma — это функции-перехватчики, которые выполняются до и после каждого запроса к базе данных. Они позволяют реализовать сквозную логику: логирование, мягкое удаление, автоматическое обновление временных меток и многое другое.
+
+## Базовый синтаксис
+
+```typescript
+prisma.$use(async (params, next) => {
+  // Логика ДО выполнения запроса
+  const before = Date.now()
+
+  const result = await next(params) // выполнить запрос
+
+  // Логика ПОСЛЕ выполнения запроса
+  const after = Date.now()
+  console.log(`Запрос ${params.model}.${params.action} занял ${after - before}мс`)
+
+  return result
+})
+```
+
+## Параметры middleware
+
+Объект `params` содержит:
+- `params.model` — модель (например, `'User'`)
+- `params.action` — операция (`'findMany'`, `'create'`, `'delete'`, и т.д.)
+- `params.args` — аргументы запроса (можно модифицировать!)
+- `params.dataPath` — путь к данным
+
+## Логирование запросов
+
+```typescript
+prisma.$use(async (params, next) => {
+  const start = Date.now()
+  const result = await next(params)
+  console.log(`${params.model}.${params.action} — ${Date.now() - start}ms`)
+  return result
+})
+```
+
+## Мягкое удаление через middleware
+
+```typescript
+prisma.$use(async (params, next) => {
+  if (params.model === 'User' && params.action === 'delete') {
+    // Перехватить delete и заменить на update
+    params.action = 'update'
+    params.args.data = { deletedAt: new Date() }
+  }
+  return next(params)
+})
+```
+
+## Автоматические метки времени
+
+```typescript
+prisma.$use(async (params, next) => {
+  if (params.action === 'create') {
+    params.args.data.createdAt = new Date()
+  }
+  if (params.action === 'update') {
+    params.args.data.updatedAt = new Date()
+  }
+  return next(params)
+})
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const middlewares = [
+  {
+    id: 'logging',
+    name: 'Логирование',
+    icon: '📋',
+    color: '#3182ce',
+    description: 'Записывает все запросы с моделью, операцией и временем выполнения',
+    code: \`prisma.$use(async (params, next) => {
+  const start = Date.now()
+  const result = await next(params)
+  const ms = Date.now() - start
+  console.log(
+    \\\`[\\\${params.model}.\\\${params.action}] \\\${ms}ms\\\`
+  )
+  return result
+})\`,
+    process: (query) => '📋 LOG: ' + query.model + '.' + query.action + ' — ' + (10 + Math.floor(Math.random() * 50)) + 'ms',
+  },
+  {
+    id: 'softDelete',
+    name: 'Мягкое удаление',
+    icon: '🗑️',
+    color: '#e53e3e',
+    description: 'Перехватывает delete и заменяет на update с полем deletedAt',
+    code: \`prisma.$use(async (params, next) => {
+  if (params.action === 'delete') {
+    params.action = 'update'
+    params.args.data = { deletedAt: new Date() }
+  }
+  if (params.action === 'findMany') {
+    params.args.where = {
+      ...params.args?.where,
+      deletedAt: null,
+    }
+  }
+  return next(params)
+})\`,
+    process: (query) => query.action === 'delete'
+      ? '🔄 TRANSFORMED: delete → update { deletedAt: "' + new Date().toISOString().slice(0, 19) + '" }'
+      : null,
+  },
+  {
+    id: 'timestamps',
+    name: 'Временные метки',
+    icon: '⏰',
+    color: '#d69e2e',
+    description: 'Автоматически устанавливает createdAt и updatedAt',
+    code: \`prisma.$use(async (params, next) => {
+  const now = new Date()
+  if (params.action === 'create') {
+    params.args.data.createdAt = now
+    params.args.data.updatedAt = now
+  }
+  if (params.action === 'update') {
+    params.args.data.updatedAt = now
+  }
+  return next(params)
+})\`,
+    process: (query) => query.action === 'create' || query.action === 'update'
+      ? '⏰ ADDED: ' + (query.action === 'create' ? 'createdAt, ' : '') + 'updatedAt = ' + new Date().toISOString().slice(0, 19)
+      : null,
+  },
+  {
+    id: 'cache',
+    name: 'Простой кэш',
+    icon: '⚡',
+    color: '#38a169',
+    description: 'Кэширует результаты findMany запросов на короткое время',
+    code: \`const cache = new Map()
+prisma.$use(async (params, next) => {
+  if (params.action !== 'findMany') return next(params)
+  const key = JSON.stringify(params)
+  if (cache.has(key)) {
+    return cache.get(key) // вернуть из кэша
+  }
+  const result = await next(params)
+  cache.set(key, result)
+  setTimeout(() => cache.delete(key), 5000)
+  return result
+})\`,
+    process: (query) => query.action === 'findMany'
+      ? '⚡ CACHE: ' + (Math.random() > 0.5 ? 'HIT — возвращаем кэш' : 'MISS — выполняем запрос')
+      : null,
+  },
+]
+
+const sampleQueries = [
+  { model: 'User', action: 'findMany', icon: '👥' },
+  { model: 'User', action: 'create', icon: '➕' },
+  { model: 'Post', action: 'delete', icon: '🗑️' },
+  { model: 'Post', action: 'update', icon: '✏️' },
+  { model: 'User', action: 'findUnique', icon: '🔍' },
+]
+
+export default function App() {
+  const [enabled, setEnabled] = useState({ logging: true, softDelete: true, timestamps: true, cache: false })
+  const [selectedQuery, setSelectedQuery] = useState(0)
+  const [pipeline, setPipeline] = useState([])
+
+  const toggleMiddleware = (id) => setEnabled(e => ({ ...e, [id]: !e[id] }))
+
+  const runQuery = () => {
+    const query = sampleQueries[selectedQuery]
+    const results = []
+    for (const mw of middlewares) {
+      if (!enabled[mw.id]) continue
+      const msg = mw.process(query)
+      results.push({ mw: mw.name, color: mw.color, icon: mw.icon, msg: msg || '⏭️ Пропущен (не применим)' })
+    }
+    results.push({ mw: 'Запрос БД', color: '#86efac', icon: '🗄️', msg: '✅ ' + query.model + '.' + query.action + ' выполнен успешно' })
+    setPipeline(results)
+  }
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '28px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 22px 0' }}>
+          Цепочка Middleware
+        </h2>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 18 }}>
+          {middlewares.map(mw => (
+            <div key={mw.id} style={{ background: CARD, borderRadius: 12, padding: 16, border: '2px solid ' + (enabled[mw.id] ? mw.color + '60' : '#334155'), opacity: enabled[mw.id] ? 1 : 0.5, transition: 'all 0.2s' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ color: mw.color, fontSize: 14, fontWeight: 700 }}>{mw.icon} {mw.name}</span>
+                <div
+                  onClick={() => toggleMiddleware(mw.id)}
+                  style={{ width: 36, height: 20, background: enabled[mw.id] ? mw.color : '#334155', borderRadius: 999, cursor: 'pointer', position: 'relative', transition: 'background 0.2s' }}
+                >
+                  <div style={{ position: 'absolute', top: 2, left: enabled[mw.id] ? 18 : 2, width: 16, height: 16, background: '#fff', borderRadius: '50%', transition: 'left 0.2s' }} />
+                </div>
+              </div>
+              <p style={{ color: '#94a3b8', fontSize: 11, margin: '0 0 8px 0', lineHeight: 1.5 }}>{mw.description}</p>
+              <pre style={{ background: '#0a0f1e', borderRadius: 8, padding: 8, margin: 0, color: '#7dd3fc', fontSize: 10, overflowX: 'auto', lineHeight: 1.6, fontFamily: 'monospace' }}>
+                {mw.code.slice(0, 100)}...
+              </pre>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background: CARD, borderRadius: 14, padding: 18, border: '1px solid #334155', marginBottom: 14 }}>
+          <h4 style={{ color: TEXT, margin: '0 0 12px 0', fontSize: 14, fontWeight: 700 }}>🎯 Запустить тестовый запрос</h4>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+            {sampleQueries.map((q, i) => (
+              <button key={i} onClick={() => setSelectedQuery(i)}
+                style={{ background: selectedQuery === i ? PRISMA : '#0a0f1e', color: selectedQuery === i ? '#fff' : '#94a3b8', border: '1px solid ' + (selectedQuery === i ? PRISMA : '#334155'), borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+                {q.icon} {q.model}.{q.action}
+              </button>
+            ))}
+          </div>
+          <button onClick={runQuery}
+            style={{ background: PRISMA, color: '#fff', border: 'none', borderRadius: 10, padding: '10px 24px', cursor: 'pointer', fontSize: 14, fontWeight: 700 }}>
+            ▶ Выполнить через Middleware
+          </button>
+        </div>
+
+        {pipeline.length > 0 && (
+          <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 16, border: '1px solid #1e3a5f' }}>
+            <h4 style={{ color: TEXT, margin: '0 0 12px 0', fontSize: 13, fontWeight: 700 }}>📡 Выполнение pipeline</h4>
+            {pipeline.map((p, i) => (
+              <div key={i} style={{ display: 'flex', gap: 10, marginBottom: 10, alignItems: 'flex-start' }}>
+                <div style={{ background: p.color + '20', border: '1px solid ' + p.color + '50', borderRadius: 6, padding: '3px 8px', color: p.color, fontSize: 11, fontWeight: 700, flexShrink: 0, minWidth: 110, textAlign: 'center' }}>
+                  {p.icon} {p.mw}
+                </div>
+                <div style={{ color: '#94a3b8', fontSize: 12, paddingTop: 3 }}>{p.msg}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+` }} />

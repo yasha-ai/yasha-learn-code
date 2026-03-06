@@ -1,0 +1,286 @@
+import { Playground } from '../../components/Playground'
+
+# Search Params: Типизированные Параметры URL
+
+## Проблема с обычными search params
+
+В стандартном веб-разработке URL параметры (`?page=1&filter=active`) — это просто строки.
+Нет типизации, нет валидации, легко получить `NaN` или `undefined`.
+
+TanStack Router решает это через **validateSearch**:
+
+```typescript
+export const Route = createFileRoute('/users')({
+  validateSearch: (search: Record<string, unknown>) => ({
+    page: Number(search.page) || 1,
+    filter: (search.filter as string) || '',
+    sort: (search.sort as 'asc' | 'desc') || 'asc',
+    view: (search.view as 'table' | 'grid') || 'table',
+  }),
+})
+```
+
+Теперь `useSearch()` возвращает `{ page: number; filter: string; sort: 'asc' | 'desc'; view: 'table' | 'grid' }`.
+
+## Валидация с Zod
+
+Для более сложной валидации используйте Zod схемы:
+
+```typescript
+import { z } from 'zod'
+
+const searchSchema = z.object({
+  page: z.number().min(1).catch(1),
+  filter: z.string().optional().catch(''),
+  sort: z.enum(['asc', 'desc']).catch('asc'),
+})
+
+export const Route = createFileRoute('/users')({
+  validateSearch: searchSchema,
+})
+```
+
+`catch()` в Zod — значение по умолчанию при неверном вводе. Без него невалидный URL вызовет ошибку.
+
+## useSearch
+
+```typescript
+function UsersPage() {
+  const { page, filter, sort } = Route.useSearch()
+  // page: number
+  // filter: string
+  // sort: 'asc' | 'desc'
+}
+```
+
+## Обновление search params
+
+```typescript
+import { useNavigate } from '@tanstack/react-router'
+
+function UsersPage() {
+  const navigate = useNavigate({ from: Route.fullPath })
+  const { page, filter } = Route.useSearch()
+
+  const setPage = (newPage: number) => {
+    navigate({ search: (prev) => ({ ...prev, page: newPage }) })
+  }
+
+  const setFilter = (newFilter: string) => {
+    // Сбрасываем страницу при изменении фильтра
+    navigate({ search: (prev) => ({ ...prev, filter: newFilter, page: 1 }) })
+  }
+}
+```
+
+## Link с search params
+
+```tsx
+// Полная типизация! TypeScript проверит структуру search
+<Link to="/users" search={{ page: 2, filter: 'active', sort: 'desc' }}>
+  Следующая страница
+</Link>
+
+// Обновление одного параметра
+<Link
+  to="."
+  search={(prev) => ({ ...prev, sort: prev.sort === 'asc' ? 'desc' : 'asc' })}
+>
+  Сортировка
+</Link>
+```
+
+## searchParamOptions
+
+Дополнительные опции для управления search params:
+
+```typescript
+export const Route = createFileRoute('/users')({
+  validateSearch: (s) => ({ page: Number(s.page) || 1 }),
+  search: {
+    middlewares: [stripSearchParams({ page: 1 })],
+    // Автоматически удаляет page=1 из URL (default значение)
+  },
+})
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+type SearchParams = {
+  page: number
+  filter: string
+  sort: 'asc' | 'desc'
+  view: 'table' | 'grid'
+  minAge: number
+  maxAge: number
+}
+
+const DEFAULT_PARAMS: SearchParams = {
+  page: 1,
+  filter: '',
+  sort: 'asc',
+  view: 'table',
+  minAge: 0,
+  maxAge: 100,
+}
+
+type ValidationResult = { valid: boolean; value: unknown; error?: string }
+
+function validateSearchParams(raw: Record<string, string>): Record<string, ValidationResult> {
+  return {
+    page: (() => {
+      const v = Number(raw.page)
+      if (isNaN(v) || v < 1) return { valid: false, value: raw.page, error: 'Должно быть число >= 1, применено значение по умолчанию: 1' }
+      return { valid: true, value: v }
+    })(),
+    filter: { valid: true, value: raw.filter || '' },
+    sort: (() => {
+      if (!['asc', 'desc'].includes(raw.sort)) return { valid: false, value: raw.sort, error: \`Ожидается 'asc' | 'desc'\` }
+      return { valid: true, value: raw.sort }
+    })(),
+    view: (() => {
+      if (!['table', 'grid'].includes(raw.view)) return { valid: false, value: raw.view, error: \`Ожидается 'table' | 'grid'\` }
+      return { valid: true, value: raw.view }
+    })(),
+    minAge: (() => {
+      const v = Number(raw.minAge)
+      if (isNaN(v) || v < 0 || v > 100) return { valid: false, value: raw.minAge, error: 'Должно быть 0-100' }
+      return { valid: true, value: v }
+    })(),
+    maxAge: (() => {
+      const v = Number(raw.maxAge)
+      if (isNaN(v) || v < 0 || v > 100) return { valid: false, value: raw.maxAge, error: 'Должно быть 0-100' }
+      return { valid: true, value: v }
+    })(),
+  }
+}
+
+export default function App() {
+  const [params, setParams] = useState<SearchParams>(DEFAULT_PARAMS)
+  const [rawUrl, setRawUrl] = useState('')
+  const [validationResults, setValidationResults] = useState<Record<string, ValidationResult>>({})
+  const [showValidation, setShowValidation] = useState(false)
+
+  const updateParam = <K extends keyof SearchParams>(key: K, value: SearchParams[K]) => {
+    const newParams = { ...params, [key]: value }
+    if (key === 'filter') newParams.page = 1  // Сброс страницы при фильтре
+    setParams(newParams)
+  }
+
+  const buildUrl = () => {
+    const nonDefault = Object.entries(params).filter(([k, v]) => v !== DEFAULT_PARAMS[k as keyof SearchParams])
+    const qs = new URLSearchParams(nonDefault.map(([k, v]) => [k, String(v)])).toString()
+    return \`/users\${qs ? '?' + qs : ''}\`
+  }
+
+  const parseAndValidate = () => {
+    try {
+      const url = new URL('http://localhost:3000' + rawUrl)
+      const raw: Record<string, string> = {}
+      url.searchParams.forEach((v, k) => { raw[k] = v })
+      const results = validateSearchParams(raw)
+      setValidationResults(results)
+      setShowValidation(true)
+    } catch {
+      setShowValidation(false)
+    }
+  }
+
+  const generatedCode = \`// Схема валидации
+const searchSchema = z.object({
+  page: z.number().min(1).catch(1),
+  filter: z.string().optional().catch(''),
+  sort: z.enum(['asc', 'desc']).catch('asc'),
+  view: z.enum(['table', 'grid']).catch('table'),
+  minAge: z.number().min(0).max(100).catch(0),
+  maxAge: z.number().min(0).max(100).catch(100),
+})
+
+// Текущие значения:
+// page: \${params.page}
+// filter: "\${params.filter}"
+// sort: "\${params.sort}"
+// view: "\${params.view}"
+// minAge: \${params.minAge}
+// maxAge: \${params.maxAge}\`
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>Search Params Manager</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Типизированные параметры URL с валидацией</p>
+
+      <div style={{ background: '#1e293b', borderRadius: '10px', padding: '12px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <span style={{ color: '#64748b', fontSize: '12px', flexShrink: 0 }}>localhost:3000</span>
+        <span style={{ color: '#a5f3fc', fontSize: '13px', fontWeight: 600, fontFamily: 'monospace' }}>{buildUrl()}</span>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '14px' }}>⚙️ Параметры (useSearch)</h3>
+
+          <div style={{ marginBottom: '12px' }}>
+            <label style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '4px' }}>page: number</label>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button onClick={() => updateParam('page', Math.max(1, params.page - 1))} style={{ background: '#334155', border: 'none', borderRadius: '4px', padding: '4px 8px', color: '#94a3b8', cursor: 'pointer' }}>-</button>
+              <span style={{ background: '#0f172a', borderRadius: '4px', padding: '4px 12px', color: '#ef4444', fontSize: '14px', fontWeight: 600 }}>{params.page}</span>
+              <button onClick={() => updateParam('page', params.page + 1)} style={{ background: '#334155', border: 'none', borderRadius: '4px', padding: '4px 8px', color: '#94a3b8', cursor: 'pointer' }}>+</button>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '12px' }}>
+            <label style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '4px' }}>filter: string</label>
+            <input value={params.filter} onChange={e => updateParam('filter', e.target.value)} placeholder="Поиск..." style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: '6px', padding: '6px 10px', color: '#e2e8f0', fontSize: '13px', boxSizing: 'border-box' }} />
+          </div>
+
+          <div style={{ marginBottom: '12px' }}>
+            <label style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '4px' }}>sort: 'asc' | 'desc'</label>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              {(['asc', 'desc'] as const).map(s => (
+                <button key={s} onClick={() => updateParam('sort', s)} style={{ flex: 1, background: params.sort === s ? '#ef444422' : '#334155', border: \`1px solid \${params.sort === s ? '#ef4444' : 'transparent'}\`, borderRadius: '6px', padding: '6px', color: params.sort === s ? '#ef4444' : '#64748b', cursor: 'pointer', fontSize: '12px' }}>{s}</button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '12px' }}>
+            <label style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '4px' }}>view: 'table' | 'grid'</label>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              {(['table', 'grid'] as const).map(v => (
+                <button key={v} onClick={() => updateParam('view', v)} style={{ flex: 1, background: params.view === v ? '#06b6d422' : '#334155', border: \`1px solid \${params.view === v ? '#06b6d4' : 'transparent'}\`, borderRadius: '6px', padding: '6px', color: params.view === v ? '#06b6d4' : '#64748b', cursor: 'pointer', fontSize: '12px' }}>{v}</button>
+              ))}
+            </div>
+          </div>
+
+          <button onClick={() => setParams(DEFAULT_PARAMS)} style={{ width: '100%', background: '#334155', border: 'none', borderRadius: '6px', padding: '8px', color: '#64748b', cursor: 'pointer', fontSize: '12px' }}>
+            Сбросить к defaults
+          </button>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>🔍 Валидация URL</h3>
+          <div style={{ display: 'flex', gap: '6px', marginBottom: '12px' }}>
+            <input value={rawUrl} onChange={e => setRawUrl(e.target.value)} placeholder="/users?page=abc&sort=invalid" style={{ flex: 1, background: '#0f172a', border: '1px solid #334155', borderRadius: '6px', padding: '6px 10px', color: '#e2e8f0', fontSize: '12px', fontFamily: 'monospace' }} />
+            <button onClick={parseAndValidate} style={{ background: '#ef4444', border: 'none', borderRadius: '6px', padding: '6px 12px', color: 'white', cursor: 'pointer', fontSize: '12px' }}>Parse</button>
+          </div>
+
+          {showValidation && Object.entries(validationResults).map(([key, result]) => (
+            <div key={key} style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', marginBottom: '6px', background: '#0f172a', borderRadius: '6px', padding: '6px 8px' }}>
+              <span style={{ fontSize: '12px', color: result.valid ? '#22c55e' : '#ef4444', flexShrink: 0 }}>{result.valid ? '✓' : '✗'}</span>
+              <div>
+                <span style={{ fontSize: '12px', color: '#94a3b8', fontFamily: 'monospace' }}>{key}: </span>
+                <span style={{ fontSize: '12px', color: result.valid ? '#86efac' : '#fca5a5' }}>{String(result.value)}</span>
+                {result.error && <div style={{ fontSize: '10px', color: '#f97316', marginTop: '2px' }}>{result.error}</div>}
+              </div>
+            </div>
+          ))}
+
+          <div style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
+            <pre style={{ background: '#0f172a', borderRadius: '6px', padding: '10px', fontSize: '10px', color: '#a5f3fc', overflow: 'auto', lineHeight: 1.6, margin: 0 }}>
+              {generatedCode}
+            </pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

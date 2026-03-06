@@ -1,0 +1,256 @@
+import { Playground } from '../../components/Playground'
+
+# Подписки (Subscriptions)
+
+Подписки в tRPC позволяют реализовать real-time функциональность через WebSocket. В отличие от query и mutation, подписки поддерживают длительные соединения, по которым сервер может отправлять данные клиенту в режиме реального времени.
+
+## Как работают подписки?
+
+Подписки основаны на концепции Observable — потока событий. Сервер создаёт observable, который эмитирует события. Клиент подписывается на него и получает каждое событие по мере его появления. Соединение остаётся открытым до явной отписки.
+
+## Настройка WebSocket
+
+Для использования подписок необходимо настроить WebSocket-сервер на бэкенде (через `createWSServer`) и добавить `wsLink` или `splitLink` на клиенте. `splitLink` позволяет использовать HTTP для query/mutation и WebSocket только для подписок.
+
+## Создание подписки на сервере
+
+Подписка создаётся через `.subscription()` вместо `.query()` или `.mutation()`. Обработчик должен возвращать `observable`, создаваемый через `observable<TData, TError>()`. Внутри observable вы вызываете `emit.next(data)` для отправки данных и `emit.complete()` для завершения.
+
+## Использование на клиенте
+
+На клиенте подписка используется через `trpc.procedureName.useSubscription()`. Хук принимает колбэки `onData` и `onError`. Подписка автоматически отключается при размонтировании компонента.
+
+## Практические применения
+
+Подписки идеальны для: чат-сообщений в реальном времени, live-уведомлений, обновления статуса задач, live-метрик и дашбордов, совместного редактирования документов.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const ORANGE = '#f97316';
+const PURPLE = '#a855f7';
+
+type EventType = 'message' | 'notification' | 'metric' | 'status';
+
+interface LiveEvent {
+  id: number;
+  type: EventType;
+  data: string;
+  time: string;
+  color: string;
+}
+
+const typeColors: Record<EventType, string> = {
+  message: TRPC,
+  notification: YELLOW,
+  metric: GREEN,
+  status: ORANGE,
+};
+
+const typeIcons: Record<EventType, string> = {
+  message: '💬',
+  notification: '🔔',
+  metric: '📊',
+  status: '⚡',
+};
+
+const serverMessages: Array<{ type: EventType; data: string }> = [
+  { type: 'message', data: 'Alice: Привет всем!' },
+  { type: 'notification', data: 'Новый пользователь зарегистрировался' },
+  { type: 'metric', data: 'CPU: 45%, Memory: 2.1GB' },
+  { type: 'status', data: 'Сервис payments: OK' },
+  { type: 'message', data: 'Bob: Как дела?' },
+  { type: 'metric', data: 'RPS: 1234, Latency: 12ms' },
+  { type: 'notification', data: 'Заказ #1042 оформлен' },
+  { type: 'message', data: 'Carol: Всё работает отлично!' },
+  { type: 'status', data: 'Deploy завершён успешно' },
+  { type: 'metric', data: 'Active users: 342' },
+  { type: 'notification', data: 'Ошибка в очереди задач' },
+  { type: 'message', data: 'Dave: Нужна помощь с tRPC?' },
+];
+
+let eventIdCounter = 0;
+
+const serverCode =
+  'subscription: publicProcedure\n' +
+  '  .input(z.object({ channel: z.string() }))\n' +
+  '  .subscription(({ input }) => {\n' +
+  '    return observable<Event>((emit) => {\n' +
+  '      const handler = (data: Event) => {\n' +
+  '        emit.next(data);\n' +
+  '      };\n' +
+  '      eventEmitter.on(input.channel, handler);\n' +
+  '      return () => {\n' +
+  '        eventEmitter.off(input.channel, handler);\n' +
+  '      };\n' +
+  '    });\n' +
+  '  }),';
+
+const clientCode =
+  'trpc.events.useSubscription(\n' +
+  '  { channel: "main" },\n' +
+  '  {\n' +
+  '    onData: (event) => {\n' +
+  '      setEvents(prev => [event, ...prev]);\n' +
+  '    },\n' +
+  '    onError: (err) => {\n' +
+  '      console.error(err);\n' +
+  '    },\n' +
+  '  }\n' +
+  ');';
+
+export default function App() {
+  const [events, setEvents] = useState<LiveEvent[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [messageIndex, setMessageIndex] = useState(0);
+  const [filter, setFilter] = useState<EventType | 'all'>('all');
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const msgIndexRef = useRef(0);
+
+  const connect = () => {
+    if (isConnected) return;
+    setIsConnecting(true);
+    setTimeout(() => {
+      setIsConnected(true);
+      setIsConnecting(false);
+      msgIndexRef.current = 0;
+      intervalRef.current = setInterval(() => {
+        const msg = serverMessages[msgIndexRef.current % serverMessages.length];
+        msgIndexRef.current++;
+        const now = new Date();
+        const time = now.getHours().toString().padStart(2, '0') + ':' +
+          now.getMinutes().toString().padStart(2, '0') + ':' +
+          now.getSeconds().toString().padStart(2, '0');
+        setEvents(prev => [{
+          id: ++eventIdCounter,
+          type: msg.type,
+          data: msg.data,
+          time,
+          color: typeColors[msg.type],
+        }, ...prev].slice(0, 30));
+      }, 1200);
+    }, 800);
+  };
+
+  const disconnect = () => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    setIsConnected(false);
+  };
+
+  useEffect(() => {
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, []);
+
+  const filteredEvents = filter === 'all' ? events : events.filter(e => e.type === filter);
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        Real-time Subscriptions — симулятор
+      </h2>
+
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: '240px', flex: '0 0 auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ background: CARD, border: '1px solid ' + (isConnected ? GREEN : '#334155'), borderRadius: '10px', padding: '14px', transition: 'border-color 0.3s' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+              <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: isConnected ? GREEN : (isConnecting ? YELLOW : '#475569'), boxShadow: isConnected ? '0 0 6px ' + GREEN : 'none', transition: 'all 0.3s' }} />
+              <span style={{ color: TEXT, fontSize: '13px', fontWeight: 'bold' }}>
+                {isConnected ? 'Подключено' : isConnecting ? 'Подключение...' : 'Отключено'}
+              </span>
+            </div>
+            <div style={{ color: TEXT, opacity: 0.6, fontSize: '11px', marginBottom: '12px' }}>
+              WebSocket: {isConnected ? 'ws://localhost:3000/trpc' : '—'}
+            </div>
+            {!isConnected ? (
+              <button onClick={connect} disabled={isConnecting} style={{ width: '100%', background: GREEN, color: '#fff', border: 'none', borderRadius: '6px', padding: '8px', cursor: 'pointer', fontSize: '12px' }}>
+                {isConnecting ? '⏳ Подключение...' : '🔌 Подключиться'}
+              </button>
+            ) : (
+              <button onClick={disconnect} style={{ width: '100%', background: '#ef444420', color: '#ef4444', border: '1px solid #ef4444', borderRadius: '6px', padding: '8px', cursor: 'pointer', fontSize: '12px' }}>
+                🔌 Отключиться
+              </button>
+            )}
+          </div>
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+            <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '11px', marginBottom: '8px' }}>Фильтр событий</div>
+            {(['all', 'message', 'notification', 'metric', 'status'] as const).map(f => (
+              <button key={f} onClick={() => setFilter(f)} style={{
+                display: 'block', width: '100%', background: filter === f ? (f === 'all' ? TRPC : typeColors[f as EventType] + '33') : 'transparent',
+                color: filter === f ? (f === 'all' ? '#fff' : typeColors[f as EventType]) : TEXT,
+                border: '1px solid ' + (filter === f ? (f === 'all' ? TRPC : typeColors[f as EventType]) : '#334155'),
+                borderRadius: '5px', padding: '5px 8px', cursor: 'pointer', fontSize: '11px',
+                marginBottom: '4px', textAlign: 'left',
+              }}>
+                {f === 'all' ? '🌐 Все' : typeIcons[f as EventType] + ' ' + f}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '12px' }}>
+            <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '11px', marginBottom: '8px' }}>Статистика</div>
+            {(['message', 'notification', 'metric', 'status'] as EventType[]).map(t => {
+              const count = events.filter(e => e.type === t).length;
+              return (
+                <div key={t} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', borderBottom: '1px solid #1e293b' }}>
+                  <span style={{ color: typeColors[t], fontSize: '11px' }}>{typeIcons[t]} {t}</span>
+                  <span style={{ color: TEXT, opacity: 0.7, fontSize: '11px' }}>{count}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ flex: '1', minWidth: '250px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px', flex: '1' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+              <span style={{ color: TEXT, fontWeight: 'bold', fontSize: '12px' }}>📡 Поток событий</span>
+              <span style={{ color: TEXT, opacity: 0.5, fontSize: '11px' }}>{filteredEvents.length} событий</span>
+            </div>
+            <div style={{ maxHeight: '280px', overflowY: 'auto' }}>
+              {filteredEvents.length === 0 ? (
+                <div style={{ color: TEXT, opacity: 0.4, textAlign: 'center', padding: '40px 0', fontSize: '12px' }}>
+                  {isConnected ? 'Ожидание событий...' : 'Подключитесь для получения событий'}
+                </div>
+              ) : (
+                filteredEvents.map(event => (
+                  <div key={event.id} style={{
+                    display: 'flex', gap: '8px', alignItems: 'flex-start', padding: '6px 8px',
+                    borderRadius: '6px', marginBottom: '4px',
+                    background: event.color + '11', borderLeft: '3px solid ' + event.color,
+                    animation: 'fadeIn 0.3s ease',
+                  }}>
+                    <span style={{ fontSize: '14px', flexShrink: 0 }}>{typeIcons[event.type]}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ color: event.color, fontSize: '10px', marginBottom: '2px' }}>{event.type}</div>
+                      <div style={{ color: TEXT, fontSize: '11px' }}>{event.data}</div>
+                    </div>
+                    <div style={{ color: TEXT, opacity: 0.4, fontSize: '10px', flexShrink: 0 }}>{event.time}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ flex: 1, background: CARD, border: '1px solid ' + TRPC, borderRadius: '8px', padding: '12px' }}>
+              <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '10px', marginBottom: '6px' }}>Сервер</div>
+              <pre style={{ margin: 0, fontSize: '9px', color: TEXT, lineHeight: '1.6', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>{serverCode}</pre>
+            </div>
+            <div style={{ flex: 1, background: CARD, border: '1px solid ' + GREEN, borderRadius: '8px', padding: '12px' }}>
+              <div style={{ color: GREEN, fontWeight: 'bold', fontSize: '10px', marginBottom: '6px' }}>Клиент</div>
+              <pre style={{ margin: 0, fontSize: '9px', color: TEXT, lineHeight: '1.6', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>{clientCode}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

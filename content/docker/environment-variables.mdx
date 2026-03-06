@@ -1,0 +1,295 @@
+import { Playground } from '../../components/Playground'
+
+# Переменные Окружения в Docker
+
+Переменные окружения — основной способ передачи конфигурации в контейнеры Docker. Они обеспечивают гибкость, позволяя использовать один образ в разных средах (dev, staging, prod) без пересборки.
+
+## ENV в Dockerfile
+
+Инструкция `ENV` устанавливает переменные на этапе сборки и сохраняет их в образе:
+
+```dockerfile
+FROM node:20-alpine
+
+# Одна переменная
+ENV NODE_ENV=production
+
+# Несколько переменных
+ENV PORT=3000 \
+    HOST=0.0.0.0 \
+    LOG_LEVEL=info
+
+# Использование в инструкциях
+RUN echo "Building for $NODE_ENV"
+
+CMD ["node", "server.js"]
+# В контейнере: process.env.NODE_ENV === "production"
+```
+
+## ARG vs ENV
+
+```dockerfile
+# ARG — только во время сборки образа
+ARG VERSION=latest
+ARG BUILD_DATE
+
+FROM node:20-alpine
+
+# Передать ARG в ENV для использования в контейнере
+ARG VERSION
+ENV APP_VERSION=${VERSION}
+
+# Передача при сборке
+# docker build --build-arg VERSION=1.2.3 .
+```
+
+Разница:
+- **ARG** — доступен только во время `docker build`, не сохраняется в образе
+- **ENV** — доступен во время сборки и в работающем контейнере, сохраняется в образе
+
+## Флаг --env при запуске
+
+```bash
+# Передать одну переменную
+docker run -e NODE_ENV=production myapp
+
+# Передать несколько переменных
+docker run \
+  -e NODE_ENV=production \
+  -e DATABASE_URL=postgresql://localhost/mydb \
+  -e SECRET_KEY=mysecret \
+  myapp
+
+# Взять значение из окружения хоста
+export DATABASE_URL=postgresql://prod-server/mydb
+docker run -e DATABASE_URL myapp  # значение берётся с хоста
+```
+
+## Файл .env с Docker Compose
+
+```bash
+# .env файл в директории проекта
+NODE_ENV=development
+DATABASE_URL=postgresql://postgres:password@localhost/mydb
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=dev_secret_change_in_prod
+API_PORT=3000
+```
+
+```yaml
+# docker-compose.yml
+services:
+  api:
+    image: myapi
+    env_file:
+      - .env          # загружает .env файл
+      - .env.local    # переопределения (git-игнорируется)
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}  # с дефолтным значением
+      - CUSTOM_VAR=hardcoded              # жёстко заданная
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mydb}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Database password required}
+      # :? — ошибка если не задано
+```
+
+## Несколько .env файлов
+
+```bash
+# Иерархия .env файлов для разных сред:
+
+.env                  # базовые значения, в git
+.env.local            # локальные переопределения, в .gitignore
+.env.development      # для разработки
+.env.production       # для продакшена (без секретов!)
+.env.test             # для тестов
+
+# docker compose с конкретным .env
+docker compose --env-file .env.production up
+```
+
+## Лучшие практики безопасности
+
+**❌ Никогда не делайте:**
+```dockerfile
+# Секреты в Dockerfile попадают в образ!
+ENV DATABASE_PASSWORD=mysecret123
+ENV API_KEY=sk-prod-abc123
+```
+
+**✅ Правильный подход:**
+```bash
+# 1. Передавать секреты через --env или Docker Secrets
+docker run -e DATABASE_PASSWORD=$DB_PASS myapp
+
+# 2. Использовать Docker Secrets в Swarm
+docker secret create db_password ./db_password.txt
+docker service create --secret db_password myapp
+
+# 3. Использовать HashiCorp Vault или cloud secrets managers
+# 4. Никогда не коммитить .env с секретами в git
+```
+
+```gitignore
+# .gitignore
+.env
+.env.local
+.env.*.local
+```
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const [envs, setEnvs] = React.useState([
+    { key: 'NODE_ENV',       value: 'production',                  source: 'dockerfile', secret: false },
+    { key: 'PORT',           value: '3000',                        source: 'dockerfile', secret: false },
+    { key: 'DATABASE_URL',   value: 'postgresql://postgres/mydb',  source: 'env_file',   secret: true  },
+    { key: 'JWT_SECRET',     value: 'super_secret_token_here',     source: 'runtime',    secret: true  },
+    { key: 'LOG_LEVEL',      value: 'info',                        source: 'env_file',   secret: false },
+    { key: 'API_VERSION',    value: 'v2',                          source: 'compose',    secret: false },
+  ]);
+  const [newKey, setNewKey] = React.useState('');
+  const [newVal, setNewVal] = React.useState('');
+  const [newSrc, setNewSrc] = React.useState('runtime');
+  const [showSecrets, setShowSecrets] = React.useState(false);
+  const [activeTab, setActiveTab] = React.useState('manager');
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+  const purple = '#8b5cf6';
+
+  const sourceColors = {
+    dockerfile: purple, env_file: green, runtime: amber, compose: docker,
+  };
+  const sourceLabels = {
+    dockerfile: 'Dockerfile ENV', env_file: '.env файл', runtime: 'docker run -e', compose: 'compose.yml',
+  };
+
+  const addEnv = () => {
+    if (!newKey.trim()) return;
+    setEnvs(e => [...e, { key: newKey.trim(), value: newVal, source: newSrc, secret: false }]);
+    setNewKey('');
+    setNewVal('');
+  };
+
+  const removeEnv = (i) => setEnvs(e => e.filter((_, j) => j !== i));
+  const toggleSecret = (i) => setEnvs(e => e.map((env, j) => j === i ? { ...env, secret: !env.secret } : env));
+
+  const masked = (val) => val.replace(/./g, '●');
+
+  const dockerfileContent = envs.filter(e => e.source === 'dockerfile')
+    .map(e => \`ENV \${e.key}=\${e.secret ? '***' : e.value}\`).join('\\n');
+
+  const envFileContent = envs.filter(e => e.source === 'env_file')
+    .map(e => \`\${e.key}=\${e.secret ? masked(e.value) : e.value}\`).join('\\n');
+
+  const runCommand = \`docker run \\\\\\n\${envs.filter(e => e.source === 'runtime').map(e => \`  -e \${e.key}=\${e.secret ? '***' : e.value}\`).join(' \\\\\\n')} \\\\\\n  myapp\`;
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        ⚙️ Менеджер Переменных Окружения
+      </h2>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 20 }}>
+        {[['manager', '📋 Переменные'], ['preview', '👁️ Предпросмотр']].map(([id, label]) => (
+          <button key={id} onClick={() => setActiveTab(id)} style={{
+            padding: '7px 16px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            background: activeTab === id ? docker : card, color: activeTab === id ? '#fff' : muted,
+          }}>{label}</button>
+        ))}
+        <button onClick={() => setShowSecrets(!showSecrets)} style={{
+          padding: '7px 14px', borderRadius: 8, border: \`1px solid \${amber}44\`, cursor: 'pointer', fontSize: 12,
+          background: showSecrets ? amber + '22' : card, color: showSecrets ? amber : muted,
+        }}>{showSecrets ? '🔓 Скрыть' : '🔒 Показать'} секреты</button>
+      </div>
+
+      <div style={{ maxWidth: 680, margin: '0 auto' }}>
+        {activeTab === 'manager' && (
+          <>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+              <input value={newKey} onChange={e => setNewKey(e.target.value)} placeholder="KEY" style={{
+                flex: 1, minWidth: 100, background: card, border: '1px solid #ffffff15', borderRadius: 8, padding: '7px 10px', color: text, fontSize: 13, outline: 'none',
+              }} />
+              <input value={newVal} onChange={e => setNewVal(e.target.value)} placeholder="value" style={{
+                flex: 2, minWidth: 120, background: card, border: '1px solid #ffffff15', borderRadius: 8, padding: '7px 10px', color: text, fontSize: 13, outline: 'none',
+              }} />
+              <select value={newSrc} onChange={e => setNewSrc(e.target.value)} style={{
+                background: card, border: '1px solid #ffffff15', borderRadius: 8, padding: '7px 10px', color: text, fontSize: 12, outline: 'none',
+              }}>
+                {Object.entries(sourceLabels).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+              <button onClick={addEnv} style={{
+                background: docker, border: 'none', borderRadius: 8, padding: '7px 14px', color: '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+              }}>+ Добавить</button>
+            </div>
+
+            {Object.entries(sourceLabels).map(([src, label]) => {
+              const group = envs.filter(e => e.source === src);
+              if (!group.length) return null;
+              return (
+                <div key={src} style={{ marginBottom: 12 }}>
+                  <div style={{ color: sourceColors[src], fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+                    {label} ({group.length})
+                  </div>
+                  {group.map((env, absIdx) => {
+                    const i = envs.indexOf(env);
+                    return (
+                      <div key={i} style={{
+                        display: 'flex', alignItems: 'center', gap: 8, background: card,
+                        borderRadius: 8, padding: '8px 12px', marginBottom: 4,
+                        border: \`1px solid \${sourceColors[src]}33\`,
+                      }}>
+                        <span style={{ color: sourceColors[src], fontFamily: 'monospace', fontSize: 12, fontWeight: 600, minWidth: 120 }}>{env.key}</span>
+                        <span style={{ color: text, fontFamily: 'monospace', fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          = {env.secret && !showSecrets ? masked(env.value) : env.value}
+                        </span>
+                        {env.secret && <span style={{ background: red + '22', color: red, borderRadius: 4, padding: '1px 5px', fontSize: 10 }}>🔒</span>}
+                        <button onClick={() => toggleSecret(i)} style={{
+                          background: 'none', border: 'none', cursor: 'pointer', color: muted, fontSize: 12,
+                        }}>{env.secret ? '🔒' : '🔓'}</button>
+                        <button onClick={() => removeEnv(i)} style={{
+                          background: 'none', border: 'none', cursor: 'pointer', color: '#ef444477', fontSize: 14,
+                        }}>×</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </>
+        )}
+
+        {activeTab === 'preview' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {dockerfileContent && (
+              <div>
+                <div style={{ color: purple, fontSize: 12, fontWeight: 700, marginBottom: 6 }}>📄 Dockerfile</div>
+                <pre style={{ background: '#0d1117', borderRadius: 8, padding: 12, fontSize: 11, color: '#94a3b8', fontFamily: 'monospace', margin: 0 }}>{dockerfileContent}</pre>
+              </div>
+            )}
+            {envFileContent && (
+              <div>
+                <div style={{ color: green, fontSize: 12, fontWeight: 700, marginBottom: 6 }}>📄 .env файл</div>
+                <pre style={{ background: '#0d1117', borderRadius: 8, padding: 12, fontSize: 11, color: '#94a3b8', fontFamily: 'monospace', margin: 0 }}>{envFileContent}</pre>
+              </div>
+            )}
+            <div>
+              <div style={{ color: amber, fontSize: 12, fontWeight: 700, marginBottom: 6 }}>💻 docker run команда</div>
+              <pre style={{ background: '#0d1117', borderRadius: 8, padding: 12, fontSize: 11, color: '#94a3b8', fontFamily: 'monospace', margin: 0 }}>{runCommand}</pre>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

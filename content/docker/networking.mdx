@@ -1,0 +1,259 @@
+import { Playground } from '../../components/Playground'
+
+# Docker Networking: Сети Контейнеров
+
+Docker предоставляет мощную систему сетей, позволяющую контейнерам взаимодействовать друг с другом и с внешним миром. По умолчанию контейнеры изолированы, но могут быть подключены к одной или нескольким сетям.
+
+## Типы сетей Docker
+
+### Bridge (мостовая сеть)
+Тип сети по умолчанию. Создаёт виртуальный коммутатор, к которому подключаются контейнеры. Контейнеры в одной bridge-сети могут общаться по имени контейнера.
+
+```bash
+# Сеть bridge по умолчанию
+docker run -d --name web nginx
+
+# Создать пользовательскую bridge-сеть
+docker network create mynetwork
+
+# Запустить контейнер в пользовательской сети
+docker run -d --name web --network mynetwork nginx
+docker run -d --name api --network mynetwork node:20-alpine
+
+# Теперь api может обращаться к web по имени:
+# http://web:80
+```
+
+### Host
+Контейнер использует сетевой стек хост-машины напрямую. Нет изоляции на уровне сети. Максимальная производительность, только на Linux.
+
+```bash
+docker run -d --network host nginx
+# nginx доступен на хосте на порту 80 напрямую
+```
+
+### None
+Полная сетевая изоляция. Нет доступа ни к внешней сети, ни к другим контейнерам.
+
+```bash
+docker run -d --network none myapp
+# Контейнер изолирован от всех сетей
+```
+
+### Overlay
+Для коммуникации контейнеров на разных хостах (Docker Swarm).
+
+```bash
+docker network create --driver overlay myswarm-net
+```
+
+## Управление сетями
+
+```bash
+# Список сетей
+docker network ls
+
+# Подробная информация о сети
+docker network inspect mynetwork
+
+# Создать сеть с подсетью
+docker network create \
+  --driver bridge \
+  --subnet=172.20.0.0/16 \
+  --ip-range=172.20.240.0/20 \
+  mynetwork
+
+# Подключить контейнер к сети
+docker network connect mynetwork container_name
+
+# Отключить контейнер от сети
+docker network disconnect mynetwork container_name
+
+# Удалить сеть
+docker network rm mynetwork
+
+# Удалить все неиспользуемые сети
+docker network prune
+```
+
+## DNS и Service Discovery
+
+В пользовательских bridge-сетях Docker автоматически обеспечивает DNS-разрешение по именам контейнеров:
+
+```bash
+docker network create backend
+
+docker run -d --name postgres --network backend postgres:15
+docker run -d --name api      --network backend \
+  -e DATABASE_URL=postgresql://postgres/mydb \
+  myapi
+
+# В коде api можно обращаться к postgres по имени:
+# postgresql://postgres:5432/mydb
+```
+
+## Маппинг портов
+
+```bash
+# -p hostPort:containerPort
+docker run -p 8080:80 nginx          # localhost:8080 → container:80
+docker run -p 3000:3000 myapp
+docker run -p 127.0.0.1:3000:3000 myapp  # только localhost
+docker run -p 3000-3005:3000-3005 myapp  # диапазон портов
+
+# Случайный порт хоста
+docker run -P nginx
+docker port nginx  # узнать назначенный порт
+```
+
+## Сети в Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  frontend:
+    image: nginx
+    ports:
+      - "80:80"
+    networks:
+      - frontend-net
+
+  api:
+    image: node:20-alpine
+    networks:
+      - frontend-net
+      - backend-net
+
+  postgres:
+    image: postgres:15
+    networks:
+      - backend-net
+    # frontend НЕ может обратиться к postgres!
+
+networks:
+  frontend-net:
+    driver: bridge
+  backend-net:
+    driver: bridge
+    internal: true  # нет доступа в интернет
+```
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const [containers, setContainers] = React.useState([
+    { id: 'c1', name: 'frontend', image: 'nginx',     networks: ['frontend'], ports: '80:8080',  color: '#3b82f6' },
+    { id: 'c2', name: 'api',      image: 'node:20',   networks: ['frontend', 'backend'], ports: '3000', color: '#22c55e' },
+    { id: 'c3', name: 'postgres', image: 'postgres',  networks: ['backend'],  ports: '5432',    color: '#f59e0b' },
+    { id: 'c4', name: 'redis',    image: 'redis:7',   networks: ['backend'],  ports: '6379',    color: '#ef4444' },
+  ]);
+  const [networks] = React.useState([
+    { name: 'frontend', color: '#3b82f6', desc: 'Внешняя сеть (интернет доступен)' },
+    { name: 'backend',  color: '#f59e0b', desc: 'Внутренняя сеть (internal: true)' },
+  ]);
+  const [selected, setSelected] = React.useState(null);
+  const [netType, setNetType] = React.useState('bridge');
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+
+  const netTypes = {
+    bridge: { desc: 'Стандартная изолированная сеть. Контейнеры общаются по имени внутри сети. Маппинг портов нужен для внешнего доступа.', color: docker },
+    host:   { desc: 'Контейнер использует сетевой стек хоста напрямую. Нет сетевой изоляции. Только Linux. Максимальная производительность.', color: '#22c55e' },
+    none:   { desc: 'Полная изоляция. Нет сетевого интерфейса кроме loopback. Для задач без сетевого доступа.', color: '#ef4444' },
+    overlay: { desc: 'Для Docker Swarm. Объединяет контейнеры на разных хостах в одну сеть. Зашифрованная коммуникация.', color: '#8b5cf6' },
+  };
+
+  const canCommunicate = (a, b) => {
+    if (a.id === b.id) return false;
+    return a.networks.some(n => b.networks.includes(n));
+  };
+
+  const sel = selected ? containers.find(c => c.id === selected) : null;
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        🌐 Docker Network Топология
+      </h2>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+        {Object.entries(netTypes).map(([k, v]) => (
+          <button key={k} onClick={() => setNetType(k)} style={{
+            padding: '6px 14px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            background: netType === k ? v.color : card, color: netType === k ? '#fff' : muted,
+          }}>{k}</button>
+        ))}
+      </div>
+
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <div style={{ background: card, borderRadius: 10, padding: 12, marginBottom: 16, border: \`1px solid \${netTypes[netType].color}44\` }}>
+          <span style={{ color: netTypes[netType].color, fontWeight: 700, fontSize: 13 }}>--network {netType}: </span>
+          <span style={{ color: text, fontSize: 13 }}>{netTypes[netType].desc}</span>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {networks.map(net => (
+            <div key={net.name} style={{ background: card, borderRadius: 12, padding: 16, border: \`2px solid \${net.color}44\` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <div style={{ width: 12, height: 12, borderRadius: '50%', background: net.color }} />
+                <span style={{ fontWeight: 700, color: net.color, fontSize: 14 }}>🌐 {net.name}</span>
+                <span style={{ color: muted, fontSize: 12 }}>({net.desc})</span>
+              </div>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                {containers.filter(c => c.networks.includes(net.name)).map(c => (
+                  <div key={c.id} onClick={() => setSelected(selected === c.id ? null : c.id)} style={{
+                    background: selected === c.id ? c.color + '33' : '#ffffff0a',
+                    border: \`2px solid \${c.color}\${selected === c.id ? '' : '66'}\`,
+                    borderRadius: 10, padding: '10px 14px', cursor: 'pointer',
+                    transition: 'all 0.2s',
+                  }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: c.color }}>📦 {c.name}</div>
+                    <div style={{ color: muted, fontSize: 11, marginTop: 2 }}>{c.image}</div>
+                    <div style={{ color: text, fontSize: 11, marginTop: 2, fontFamily: 'monospace' }}>:{c.ports}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {sel && (
+          <div style={{ marginTop: 16, background: card, borderRadius: 12, padding: 16, border: \`1px solid \${sel.color}55\` }}>
+            <div style={{ fontWeight: 700, color: sel.color, fontSize: 14, marginBottom: 10 }}>
+              📦 {sel.name} — возможности коммуникации
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {containers.filter(c => c.id !== sel.id).map(c => {
+                const ok = canCommunicate(sel, c);
+                const sharedNet = sel.networks.find(n => c.networks.includes(n));
+                return (
+                  <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+                    <span style={{ color: ok ? green : '#ef4444', fontWeight: 700, minWidth: 20 }}>{ok ? '✓' : '✗'}</span>
+                    <span style={{ color: c.color, fontWeight: 600, minWidth: 80 }}>{c.name}</span>
+                    <span style={{ color: muted, flex: 1, fontSize: 12 }}>
+                      {ok ? \`через сеть "\${sharedNet}" → http://\${c.name}:\${c.ports.split(':').pop()}\` : 'нет общей сети'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: 16, background: '#0d1117', borderRadius: 10, padding: 14, fontFamily: 'monospace', fontSize: 11, border: '1px solid #ffffff10' }}>
+          <div style={{ color: muted, marginBottom: 8 }}>docker network ls</div>
+          <div style={{ color: docker }}>NETWORK ID     NAME        DRIVER    SCOPE</div>
+          {networks.map((n, i) => (
+            <div key={i} style={{ color: text }}>
+              {Math.random().toString(16).substr(2, 12)}   {n.name.padEnd(12)} bridge    local
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,270 @@
+import { Playground } from '../../components/Playground'
+
+# Агрегации и группировка
+
+Prisma предоставляет мощный API для агрегации данных: подсчёта, суммирования, нахождения минимума/максимума, среднего значения, а также группировки записей.
+
+## Метод aggregate()
+
+```typescript
+const stats = await prisma.user.aggregate({
+  _count: { id: true },        // количество записей
+  _avg:   { age: true },       // среднее значение
+  _sum:   { balance: true },   // сумма
+  _min:   { age: true },       // минимум
+  _max:   { age: true },       // максимум
+})
+
+console.log(stats._count.id)   // 250
+console.log(stats._avg.age)    // 31.4
+```
+
+## Метод count()
+
+```typescript
+// Подсчёт всех записей
+const total = await prisma.user.count()
+
+// Подсчёт с условием
+const activeUsers = await prisma.user.count({
+  where: { isActive: true },
+})
+
+// Подсчёт вместе с данными через include
+const user = await prisma.user.findUnique({
+  where: { id: 1 },
+  include: {
+    _count: {
+      select: { posts: true, comments: true },
+    },
+  },
+})
+```
+
+## Метод groupBy()
+
+```typescript
+const grouped = await prisma.user.groupBy({
+  by: ['role'],
+  _count: { id: true },
+  _avg: { age: true },
+  having: {
+    age: { _avg: { gt: 25 } },
+  },
+  orderBy: { _count: { id: 'desc' } },
+})
+```
+
+## Агрегации через связи
+
+Можно считать связанные записи прямо в запросе:
+
+```typescript
+const posts = await prisma.post.findMany({
+  include: {
+    _count: {
+      select: {
+        comments: true,
+        likes: true,
+      },
+    },
+  },
+})
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const mockData = {
+  user: {
+    records: [
+      { id: 1, name: 'Иван', age: 28, balance: 50000, role: 'ADMIN' },
+      { id: 2, name: 'Анна', age: 23, balance: 30000, role: 'USER' },
+      { id: 3, name: 'Пётр', age: 35, balance: 75000, role: 'USER' },
+      { id: 4, name: 'Мария', age: 42, balance: 120000, role: 'ADMIN' },
+      { id: 5, name: 'Дмитрий', age: 31, balance: 45000, role: 'MODERATOR' },
+      { id: 6, name: 'Елена', age: 27, balance: 60000, role: 'USER' },
+      { id: 7, name: 'Алексей', age: 38, balance: 95000, role: 'USER' },
+    ],
+    aggregableFields: ['age', 'balance', 'id'],
+  },
+  post: {
+    records: [
+      { id: 1, title: 'Введение в Prisma', views: 1200, likes: 45, authorId: 1 },
+      { id: 2, title: 'TypeScript Guide', views: 3400, likes: 120, authorId: 2 },
+      { id: 3, title: 'React Hooks', views: 2100, likes: 87, authorId: 1 },
+      { id: 4, title: 'Node.js Best Practices', views: 890, likes: 32, authorId: 3 },
+      { id: 5, title: 'CSS Grid Layout', views: 1800, likes: 64, authorId: 2 },
+    ],
+    aggregableFields: ['views', 'likes', 'id'],
+  },
+}
+
+const aggFunctions = [
+  { fn: '_count', label: 'COUNT', icon: '#️⃣', color: '#3182ce', desc: 'Количество записей' },
+  { fn: '_sum', label: 'SUM', icon: '∑', color: '#38a169', desc: 'Сумма значений' },
+  { fn: '_avg', label: 'AVG', icon: '⌀', color: '#d69e2e', desc: 'Среднее значение' },
+  { fn: '_min', label: 'MIN', icon: '↓', color: '#805ad5', desc: 'Минимальное значение' },
+  { fn: '_max', label: 'MAX', icon: '↑', color: '#e53e3e', desc: 'Максимальное значение' },
+]
+
+function computeAgg(records, fn, field) {
+  const values = records.map(r => r[field]).filter(v => v !== undefined)
+  switch (fn) {
+    case '_count': return records.length
+    case '_sum': return values.reduce((a, b) => a + b, 0)
+    case '_avg': return Math.round(values.reduce((a, b) => a + b, 0) / values.length * 100) / 100
+    case '_min': return Math.min(...values)
+    case '_max': return Math.max(...values)
+    default: return null
+  }
+}
+
+function buildCode(model, aggFn, field) {
+  return 'const result = await prisma.' + model + '.aggregate({\n' +
+    '  ' + aggFn + ': { ' + field + ': true },\n' +
+    '  where: { /* ... */ },\n' +
+    '})\n\n' +
+    '// Результат: result.' + aggFn + '.' + field
+}
+
+function buildGroupByCode(model, field) {
+  return 'const grouped = await prisma.' + model + '.groupBy({\n' +
+    '  by: ["' + field + '"],\n' +
+    '  _count: { id: true },\n' +
+    '  _avg: { age: true },\n' +
+    '  orderBy: {\n' +
+    '    _count: { id: "desc" },\n' +
+    '  },\n' +
+    '})'
+}
+
+export default function App() {
+  const [model, setModel] = useState('user')
+  const [aggFn, setAggFn] = useState('_count')
+  const [field, setField] = useState('id')
+  const [tab, setTab] = useState('aggregate')
+
+  const data = mockData[model]
+  const result = computeAgg(data.records, aggFn, field)
+  const aggInfo = aggFunctions.find(a => a.fn === aggFn)
+
+  const groupByField = 'role'
+  const grouped = Object.entries(
+    data.records.reduce((acc, r) => {
+      const key = r[groupByField] || 'unknown'
+      if (!acc[key]) acc[key] = []
+      acc[key].push(r)
+      return acc
+    }, {})
+  ).map(([key, items]) => ({
+    group: key,
+    count: items.length,
+    avgAge: items[0].age !== undefined ? Math.round(items.reduce((s, i) => s + i.age, 0) / items.length) : 'N/A',
+  }))
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '28px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 880, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 22px 0' }}>
+          Конструктор агрегаций
+        </h2>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+          {['aggregate', 'groupBy'].map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              style={{ background: tab === t ? PRISMA : CARD, color: tab === t ? '#fff' : '#94a3b8', border: '1px solid ' + (tab === t ? PRISMA : '#334155'), borderRadius: 8, padding: '7px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {t === 'aggregate' ? '📊 aggregate()' : '📦 groupBy()'}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'aggregate' && (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 18 }}>
+              <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+                <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 8 }}>Модель</div>
+                {['user', 'post'].map(m => (
+                  <button key={m} onClick={() => { setModel(m); setField(mockData[m].aggregableFields[0]) }}
+                    style={{ display: 'block', width: '100%', background: model === m ? PRISMA : '#0a0f1e', color: model === m ? '#fff' : '#94a3b8', border: '1px solid ' + (model === m ? PRISMA : '#334155'), borderRadius: 6, padding: '6px 10px', marginBottom: 4, cursor: 'pointer', fontSize: 13, textAlign: 'left' }}>
+                    {m === 'user' ? '👤 User' : '📝 Post'}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+                <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 8 }}>Функция</div>
+                {aggFunctions.map(a => (
+                  <button key={a.fn} onClick={() => setAggFn(a.fn)}
+                    style={{ display: 'block', width: '100%', background: aggFn === a.fn ? a.color + '30' : '#0a0f1e', color: aggFn === a.fn ? a.color : '#94a3b8', border: '1px solid ' + (aggFn === a.fn ? a.color : '#334155'), borderRadius: 6, padding: '5px 10px', marginBottom: 4, cursor: 'pointer', fontSize: 12, textAlign: 'left', fontWeight: aggFn === a.fn ? 700 : 400 }}>
+                    {a.icon} {a.label} — {a.desc}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+                <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 8 }}>Поле</div>
+                {data.aggregableFields.map(f => (
+                  <button key={f} onClick={() => setField(f)}
+                    style={{ display: 'block', width: '100%', background: field === f ? aggInfo.color + '20' : '#0a0f1e', color: field === f ? aggInfo.color : '#94a3b8', border: '1px solid ' + (field === f ? aggInfo.color : '#334155'), borderRadius: 6, padding: '6px 10px', marginBottom: 4, cursor: 'pointer', fontSize: 13, textAlign: 'left', fontFamily: 'monospace' }}>
+                    {f}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 12 }}>
+              <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 16, border: '1px solid #1e3a5f' }}>
+                <div style={{ color: '#475569', fontSize: 11, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Код</div>
+                <pre style={{ margin: 0, color: TEXT, fontSize: 12, lineHeight: 1.7, fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+                  {buildCode(model, aggFn, field)}
+                </pre>
+              </div>
+              <div style={{ background: aggInfo.color + '15', borderRadius: 12, padding: 16, border: '2px solid ' + aggInfo.color + '50', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+                <div style={{ fontSize: 36, marginBottom: 8 }}>{aggInfo.icon}</div>
+                <div style={{ color: aggInfo.color, fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                  {aggInfo.label}({model}.{field})
+                </div>
+                <div style={{ color: TEXT, fontSize: 32, fontWeight: 800 }}>{result}</div>
+                <div style={{ color: '#64748b', fontSize: 11, marginTop: 4 }}>из {data.records.length} записей</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === 'groupBy' && (
+          <div>
+            <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 16, border: '1px solid #1e3a5f', marginBottom: 16 }}>
+              <div style={{ color: '#475569', fontSize: 11, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Код</div>
+              <pre style={{ margin: 0, color: TEXT, fontSize: 12, lineHeight: 1.7, fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+                {buildGroupByCode(model, 'role')}
+              </pre>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {grouped.map((g, i) => (
+                <div key={i} style={{ background: CARD, borderRadius: 10, padding: 14, border: '1px solid #334155', display: 'flex', gap: 20, alignItems: 'center' }}>
+                  <span style={{ background: PRISMA + '30', color: '#a5b4fc', padding: '4px 12px', borderRadius: 8, fontSize: 13, fontWeight: 700, minWidth: 90, textAlign: 'center' }}>{g.group}</span>
+                  <div style={{ display: 'flex', gap: 24 }}>
+                    <div>
+                      <div style={{ color: '#94a3b8', fontSize: 11 }}>COUNT</div>
+                      <div style={{ color: '#7dd3fc', fontSize: 18, fontWeight: 700 }}>{g.count}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: '#94a3b8', fontSize: 11 }}>AVG age</div>
+                      <div style={{ color: '#fbbf24', fontSize: 18, fontWeight: 700 }}>{g.avgAge}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+` }} />

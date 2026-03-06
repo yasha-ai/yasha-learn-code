@@ -1,0 +1,356 @@
+import { Playground } from '../../components/Playground'
+
+# useMutation: Изменение Данных
+
+## Что такое мутации?
+
+Мутации — это операции, которые **изменяют** данные на сервере: создание, обновление, удаление.
+В отличие от `useQuery` (который работает автоматически), `useMutation` выполняется вручную.
+
+## Хук useMutation
+
+```typescript
+const mutation = useMutation({
+  mutationFn: (newUser: NewUser) => createUser(newUser),
+  onSuccess: (data) => {
+    console.log('Пользователь создан:', data)
+  },
+  onError: (error) => {
+    console.error('Ошибка:', error.message)
+  },
+  onSettled: () => {
+    // Выполняется всегда: и при успехе, и при ошибке
+    queryClient.invalidateQueries({ queryKey: ['users'] })
+  },
+})
+```
+
+## mutate vs mutateAsync
+
+`useMutation` возвращает два метода для вызова мутации:
+
+**`mutate`** — синхронный вызов, не возвращает Promise:
+```typescript
+mutation.mutate({ name: 'Анна', email: 'anna@example.com' })
+```
+
+**`mutateAsync`** — асинхронный вызов, возвращает Promise:
+```typescript
+try {
+  const user = await mutation.mutateAsync({ name: 'Анна', email: 'anna@example.com' })
+  console.log('ID нового пользователя:', user.id)
+} catch (error) {
+  console.error(error)
+}
+```
+
+Используйте `mutateAsync`, когда нужно дождаться результата для следующих действий.
+
+## Коллбэки жизненного цикла
+
+| Коллбэк | Когда вызывается | Аргументы |
+|---------|-----------------|-----------|
+| `onMutate` | До выполнения запроса | variables |
+| `onSuccess` | При успехе | data, variables, context |
+| `onError` | При ошибке | error, variables, context |
+| `onSettled` | Всегда после завершения | data?, error?, variables, context |
+
+```typescript
+const mutation = useMutation({
+  mutationFn: updateUser,
+  onMutate: (variables) => {
+    // Оптимистичное обновление UI (до ответа сервера)
+    return { previousData: queryClient.getQueryData(['users']) }
+  },
+  onSuccess: (data, variables, context) => {
+    // data — ответ сервера
+    // variables — то, что передали в mutate()
+    // context — то, что вернул onMutate
+  },
+  onError: (error, variables, context) => {
+    // Откат изменений при ошибке
+    queryClient.setQueryData(['users'], context.previousData)
+  },
+  onSettled: () => {
+    queryClient.invalidateQueries({ queryKey: ['users'] })
+  },
+})
+```
+
+## Статусы мутации
+
+```typescript
+const {
+  mutate,
+  mutateAsync,
+  isPending,   // true пока запрос выполняется
+  isSuccess,   // true после успешного выполнения
+  isError,     // true при ошибке
+  isIdle,      // true до первого вызова
+  data,        // данные ответа при успехе
+  error,       // объект ошибки
+  reset,       // сброс состояния мутации
+} = useMutation({ mutationFn })
+```
+
+## Инвалидация после мутации
+
+Лучшая практика — инвалидировать связанные запросы после мутации:
+
+```typescript
+const queryClient = useQueryClient()
+
+const addUser = useMutation({
+  mutationFn: createUser,
+  onSuccess: () => {
+    // Перезагрузить список пользователей
+    queryClient.invalidateQueries({ queryKey: ['users'] })
+  },
+})
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+type Task = { id: number; title: string; status: 'todo' | 'done'; createdAt: string }
+type MutationStatus = 'idle' | 'pending' | 'success' | 'error'
+
+let taskIdCounter = 4
+
+const initialTasks: Task[] = [
+  { id: 1, title: 'Изучить TanStack Query', status: 'done', createdAt: '10:00' },
+  { id: 2, title: 'Написать компонент', status: 'todo', createdAt: '10:30' },
+  { id: 3, title: 'Провести код-ревью', status: 'todo', createdAt: '11:00' },
+]
+
+// Симуляция useMutation
+function useSimulatedMutation<TData, TVars>(
+  mutationFn: (vars: TVars) => Promise<TData>,
+  options?: {
+    onSuccess?: (data: TData, vars: TVars) => void
+    onError?: (error: Error, vars: TVars) => void
+    onSettled?: (data: TData | undefined, error: Error | null, vars: TVars) => void
+  }
+) {
+  const [status, setStatus] = useState<MutationStatus>('idle')
+  const [data, setData] = useState<TData | undefined>()
+  const [error, setError] = useState<Error | null>(null)
+  const [vars, setVars] = useState<TVars | undefined>()
+
+  const mutate = async (variables: TVars) => {
+    setStatus('pending')
+    setVars(variables)
+    setError(null)
+    try {
+      const result = await mutationFn(variables)
+      setData(result)
+      setStatus('success')
+      options?.onSuccess?.(result, variables)
+      options?.onSettled?.(result, null, variables)
+    } catch (err) {
+      const e = err as Error
+      setError(e)
+      setStatus('error')
+      options?.onError?.(e, variables)
+      options?.onSettled?.(undefined, e, variables)
+    }
+  }
+
+  return {
+    mutate,
+    status,
+    data,
+    error,
+    variables: vars,
+    isPending: status === 'pending',
+    isSuccess: status === 'success',
+    isError: status === 'error',
+    isIdle: status === 'idle',
+    reset: () => { setStatus('idle'); setData(undefined); setError(null) },
+  }
+}
+
+export default function App() {
+  const [tasks, setTasks] = useState<Task[]>(initialTasks)
+  const [newTitle, setNewTitle] = useState('')
+  const [simulateError, setSimulateError] = useState(false)
+  const [log, setLog] = useState<string[]>([])
+
+  const addLog = (msg: string) => setLog(l => [\`\${new Date().toLocaleTimeString()} — \${msg}\`, ...l].slice(0, 8))
+
+  const addTask = useSimulatedMutation<Task, string>(
+    async (title) => {
+      addLog(\`onMutate: переменные = "\${title}"\`)
+      await new Promise((res, rej) => setTimeout(() => {
+        if (simulateError) rej(new Error('Сервер недоступен (500)'))
+        else res(null)
+      }, 1000))
+      return { id: ++taskIdCounter, title, status: 'todo' as const, createdAt: new Date().toLocaleTimeString() }
+    },
+    {
+      onSuccess: (data) => {
+        setTasks(t => [...t, data])
+        setNewTitle('')
+        addLog(\`onSuccess: задача #\${data.id} создана\`)
+      },
+      onError: (err) => {
+        addLog(\`onError: \${err.message}\`)
+      },
+      onSettled: (_data, err) => {
+        addLog(\`onSettled: \${err ? 'с ошибкой' : 'успешно'}\`)
+      },
+    }
+  )
+
+  const toggleTask = useSimulatedMutation<Task, number>(
+    async (id) => {
+      await new Promise(res => setTimeout(res, 500))
+      const task = tasks.find(t => t.id === id)!
+      return { ...task, status: task.status === 'done' ? 'todo' : 'done' }
+    },
+    {
+      onSuccess: (data) => {
+        setTasks(t => t.map(task => task.id === data.id ? data : task))
+        addLog(\`Задача #\${data.id} → \${data.status}\`)
+      },
+    }
+  )
+
+  const deleteTask = useSimulatedMutation<number, number>(
+    async (id) => {
+      await new Promise(res => setTimeout(res, 600))
+      return id
+    },
+    {
+      onSuccess: (id) => {
+        setTasks(t => t.filter(task => task.id !== id))
+        addLog(\`Задача #\${id} удалена\`)
+      },
+    }
+  )
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>useMutation — Поток данных</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Добавление, обновление и удаление задач</p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+        <div>
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', marginBottom: '12px' }}>
+            <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>➕ Добавить задачу</h3>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+              <input
+                value={newTitle}
+                onChange={e => setNewTitle(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && newTitle && addTask.mutate(newTitle)}
+                placeholder="Введите задачу..."
+                style={{
+                  flex: 1, background: '#0f172a', border: '1px solid #334155',
+                  borderRadius: '8px', padding: '8px 12px', color: '#e2e8f0', fontSize: '13px',
+                }}
+              />
+              <button
+                onClick={() => newTitle && addTask.mutate(newTitle)}
+                disabled={addTask.isPending || !newTitle}
+                style={{
+                  background: addTask.isPending ? '#334155' : '#ef4444',
+                  border: 'none', borderRadius: '8px', padding: '8px 16px',
+                  color: 'white', cursor: addTask.isPending ? 'wait' : 'pointer', fontSize: '13px',
+                }}
+              >
+                {addTask.isPending ? '⏳' : '+ Добавить'}
+              </button>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#64748b', cursor: 'pointer' }}>
+              <input type="checkbox" checked={simulateError} onChange={e => setSimulateError(e.target.checked)} />
+              Симулировать ошибку сервера
+            </label>
+            {addTask.isError && (
+              <div style={{ background: '#ef444422', border: '1px solid #ef4444', borderRadius: '6px', padding: '8px', marginTop: '8px', fontSize: '12px', color: '#fca5a5' }}>
+                ❌ {addTask.error?.message}
+                <button onClick={addTask.reset} style={{ marginLeft: '8px', background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '11px', textDecoration: 'underline' }}>Сбросить</button>
+              </div>
+            )}
+          </div>
+
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+            <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>📋 Задачи ({tasks.length})</h3>
+            {tasks.map(task => (
+              <div key={task.id} style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                background: '#0f172a', borderRadius: '8px', padding: '10px', marginBottom: '6px',
+              }}>
+                <button
+                  onClick={() => toggleTask.mutate(task.id)}
+                  style={{
+                    width: '20px', height: '20px', borderRadius: '4px',
+                    background: task.status === 'done' ? '#22c55e' : 'transparent',
+                    border: \`2px solid \${task.status === 'done' ? '#22c55e' : '#475569'}\`,
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    color: 'white', fontSize: '11px', flexShrink: 0,
+                  }}
+                >
+                  {toggleTask.isPending && toggleTask.variables === task.id ? '⏳' : task.status === 'done' ? '✓' : ''}
+                </button>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: '13px', textDecoration: task.status === 'done' ? 'line-through' : 'none', color: task.status === 'done' ? '#64748b' : '#e2e8f0' }}>
+                    {task.title}
+                  </span>
+                  <span style={{ fontSize: '11px', color: '#475569', marginLeft: '8px' }}>{task.createdAt}</span>
+                </div>
+                <button
+                  onClick={() => deleteTask.mutate(task.id)}
+                  disabled={deleteTask.isPending && deleteTask.variables === task.id}
+                  style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '14px', padding: '0 4px' }}
+                >
+                  {deleteTask.isPending && deleteTask.variables === task.id ? '⏳' : '🗑️'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>📜 Лог событий</h3>
+          <div style={{ fontFamily: 'monospace', fontSize: '11px' }}>
+            {log.length === 0 ? (
+              <p style={{ color: '#475569', textAlign: 'center', padding: '20px 0' }}>Выполните операцию...</p>
+            ) : (
+              log.map((entry, i) => (
+                <div key={i} style={{
+                  padding: '6px 8px',
+                  borderRadius: '4px',
+                  marginBottom: '4px',
+                  background: '#0f172a',
+                  color: entry.includes('Error') || entry.includes('ошибк') ? '#fca5a5' : entry.includes('Success') || entry.includes('успешно') || entry.includes('создана') ? '#86efac' : '#94a3b8',
+                  lineHeight: 1.4,
+                }}>
+                  {entry}
+                </div>
+              ))
+            )}
+          </div>
+
+          <div style={{ marginTop: '16px', borderTop: '1px solid #334155', paddingTop: '16px' }}>
+            <h4 style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '8px' }}>Статус addTask мутации:</h4>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {(['idle', 'pending', 'success', 'error'] as const).map(s => (
+                <span key={s} style={{
+                  padding: '3px 10px',
+                  borderRadius: '9999px',
+                  fontSize: '11px',
+                  background: addTask.status === s ? (s === 'error' ? '#ef444422' : s === 'success' ? '#22c55e22' : s === 'pending' ? '#f9731622' : '#334155') : '#1e293b',
+                  color: addTask.status === s ? (s === 'error' ? '#ef4444' : s === 'success' ? '#22c55e' : s === 'pending' ? '#f97316' : '#94a3b8') : '#475569',
+                  border: addTask.status === s ? \`1px solid currentColor\` : '1px solid transparent',
+                  fontWeight: addTask.status === s ? 700 : 400,
+                }}>
+                  {s}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

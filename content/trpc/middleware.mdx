@@ -1,0 +1,302 @@
+import { Playground } from '../../components/Playground'
+
+# Промежуточное ПО (Middleware)
+
+Middleware в tRPC — это функции, которые выполняются между получением запроса и вызовом основного обработчика процедуры. Они используются для логирования, аутентификации, авторизации, ограничения частоты запросов и многого другого.
+
+## Создание middleware
+
+Middleware создаётся через `t.middleware()`. Функция middleware получает объект `{ ctx, next, input, type, path }`. Для продолжения выполнения необходимо вызвать `next()`. Можно также расширить контекст, передав новый объект в `next({ ctx: newCtx })`.
+
+## Middleware аутентификации
+
+Самый распространённый middleware — проверка аутентификации. Он проверяет `ctx.user`, и если пользователь не авторизован, выбрасывает ошибку `TRPCError({ code: 'UNAUTHORIZED' })`. Если авторизован — обогащает контекст гарантированно не-null пользователем.
+
+## Цепочки middleware
+
+Middleware можно выстраивать в цепочки: один middleware вызывает следующий через `next()`. Порядок имеет значение: первым выполняется первый middleware в цепочке. Это позволяет строить сложные pipelines обработки запросов.
+
+## Логирование
+
+Logging middleware измеряет время выполнения процедуры: сохраняет время начала до вызова `next()` и логирует разницу после. Это мощный способ мониторинга производительности без изменения бизнес-логики.
+
+## Rate limiting
+
+Middleware ограничения частоты запросов проверяет количество вызовов от конкретного пользователя или IP за временной интервал. При превышении лимита выбрасывается ошибка `TOO_MANY_REQUESTS`.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+const PURPLE = '#a855f7';
+
+interface Middleware {
+  id: string;
+  name: string;
+  color: string;
+  icon: string;
+  description: string;
+  enabled: boolean;
+  code: string;
+  canFail: boolean;
+  failMessage?: string;
+}
+
+const defaultMiddlewares: Middleware[] = [
+  {
+    id: 'logging',
+    name: 'Логирование',
+    color: TRPC,
+    icon: '📝',
+    description: 'Записывает путь процедуры и время выполнения',
+    enabled: true,
+    canFail: false,
+    code:
+      'const logging = t.middleware(async ({ path, next }) => {\n' +
+      '  const start = Date.now();\n' +
+      '  const result = await next();\n' +
+      '  console.log(path, Date.now() - start, "ms");\n' +
+      '  return result;\n' +
+      '});',
+  },
+  {
+    id: 'auth',
+    name: 'Аутентификация',
+    color: YELLOW,
+    icon: '🔐',
+    description: 'Проверяет наличие авторизованного пользователя в ctx',
+    enabled: true,
+    canFail: true,
+    failMessage: 'UNAUTHORIZED: Пользователь не авторизован',
+    code:
+      'const isAuthed = t.middleware(({ ctx, next }) => {\n' +
+      '  if (!ctx.user) {\n' +
+      '    throw new TRPCError({ code: "UNAUTHORIZED" });\n' +
+      '  }\n' +
+      '  return next({ ctx: { ...ctx, user: ctx.user } });\n' +
+      '});',
+  },
+  {
+    id: 'rateLimit',
+    name: 'Rate Limiting',
+    color: ORANGE,
+    icon: '🚦',
+    description: 'Ограничивает количество запросов в единицу времени',
+    enabled: false,
+    canFail: true,
+    failMessage: 'TOO_MANY_REQUESTS: Превышен лимит запросов',
+    code:
+      'const rateLimit = t.middleware(({ ctx, next }) => {\n' +
+      '  const key = ctx.user?.id ?? ctx.ip;\n' +
+      '  if (rateLimiter.check(key) > 100) {\n' +
+      '    throw new TRPCError({\n' +
+      '      code: "TOO_MANY_REQUESTS",\n' +
+      '    });\n' +
+      '  }\n' +
+      '  return next();\n' +
+      '});',
+  },
+  {
+    id: 'validation',
+    name: 'Входная валидация',
+    color: PURPLE,
+    icon: '✅',
+    description: 'Дополнительная бизнес-валидация поверх Zod',
+    enabled: true,
+    canFail: false,
+    code:
+      'const bizValidate = t.middleware(({ input, next }) => {\n' +
+      '  // Дополнительные бизнес-правила\n' +
+      '  if (input && typeof input === "object") {\n' +
+      '    // validate business rules...\n' +
+      '  }\n' +
+      '  return next();\n' +
+      '});',
+  },
+];
+
+interface LogEntry {
+  id: number;
+  middlewareId: string;
+  status: 'running' | 'passed' | 'failed' | 'skipped';
+  message: string;
+  time?: number;
+}
+
+let logIdCounter = 0;
+
+export default function App() {
+  const [middlewares, setMiddlewares] = useState<Middleware[]>(defaultMiddlewares);
+  const [isAuthed, setIsAuthed] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [selectedMw, setSelectedMw] = useState<Middleware | null>(null);
+  const [activeIndex, setActiveIndex] = useState(-1);
+
+  const toggleMiddleware = (id: string) => {
+    setMiddlewares(mws => mws.map(mw => mw.id === id ? { ...mw, enabled: !mw.enabled } : mw));
+  };
+
+  const runPipeline = async () => {
+    if (isRunning) return;
+    setIsRunning(true);
+    setLogs([]);
+    setActiveIndex(-1);
+
+    const enabled = middlewares.filter(mw => mw.enabled);
+
+    for (let i = 0; i < enabled.length; i++) {
+      const mw = enabled[i];
+      setActiveIndex(i);
+
+      await new Promise(resolve => setTimeout(resolve, 600));
+
+      const startTime = Date.now();
+      let passed = true;
+      let msg = '';
+
+      if (mw.id === 'auth' && !isAuthed && mw.canFail) {
+        passed = false;
+        msg = mw.failMessage || 'Error';
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 400));
+      const elapsed = Date.now() - startTime;
+
+      setLogs(l => [...l, {
+        id: ++logIdCounter,
+        middlewareId: mw.id,
+        status: passed ? 'passed' : 'failed',
+        message: passed ? mw.name + ' — пройден (' + elapsed + 'ms)' : mw.name + ' — ' + msg,
+        time: elapsed,
+      }]);
+
+      if (!passed) {
+        setActiveIndex(-1);
+        setIsRunning(false);
+        return;
+      }
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 400));
+    setLogs(l => [...l, {
+      id: ++logIdCounter,
+      middlewareId: 'procedure',
+      status: 'passed',
+      message: '🎯 Процедура выполнена успешно',
+    }]);
+    setActiveIndex(-1);
+    setIsRunning(false);
+  };
+
+  const enabledCount = middlewares.filter(m => m.enabled).length;
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        Middleware Pipeline
+      </h2>
+
+      <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: '240px', flex: '0 0 auto' }}>
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px', marginBottom: '10px' }}>
+            <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '12px', marginBottom: '10px' }}>⚙️ Middleware</div>
+            {middlewares.map((mw, i) => {
+              const enabledList = middlewares.filter(m => m.enabled);
+              const pos = enabledList.findIndex(m => m.id === mw.id);
+              const isActive = pos === activeIndex;
+              return (
+                <div key={mw.id}
+                  onClick={() => setSelectedMw(mw === selectedMw ? null : mw)}
+                  style={{
+                    background: isActive ? 'rgba(57,140,203,0.2)' : BG,
+                    border: '1px solid ' + (selectedMw?.id === mw.id ? mw.color : (mw.enabled ? mw.color + '44' : '#334155')),
+                    borderRadius: '8px', padding: '8px 12px', marginBottom: '6px', cursor: 'pointer',
+                    opacity: mw.enabled ? 1 : 0.5, transition: 'all 0.2s',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ color: mw.enabled ? mw.color : '#475569', fontSize: '12px', fontWeight: 'bold' }}>
+                      {mw.icon} {mw.name}
+                    </div>
+                    <button onClick={e => { e.stopPropagation(); toggleMiddleware(mw.id); }} style={{
+                      background: mw.enabled ? mw.color + '33' : '#334155', color: mw.enabled ? mw.color : '#475569',
+                      border: '1px solid ' + (mw.enabled ? mw.color : '#475569'), borderRadius: '4px',
+                      padding: '2px 8px', cursor: 'pointer', fontSize: '10px',
+                    }}>
+                      {mw.enabled ? 'Вкл' : 'Выкл'}
+                    </button>
+                  </div>
+                  <div style={{ color: TEXT, opacity: 0.5, fontSize: '10px', marginTop: '2px' }}>{mw.description}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '8px', padding: '12px', marginBottom: '10px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '12px' }}>
+              <input type="checkbox" checked={isAuthed} onChange={e => setIsAuthed(e.target.checked)} />
+              <span style={{ color: TEXT }}>Авторизованный запрос</span>
+            </label>
+          </div>
+
+          <button onClick={runPipeline} disabled={isRunning} style={{
+            width: '100%', background: isRunning ? '#334155' : TRPC, color: '#fff', border: 'none',
+            borderRadius: '8px', padding: '10px', cursor: isRunning ? 'not-allowed' : 'pointer', fontSize: '13px',
+          }}>
+            {isRunning ? '⏳ Выполнение...' : '▶ Запустить запрос'}
+          </button>
+        </div>
+
+        <div style={{ flex: '1', minWidth: '250px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {selectedMw && (
+            <div style={{ background: CARD, border: '1px solid ' + selectedMw.color, borderRadius: '10px', padding: '14px' }}>
+              <div style={{ color: selectedMw.color, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>
+                {selectedMw.icon} Код middleware: {selectedMw.name}
+              </div>
+              <pre style={{ margin: 0, fontSize: '10px', color: TEXT, lineHeight: '1.6', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+                {selectedMw.code}
+              </pre>
+            </div>
+          )}
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px', flex: '1', minHeight: '200px' }}>
+            <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '12px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between' }}>
+              <span>📋 Лог выполнения</span>
+              {logs.length > 0 && (
+                <button onClick={() => setLogs([])} style={{ background: 'transparent', border: 'none', color: '#475569', cursor: 'pointer', fontSize: '11px' }}>
+                  Очистить
+                </button>
+              )}
+            </div>
+            {logs.length === 0 ? (
+              <div style={{ color: TEXT, opacity: 0.4, fontSize: '12px', textAlign: 'center', paddingTop: '40px' }}>
+                Нажмите "Запустить запрос"
+              </div>
+            ) : (
+              logs.map(log => (
+                <div key={log.id} style={{
+                  display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px',
+                  borderRadius: '6px', marginBottom: '4px',
+                  background: log.status === 'passed' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                }}>
+                  <span style={{ fontSize: '14px' }}>{log.status === 'passed' ? '✅' : '❌'}</span>
+                  <span style={{ color: log.status === 'passed' ? GREEN : RED, fontSize: '11px' }}>
+                    {log.message}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

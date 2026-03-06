@@ -1,0 +1,460 @@
+import { Playground } from '../../components/Playground'
+
+# Реальное приложение с Prisma
+
+В этом уроке мы рассмотрим полноценную схему блог-платформы и научимся строить сложные запросы для реальных задач. Приложение включает пользователей, посты, комментарии, теги и категории.
+
+## Схема блог-платформы
+
+```prisma
+model User {
+  id        Int       @id @default(autoincrement())
+  email     String    @unique
+  name      String
+  bio       String?
+  avatar    String?
+  role      Role      @default(USER)
+  posts     Post[]
+  comments  Comment[]
+  createdAt DateTime  @default(now())
+
+  @@index([email])
+}
+
+model Post {
+  id          Int       @id @default(autoincrement())
+  title       String
+  slug        String    @unique
+  content     String
+  published   Boolean   @default(false)
+  viewCount   Int       @default(0)
+  author      User      @relation(fields: [authorId], references: [id])
+  authorId    Int
+  category    Category  @relation(fields: [categoryId], references: [id])
+  categoryId  Int
+  tags        Tag[]
+  comments    Comment[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([authorId])
+  @@index([categoryId])
+  @@index([slug])
+}
+
+model Comment {
+  id        Int      @id @default(autoincrement())
+  body      String
+  author    User     @relation(fields: [authorId], references: [id])
+  authorId  Int
+  post      Post     @relation(fields: [postId], references: [id])
+  postId    Int
+  createdAt DateTime @default(now())
+}
+
+model Tag {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  posts Post[]
+}
+
+model Category {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  posts Post[]
+}
+```
+
+## Типичные сложные запросы
+
+```typescript
+// Получить посты с авторами, тегами и количеством комментариев
+const posts = await prisma.post.findMany({
+  where: { published: true },
+  include: {
+    author: { select: { name: true, avatar: true } },
+    tags: true,
+    category: true,
+    _count: { select: { comments: true } },
+  },
+  orderBy: { createdAt: 'desc' },
+  take: 10,
+})
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+// ============================================================
+// MOCK DATA
+// ============================================================
+
+const mockUsers = [
+  { id: 1, name: 'Иван Петров', email: 'ivan@example.com', role: 'ADMIN', bio: 'Fullstack разработчик', avatar: '👨‍💻', posts: [1, 2, 3] },
+  { id: 2, name: 'Анна Смирнова', email: 'anna@example.com', role: 'USER', bio: 'Frontend разработчик', avatar: '👩‍💻', posts: [4, 5] },
+  { id: 3, name: 'Пётр Иванов', email: 'petr@example.com', role: 'MODERATOR', bio: 'Backend инженер', avatar: '🧑‍💻', posts: [6] },
+]
+
+const mockCategories = [
+  { id: 1, name: 'TypeScript', posts: [1, 3, 5] },
+  { id: 2, name: 'Prisma / DB', posts: [2, 4] },
+  { id: 3, name: 'React', posts: [6] },
+]
+
+const mockTags = [
+  { id: 1, name: 'prisma', posts: [2, 4] },
+  { id: 2, name: 'typescript', posts: [1, 3, 5] },
+  { id: 3, name: 'react', posts: [6] },
+  { id: 4, name: 'orm', posts: [2, 4] },
+  { id: 5, name: 'nodejs', posts: [1, 2, 6] },
+]
+
+const mockPosts = [
+  { id: 1, title: 'Введение в TypeScript', slug: 'intro-typescript', authorId: 1, categoryId: 1, tags: [2, 5], published: true, viewCount: 1240, commentCount: 8 },
+  { id: 2, title: 'Prisma ORM — полное руководство', slug: 'prisma-guide', authorId: 1, categoryId: 2, tags: [1, 4, 5], published: true, viewCount: 3420, commentCount: 24 },
+  { id: 3, title: 'Продвинутые типы TypeScript', slug: 'advanced-ts', authorId: 1, categoryId: 1, tags: [2], published: false, viewCount: 0, commentCount: 0 },
+  { id: 4, title: 'PostgreSQL и Prisma', slug: 'postgres-prisma', authorId: 2, categoryId: 2, tags: [1, 4], published: true, viewCount: 890, commentCount: 5 },
+  { id: 5, title: 'Паттерны проектирования в TS', slug: 'ts-patterns', authorId: 2, categoryId: 1, tags: [2], published: true, viewCount: 2100, commentCount: 13 },
+  { id: 6, title: 'React Server Components', slug: 'rsc', authorId: 3, categoryId: 3, tags: [3, 5], published: true, viewCount: 4500, commentCount: 32 },
+]
+
+const mockComments = [
+  { id: 1, body: 'Отличная статья, очень помогло!', authorId: 2, postId: 2, createdAt: '15 янв 2024' },
+  { id: 2, body: 'Спасибо, всё понятно объяснено.', authorId: 3, postId: 2, createdAt: '16 янв 2024' },
+  { id: 3, body: 'Можете добавить примеры с транзакциями?', authorId: 1, postId: 4, createdAt: '17 янв 2024' },
+]
+
+const models = [
+  { name: 'User', icon: '👤', color: '#3182ce', count: mockUsers.length },
+  { name: 'Post', icon: '📝', color: '#38a169', count: mockPosts.length },
+  { name: 'Comment', icon: '💬', color: '#805ad5', count: mockComments.length },
+  { name: 'Tag', icon: '🏷️', color: '#d69e2e', count: mockTags.length },
+  { name: 'Category', icon: '📂', color: '#e53e3e', count: mockCategories.length },
+]
+
+const operations = {
+  User: [
+    {
+      label: 'findMany',
+      desc: 'Все пользователи',
+      code: \`await prisma.user.findMany({
+  include: {
+    _count: {
+      select: { posts: true }
+    }
+  },
+  orderBy: { name: 'asc' }
+})\`,
+      getData: () => mockUsers.map(u => ({ ...u, _count: { posts: u.posts.length } })),
+    },
+    {
+      label: 'findUnique',
+      desc: 'Пользователь с постами',
+      code: \`await prisma.user.findUnique({
+  where: { id: 1 },
+  include: {
+    posts: {
+      where: { published: true },
+      take: 5,
+    },
+    _count: { select: { posts: true } }
+  }
+})\`,
+      getData: () => {
+        const user = mockUsers[0]
+        const posts = mockPosts.filter(p => p.authorId === user.id && p.published)
+        return { ...user, posts, _count: { posts: user.posts.length } }
+      },
+    },
+    {
+      label: 'create',
+      desc: 'Создать пользователя',
+      code: \`await prisma.user.create({
+  data: {
+    email: 'newuser@example.com',
+    name: 'Новый Пользователь',
+    role: 'USER',
+  }
+})\`,
+      getData: () => ({ id: 4, email: 'newuser@example.com', name: 'Новый Пользователь', role: 'USER', createdAt: new Date().toISOString() }),
+    },
+  ],
+  Post: [
+    {
+      label: 'findMany',
+      desc: 'Опубликованные посты',
+      code: \`await prisma.post.findMany({
+  where: { published: true },
+  include: {
+    author: { select: { name: true, avatar: true } },
+    category: true,
+    tags: true,
+    _count: { select: { comments: true } },
+  },
+  orderBy: { viewCount: 'desc' },
+  take: 10,
+})\`,
+      getData: () => mockPosts
+        .filter(p => p.published)
+        .sort((a, b) => b.viewCount - a.viewCount)
+        .map(p => ({
+          ...p,
+          author: mockUsers.find(u => u.id === p.authorId),
+          category: mockCategories.find(c => c.id === p.categoryId),
+          tags: p.tags.map(tid => mockTags.find(t => t.id === tid)),
+          _count: { comments: p.commentCount },
+        })),
+    },
+    {
+      label: 'findUnique',
+      desc: 'Пост по slug',
+      code: \`await prisma.post.findUnique({
+  where: { slug: 'prisma-guide' },
+  include: {
+    author: true,
+    tags: true,
+    category: true,
+    comments: {
+      include: { author: { select: { name: true } } },
+      orderBy: { createdAt: 'asc' },
+    },
+  },
+})\`,
+      getData: () => {
+        const post = mockPosts.find(p => p.slug === 'prisma-guide')
+        return {
+          ...post,
+          author: mockUsers.find(u => u.id === post.authorId),
+          tags: post.tags.map(tid => mockTags.find(t => t.id === tid)),
+          category: mockCategories.find(c => c.id === post.categoryId),
+          comments: mockComments.filter(c => c.postId === post.id).map(c => ({
+            ...c, author: mockUsers.find(u => u.id === c.authorId),
+          })),
+        }
+      },
+    },
+    {
+      label: 'aggregate',
+      desc: 'Статистика постов',
+      code: \`await prisma.post.aggregate({
+  _count: { id: true },
+  _sum: { viewCount: true },
+  _avg: { viewCount: true },
+  _max: { viewCount: true },
+  where: { published: true },
+})\`,
+      getData: () => {
+        const published = mockPosts.filter(p => p.published)
+        return {
+          _count: { id: published.length },
+          _sum: { viewCount: published.reduce((s, p) => s + p.viewCount, 0) },
+          _avg: { viewCount: Math.round(published.reduce((s, p) => s + p.viewCount, 0) / published.length) },
+          _max: { viewCount: Math.max(...published.map(p => p.viewCount)) },
+        }
+      },
+    },
+  ],
+  Comment: [
+    {
+      label: 'findMany',
+      desc: 'Комментарии с авторами',
+      code: \`await prisma.comment.findMany({
+  include: {
+    author: { select: { name: true, avatar: true } },
+    post: { select: { title: true, slug: true } },
+  },
+  orderBy: { createdAt: 'desc' },
+  take: 20,
+})\`,
+      getData: () => mockComments.map(c => ({
+        ...c,
+        author: mockUsers.find(u => u.id === c.authorId),
+        post: mockPosts.find(p => p.id === c.postId),
+      })),
+    },
+  ],
+  Tag: [
+    {
+      label: 'findMany',
+      desc: 'Теги с количеством постов',
+      code: \`await prisma.tag.findMany({
+  include: {
+    _count: { select: { posts: true } },
+  },
+  orderBy: { posts: { _count: 'desc' } },
+})\`,
+      getData: () => mockTags.map(t => ({ ...t, _count: { posts: t.posts.length } })),
+    },
+  ],
+  Category: [
+    {
+      label: 'findMany',
+      desc: 'Категории со статистикой',
+      code: \`await prisma.category.findMany({
+  include: {
+    posts: {
+      where: { published: true },
+      select: { id: true, title: true, viewCount: true },
+    },
+    _count: { select: { posts: true } },
+  }
+})\`,
+      getData: () => mockCategories.map(c => ({
+        ...c,
+        posts: mockPosts.filter(p => p.categoryId === c.id && p.published),
+        _count: { posts: c.posts.length },
+      })),
+    },
+  ],
+}
+
+export default function App() {
+  const [selectedModel, setSelectedModel] = useState('Post')
+  const [selectedOp, setSelectedOp] = useState(0)
+  const [result, setResult] = useState(null)
+
+  const modelColor = models.find(m => m.name === selectedModel)?.color || PRISMA
+  const modelOps = operations[selectedModel] || []
+  const currentOp = modelOps[selectedOp]
+
+  const runQuery = () => {
+    if (currentOp) setResult(currentOp.getData())
+  }
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 1100, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 4px 0' }}>
+          🏗️ Блог-платформа — Интерактивный Query Builder
+        </h2>
+        <p style={{ color: '#94a3b8', margin: '0 0 22px 0', fontSize: 13 }}>
+          Схема с 5 моделями: User, Post, Comment, Tag, Category
+        </p>
+
+        {/* Model selector */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+          {models.map(m => (
+            <div
+              key={m.name}
+              onClick={() => { setSelectedModel(m.name); setSelectedOp(0); setResult(null) }}
+              style={{
+                background: selectedModel === m.name ? m.color + '25' : CARD,
+                border: '2px solid ' + (selectedModel === m.name ? m.color : '#334155'),
+                borderRadius: 12,
+                padding: '12px 18px',
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+                minWidth: 110,
+                textAlign: 'center',
+              }}
+            >
+              <div style={{ fontSize: 24, marginBottom: 4 }}>{m.icon}</div>
+              <div style={{ color: selectedModel === m.name ? m.color : TEXT, fontSize: 14, fontWeight: 700 }}>{m.name}</div>
+              <div style={{ color: '#475569', fontSize: 11 }}>{m.count} записей</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr 1fr', gap: 14, marginBottom: 14 }}>
+          {/* Operations list */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 14, border: '1px solid #334155' }}>
+            <div style={{ color: '#94a3b8', fontSize: 11, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 1 }}>Операции</div>
+            {modelOps.map((op, i) => (
+              <div
+                key={i}
+                onClick={() => { setSelectedOp(i); setResult(null) }}
+                style={{
+                  background: selectedOp === i ? modelColor + '20' : 'transparent',
+                  border: '1px solid ' + (selectedOp === i ? modelColor + '60' : 'transparent'),
+                  borderRadius: 8,
+                  padding: '9px 12px',
+                  cursor: 'pointer',
+                  marginBottom: 4,
+                  transition: 'all 0.15s',
+                }}
+              >
+                <div style={{ color: selectedOp === i ? modelColor : '#94a3b8', fontSize: 12, fontWeight: 700, fontFamily: 'monospace' }}>
+                  {op.label}()
+                </div>
+                <div style={{ color: '#475569', fontSize: 11 }}>{op.desc}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Code */}
+          <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 16, border: '1px solid #1e3a5f', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={{ color: '#475569', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>
+                prisma.{selectedModel.toLowerCase()}.{currentOp?.label}()
+              </div>
+              <button
+                onClick={runQuery}
+                style={{ background: modelColor, color: '#fff', border: 'none', borderRadius: 7, padding: '5px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 700 }}
+              >
+                ▶ Run
+              </button>
+            </div>
+            <pre style={{ margin: 0, color: TEXT, fontSize: 12, lineHeight: 1.8, fontFamily: 'monospace', overflowX: 'auto', flex: 1 }}>
+              {currentOp?.code || '// Выберите операцию'}
+            </pre>
+          </div>
+
+          {/* Result */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155', overflow: 'auto', maxHeight: 400 }}>
+            <div style={{ color: '#475569', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10, display: 'flex', justifyContent: 'space-between' }}>
+              <span>Результат</span>
+              {result && <span style={{ color: modelColor, fontWeight: 700 }}>✓ Получен</span>}
+            </div>
+            {result ? (
+              <pre style={{ margin: 0, color: '#86efac', fontSize: 11, lineHeight: 1.6, fontFamily: 'monospace', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+                {JSON.stringify(result, null, 2).slice(0, 1200)}
+                {JSON.stringify(result, null, 2).length > 1200 ? '\\n...(сокращено)' : ''}
+              </pre>
+            ) : (
+              <div style={{ color: '#334155', fontSize: 13, textAlign: 'center', padding: '40px 0' }}>
+                Нажмите ▶ Run для выполнения
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Schema summary */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+          <h4 style={{ color: TEXT, margin: '0 0 12px 0', fontSize: 13, fontWeight: 700 }}>
+            📐 Схема базы данных (overview)
+          </h4>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {[
+              { model: 'User', fields: ['id', 'email*', 'name', 'role', 'bio?', 'avatar?'], relations: ['posts[]', 'comments[]'], color: '#3182ce' },
+              { model: 'Post', fields: ['id', 'title', 'slug*', 'content', 'published', 'viewCount'], relations: ['author', 'category', 'tags[]', 'comments[]'], color: '#38a169' },
+              { model: 'Comment', fields: ['id', 'body', 'createdAt'], relations: ['author', 'post'], color: '#805ad5' },
+              { model: 'Tag', fields: ['id', 'name*'], relations: ['posts[]'], color: '#d69e2e' },
+              { model: 'Category', fields: ['id', 'name*'], relations: ['posts[]'], color: '#e53e3e' },
+            ].map((m, i) => (
+              <div key={i} style={{ background: '#0a0f1e', borderRadius: 10, padding: 12, border: '1px solid ' + m.color + '40', flex: '1 1 150px', minWidth: 150 }}>
+                <div style={{ color: m.color, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>{m.model}</div>
+                {m.fields.map((f, j) => (
+                  <div key={j} style={{ color: '#94a3b8', fontSize: 11, fontFamily: 'monospace', marginBottom: 2 }}>
+                    {f.includes('*') ? '🔑 ' : '  '}{f.replace('*', ' @unique').replace('?', '?')}
+                  </div>
+                ))}
+                <div style={{ borderTop: '1px solid #1e293b', marginTop: 8, paddingTop: 8 }}>
+                  {m.relations.map((r, j) => (
+                    <div key={j} style={{ color: '#475569', fontSize: 11, fontFamily: 'monospace', marginBottom: 2 }}>
+                      🔗 {r}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

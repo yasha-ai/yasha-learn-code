@@ -1,0 +1,390 @@
+import { Playground } from '../../components/Playground'
+
+# Миграция с Webpack на Vite — полное руководство
+
+Vite стал популярной альтернативой Webpack благодаря молниеносному dev-серверу и простой конфигурации. Однако миграция требует внимательного подхода — есть ряд нюансов и потенциальных проблем.
+
+## Почему мигрируют с Webpack на Vite?
+
+| Критерий | Webpack | Vite |
+|----------|---------|------|
+| Старт dev-сервера | 10-60+ сек | < 1 сек |
+| HMR | Секунды | Мгновенно |
+| Конфигурация | Сложная | Простая |
+| Build (production) | Webpack bundler | Rollup |
+| Module Federation | ✅ Native | ❌ Плагин (ограниченный) |
+| Legacy browsers | Webpack + Babel | @vitejs/plugin-legacy |
+| Кастомные лоадеры | ✅ | Только Rollup плагины |
+| Размер бандла | Схожий | Схожий |
+
+**Когда НЕ мигрировать:**
+- Проект использует Module Federation
+- Сложные кастомные Webpack лоадеры без аналогов
+- Большой enterprise проект с устоявшейся инфраструктурой
+- Интеграция с SSR (Next.js, Remix — у них свои системы сборки)
+
+## Шаг 1: Установка Vite
+
+```bash
+npm install --save-dev vite @vitejs/plugin-react
+# или для TypeScript
+npm install --save-dev vite @vitejs/plugin-react typescript
+```
+
+## Шаг 2: vite.config.ts (эквивалент webpack.config.js)
+
+```ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+
+export default defineConfig({
+  plugins: [react()],
+
+  // Эквивалент resolve.alias
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+    },
+  },
+
+  // Эквивалент devServer
+  server: {
+    port: 3000,
+    proxy: {
+      '/api': { target: 'http://localhost:8080', changeOrigin: true },
+    },
+  },
+
+  // Эквивалент output
+  build: {
+    outDir: 'dist',
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'router': ['react-router-dom'],
+        },
+      },
+    },
+  },
+
+  // Эквивалент DefinePlugin
+  define: {
+    'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV),
+  },
+});
+```
+
+## Шаг 3: Переменные окружения
+
+```
+# Webpack
+process.env.REACT_APP_API_URL
+
+# Vite — только переменные с префиксом VITE_!
+import.meta.env.VITE_API_URL
+```
+
+Если много переменных `REACT_APP_*`, используйте `vite-plugin-env-compatible`:
+```bash
+npm install --save-dev vite-plugin-env-compatible
+```
+
+## Шаг 4: index.html — из public/ в корень
+
+```html
+<!-- Webpack: public/index.html -->
+<div id="root"></div>
+<!-- Webpack вставляет <script> автоматически -->
+
+<!-- Vite: index.html в корне проекта -->
+<div id="root"></div>
+<!-- Явный <script> обязателен! -->
+<script type="module" src="/src/index.tsx"></script>
+```
+
+## Шаг 5: Эквиваленты конфигураций
+
+### DefinePlugin → define
+
+```js
+// Webpack
+new webpack.DefinePlugin({ 'process.env.NODE_ENV': JSON.stringify('production') })
+
+// Vite
+define: { 'process.env.NODE_ENV': JSON.stringify('production') }
+```
+
+### HtmlWebpackPlugin → встроено в Vite
+```js
+// Webpack: нужен плагин
+new HtmlWebpackPlugin({ template: './public/index.html' })
+
+// Vite: не нужен, index.html в корне — автоматически
+```
+
+### CopyWebpackPlugin → vite-plugin-static-copy
+```bash
+npm install --save-dev vite-plugin-static-copy
+```
+
+```js
+import { viteStaticCopy } from 'vite-plugin-static-copy';
+
+plugins: [
+  react(),
+  viteStaticCopy({ targets: [{ src: 'public/robots.txt', dest: '' }] }),
+]
+```
+
+## Шаг 6: npm scripts
+
+```json
+{
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  }
+}
+```
+
+## Типичные проблемы при миграции
+
+### `require()` не работает
+```js
+// ❌ Webpack поддерживал require() в компонентах
+const img = require('./logo.png');
+
+// ✅ Vite: только ES imports
+import img from './logo.png';
+```
+
+### CommonJS зависимости
+Некоторые npm пакеты используют только CommonJS. Vite обычно справляется автоматически через `@rollup/plugin-commonjs`, но иногда нужен `optimizeDeps`:
+
+```js
+optimizeDeps: {
+  include: ['some-cjs-package'],
+}
+```
+
+### Glob imports
+```js
+// ❌ Webpack require.context
+const modules = require.context('./modules', true, /\\.ts$/);
+
+// ✅ Vite: import.meta.glob
+const modules = import.meta.glob('./modules/**/*.ts');
+```
+
+Ниже — интерактивный чеклист миграции с Webpack на Vite.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const ERROR = '#f87171';
+const VITE_COLOR = '#646cff';
+
+interface MigrationTask {
+  id: string;
+  category: string;
+  title: string;
+  webpackWay: string;
+  viteWay: string;
+  difficulty: 'easy' | 'medium' | 'hard';
+  breakingChange: boolean;
+  done: boolean;
+}
+
+const TASKS: MigrationTask[] = [
+  { id: 'install', category: 'Установка', title: 'Установить Vite и плагины', webpackWay: 'webpack webpack-cli webpack-dev-server', viteWay: 'vite @vitejs/plugin-react', difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'config', category: 'Конфигурация', title: 'Создать vite.config.ts', webpackWay: 'webpack.config.js', viteWay: 'vite.config.ts', difficulty: 'medium', breakingChange: false, done: false },
+  { id: 'html', category: 'HTML', title: 'Переместить index.html в корень', webpackWay: 'public/index.html (без <script>)', viteWay: 'index.html в корне + <script type="module" src="/src/index.tsx">', difficulty: 'easy', breakingChange: true, done: false },
+  { id: 'envVars', category: 'Env Variables', title: 'Переименовать env переменные', webpackWay: 'REACT_APP_* → process.env.*', viteWay: 'VITE_* → import.meta.env.*', difficulty: 'medium', breakingChange: true, done: false },
+  { id: 'aliases', category: 'Алиасы', title: 'Перенести path aliases', webpackWay: "resolve.alias: { '@': src }", viteWay: "resolve.alias: { '@': src }", difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'proxy', category: 'Dev Server', title: 'Настроить proxy', webpackWay: 'devServer.proxy', viteWay: 'server.proxy', difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'require', category: 'Imports', title: 'Заменить require() на import', webpackWay: "const x = require('./module')", viteWay: "import x from './module'", difficulty: 'medium', breakingChange: true, done: false },
+  { id: 'definePlugin', category: 'Плагины', title: 'Заменить DefinePlugin', webpackWay: 'new webpack.DefinePlugin({})', viteWay: 'define: {} в vite.config.ts', difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'htmlPlugin', category: 'Плагины', title: 'Удалить HtmlWebpackPlugin', webpackWay: 'new HtmlWebpackPlugin()', viteWay: 'Встроено в Vite (не нужен)', difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'copyPlugin', category: 'Плагины', title: 'Заменить CopyWebpackPlugin', webpackWay: 'new CopyWebpackPlugin()', viteWay: 'vite-plugin-static-copy или папка public/', difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'requireContext', category: 'Webpack APIs', title: 'Заменить require.context', webpackWay: "require.context('./dir', true, /.ts$/)", viteWay: "import.meta.glob('./dir/**/*.ts')", difficulty: 'medium', breakingChange: true, done: false },
+  { id: 'cssModules', category: 'CSS', title: 'CSS Modules — без изменений', webpackWay: 'import styles from "./App.module.css"', viteWay: 'import styles from "./App.module.css" (то же самое)', difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'sass', category: 'CSS', title: 'SASS — только установить sass', webpackWay: 'sass-loader + sass', viteWay: 'только npm install sass', difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'scripts', category: 'npm scripts', title: 'Обновить npm scripts', webpackWay: '"start": "webpack serve", "build": "webpack"', viteWay: '"dev": "vite", "build": "vite build"', difficulty: 'easy', breakingChange: false, done: false },
+  { id: 'cjsDeps', category: 'Зависимости', title: 'Проверить CJS зависимости', webpackWay: 'Автоматически (через babel)', viteWay: 'Нужен optimizeDeps.include для некоторых пакетов', difficulty: 'hard', breakingChange: false, done: false },
+];
+
+const DIFF_COLORS = { easy: SUCCESS, medium: ACCENT, hard: ERROR };
+const DIFF_LABELS = { easy: 'Легко', medium: 'Средне', hard: 'Сложно' };
+
+export default function App() {
+  const [tasks, setTasks] = useState(TASKS);
+  const [selectedTask, setSelectedTask] = useState<string | null>(null);
+  const [filter, setFilter] = useState<'all' | 'pending' | 'done'>('all');
+
+  const toggle = (id: string) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, done: !t.done } : t));
+  };
+
+  const doneCount = tasks.filter(t => t.done).length;
+  const total = tasks.length;
+  const progress = Math.round((doneCount / total) * 100);
+
+  const filtered = tasks.filter(t => filter === 'all' ? true : filter === 'done' ? t.done : !t.done);
+  const selected = tasks.find(t => t.id === selectedTask);
+
+  const categories = [...new Set(tasks.map(t => t.category))];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>
+            <span style={{ color: WEBPACK_COLOR }}>Webpack</span>
+            <span style={{ color: MUTED, margin: '0 12px' }}>→</span>
+            <span style={{ color: VITE_COLOR }}>Vite</span>
+            {' '}Migration Checklist
+          </div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Отмечайте выполненные шаги миграции</div>
+        </div>
+
+        {/* Progress */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 24 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontSize: 14, color: TEXT, fontWeight: 700 }}>Прогресс миграции</div>
+            <div style={{ fontSize: 18, color: progress === 100 ? SUCCESS : WEBPACK_COLOR, fontWeight: 700 }}>{doneCount}/{total}</div>
+          </div>
+          <div style={{ background: '#0a0f1e', borderRadius: 6, overflow: 'hidden', height: 12, marginBottom: 8 }}>
+            <div style={{ height: '100%', background: progress === 100 ? SUCCESS : \`linear-gradient(to right, \${WEBPACK_COLOR}, \${VITE_COLOR})\`, width: \`\${progress}%\`, transition: 'width 0.5s' }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: MUTED }}>
+            <span>Webpack</span>
+            <span style={{ color: progress === 100 ? SUCCESS : TEXT, fontWeight: 700 }}>{progress}%</span>
+            <span style={{ color: VITE_COLOR }}>Vite</span>
+          </div>
+          {progress === 100 && (
+            <div style={{ textAlign: 'center', marginTop: 12, fontSize: 14, color: SUCCESS, fontWeight: 700 }}>
+              🎉 Миграция завершена! Запустите npm run dev
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 360px', gap: 20 }}>
+          {/* Tasks list */}
+          <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+              {(['all', 'pending', 'done'] as const).map(f => (
+                <button key={f} onClick={() => setFilter(f)} style={{ padding: '5px 12px', background: filter === f ? WEBPACK_COLOR : CARD, color: filter === f ? BG : TEXT, border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: filter === f ? 700 : 400 }}>
+                  {f === 'all' ? 'Все' : f === 'done' ? 'Готово' : 'Осталось'}
+                  {' '}({f === 'all' ? total : f === 'done' ? doneCount : total - doneCount})
+                </button>
+              ))}
+            </div>
+
+            {categories.map(cat => {
+              const catTasks = filtered.filter(t => t.category === cat);
+              if (catTasks.length === 0) return null;
+              return (
+                <div key={cat} style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 6, textTransform: 'uppercase' }}>{cat}</div>
+                  {catTasks.map(task => (
+                    <div
+                      key={task.id}
+                      style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px', background: selectedTask === task.id ? '#0f2744' : (task.done ? '#0a1a0a' : CARD), borderRadius: 8, marginBottom: 6, border: \`1px solid \${selectedTask === task.id ? WEBPACK_COLOR : task.done ? '#14532d40' : 'transparent'}\`, transition: 'all 0.2s', cursor: 'pointer' }}
+                      onClick={() => setSelectedTask(selectedTask === task.id ? null : task.id)}
+                    >
+                      <div
+                        onClick={e => { e.stopPropagation(); toggle(task.id); }}
+                        style={{ width: 18, height: 18, borderRadius: 4, border: \`2px solid \${task.done ? SUCCESS : '#334155'}\`, background: task.done ? SUCCESS : 'transparent', flexShrink: 0, marginTop: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                      >
+                        {task.done && <span style={{ fontSize: 11, color: BG, fontWeight: 900 }}>✓</span>}
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, color: task.done ? MUTED : TEXT, fontWeight: 700, textDecoration: task.done ? 'line-through' : 'none' }}>{task.title}</div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        {task.breakingChange && <span style={{ fontSize: 9, color: ERROR, background: '#450a0a', padding: '2px 5px', borderRadius: 3 }}>BREAKING</span>}
+                        <span style={{ fontSize: 9, color: DIFF_COLORS[task.difficulty], background: '#0a0f1e', padding: '2px 5px', borderRadius: 3 }}>{DIFF_LABELS[task.difficulty]}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Task detail */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {selected ? (
+              <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+                <div style={{ fontSize: 14, color: WEBPACK_COLOR, fontWeight: 700, marginBottom: 4 }}>{selected.title}</div>
+                <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+                  <span style={{ fontSize: 10, color: DIFF_COLORS[selected.difficulty], background: '#0a0f1e', padding: '2px 6px', borderRadius: 3 }}>{DIFF_LABELS[selected.difficulty]}</span>
+                  {selected.breakingChange && <span style={{ fontSize: 10, color: ERROR, background: '#450a0a', padding: '2px 6px', borderRadius: 3 }}>⚠️ Breaking Change</span>}
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 10, color: WEBPACK_COLOR, marginBottom: 4, textTransform: 'uppercase' }}>Webpack</div>
+                  <div style={{ background: '#0a0f1e', borderRadius: 6, padding: '8px 10px', fontSize: 11, color: TEXT }}>{selected.webpackWay}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: VITE_COLOR, marginBottom: 4, textTransform: 'uppercase' }}>Vite</div>
+                  <div style={{ background: '#0a0f1e', borderRadius: 6, padding: '8px 10px', fontSize: 11, color: SUCCESS }}>{selected.viteWay}</div>
+                </div>
+                <button onClick={() => { toggle(selected.id); setSelectedTask(null); }} style={{ width: '100%', marginTop: 14, padding: '8px', background: selected.done ? '#334155' : SUCCESS, color: selected.done ? MUTED : BG, border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
+                  {selected.done ? '✗ Отметить как невыполненное' : '✓ Отметить как выполненное'}
+                </button>
+              </div>
+            ) : (
+              <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+                <div style={{ fontSize: 12, color: MUTED, textAlign: 'center', paddingTop: 10, marginBottom: 16 }}>Нажмите на задачу для деталей</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                  {Object.entries(DIFF_LABELS).map(([d, label]) => (
+                    <div key={d} style={{ background: '#0a0f1e', borderRadius: 6, padding: 8, textAlign: 'center' }}>
+                      <div style={{ fontSize: 16, color: DIFF_COLORS[d as 'easy' | 'medium' | 'hard'], fontWeight: 700 }}>{tasks.filter(t => t.difficulty === d).length}</div>
+                      <div style={{ fontSize: 10, color: DIFF_COLORS[d as 'easy' | 'medium' | 'hard'] }}>{label}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 12, background: '#0a0f1e', borderRadius: 6, padding: 8, textAlign: 'center' }}>
+                  <div style={{ fontSize: 16, color: ERROR, fontWeight: 700 }}>{tasks.filter(t => t.breakingChange).length}</div>
+                  <div style={{ fontSize: 10, color: ERROR }}>Breaking Changes</div>
+                </div>
+              </div>
+            )}
+
+            {/* Stats */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 10, textTransform: 'uppercase' }}>Прогресс по категориям</div>
+              {categories.map(cat => {
+                const catAll = tasks.filter(t => t.category === cat);
+                const catDone = catAll.filter(t => t.done);
+                return (
+                  <div key={cat} style={{ marginBottom: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, marginBottom: 3 }}>
+                      <span style={{ color: MUTED }}>{cat}</span>
+                      <span style={{ color: catDone.length === catAll.length ? SUCCESS : TEXT }}>{catDone.length}/{catAll.length}</span>
+                    </div>
+                    <div style={{ background: '#0a0f1e', borderRadius: 3, overflow: 'hidden', height: 5 }}>
+                      <div style={{ height: '100%', background: catDone.length === catAll.length ? SUCCESS : WEBPACK_COLOR, width: \`\${(catDone.length / catAll.length) * 100}%\`, transition: 'width 0.3s' }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,270 @@
+import { Playground } from '../../components/Playground'
+
+# Обработка ошибок
+
+Remix предоставляет отличную систему обработки ошибок. Каждый маршрут может иметь свой `ErrorBoundary`, который перехватывает ошибки из loader, action и компонента.
+
+## ErrorBoundary
+
+```typescript
+import { useRouteError, isRouteErrorResponse } from "@remix-run/react";
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  // Ошибки, брошенные как Response (throw new Response(...))
+  if (isRouteErrorResponse(error)) {
+    return (
+      <div>
+        <h1>{error.status} {error.statusText}</h1>
+        <p>{error.data}</p>
+      </div>
+    );
+  }
+
+  // Обычные JavaScript ошибки
+  if (error instanceof Error) {
+    return (
+      <div>
+        <h1>Что-то пошло не так</h1>
+        <p>{error.message}</p>
+      </div>
+    );
+  }
+
+  return <h1>Неизвестная ошибка</h1>;
+}
+```
+
+## Типы ошибок
+
+### 1. Response ошибки (HTTP)
+
+```typescript
+export async function loader({ params }) {
+  const user = await getUser(params.id);
+
+  if (!user) {
+    throw new Response("Пользователь не найден", {
+      status: 404,
+      statusText: "Not Found",
+    });
+  }
+
+  return json(user);
+}
+```
+
+### 2. Обычные ошибки
+
+```typescript
+export async function loader() {
+  try {
+    return json(await fetchData());
+  } catch (err) {
+    // Remix перехватит это в ErrorBoundary
+    throw new Error("Ошибка загрузки данных");
+  }
+}
+```
+
+### 3. Ошибки в action
+
+```typescript
+export async function action({ request }) {
+  const data = await request.formData();
+  const result = await riskyOperation(data.get("id"));
+
+  if (!result.ok) {
+    // Возвращаем данные об ошибке (не бросаем)
+    return json({ error: result.message }, { status: 400 });
+  }
+
+  return redirect("/success");
+}
+```
+
+## Вложенные ErrorBoundary
+
+Ключевое преимущество Remix — ошибки изолируются в своём маршруте:
+
+```
+app/routes/
+  dashboard.tsx          ErrorBoundary здесь...
+  dashboard.users.tsx    ...перехватит ошибку здесь
+  dashboard.stats.tsx    ...или здесь
+```
+
+Если `dashboard/stats` бросает ошибку, `ErrorBoundary` в `dashboard/stats.tsx` показывает ошибку только в области статистики, остальная часть dashboard продолжает работать!
+
+## Root ErrorBoundary
+
+В `root.tsx` обязательно нужен `ErrorBoundary` как страховка:
+
+```typescript
+// root.tsx
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  return (
+    <html>
+      <head><title>Ошибка</title></head>
+      <body>
+        <div className="error-page">
+          <h1>Критическая ошибка</h1>
+          {isRouteErrorResponse(error)
+            ? `${error.status}: ${error.statusText}`
+            : "Что-то пошло не так"}
+        </div>
+      </body>
+    </html>
+  );
+}
+```
+
+## notFound helper (Remix v2)
+
+```typescript
+import { data } from "@remix-run/node";
+
+export async function loader({ params }) {
+  const post = await getPost(params.slug);
+
+  if (!post) {
+    throw data("Пост не найден", { status: 404 });
+  }
+
+  return { post };
+}
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+const WARN = "#f59e0b";
+
+type ErrorType = "none" | "404" | "500" | "js-error" | "action-error";
+
+const scenarios: { id: ErrorType; label: string; desc: string }[] = [
+  { id: "none", label: "✅ Без ошибок", desc: "Нормальная работа приложения" },
+  { id: "404", label: "404 Not Found", desc: "throw new Response('Not Found', { status: 404 })" },
+  { id: "500", label: "500 Server Error", desc: "throw new Error('Database connection failed')" },
+  { id: "js-error", label: "JS Error", desc: "Ошибка в React компоненте" },
+  { id: "action-error", label: "Action Error", desc: "return json({ error: '...' }, { status: 400 })" },
+];
+
+function MockRoute({ errorType }: { errorType: ErrorType }) {
+  if (errorType === "js-error") {
+    return (
+      <div style={{ background: ERROR + "11", border: \`1px solid \${ERROR}44\`, borderRadius: "10px", padding: "20px" }}>
+        <div style={{ color: ERROR, fontWeight: 700, marginBottom: "8px" }}>💥 ErrorBoundary перехватил ошибку</div>
+        <div style={{ fontFamily: "monospace", fontSize: "12px", color: "#fca5a5" }}>
+          TypeError: Cannot read properties of undefined
+        </div>
+        <div style={{ color: MUTED, fontSize: "12px", marginTop: "8px" }}>
+          компонент: UserProfile.tsx:42
+        </div>
+      </div>
+    );
+  }
+
+  if (errorType === "404") {
+    return (
+      <div style={{ background: WARN + "11", border: \`1px solid \${WARN}44\`, borderRadius: "10px", padding: "20px" }}>
+        <div style={{ fontSize: "48px", fontWeight: 900, color: WARN }}>404</div>
+        <div style={{ color: WARN, fontWeight: 700 }}>Not Found</div>
+        <div style={{ color: MUTED, fontSize: "12px", marginTop: "8px", fontFamily: "monospace" }}>
+          isRouteErrorResponse(error) === true
+          <br />error.status === 404
+        </div>
+      </div>
+    );
+  }
+
+  if (errorType === "500") {
+    return (
+      <div style={{ background: ERROR + "11", border: \`1px solid \${ERROR}44\`, borderRadius: "10px", padding: "20px" }}>
+        <div style={{ fontSize: "48px", fontWeight: 900, color: ERROR }}>500</div>
+        <div style={{ color: ERROR, fontWeight: 700 }}>Server Error</div>
+        <div style={{ color: MUTED, fontSize: "12px", marginTop: "8px", fontFamily: "monospace" }}>
+          error instanceof Error === true
+          <br />error.message: "Database connection failed"
+        </div>
+      </div>
+    );
+  }
+
+  if (errorType === "action-error") {
+    return (
+      <div style={{ background: CARD, borderRadius: "10px", padding: "20px" }}>
+        <div style={{ color: ACCENT, fontWeight: 700, marginBottom: "12px" }}>Форма с ошибкой action</div>
+        <div style={{ background: ERROR + "11", border: \`1px solid \${ERROR}44\`, borderRadius: "8px", padding: "10px", marginBottom: "12px", fontSize: "13px", color: ERROR }}>
+          ⚠️ useActionData(): "Email уже занят"
+        </div>
+        <div style={{ color: MUTED, fontSize: "12px", fontFamily: "monospace" }}>
+          {"return json({ error: '...' }, { status: 400 })"}
+          <br />
+          {"// Страница НЕ переходит в ErrorBoundary"}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: SUCCESS + "11", border: \`1px solid \${SUCCESS}44\`, borderRadius: "10px", padding: "20px" }}>
+      <div style={{ color: SUCCESS, fontWeight: 700, marginBottom: "8px" }}>✅ Маршрут загружен успешно</div>
+      <div style={{ color: TEXT, fontSize: "13px" }}>Данные: &#123; user: &#123; name: "Алексей", role: "admin" &#125; &#125;</div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [selected, setSelected] = useState<ErrorType>("none");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>🛡️ Обработка ошибок в Remix</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>Выбери тип ошибки для демонстрации</p>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxWidth: "700px" }}>
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "16px" }}>
+          {scenarios.map(s => (
+            <button key={s.id} onClick={() => setSelected(s.id)} style={{
+              padding: "8px 14px", borderRadius: "8px",
+              border: \`2px solid \${selected === s.id ? ACCENT : "#334155"}\`,
+              background: selected === s.id ? ACCENT + "22" : CARD,
+              color: selected === s.id ? ACCENT : MUTED,
+              cursor: "pointer", fontSize: "12px",
+            }}>{s.label}</button>
+          ))}
+        </div>
+
+        <div style={{ background: CARD, borderRadius: "12px", padding: "20px" }}>
+          <div style={{ fontFamily: "monospace", fontSize: "12px", color: MUTED, marginBottom: "12px" }}>
+            {"// app/routes/dashboard.tsx -> ErrorBoundary"}
+          </div>
+          <MockRoute errorType={selected} />
+        </div>
+
+        <div style={{ background: CARD, borderRadius: "12px", padding: "16px", borderLeft: \`4px solid \${ACCENT}\` }}>
+          <div style={{ fontSize: "13px", color: TEXT, lineHeight: 1.6 }}>
+            <strong style={{ color: ACCENT }}>Важно:</strong>{" "}
+            {selected === "action-error"
+              ? "Ошибки из action (return json) НЕ вызывают ErrorBoundary — они доступны через useActionData()"
+              : selected === "none"
+              ? "Вложенные ErrorBoundary изолируют ошибки — остальная часть страницы продолжает работать"
+              : "Ошибка изолирована в ErrorBoundary этого маршрута. Родительский layout не затронут."}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

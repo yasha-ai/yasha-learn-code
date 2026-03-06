@@ -1,0 +1,388 @@
+import { Playground } from '../../components/Playground'
+
+# routeLoader$ и routeAction$
+
+В Qwik City загрузка данных и мутации управляются через `routeLoader$` и `routeAction$`. Эти функции выполняются **на сервере** и обеспечивают типобезопасный обмен данными между сервером и клиентом.
+
+## routeLoader$ — загрузка данных
+
+`routeLoader$` запускается на сервере **перед** рендером страницы и предоставляет данные компонентам:
+
+```typescript
+// src/routes/blog/[slug]/index.tsx
+import { component$ } from '@builder.io/qwik';
+import { routeLoader$ } from '@builder.io/qwik-city';
+
+// Определяем загрузчик
+export const usePost = routeLoader$(async ({ params, status }) => {
+  const post = await db.posts.findUnique({
+    where: { slug: params.slug }
+  });
+  
+  if (!post) {
+    status(404);  // Устанавливаем HTTP статус
+    return null;
+  }
+  
+  return post;
+});
+
+// Используем в компоненте
+export default component$(() => {
+  const post = usePost();  // Данные уже загружены!
+  
+  if (!post.value) {
+    return <h1>Пост не найден</h1>;
+  }
+  
+  return (
+    <article>
+      <h1>{post.value.title}</h1>
+      <p>{post.value.content}</p>
+    </article>
+  );
+});
+```
+
+### Доступные параметры загрузчика
+
+```typescript
+export const useData = routeLoader$(async ({
+  params,    // Параметры маршрута (/blog/[slug])
+  query,     // Параметры запроса (?page=1)
+  request,   // Request объект
+  cookie,    // Cookies
+  env,       // Переменные окружения
+  platform,  // Платформа (Cloudflare, Vercel...)
+  status,    // Установка HTTP статуса
+  redirect,  // Перенаправление
+  fail,      // Возврат ошибки
+}) => {
+  return { data: 'value' };
+});
+```
+
+### Загрузка в лейауте
+
+Загрузчики можно определять в `layout.tsx` — они будут доступны всем дочерним страницам:
+
+```typescript
+// src/routes/layout.tsx
+export const useCurrentUser = routeLoader$(async ({ cookie }) => {
+  return await getUserFromCookie(cookie.get('auth')?.value);
+});
+
+// src/routes/dashboard/index.tsx
+export default component$(() => {
+  const user = useCurrentUser(); // Доступен из лейаута!
+  return <div>Привет, {user.value?.name}</div>;
+});
+```
+
+## routeAction$ — мутации данных
+
+`routeAction$` обрабатывает форм-данные и другие мутации на сервере:
+
+```typescript
+import { routeAction$, Form } from '@builder.io/qwik-city';
+
+export const useCreatePost = routeAction$(async (data, { redirect }) => {
+  // data автоматически извлечён из FormData
+  const post = await db.posts.create({
+    data: {
+      title: data.title as string,
+      content: data.content as string,
+    }
+  });
+  
+  throw redirect(302, \`/blog/\${post.slug}\`);
+});
+
+export default component$(() => {
+  const createPost = useCreatePost();
+  
+  return (
+    <Form action={createPost}>
+      <input name="title" placeholder="Заголовок" />
+      <textarea name="content" />
+      <button type="submit">Опубликовать</button>
+      {createPost.value?.failed && (
+        <p>Ошибка: {createPost.value.message}</p>
+      )}
+    </Form>
+  );
+});
+```
+
+## Валидация с zod
+
+```typescript
+import { routeAction$, zod$, z } from '@builder.io/qwik-city';
+
+export const useSignUp = routeAction$(
+  async (data) => {
+    // data уже валидирован и типизирован!
+    await createUser(data.email, data.password);
+    return { success: true };
+  },
+  zod$({
+    email: z.string().email('Неверный email'),
+    password: z.string().min(8, 'Минимум 8 символов'),
+    name: z.string().min(2, 'Слишком короткое имя'),
+  })
+);
+```
+
+## useLoader vs useAction: разница
+
+| | routeLoader$ | routeAction$ |
+|---|---|---|
+| Когда | До рендера | При отправке формы |
+| HTTP | GET | POST, PUT, DELETE |
+| Данные | params, query | FormData, JSON |
+| Кеш | Да | Нет |
+| Ре-рендер | Автоматически | По необходимости |
+
+## Playground: Симулятор загрузки данных
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect } from 'react';
+
+const BG = '#0f172a';
+const QWIK = '#ac7ef4';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#22c55e';
+const RED = '#ef4444';
+const BLUE = '#38bdf8';
+const ORANGE = '#f97316';
+
+type Post = { id: number; title: string; author: string; date: string; likes: number };
+type LoaderState = 'idle' | 'loading' | 'success' | 'error';
+type ActionState = 'idle' | 'submitting' | 'success' | 'error';
+
+const fakePosts: Post[] = [
+  { id: 1, title: 'Введение в Qwik', author: 'Мisko H.', date: '2024-01-15', likes: 142 },
+  { id: 2, title: 'Resumability объяснена', author: 'Adam B.', date: '2024-01-20', likes: 89 },
+  { id: 3, title: 'Qwik vs React: производительность', author: 'Builder.io', date: '2024-01-25', likes: 234 },
+];
+
+export default function App() {
+  const [tab, setTab] = useState<'loader' | 'action'>('loader');
+
+  // Loader simulation
+  const [loaderState, setLoaderState] = useState<LoaderState>('idle');
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [selectedSlug, setSelectedSlug] = useState('intro-to-qwik');
+  const [loaderLog, setLoaderLog] = useState<string[]>([]);
+
+  const addLog = (msg: string) => setLoaderLog(prev => [msg, ...prev.slice(0, 9)]);
+
+  const simulateLoader = async () => {
+    setLoaderState('loading');
+    setPosts([]);
+    addLog(\`📡 routeLoader\\$: запрос к /api/posts?slug=\${selectedSlug}\`);
+    await new Promise(r => setTimeout(r, 800));
+    addLog(\`🖥️  Сервер: выполнение SQL запроса...\`);
+    await new Promise(r => setTimeout(r, 600));
+    addLog(\`✅ Сервер: данные получены, сериализация...\`);
+    await new Promise(r => setTimeout(r, 200));
+    setPosts(fakePosts);
+    setLoaderState('success');
+    addLog(\`🌐 Клиент: данные отрендерены в HTML\`);
+  };
+
+  // Action simulation
+  const [actionState, setActionState] = useState<ActionState>('idle');
+  const [formData, setFormData] = useState({ title: '', content: '', author: '' });
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [actionLog, setActionLog] = useState<string[]>([]);
+  const [createdPosts, setCreatedPosts] = useState<Post[]>([]);
+
+  const addActionLog = (msg: string) => setActionLog(prev => [msg, ...prev.slice(0, 9)]);
+
+  const validate = () => {
+    const errors: Record<string, string> = {};
+    if (!formData.title.trim()) errors.title = 'Заголовок обязателен';
+    else if (formData.title.length < 5) errors.title = 'Минимум 5 символов';
+    if (!formData.content.trim()) errors.content = 'Контент обязателен';
+    if (!formData.author.trim()) errors.author = 'Автор обязателен';
+    return errors;
+  };
+
+  const simulateAction = async () => {
+    const errors = validate();
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors);
+      return;
+    }
+    setFormErrors({});
+    setActionState('submitting');
+    addActionLog(\`📤 Form submit → POST /api/posts\`);
+    addActionLog(\`🖥️  routeAction\\$: валидация через zod...\`);
+    await new Promise(r => setTimeout(r, 500));
+    addActionLog(\`✅ zod: данные валидны\`);
+    await new Promise(r => setTimeout(r, 600));
+    addActionLog(\`🗄️  db.posts.create({ data: formData })\`);
+    await new Promise(r => setTimeout(r, 400));
+    const newPost: Post = {
+      id: Date.now(),
+      title: formData.title,
+      author: formData.author,
+      date: new Date().toISOString().split('T')[0],
+      likes: 0,
+    };
+    setCreatedPosts(prev => [newPost, ...prev]);
+    setActionState('success');
+    setFormData({ title: '', content: '', author: '' });
+    addActionLog(\`🎉 Пост создан! redirect('/blog/\${formData.title.toLowerCase().replace(/\\s+/g, '-')}')\`);
+    setTimeout(() => setActionState('idle'), 2000);
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <h1 style={{ color: QWIK, margin: '0 0 4px' }}>🔄 routeLoader$ и routeAction$</h1>
+        <p style={{ color: MUTED, margin: '0 0 20px', fontSize: 13 }}>Симуляция загрузки данных и мутаций</p>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+          {(['loader', 'action'] as const).map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{
+              flex: 1, background: tab === t ? QWIK : CARD, color: tab === t ? '#0f172a' : TEXT,
+              border: \`1px solid \${tab === t ? QWIK : '#334155'}\`, borderRadius: 8,
+              padding: '10px 0', cursor: 'pointer', fontWeight: 700, fontSize: 14,
+            }}>
+              {t === 'loader' ? '📡 routeLoader$' : '📤 routeAction$'}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'loader' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ background: CARD, borderRadius: 12, padding: 20, border: '1px solid #334155' }}>
+              <pre style={{ background: '#0d1829', borderRadius: 8, padding: 12, fontSize: 11, color: '#a5f3fc', margin: '0 0 16px', lineHeight: 1.6 }}>
+                <code>{[
+                  \`export const usePosts = routeLoader\\$(async ({ params }) => {\`,
+                  \`  const posts = await db.posts.findMany();\`,
+                  \`  return posts; // Выполняется на сервере\`,
+                  \`});\`,
+                ].join('\\n')}</code>
+              </pre>
+              <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'center' }}>
+                <select
+                  value={selectedSlug}
+                  onChange={e => setSelectedSlug(e.target.value)}
+                  style={{ background: '#0d1829', border: '1px solid #334155', borderRadius: 6, padding: '8px 12px', color: TEXT, fontSize: 13 }}
+                >
+                  <option value="intro-to-qwik">intro-to-qwik</option>
+                  <option value="resumability">resumability</option>
+                  <option value="qwik-vs-react">qwik-vs-react</option>
+                </select>
+                <button onClick={simulateLoader} disabled={loaderState === 'loading'} style={{
+                  background: loaderState === 'loading' ? '#334155' : QWIK, color: loaderState === 'loading' ? MUTED : '#0f172a',
+                  border: 'none', borderRadius: 8, padding: '8px 20px', cursor: loaderState === 'loading' ? 'not-allowed' : 'pointer', fontWeight: 700,
+                }}>
+                  {loaderState === 'loading' ? '⏳ Загрузка...' : '▶ Запустить Loader'}
+                </button>
+              </div>
+
+              {loaderState === 'success' && posts.map(post => (
+                <div key={post.id} style={{ background: '#0d1829', borderRadius: 8, padding: 12, marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ color: TEXT, fontWeight: 600, fontSize: 14 }}>{post.title}</div>
+                    <div style={{ color: MUTED, fontSize: 12 }}>{post.author} · {post.date}</div>
+                  </div>
+                  <div style={{ color: QWIK, fontFamily: 'monospace' }}>❤️ {post.likes}</div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+              <div style={{ color: TEXT, fontSize: 14, fontWeight: 600, marginBottom: 8 }}>📋 Лог выполнения</div>
+              {loaderLog.length === 0 ? (
+                <div style={{ color: MUTED, fontSize: 13, textAlign: 'center', padding: 10 }}>Запусти loader для просмотра</div>
+              ) : loaderLog.map((log, i) => (
+                <div key={i} style={{ color: i === 0 ? TEXT : MUTED, fontSize: 12, padding: '3px 0', borderBottom: '1px solid #1e293b' }}>{log}</div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === 'action' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ background: CARD, borderRadius: 12, padding: 20, border: '1px solid #334155' }}>
+              <pre style={{ background: '#0d1829', borderRadius: 8, padding: 12, fontSize: 11, color: '#a5f3fc', margin: '0 0 16px', lineHeight: 1.6 }}>
+                <code>{[
+                  \`export const useCreatePost = routeAction\\$(\`,
+                  \`  async (data) => { await db.posts.create({data}); },\`,
+                  \`  zod\\$({ title: z.string().min(5), ... })\`,
+                  \`);\`,
+                ].join('\\n')}</code>
+              </pre>
+
+              {[
+                { key: 'title', label: 'Заголовок поста', placeholder: 'Введи заголовок...', type: 'text' },
+                { key: 'author', label: 'Автор', placeholder: 'Твоё имя...', type: 'text' },
+                { key: 'content', label: 'Контент', placeholder: 'Напиши статью...', type: 'textarea' },
+              ].map(({ key, label, placeholder, type }) => (
+                <div key={key} style={{ marginBottom: 12 }}>
+                  <label style={{ color: TEXT, fontSize: 13, display: 'block', marginBottom: 4 }}>{label}</label>
+                  {type === 'textarea' ? (
+                    <textarea
+                      value={formData[key as keyof typeof formData]}
+                      onChange={e => setFormData(d => ({ ...d, [key]: e.target.value }))}
+                      placeholder={placeholder}
+                      rows={3}
+                      style={{ width: '100%', background: '#0d1829', border: \`1px solid \${formErrors[key] ? RED : '#334155'}\`, borderRadius: 8, padding: '8px 12px', color: TEXT, fontSize: 13, boxSizing: 'border-box', resize: 'vertical' }}
+                    />
+                  ) : (
+                    <input
+                      value={formData[key as keyof typeof formData]}
+                      onChange={e => setFormData(d => ({ ...d, [key]: e.target.value }))}
+                      placeholder={placeholder}
+                      style={{ width: '100%', background: '#0d1829', border: \`1px solid \${formErrors[key] ? RED : '#334155'}\`, borderRadius: 8, padding: '8px 12px', color: TEXT, fontSize: 13, boxSizing: 'border-box' }}
+                    />
+                  )}
+                  {formErrors[key] && <div style={{ color: RED, fontSize: 11, marginTop: 3 }}>⚠ {formErrors[key]}</div>}
+                </div>
+              ))}
+
+              <button
+                onClick={simulateAction}
+                disabled={actionState === 'submitting'}
+                style={{
+                  width: '100%', background: actionState === 'success' ? GREEN : actionState === 'submitting' ? '#334155' : QWIK,
+                  color: actionState === 'submitting' ? MUTED : '#0f172a',
+                  border: 'none', borderRadius: 8, padding: '12px 0', cursor: actionState === 'submitting' ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 15,
+                }}
+              >
+                {actionState === 'idle' ? '📤 Создать пост' : actionState === 'submitting' ? '⏳ Сохранение...' : '✅ Пост создан!'}
+              </button>
+            </div>
+
+            {createdPosts.length > 0 && (
+              <div style={{ background: CARD, borderRadius: 12, padding: 16, border: \`1px solid \${GREEN}33\` }}>
+                <div style={{ color: GREEN, fontSize: 14, fontWeight: 600, marginBottom: 8 }}>✅ Созданные посты</div>
+                {createdPosts.map(post => (
+                  <div key={post.id} style={{ color: TEXT, fontSize: 13, padding: '6px 0', borderBottom: '1px solid #1e293b' }}>
+                    📄 {post.title} — {post.author}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+              <div style={{ color: TEXT, fontSize: 14, fontWeight: 600, marginBottom: 8 }}>📋 Лог выполнения</div>
+              {actionLog.length === 0 ? (
+                <div style={{ color: MUTED, fontSize: 13, textAlign: 'center', padding: 10 }}>Отправь форму для просмотра</div>
+              ) : actionLog.map((log, i) => (
+                <div key={i} style={{ color: i === 0 ? TEXT : MUTED, fontSize: 12, padding: '3px 0', borderBottom: '1px solid #1e293b' }}>{log}</div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

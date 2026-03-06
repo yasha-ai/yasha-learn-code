@@ -1,0 +1,310 @@
+import { Playground } from '../../components/Playground'
+
+# MongoDB и Prisma
+
+Prisma поддерживает MongoDB начиная с версии 3.x, однако работа с документной базой данных имеет свои особенности. Важно понимать ключевые отличия MongoDB от реляционных баз данных при использовании Prisma.
+
+## Настройка провайдера
+
+```prisma
+datasource db {
+  provider = "mongodb"
+  url      = env("MONGODB_URI")
+}
+```
+
+## ObjectId — идентификаторы в MongoDB
+
+В MongoDB все документы имеют поле `_id` типа `ObjectId`. Prisma предоставляет атрибут `@db.ObjectId` для маппинга:
+
+```prisma
+model User {
+  id    String @id @default(auto()) @map("_id") @db.ObjectId
+  email String @unique
+  name  String
+}
+```
+
+## Встроенные документы (Embedded Documents)
+
+MongoDB поддерживает хранение связанных данных внутри одного документа — в отличие от реляционных баз, где используются отдельные таблицы:
+
+```prisma
+type Address {
+  street String
+  city   String
+  zip    String
+}
+
+model User {
+  id      String  @id @default(auto()) @map("_id") @db.ObjectId
+  email   String  @unique
+  address Address?
+}
+```
+
+## Реляционные ссылки в MongoDB
+
+Для отношений между коллекциями используются `@db.ObjectId` поля:
+
+```prisma
+model Post {
+  id       String @id @default(auto()) @map("_id") @db.ObjectId
+  title    String
+  authorId String @db.ObjectId
+  author   User   @relation(fields: [authorId], references: [id])
+}
+```
+
+## Отличия от реляционных БД
+
+| Особенность | Реляционные | MongoDB |
+|------------|-------------|---------|
+| Транзакции | Полная поддержка | Только в replica set |
+| Миграции | prisma migrate | Нет (нет схемы) |
+| JOIN | Через include | Через populate |
+| Встроенные данные | Нет | Есть |
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const relationalData = {
+  title: 'Реляционная модель (PostgreSQL)',
+  description: 'Данные нормализованы — каждая сущность в отдельной таблице. Связи через внешние ключи.',
+  tables: [
+    {
+      name: 'users',
+      color: '#3182ce',
+      columns: ['id (PK)', 'email', 'name', 'created_at'],
+      rows: [
+        ['1', 'ivan@example.com', 'Иван Петров', '2024-01-15'],
+      ],
+    },
+    {
+      name: 'user_addresses',
+      color: '#805ad5',
+      columns: ['id (PK)', 'user_id (FK)', 'street', 'city', 'zip'],
+      rows: [
+        ['1', '1', 'ул. Ленина, 10', 'Москва', '101000'],
+      ],
+    },
+    {
+      name: 'posts',
+      color: '#38a169',
+      columns: ['id (PK)', 'author_id (FK)', 'title', 'published'],
+      rows: [
+        ['10', '1', 'Введение в Prisma', 'true'],
+        ['11', '1', 'TypeScript Guide', 'false'],
+      ],
+    },
+  ],
+  schema: \`model User {
+  id        Int       @id @default(autoincrement())
+  email     String    @unique
+  name      String
+  address   Address?
+  posts     Post[]
+  createdAt DateTime  @default(now())
+}
+
+model Address {
+  id     Int    @id @default(autoincrement())
+  street String
+  city   String
+  zip    String
+  user   User   @relation(fields: [userId], references: [id])
+  userId Int    @unique
+}
+
+model Post {
+  id       Int    @id @default(autoincrement())
+  title    String
+  author   User   @relation(fields: [authorId], references: [id])
+  authorId Int
+}\`,
+}
+
+const mongoData = {
+  title: 'Документная модель (MongoDB)',
+  description: 'Данные денормализованы — связанные данные встроены в документ. Меньше JOIN-ов, но дублирование данных.',
+  documents: [
+    {
+      collection: 'users',
+      color: '#d69e2e',
+      document: {
+        _id: 'ObjectId("507f1f77bcf86cd799439011")',
+        email: 'ivan@example.com',
+        name: 'Иван Петров',
+        address: {
+          street: 'ул. Ленина, 10',
+          city: 'Москва',
+          zip: '101000',
+        },
+        createdAt: 'ISODate("2024-01-15")',
+      },
+    },
+    {
+      collection: 'posts',
+      color: '#38a169',
+      document: {
+        _id: 'ObjectId("507f191e810c19729de860ea")',
+        title: 'Введение в Prisma',
+        authorId: 'ObjectId("507f1f77bcf86cd799439011")',
+        published: true,
+      },
+    },
+  ],
+  schema: \`datasource db {
+  provider = "mongodb"
+  url      = env("MONGODB_URI")
+}
+
+type Address {
+  street String
+  city   String
+  zip    String
+}
+
+model User {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  email     String   @unique
+  name      String
+  address   Address?
+  posts     Post[]
+  createdAt DateTime @default(now())
+}
+
+model Post {
+  id       String  @id @default(auto()) @map("_id") @db.ObjectId
+  title    String
+  author   User    @relation(fields: [authorId], references: [id])
+  authorId String  @db.ObjectId
+}\`,
+}
+
+const differences = [
+  { topic: 'Идентификаторы', relational: 'INT AUTOINCREMENT', mongo: 'ObjectId (BSON)' },
+  { topic: 'Связанные данные', relational: 'JOIN через FK', mongo: 'Встроенные документы' },
+  { topic: 'Схема', relational: 'Строгая схема', mongo: 'Гибкая схема' },
+  { topic: 'Миграции', relational: 'prisma migrate', mongo: 'Не требуются' },
+  { topic: 'Транзакции', relational: 'Полная поддержка', mongo: 'Только replica set' },
+  { topic: 'Поиск', relational: 'SQL WHERE', mongo: 'MongoDB query operators' },
+]
+
+export default function App() {
+  const [view, setView] = useState('compare')
+  const [dbMode, setDbMode] = useState('relational')
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '28px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 22px 0' }}>
+          MongoDB vs Реляционные БД в Prisma
+        </h2>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 22 }}>
+          {['compare', 'data', 'schema'].map(v => (
+            <button key={v} onClick={() => setView(v)}
+              style={{ background: view === v ? PRISMA : CARD, color: view === v ? '#fff' : '#94a3b8', border: '1px solid ' + (view === v ? PRISMA : '#334155'), borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {v === 'compare' ? '⚖️ Сравнение' : v === 'data' ? '📊 Данные' : '📐 Схемы'}
+            </button>
+          ))}
+        </div>
+
+        {view === 'compare' && (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
+              <div style={{ background: '#0a0f1e', borderRadius: 8, padding: '8px 12px', color: '#475569', fontSize: 11, fontWeight: 700, textAlign: 'center' }}>Характеристика</div>
+              <div style={{ background: '#1a2744', borderRadius: 8, padding: '8px 12px', color: '#7dd3fc', fontSize: 11, fontWeight: 700, textAlign: 'center' }}>PostgreSQL / MySQL</div>
+              <div style={{ background: '#1a3a1a', borderRadius: 8, padding: '8px 12px', color: '#86efac', fontSize: 11, fontWeight: 700, textAlign: 'center' }}>MongoDB</div>
+            </div>
+            {differences.map((d, i) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 6 }}>
+                <div style={{ background: CARD, borderRadius: 8, padding: '10px 12px', color: TEXT, fontSize: 12, fontWeight: 600 }}>{d.topic}</div>
+                <div style={{ background: '#0a1628', borderRadius: 8, padding: '10px 12px', color: '#93c5fd', fontSize: 12, fontFamily: 'monospace' }}>{d.relational}</div>
+                <div style={{ background: '#0a1a0a', borderRadius: 8, padding: '10px 12px', color: '#86efac', fontSize: 12, fontFamily: 'monospace' }}>{d.mongo}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {view === 'data' && (
+          <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              {['relational', 'mongo'].map(mode => (
+                <button key={mode} onClick={() => setDbMode(mode)}
+                  style={{ background: dbMode === mode ? (mode === 'relational' ? '#3182ce' : '#d69e2e') : CARD, color: dbMode === mode ? '#fff' : '#94a3b8', border: '1px solid ' + (dbMode === mode ? (mode === 'relational' ? '#3182ce' : '#d69e2e') : '#334155'), borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                  {mode === 'relational' ? '🗄️ PostgreSQL' : '🍃 MongoDB'}
+                </button>
+              ))}
+            </div>
+
+            {dbMode === 'relational' ? (
+              <div>
+                <p style={{ color: '#94a3b8', fontSize: 13, marginBottom: 14 }}>{relationalData.description}</p>
+                {relationalData.tables.map((table, i) => (
+                  <div key={i} style={{ background: CARD, borderRadius: 10, padding: 16, border: '1px solid ' + table.color + '50', marginBottom: 10 }}>
+                    <div style={{ color: table.color, fontSize: 13, fontWeight: 700, marginBottom: 10 }}>📋 {table.name}</div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                      <thead>
+                        <tr>
+                          {table.columns.map(col => (
+                            <th key={col} style={{ color: '#7dd3fc', padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid #334155', fontFamily: 'monospace' }}>{col}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {table.rows.map((row, j) => (
+                          <tr key={j}>
+                            {row.map((cell, k) => (
+                              <td key={k} style={{ color: TEXT, padding: '6px 8px', fontFamily: 'monospace', borderBottom: '1px solid #1e293b' }}>{cell}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div>
+                <p style={{ color: '#94a3b8', fontSize: 13, marginBottom: 14 }}>{mongoData.description}</p>
+                {mongoData.documents.map((doc, i) => (
+                  <div key={i} style={{ background: CARD, borderRadius: 10, padding: 16, border: '1px solid ' + doc.color + '50', marginBottom: 10 }}>
+                    <div style={{ color: doc.color, fontSize: 13, fontWeight: 700, marginBottom: 10 }}>🍃 Collection: {doc.collection}</div>
+                    <pre style={{ background: '#0a0f1e', borderRadius: 8, padding: 12, margin: 0, color: '#86efac', fontSize: 11, lineHeight: 1.7, fontFamily: 'monospace', overflowX: 'auto' }}>
+                      {JSON.stringify(doc.document, null, 2)}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {view === 'schema' && (
+          <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              {['relational', 'mongo'].map(mode => (
+                <button key={mode} onClick={() => setDbMode(mode)}
+                  style={{ background: dbMode === mode ? (mode === 'relational' ? '#3182ce' : '#d69e2e') : CARD, color: dbMode === mode ? '#fff' : '#94a3b8', border: '1px solid ' + (dbMode === mode ? (mode === 'relational' ? '#3182ce' : '#d69e2e') : '#334155'), borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                  {mode === 'relational' ? '🗄️ PostgreSQL schema' : '🍃 MongoDB schema'}
+                </button>
+              ))}
+            </div>
+            <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 18, border: '1px solid #1e3a5f' }}>
+              <pre style={{ margin: 0, color: TEXT, fontSize: 12, lineHeight: 1.8, fontFamily: 'monospace', overflowX: 'auto' }}>
+                {dbMode === 'relational' ? relationalData.schema : mongoData.schema}
+              </pre>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+` }} />

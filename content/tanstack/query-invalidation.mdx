@@ -1,0 +1,273 @@
+import { Playground } from '../../components/Playground'
+
+# Инвалидация Кэша и Прямое Управление
+
+## Зачем инвалидировать кэш?
+
+После мутации данные на сервере изменились, но TanStack Query не знает об этом. Инвалидация
+сообщает библиотеке: «эти данные устарели, нужно их обновить». При следующем обращении к кэшу
+автоматически выполнится новый запрос.
+
+## queryClient.invalidateQueries
+
+Самый распространённый способ обновить данные после мутации:
+
+```typescript
+const queryClient = useQueryClient()
+
+// Инвалидировать все запросы с ключом 'users'
+queryClient.invalidateQueries({ queryKey: ['users'] })
+
+// Инвалидировать конкретного пользователя
+queryClient.invalidateQueries({ queryKey: ['user', userId] })
+
+// Инвалидировать всё что начинается с 'user' (включая ['user', 1], ['users', 'list'])
+queryClient.invalidateQueries({ queryKey: ['user'] })
+
+// Инвалидировать ВСЕ запросы
+queryClient.invalidateQueries()
+```
+
+## Точность инвалидации
+
+TanStack Query использует **иерархическое сопоставление** ключей:
+
+```typescript
+queryClient.invalidateQueries({ queryKey: ['users'] })
+// Инвалидирует: ['users'], ['users', 1], ['users', { filter: 'active' }]
+
+queryClient.invalidateQueries({ queryKey: ['users', 1] })
+// Инвалидирует ТОЛЬКО: ['users', 1]
+// НЕ инвалидирует: ['users'], ['users', 2]
+```
+
+## refetchQueries: Принудительное обновление
+
+`refetchQueries` немедленно запускает запрос, не дожидаясь обращения к кэшу:
+
+```typescript
+// Принудительно обновить сейчас
+await queryClient.refetchQueries({ queryKey: ['users'] })
+
+// Только активные запросы (есть подписчики)
+await queryClient.refetchQueries({ queryKey: ['users'], type: 'active' })
+```
+
+## setQueryData: Обновление кэша вручную
+
+Позволяет напрямую установить данные в кэш без запроса. Ключевой инструмент для оптимистичных обновлений:
+
+```typescript
+// Установить данные
+queryClient.setQueryData(['user', 1], { id: 1, name: 'Новое имя' })
+
+// Обновить данные (как setState с функцией)
+queryClient.setQueryData(['users'], (oldData: User[]) => {
+  return oldData.map(user =>
+    user.id === updatedUser.id ? updatedUser : user
+  )
+})
+```
+
+## getQueryData: Чтение кэша
+
+```typescript
+const users = queryClient.getQueryData<User[]>(['users'])
+const user = queryClient.getQueryData<User>(['user', 1])
+```
+
+## cancelQueries: Отмена запросов
+
+Полезно перед оптимистичным обновлением — отменяем текущий запрос, чтобы не перезаписать наши изменения:
+
+```typescript
+await queryClient.cancelQueries({ queryKey: ['users'] })
+```
+
+## removeQueries: Удаление из кэша
+
+```typescript
+queryClient.removeQueries({ queryKey: ['user', oldUserId] })
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+type User = { id: number; name: string; email: string; role: string; updatedAt: number }
+
+const INITIAL_USERS: User[] = [
+  { id: 1, name: 'Анна Петрова', email: 'anna@example.com', role: 'admin', updatedAt: Date.now() - 60000 },
+  { id: 2, name: 'Иван Иванов', email: 'ivan@example.com', role: 'user', updatedAt: Date.now() - 120000 },
+  { id: 3, name: 'Мария Смирнова', email: 'maria@example.com', role: 'editor', updatedAt: Date.now() - 30000 },
+]
+
+type CacheEntry = {
+  queryKey: string
+  data: any
+  status: 'fresh' | 'stale' | 'fetching'
+  updatedAt: number
+}
+
+export default function App() {
+  const [cache, setCache] = useState<CacheEntry[]>([
+    { queryKey: "['users']", data: INITIAL_USERS, status: 'fresh', updatedAt: Date.now() },
+    { queryKey: "['user', 1]", data: INITIAL_USERS[0], status: 'stale', updatedAt: Date.now() - 300000 },
+    { queryKey: "['user', 2]", data: INITIAL_USERS[1], status: 'fresh', updatedAt: Date.now() - 10000 },
+  ])
+  const [log, setLog] = useState<{ msg: string; type: 'info' | 'success' | 'warn' | 'error' }[]>([])
+  const [selected, setSelected] = useState<string | null>(null)
+  const [editData, setEditData] = useState('')
+
+  const addLog = (msg: string, type: 'info' | 'success' | 'warn' | 'error' = 'info') =>
+    setLog(l => [{ msg: \`\${new Date().toLocaleTimeString()} — \${msg}\`, type }, ...l].slice(0, 10))
+
+  const invalidateAll = () => {
+    setCache(c => c.map(e => ({ ...e, status: 'stale' as const })))
+    addLog("queryClient.invalidateQueries() — все запросы помечены как stale", 'warn')
+    setTimeout(() => {
+      setCache(c => c.map(e => e.status === 'stale' ? { ...e, status: 'fetching' as const } : e))
+      addLog("Автоматическое обновление активных запросов...", 'info')
+      setTimeout(() => {
+        setCache(c => c.map(e => ({ ...e, status: 'fresh' as const, updatedAt: Date.now() })))
+        addLog("Все запросы обновлены ✓", 'success')
+      }, 1200)
+    }, 500)
+  }
+
+  const invalidateUsers = () => {
+    setCache(c => c.map(e =>
+      e.queryKey.includes("'users'") || e.queryKey.startsWith("['user'")
+        ? { ...e, status: 'stale' as const }
+        : e
+    ))
+    addLog("invalidateQueries({ queryKey: ['user'] }) — user* запросы устарели", 'warn')
+    setTimeout(() => {
+      setCache(c => c.map(e =>
+        e.status === 'stale' ? { ...e, status: 'fetching' as const } : e
+      ))
+      setTimeout(() => {
+        setCache(c => c.map(e =>
+          e.status === 'fetching' ? { ...e, status: 'fresh' as const, updatedAt: Date.now() } : e
+        ))
+        addLog("user* запросы обновлены ✓", 'success')
+      }, 1000)
+    }, 400)
+  }
+
+  const setQueryData = () => {
+    if (!selected) { addLog("Выберите запрос для setQueryData", 'error'); return }
+    try {
+      const newData = editData ? JSON.parse(editData) : null
+      if (!newData) return
+      setCache(c => c.map(e => e.queryKey === selected ? { ...e, data: newData, status: 'fresh' as const, updatedAt: Date.now() } : e))
+      addLog(\`setQueryData(\${selected}, {...}) — кэш обновлён напрямую ✓\`, 'success')
+      setEditData('')
+    } catch {
+      addLog("Невалидный JSON!", 'error')
+    }
+  }
+
+  const removeQuery = (key: string) => {
+    setCache(c => c.filter(e => e.queryKey !== key))
+    if (selected === key) setSelected(null)
+    addLog(\`removeQueries(\${key}) — удалено из кэша\`, 'warn')
+  }
+
+  const refetchAll = () => {
+    setCache(c => c.map(e => ({ ...e, status: 'fetching' as const })))
+    addLog("refetchQueries() — принудительное обновление всех запросов...", 'info')
+    setTimeout(() => {
+      setCache(c => c.map(e => ({ ...e, status: 'fresh' as const, updatedAt: Date.now() })))
+      addLog("Все запросы принудительно обновлены ✓", 'success')
+    }, 1200)
+  }
+
+  const statusColor = { fresh: '#22c55e', stale: '#eab308', fetching: '#f97316' }
+  const statusIcon = { fresh: '🟢', stale: '🟡', fetching: '⏳' }
+  const logColor = { info: '#94a3b8', success: '#86efac', warn: '#fde047', error: '#fca5a5' }
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>Инвалидация и управление кэшем</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Интерактивный симулятор queryClient API</p>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', flexWrap: 'wrap' }}>
+        {[
+          { label: 'invalidateQueries()', color: '#eab308', action: invalidateAll },
+          { label: "invalidateQueries(['user'])", color: '#f97316', action: invalidateUsers },
+          { label: 'refetchQueries()', color: '#06b6d4', action: refetchAll },
+        ].map(btn => (
+          <button key={btn.label} onClick={btn.action} style={{
+            background: btn.color + '22', border: \`1px solid \${btn.color}\`,
+            borderRadius: '8px', padding: '8px 14px', color: btn.color,
+            cursor: 'pointer', fontSize: '12px', fontFamily: 'monospace',
+          }}>
+            {btn.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+        <div>
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', marginBottom: '12px' }}>
+            <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>🗃️ Кэш (нажмите для выбора)</h3>
+            {cache.map(entry => (
+              <div
+                key={entry.queryKey}
+                onClick={() => { setSelected(entry.queryKey); setEditData(JSON.stringify(entry.data, null, 2)) }}
+                style={{
+                  background: selected === entry.queryKey ? '#ef444411' : '#0f172a',
+                  border: \`1px solid \${selected === entry.queryKey ? '#ef4444' : '#334155'}\`,
+                  borderRadius: '8px', padding: '10px', marginBottom: '8px', cursor: 'pointer',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <code style={{ fontSize: '12px', color: '#a5f3fc' }}>{entry.queryKey}</code>
+                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                    <span style={{ fontSize: '11px', color: statusColor[entry.status] }}>{statusIcon[entry.status]} {entry.status}</span>
+                    <button onClick={e => { e.stopPropagation(); removeQuery(entry.queryKey) }} style={{ background: 'none', border: 'none', color: '#475569', cursor: 'pointer', fontSize: '12px', padding: '0 2px' }}>✕</button>
+                  </div>
+                </div>
+                <div style={{ fontSize: '11px', color: '#475569', marginTop: '4px' }}>
+                  Updated: {new Date(entry.updatedAt).toLocaleTimeString()}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {selected && (
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+              <h3 style={{ color: '#e2e8f0', fontSize: '13px', marginBottom: '8px' }}>✏️ setQueryData({selected})</h3>
+              <textarea
+                value={editData}
+                onChange={e => setEditData(e.target.value)}
+                style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: '6px', padding: '8px', color: '#a5f3fc', fontSize: '11px', fontFamily: 'monospace', minHeight: '80px', boxSizing: 'border-box' }}
+              />
+              <button onClick={setQueryData} style={{ marginTop: '8px', background: '#ef4444', border: 'none', borderRadius: '6px', padding: '8px 16px', color: 'white', cursor: 'pointer', fontSize: '12px', width: '100%' }}>
+                setQueryData()
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>📜 Лог операций</h3>
+          <div style={{ fontFamily: 'monospace', fontSize: '11px', maxHeight: '400px', overflow: 'auto' }}>
+            {log.length === 0 ? (
+              <p style={{ color: '#475569', textAlign: 'center', padding: '20px 0' }}>Выполните операцию...</p>
+            ) : (
+              log.map((entry, i) => (
+                <div key={i} style={{ padding: '6px 8px', borderRadius: '4px', marginBottom: '4px', background: '#0f172a', color: logColor[entry.type], lineHeight: 1.4 }}>
+                  {entry.msg}
+                </div>
+              ))
+            )}
+          </div>
+          <button onClick={() => setLog([])} style={{ marginTop: '8px', background: '#334155', border: 'none', borderRadius: '6px', padding: '6px 12px', color: '#94a3b8', cursor: 'pointer', fontSize: '11px' }}>
+            Очистить лог
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

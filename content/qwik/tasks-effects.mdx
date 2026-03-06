@@ -1,0 +1,332 @@
+import { Playground } from '../../components/Playground'
+
+# useTask$ и useVisibleTask$
+
+Побочные эффекты в Qwik управляются через `useTask$()` и `useVisibleTask$()`. Эти хуки заменяют `useEffect` из React, но работают принципиально иначе.
+
+## useTask$ — универсальный эффект
+
+`useTask$` запускается как на **сервере**, так и на **клиенте**. Это аналог `useEffect`, но с возможностью серверного выполнения.
+
+```typescript
+import { component$, useSignal, useTask$ } from '@builder.io/qwik';
+
+export const Logger = component$(() => {
+  const count = useSignal(0);
+  
+  useTask$(({ track }) => {
+    // track() подписывается на изменения
+    const currentCount = track(() => count.value);
+    
+    console.log('count изменился:', currentCount);
+    
+    // Функция очистки (как return в useEffect)
+    return () => {
+      console.log('cleanup перед следующим запуском');
+    };
+  });
+  
+  return <button onClick$={() => count.value++}>{count.value}</button>;
+});
+```
+
+### track() — отслеживание зависимостей
+
+В отличие от React, зависимости в Qwik не объявляются в массиве — они **отслеживаются явно** через `track()`:
+
+```typescript
+useTask$(({ track }) => {
+  // Отслеживаем конкретное свойство
+  const name = track(() => state.name);
+  const age = track(() => state.age);
+  
+  // Эффект запустится при изменении name ИЛИ age
+  console.log(\`\${name}, \${age} лет\`);
+});
+```
+
+### Эффект без track (один раз)
+
+```typescript
+useTask$(() => {
+  // Выполняется один раз при монтировании
+  console.log('Компонент создан');
+});
+```
+
+## useVisibleTask$ — только браузер
+
+`useVisibleTask$` запускается **только в браузере** и только когда компонент **виден** в viewport:
+
+```typescript
+import { component$, useSignal, useVisibleTask$ } from '@builder.io/qwik';
+
+export const Timer = component$(() => {
+  const seconds = useSignal(0);
+  
+  useVisibleTask$(() => {
+    // Это НЕ выполняется на сервере!
+    const interval = setInterval(() => {
+      seconds.value++;
+    }, 1000);
+    
+    // Cleanup при уничтожении компонента
+    return () => clearInterval(interval);
+  });
+  
+  return <div>Прошло: {seconds.value} сек</div>;
+});
+```
+
+### Стратегии запуска useVisibleTask$
+
+```typescript
+// Запустить сразу при видимости (по умолчанию)
+useVisibleTask$(() => { ... }, { strategy: 'intersection-observer' });
+
+// Запустить при первом взаимодействии пользователя
+useVisibleTask$(() => { ... }, { strategy: 'document-ready' });
+
+// Запустить как только документ загружен
+useVisibleTask$(() => { ... }, { strategy: 'document-idle' });
+```
+
+## noSerialize — браузерные объекты
+
+Некоторые объекты нельзя сериализовать (WebSocket, Map, интервалы). Для них используется `noSerialize`:
+
+```typescript
+import { component$, useStore, useVisibleTask$, noSerialize } from '@builder.io/qwik';
+
+export const WebSocketDemo = component$(() => {
+  const state = useStore<{
+    ws: WebSocket | undefined;
+    messages: string[];
+  }>({
+    ws: undefined,  // WebSocket не сериализуем!
+    messages: [],
+  });
+  
+  useVisibleTask$(() => {
+    // Оборачиваем в noSerialize
+    state.ws = noSerialize(new WebSocket('wss://api.example.com'));
+    
+    state.ws!.onmessage = (event) => {
+      state.messages.push(event.data);
+    };
+    
+    return () => state.ws?.close();
+  });
+  
+  return (
+    <ul>
+      {state.messages.map((msg, i) => (
+        <li key={i}>{msg}</li>
+      ))}
+    </ul>
+  );
+});
+```
+
+## Сравнение с React useEffect
+
+```typescript
+// React useEffect
+useEffect(() => {
+  // Только клиент
+  // Массив зависимостей — часто ошибки
+  fetchData(userId);
+  return () => cleanup();
+}, [userId]); // ← Зависимости декларативно
+
+// Qwik useTask$
+useTask$(({ track }) => {
+  // Сервер + клиент
+  // Зависимости через track() — явно
+  const id = track(() => userId.value);
+  fetchData(id);
+  return () => cleanup();
+}); // ← Зависимостей нет, они в track()
+
+// Qwik useVisibleTask$ (только клиент)
+useVisibleTask$(() => {
+  // Только браузер, только при видимости
+  initBrowserAPI();
+  return () => cleanup();
+});
+```
+
+## Playground: Визуализатор жизненного цикла
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const QWIK = '#ac7ef4';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#22c55e';
+const ORANGE = '#f97316';
+const BLUE = '#38bdf8';
+const RED = '#ef4444';
+
+type LogEntry = {
+  id: number;
+  time: number;
+  hook: string;
+  event: string;
+  env: 'server' | 'browser';
+  color: string;
+};
+
+let logId = 0;
+
+export default function App() {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [count, setCount] = useState(0);
+  const [name, setName] = useState('Qwik');
+  const [mounted, setMounted] = useState(true);
+  const startTime = useRef(Date.now());
+
+  const addLog = (hook: string, event: string, env: 'server' | 'browser', color: string) => {
+    setLogs(prev => [{
+      id: logId++,
+      time: Date.now() - startTime.current,
+      hook, event, env, color,
+    }, ...prev.slice(0, 29)]);
+  };
+
+  // Симуляция серверного рендера
+  useEffect(() => {
+    addLog('useTask$', 'Выполнен на сервере (SSR)', 'server', BLUE);
+    addLog('useTask$', 'Выполнен на клиенте (гидратация)', 'browser', BLUE);
+    addLog('useVisibleTask$', 'Компонент виден — запуск', 'browser', GREEN);
+  }, []);
+
+  // Симуляция track(() => count)
+  useEffect(() => {
+    if (count > 0) {
+      addLog('useTask$', \`track(count) → \${count}\`, 'browser', QWIK);
+    }
+  }, [count]);
+
+  // Симуляция track(() => name)
+  useEffect(() => {
+    if (name !== 'Qwik') {
+      addLog('useTask$', \`track(name) → "\${name}"\`, 'browser', QWIK);
+    }
+  }, [name]);
+
+  const hookColors: Record<string, string> = {
+    'useTask$': QWIK,
+    'useVisibleTask$': GREEN,
+    'cleanup': RED,
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <h1 style={{ color: QWIK, margin: '0 0 4px' }}>♻️ Жизненный цикл Qwik</h1>
+        <p style={{ color: MUTED, margin: '0 0 20px', fontSize: 13 }}>Измени значения и наблюдай за хуками в реальном времени</p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+          {/* Легенда */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+            <h3 style={{ color: TEXT, margin: '0 0 12px', fontSize: 15 }}>Хуки</h3>
+            {[
+              { name: 'useTask$', color: QWIK, env: 'Сервер + Клиент', desc: 'С track()' },
+              { name: 'useVisibleTask$', color: GREEN, env: 'Только браузер', desc: 'При видимости' },
+              { name: 'cleanup', color: RED, env: 'Оба', desc: 'Return функция' },
+            ].map(h => (
+              <div key={h.name} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <div style={{ width: 10, height: 10, borderRadius: '50%', background: h.color, flexShrink: 0 }} />
+                <div>
+                  <span style={{ color: h.color, fontFamily: 'monospace', fontSize: 12 }}>{h.name}</span>
+                  <span style={{ color: MUTED, fontSize: 11, marginLeft: 6 }}>{h.env}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Контролы */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+            <h3 style={{ color: TEXT, margin: '0 0 12px', fontSize: 15 }}>Изменить состояние</h3>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>count: {count}</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button onClick={() => setCount(c => c + 1)} style={{ background: QWIK, color: '#0f172a', border: 'none', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontWeight: 700 }}>+1</button>
+                <button onClick={() => setCount(c => c - 1)} style={{ background: CARD, color: TEXT, border: '1px solid #334155', borderRadius: 6, padding: '6px 14px', cursor: 'pointer' }}>-1</button>
+              </div>
+            </div>
+            <div>
+              <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>name:</div>
+              <input
+                value={name}
+                onChange={e => setName(e.target.value)}
+                style={{ width: '100%', background: '#0d1829', border: '1px solid #334155', borderRadius: 6, padding: '6px 10px', color: TEXT, fontSize: 13, boxSizing: 'border-box' }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Код примера */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 20, border: '1px solid #334155' }}>
+          <h3 style={{ color: TEXT, margin: '0 0 12px', fontSize: 15 }}>Код компонента</h3>
+          <pre style={{ background: '#0d1829', borderRadius: 8, padding: 16, fontSize: 11, color: '#a5f3fc', margin: 0, lineHeight: 1.7, overflow: 'auto' }}>
+            <code>{[
+              \`export const MyComp = component\\$(() => {\`,
+              \`  const count = useSignal(0);\`,
+              \`  const name = useSignal('Qwik');\`,
+              \`\`,
+              \`  // ✅ Сервер + Клиент\`,
+              \`  useTask\\$(({ track }) => {\`,
+              \`    const c = track(() => count.value);\`,
+              \`    const n = track(() => name.value);\`,
+              \`    console.log(c, n);\`,
+              \`    return () => console.log('cleanup');\`,
+              \`  });\`,
+              \`\`,
+              \`  // 🌐 Только браузер\`,
+              \`  useVisibleTask\\$(() => {\`,
+              \`    const id = setInterval(() => count.value++, 1000);\`,
+              \`    return () => clearInterval(id);\`,
+              \`  });\`,
+              \`\`,
+              \`  return <div>{count.value} - {name.value}</div>;\`,
+              \`});\`,
+            ].join('\\n')}</code>
+          </pre>
+        </div>
+
+        {/* Лог событий */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, border: '1px solid #334155' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h3 style={{ color: TEXT, margin: 0, fontSize: 15 }}>📋 Лог хуков</h3>
+            <button onClick={() => setLogs([])} style={{ background: 'transparent', color: MUTED, border: '1px solid #334155', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 12 }}>Очистить</button>
+          </div>
+          <div style={{ maxHeight: 240, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {logs.length === 0 ? (
+              <div style={{ color: MUTED, textAlign: 'center', padding: 20, fontSize: 13 }}>Измени состояние для просмотра лога</div>
+            ) : logs.map(log => (
+              <div key={log.id} style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '6px 10px', borderRadius: 6,
+                background: log.env === 'server' ? '#0a1020' : '#0a1a0a',
+                border: \`1px solid \${log.color}22\`,
+                fontSize: 12,
+              }}>
+                <span style={{ color: MUTED, fontFamily: 'monospace', minWidth: 50 }}>{log.time}мс</span>
+                <span style={{ color: log.color, fontFamily: 'monospace', fontWeight: 600, minWidth: 120 }}>{log.hook}</span>
+                <span style={{ color: log.env === 'server' ? BLUE : GREEN, fontSize: 10, minWidth: 55 }}>
+                  {log.env === 'server' ? '🖥 сервер' : '🌐 браузер'}
+                </span>
+                <span style={{ color: TEXT, flex: 1 }}>{log.event}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

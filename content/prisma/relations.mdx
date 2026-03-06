@@ -1,0 +1,266 @@
+import { Playground } from '../../components/Playground'
+
+# Отношения между моделями
+
+Одна из сильнейших сторон Prisma — декларативное описание связей между моделями прямо в схеме. Prisma автоматически генерирует типы для всех связей и предоставляет удобный API для работы с ними.
+
+## Типы отношений
+
+Prisma поддерживает три вида отношений:
+
+- **Один-к-одному (1:1)** — каждая запись связана ровно с одной записью другой модели
+- **Один-ко-многим (1:N)** — одна запись связана со многими записями другой модели
+- **Многие-ко-многим (N:M)** — множество записей связано со множеством других записей
+
+## Атрибут @relation
+
+Атрибут `@relation` явно описывает связь. Он принимает поля `fields` (колонки-ключи в текущей таблице) и `references` (колонки, на которые они ссылаются):
+
+```prisma
+model Post {
+  author   User @relation(fields: [authorId], references: [id])
+  authorId Int
+}
+```
+
+## Неявные и явные связи N:M
+
+Prisma поддерживает два варианта связи многие-ко-многим:
+
+- **Неявная** — Prisma автоматически создаёт промежуточную таблицу
+- **Явная** — вы описываете промежуточную модель сами, что позволяет добавить к ней дополнительные поля
+
+## Каскадное удаление
+
+С помощью аргументов `onDelete` и `onUpdate` в `@relation` можно настроить каскадное поведение:
+
+```prisma
+model Post {
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  authorId Int
+}
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const relations = [
+  {
+    type: '1:1',
+    label: 'Один-к-одному',
+    icon: '🔗',
+    color: '#38a169',
+    description: 'Каждая запись модели A связана ровно с одной записью модели B. Пример: пользователь и его профиль.',
+    example: 'User ↔ Profile',
+    schema: \`model User {
+  id      Int      @id @default(autoincrement())
+  email   String   @unique
+  profile Profile?
+}
+
+model Profile {
+  id     Int    @id @default(autoincrement())
+  bio    String?
+  avatar String?
+  user   User   @relation(fields: [userId], references: [id])
+  userId Int    @unique
+}\`,
+    query: \`// Создать пользователя с профилем
+const user = await prisma.user.create({
+  data: {
+    email: 'ivan@example.com',
+    profile: {
+      create: {
+        bio: 'Fullstack разработчик',
+        avatar: 'https://...'
+      }
+    }
+  },
+  include: { profile: true }
+})\`,
+    diagram: [
+      { model: 'User', fields: ['id PK', 'email', 'profile?'] },
+      { model: 'Profile', fields: ['id PK', 'bio', 'userId FK @unique'] },
+    ],
+    arrow: '1:1',
+  },
+  {
+    type: '1:N',
+    label: 'Один-ко-многим',
+    icon: '🌿',
+    color: '#3182ce',
+    description: 'Одна запись модели A связана со многими записями модели B. Пример: автор и его посты.',
+    example: 'User → Posts',
+    schema: \`model User {
+  id    Int    @id @default(autoincrement())
+  email String @unique
+  posts Post[]
+}
+
+model Post {
+  id       Int    @id @default(autoincrement())
+  title    String
+  author   User   @relation(fields: [authorId], references: [id])
+  authorId Int
+}\`,
+    query: \`// Получить пользователя со всеми постами
+const user = await prisma.user.findUnique({
+  where: { id: 1 },
+  include: {
+    posts: {
+      orderBy: { createdAt: 'desc' },
+      take: 10
+    }
+  }
+})\`,
+    diagram: [
+      { model: 'User', fields: ['id PK', 'email', 'posts[]'] },
+      { model: 'Post', fields: ['id PK', 'title', 'authorId FK'] },
+    ],
+    arrow: '1:N',
+  },
+  {
+    type: 'N:M',
+    label: 'Многие-ко-многим',
+    icon: '🕸️',
+    color: '#d69e2e',
+    description: 'Множество записей A связано со множеством записей B. Пример: посты и теги.',
+    example: 'Posts ↔ Tags',
+    schema: \`model Post {
+  id    Int    @id @default(autoincrement())
+  title String
+  tags  Tag[]
+}
+
+model Tag {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  posts Post[]
+}
+// Prisma автоматически создаст
+// промежуточную таблицу _PostToTag\`,
+    query: \`// Создать пост с тегами
+const post = await prisma.post.create({
+  data: {
+    title: 'Prisma Guide',
+    tags: {
+      connectOrCreate: [
+        { where: { name: 'prisma' }, create: { name: 'prisma' } },
+        { where: { name: 'orm' },    create: { name: 'orm' } },
+      ]
+    }
+  },
+  include: { tags: true }
+})\`,
+    diagram: [
+      { model: 'Post', fields: ['id PK', 'title', 'tags[]'] },
+      { model: 'Tag', fields: ['id PK', 'name', 'posts[]'] },
+    ],
+    arrow: 'N:M',
+  },
+]
+
+export default function App() {
+  const [active, setActive] = useState(0)
+  const [view, setView] = useState('schema')
+  const rel = relations[active]
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '32px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 24px 0' }}>
+          Типы отношений в Prisma
+        </h2>
+
+        <div style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
+          {relations.map((r, i) => (
+            <button
+              key={i}
+              onClick={() => setActive(i)}
+              style={{
+                flex: 1,
+                background: active === i ? r.color : CARD,
+                color: active === i ? '#fff' : '#94a3b8',
+                border: '2px solid ' + (active === i ? r.color : '#334155'),
+                borderRadius: 12,
+                padding: '14px 12px',
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+                textAlign: 'center',
+              }}
+            >
+              <div style={{ fontSize: 24, marginBottom: 4 }}>{r.icon}</div>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{r.type}</div>
+              <div style={{ fontSize: 11, opacity: 0.8 }}>{r.label}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: CARD, borderRadius: 14, padding: 18, border: '2px solid ' + rel.color + '50', marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+            <div>
+              <h3 style={{ color: rel.color, margin: '0 0 4px 0', fontSize: 18, fontWeight: 700 }}>
+                {rel.icon} {rel.label} — {rel.example}
+              </h3>
+              <p style={{ color: '#94a3b8', margin: 0, fontSize: 13 }}>{rel.description}</p>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 24, marginBottom: 16 }}>
+            {rel.diagram.map((d, i) => (
+              <div key={i} style={{ flex: 1 }}>
+                <div style={{ background: rel.color + '20', border: '2px solid ' + rel.color, borderRadius: 10, padding: 12 }}>
+                  <div style={{ color: rel.color, fontWeight: 700, fontSize: 14, marginBottom: 8, textAlign: 'center' }}>
+                    📋 {d.model}
+                  </div>
+                  {d.fields.map((f, j) => (
+                    <div key={j} style={{ color: '#94a3b8', fontSize: 12, padding: '3px 0', borderBottom: '1px solid #334155', fontFamily: 'monospace' }}>
+                      {f.includes('PK') ? '🔑' : f.includes('FK') ? '🔗' : '  '} {f}
+                    </div>
+                  ))}
+                </div>
+                {i === 0 && (
+                  <div style={{ textAlign: 'center', padding: '8px 0', color: rel.color, fontSize: 20, fontWeight: 700 }}>
+                    {rel.arrow === '1:1' ? '⟷' : rel.arrow === '1:N' ? '⟶' : '⟺'}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          {['schema', 'query'].map(v => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              style={{
+                background: view === v ? PRISMA : CARD,
+                color: view === v ? '#fff' : '#94a3b8',
+                border: '1px solid ' + (view === v ? PRISMA : '#334155'),
+                borderRadius: 8,
+                padding: '6px 16px',
+                cursor: 'pointer',
+                fontSize: 13,
+                fontWeight: 600,
+              }}
+            >
+              {v === 'schema' ? '📐 Схема' : '🔍 Запрос'}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: '#0a0f1e', borderRadius: 14, padding: 20, border: '1px solid #1e3a5f' }}>
+          <pre style={{ margin: 0, color: TEXT, fontSize: 13, lineHeight: 1.8, overflowX: 'auto', fontFamily: 'monospace' }}>
+            {view === 'schema' ? rel.schema : rel.query}
+          </pre>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

@@ -1,0 +1,397 @@
+import { Playground } from '../../components/Playground'
+
+# Валидация в TanStack Form
+
+## Стратегии валидации
+
+TanStack Form поддерживает валидацию на разных событиях:
+
+```typescript
+<form.Field
+  name="email"
+  validators={{
+    onChange: ({ value }) => validateEmail(value),        // При каждом вводе
+    onBlur: ({ value }) => strictValidate(value),         // При потере фокуса
+    onMount: ({ value }) => initialValidate(value),       // При монтировании
+    onSubmit: ({ value }) => finalValidate(value),        // При отправке
+    onChangeAsync: async ({ value }) => await checkEmail(value),  // Асинхронно при вводе
+    onChangeAsyncDebounceMs: 500,                         // Дебаунс для async
+  }}
+>
+```
+
+## Синхронная валидация
+
+```typescript
+validators={{
+  onChange: ({ value }) => {
+    if (!value) return 'Обязательное поле'
+    if (value.length < 3) return 'Минимум 3 символа'
+    if (value.length > 50) return 'Максимум 50 символов'
+    return undefined  // undefined = нет ошибки
+  },
+}}
+```
+
+## Асинхронная валидация
+
+Идеальна для проверок на сервере (уникальность email, username):
+
+```typescript
+validators={{
+  onChangeAsync: async ({ value }) => {
+    if (!value) return undefined  // Не проверяем пустые значения
+
+    const exists = await checkEmailExists(value)
+    if (exists) return 'Этот email уже зарегистрирован'
+
+    return undefined
+  },
+  onChangeAsyncDebounceMs: 500,  // Ждём 500ms после ввода
+}}
+```
+
+## Валидация с Zod
+
+```typescript
+import { z } from 'zod'
+
+const userSchema = z.object({
+  name: z.string().min(2, 'Минимум 2 символа'),
+  email: z.string().email('Невалидный email'),
+  age: z.number().min(18, 'Минимальный возраст 18 лет'),
+})
+
+// В useForm:
+const form = useForm({
+  defaultValues: { name: '', email: '', age: 0 },
+  validators: {
+    onChange: userSchema,  // Zod схема работает напрямую!
+  },
+})
+```
+
+## Кросс-полевая валидация
+
+Валидация, которая зависит от значений других полей:
+
+```typescript
+const form = useForm({
+  defaultValues: { password: '', confirmPassword: '' },
+  validators: {
+    onChange: ({ value }) => {
+      if (value.password !== value.confirmPassword) {
+        return { fields: { confirmPassword: 'Пароли не совпадают' } }
+      }
+    },
+  },
+})
+```
+
+## Адаптеры валидации
+
+TanStack Form поддерживает популярные библиотеки через адаптеры:
+
+```typescript
+import { zodValidator } from '@tanstack/zod-form-adapter'
+import { valibotValidator } from '@tanstack/valibot-form-adapter'
+
+const form = useForm({
+  validatorAdapter: zodValidator(),
+  validators: {
+    onChange: z.object({
+      email: z.string().email(),
+    }),
+  },
+})
+```
+
+## errorMap и доступ к ошибкам
+
+```typescript
+// Ошибки по источнику
+field.state.meta.errorMap = {
+  onChange: 'Ошибка при вводе',
+  onBlur: 'Ошибка при blur',
+  onSubmit: 'Ошибка при submit',
+}
+
+// Плоский массив всех ошибок
+field.state.meta.errors  // ['Ошибка при вводе', ...]
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useCallback } from 'react'
+
+type FormValues = {
+  username: string
+  email: string
+  password: string
+  confirmPassword: string
+  age: string
+  website: string
+}
+
+type ValidationState = 'idle' | 'validating' | 'valid' | 'error'
+
+type FieldState = {
+  value: string
+  errors: string[]
+  validationState: ValidationState
+  touched: boolean
+  asyncDebounceTimer?: ReturnType<typeof setTimeout>
+}
+
+// Симуляция занятых username
+const TAKEN_USERNAMES = ['admin', 'user', 'test', 'root', 'anna', 'ivan']
+const TAKEN_EMAILS = ['admin@example.com', 'user@test.com']
+
+// Валидаторы
+const VALIDATORS: Record<keyof FormValues, {
+  sync: (value: string, allValues: FormValues) => string | undefined
+  async?: (value: string) => Promise<string | undefined>
+}> = {
+  username: {
+    sync: v => !v ? 'Обязательное поле' : v.length < 3 ? 'Минимум 3 символа' : !/^[a-z0-9_]+$/.test(v) ? 'Только a-z, 0-9 и _' : undefined,
+    async: async v => {
+      await new Promise(res => setTimeout(res, 600))
+      return TAKEN_USERNAMES.includes(v.toLowerCase()) ? \`"\${v}" уже занят. Попробуйте другой.\` : undefined
+    },
+  },
+  email: {
+    sync: v => !v ? 'Обязательное поле' : !/^[^@]+@[^@]+\.[^@]+$/.test(v) ? 'Невалидный формат email' : undefined,
+    async: async v => {
+      await new Promise(res => setTimeout(res, 800))
+      return TAKEN_EMAILS.includes(v) ? 'Этот email уже зарегистрирован' : undefined
+    },
+  },
+  password: {
+    sync: v => {
+      if (!v) return 'Обязательное поле'
+      if (v.length < 8) return 'Минимум 8 символов'
+      if (!/[A-Z]/.test(v)) return 'Нужна хотя бы одна заглавная буква'
+      if (!/[0-9]/.test(v)) return 'Нужна хотя бы одна цифра'
+      return undefined
+    },
+  },
+  confirmPassword: {
+    sync: (v, all) => !v ? 'Обязательное поле' : v !== all.password ? 'Пароли не совпадают' : undefined,
+  },
+  age: {
+    sync: v => {
+      if (!v) return 'Обязательное поле'
+      const n = Number(v)
+      if (isNaN(n)) return 'Должно быть числом'
+      if (n < 18) return 'Минимальный возраст 18 лет'
+      if (n > 120) return 'Некорректный возраст'
+      return undefined
+    },
+  },
+  website: {
+    sync: v => v && !/^https?:\/\/.+\..+/.test(v) ? 'Должен начинаться с http:// или https://' : undefined,
+  },
+}
+
+export default function App() {
+  const [fields, setFields] = useState<Record<keyof FormValues, FieldState>>({
+    username: { value: '', errors: [], validationState: 'idle', touched: false },
+    email: { value: '', errors: [], validationState: 'idle', touched: false },
+    password: { value: '', errors: [], validationState: 'idle', touched: false },
+    confirmPassword: { value: '', errors: [], validationState: 'idle', touched: false },
+    age: { value: '', errors: [], validationState: 'idle', touched: false },
+    website: { value: '', errors: [], validationState: 'idle', touched: false },
+  })
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitResult, setSubmitResult] = useState<'success' | 'error' | null>(null)
+
+  const getAllValues = useCallback((): FormValues => {
+    return Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.value])) as FormValues
+  }, [fields])
+
+  const updateField = useCallback((name: keyof FormValues, value: string) => {
+    const allValues = { ...getAllValues(), [name]: value }
+    const validator = VALIDATORS[name]
+    const syncError = validator.sync(value, allValues)
+
+    setFields(prev => {
+      const field = prev[name]
+      if (field.asyncDebounceTimer) clearTimeout(field.asyncDebounceTimer)
+
+      let timer: ReturnType<typeof setTimeout> | undefined
+      if (!syncError && validator.async && value) {
+        const state = { current: true }
+        timer = setTimeout(async () => {
+          setFields(p => ({ ...p, [name]: { ...p[name], validationState: 'validating' } }))
+          const asyncError = await validator.async!(value)
+          if (state.current) {
+            setFields(p => ({ ...p, [name]: { ...p[name], errors: asyncError ? [asyncError] : [], validationState: asyncError ? 'error' : 'valid' } }))
+          }
+        }, 500)
+      }
+
+      return {
+        ...prev,
+        [name]: {
+          ...field,
+          value,
+          errors: syncError ? [syncError] : [],
+          validationState: syncError ? 'error' : validator.async && value ? 'idle' : value ? 'valid' : 'idle',
+          asyncDebounceTimer: timer,
+        },
+      }
+    })
+
+    // Также ревалидируем confirmPassword при изменении password
+    if (name === 'password') {
+      setFields(prev => {
+        const cpValue = prev.confirmPassword.value
+        if (cpValue) {
+          const cpError = VALIDATORS.confirmPassword.sync(cpValue, allValues)
+          return { ...prev, confirmPassword: { ...prev.confirmPassword, errors: cpError ? [cpError] : [], validationState: cpError ? 'error' : 'valid' } }
+        }
+        return prev
+      })
+    }
+  }, [getAllValues])
+
+  const touchField = (name: keyof FormValues) => {
+    setFields(prev => ({
+      ...prev,
+      [name]: { ...prev[name], touched: true },
+    }))
+    updateField(name, fields[name].value)
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const allValues = getAllValues()
+    let hasErrors = false
+
+    Object.keys(fields).forEach(key => {
+      const k = key as keyof FormValues
+      const err = VALIDATORS[k].sync(allValues[k], allValues)
+      if (err) { hasErrors = true; setFields(prev => ({ ...prev, [k]: { ...prev[k], errors: [err], touched: true, validationState: 'error' } })) }
+    })
+
+    if (hasErrors) return
+    setIsSubmitting(true)
+    await new Promise(res => setTimeout(res, 1200))
+    setIsSubmitting(false)
+    setSubmitResult('success')
+  }
+
+  const getFieldIcon = (state: ValidationState) => {
+    if (state === 'validating') return '⏳'
+    if (state === 'valid') return '✅'
+    if (state === 'error') return '❌'
+    return ''
+  }
+
+  const allValid = Object.entries(fields).every(([k, v]) => {
+    const required = k !== 'website'
+    if (required && !v.value) return false
+    return v.errors.length === 0 && v.validationState !== 'error'
+  })
+
+  const FIELD_LABELS: Record<keyof FormValues, string> = {
+    username: 'Имя пользователя *',
+    email: 'Email * (проверяется на сервере)',
+    password: 'Пароль * (мин. 8 символов, A-Z, 0-9)',
+    confirmPassword: 'Подтвердите пароль *',
+    age: 'Возраст * (мин. 18)',
+    website: 'Сайт (опционально)',
+  }
+
+  if (submitResult === 'success') {
+    return (
+      <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '32px', maxWidth: '400px', width: '100%', textAlign: 'center' }}>
+          <div style={{ fontSize: '48px', marginBottom: '12px' }}>🎉</div>
+          <h2 style={{ color: '#22c55e' }}>Регистрация успешна!</h2>
+          <p style={{ color: '#64748b', fontSize: '13px' }}>Добро пожаловать, {fields.username.value}!</p>
+          <button onClick={() => { setSubmitResult(null) }} style={{ marginTop: '16px', background: '#ef4444', border: 'none', borderRadius: '8px', padding: '10px 24px', color: 'white', cursor: 'pointer', fontSize: '13px' }}>Новая регистрация</button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>Продвинутая валидация</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Sync + Async + Cross-field валидация</p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 240px', gap: '16px' }}>
+        <form onSubmit={handleSubmit} style={{ background: '#1e293b', borderRadius: '12px', padding: '20px' }}>
+          {(Object.keys(fields) as (keyof FormValues)[]).map(name => {
+            const field = fields[name]
+            const hasError = field.errors.length > 0
+            const isAsync = !!VALIDATORS[name].async
+            return (
+              <div key={name} style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
+                  <span style={{ fontSize: '12px', color: '#94a3b8' }}>{FIELD_LABELS[name]}</span>
+                  {isAsync && <span style={{ fontSize: '10px', color: '#f97316' }}>⚡ async</span>}
+                </label>
+                <div style={{ position: 'relative' }}>
+                  <input
+                    value={field.value}
+                    type={name === 'password' || name === 'confirmPassword' ? 'password' : name === 'age' ? 'number' : 'text'}
+                    onChange={e => updateField(name, e.target.value)}
+                    onBlur={() => touchField(name)}
+                    style={{
+                      width: '100%',
+                      background: '#0f172a',
+                      border: \`1px solid \${field.touched && hasError ? '#ef4444' : field.validationState === 'valid' ? '#22c55e' : '#334155'}\`,
+                      borderRadius: '8px',
+                      padding: '8px 36px 8px 12px',
+                      color: '#e2e8f0',
+                      fontSize: '13px',
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                  <span style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', fontSize: '14px' }}>
+                    {field.touched && getFieldIcon(field.validationState)}
+                  </span>
+                </div>
+                {field.touched && field.errors[0] && (
+                  <p style={{ color: '#ef4444', fontSize: '11px', margin: '4px 0 0 0' }}>⚠ {field.errors[0]}</p>
+                )}
+                {field.validationState === 'validating' && (
+                  <p style={{ color: '#f97316', fontSize: '11px', margin: '4px 0 0 0' }}>⏳ Проверка на сервере...</p>
+                )}
+              </div>
+            )
+          })}
+
+          <button type="submit" disabled={!allValid || isSubmitting}
+            style={{ width: '100%', background: allValid && !isSubmitting ? '#ef4444' : '#334155', border: 'none', borderRadius: '8px', padding: '12px', color: allValid ? 'white' : '#64748b', cursor: allValid ? 'pointer' : 'not-allowed', fontSize: '14px', fontWeight: 600 }}>
+            {isSubmitting ? '⏳ Регистрация...' : '📝 Зарегистрироваться'}
+          </button>
+        </form>
+
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px' }}>
+          <h3 style={{ color: '#94a3b8', fontSize: '11px', margin: '0 0 10px 0', textTransform: 'uppercase' }}>Состояние полей</h3>
+          {(Object.keys(fields) as (keyof FormValues)[]).map(name => {
+            const f = fields[name]
+            return (
+              <div key={name} style={{ marginBottom: '8px', padding: '6px', background: '#0f172a', borderRadius: '6px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
+                  <span style={{ fontSize: '11px', color: '#64748b', fontFamily: 'monospace' }}>{name}</span>
+                  <span style={{ fontSize: '10px', color: f.validationState === 'valid' ? '#22c55e' : f.validationState === 'error' ? '#ef4444' : '#475569' }}>
+                    {f.validationState}
+                  </span>
+                </div>
+                {f.errors[0] && <div style={{ fontSize: '10px', color: '#fca5a5' }}>{f.errors[0]}</div>}
+              </div>
+            )
+          })}
+          <div style={{ borderTop: '1px solid #334155', paddingTop: '8px', marginTop: '8px' }}>
+            <div style={{ fontSize: '12px', color: allValid ? '#22c55e' : '#ef4444', fontWeight: 600 }}>
+              {allValid ? '✅ Форма валидна' : '❌ Есть ошибки'}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

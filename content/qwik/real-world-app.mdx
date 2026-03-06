@@ -1,0 +1,571 @@
+import { Playground } from '../../components/Playground'
+
+# Реальный проект: Todo App на Qwik
+
+В этом уроке мы рассмотрим полноценное Todo приложение, которое демонстрирует все ключевые возможности Qwik: сигналы для состояния, routeAction$ для CRUD операций, валидацию форм, оптимистичный UI и серверный рендеринг.
+
+## Архитектура приложения
+
+```
+src/
+├── routes/
+│   ├── layout.tsx          — Общий лейаут
+│   └── todos/
+│       ├── index.tsx        — Список задач (routeLoader$)
+│       └── [id]/
+│           └── index.tsx    — Детальная страница задачи
+├── components/
+│   ├── todo-item.tsx        — Компонент задачи
+│   ├── todo-form.tsx        — Форма создания
+│   └── todo-filter.tsx      — Фильтрация задач
+└── lib/
+    ├── db.ts               — Prisma клиент
+    └── todos.ts            — Бизнес-логика
+```
+
+## Модель данных
+
+```typescript
+// prisma/schema.prisma
+model Todo {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  completed   Boolean  @default(false)
+  priority    Priority @default(MEDIUM)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+}
+```
+
+## Загрузка и фильтрация данных
+
+```typescript
+// src/routes/todos/index.tsx
+export const useTodos = routeLoader$(async ({ url }) => {
+  const filter = url.searchParams.get('filter') ?? 'all';
+  const search = url.searchParams.get('q') ?? '';
+  
+  return await prisma.todo.findMany({
+    where: {
+      ...(filter === 'active' && { completed: false }),
+      ...(filter === 'done' && { completed: true }),
+      ...(search && { title: { contains: search, mode: 'insensitive' } }),
+    },
+    orderBy: [{ completed: 'asc' }, { createdAt: 'desc' }],
+  });
+});
+```
+
+## CRUD действия
+
+```typescript
+// Создание задачи
+export const useCreateTodo = routeAction$(
+  async (data) => {
+    return await prisma.todo.create({ data });
+  },
+  zod$({
+    title: z.string().min(1, 'Введите название').max(200),
+    description: z.string().optional(),
+    priority: z.enum(['LOW', 'MEDIUM', 'HIGH']).default('MEDIUM'),
+  })
+);
+
+// Переключение статуса
+export const useToggleTodo = routeAction$(async (data) => {
+  return await prisma.todo.update({
+    where: { id: data.id as string },
+    data: { completed: data.completed === 'true' },
+  });
+});
+
+// Удаление задачи
+export const useDeleteTodo = routeAction$(async (data) => {
+  return await prisma.todo.delete({
+    where: { id: data.id as string },
+  });
+});
+```
+
+## Компонент задачи с оптимистичным UI
+
+```tsx
+// src/components/todo-item.tsx
+export const TodoItem = component$<{
+  todo: Todo;
+  onToggle$: PropFunction<(id: string) => void>;
+  onDelete$: PropFunction<(id: string) => void>;
+}>((props) => {
+  const isDeleting = useSignal(false);
+  const isToggling = useSignal(false);
+  
+  // Оптимистичный статус
+  const optimisticCompleted = isToggling.value
+    ? !props.todo.completed  // Сразу показываем результат
+    : props.todo.completed;
+  
+  return (
+    <div class={{ 'todo-item': true, 'todo-item--done': optimisticCompleted }}>
+      <button
+        onClick$={async () => {
+          isToggling.value = true;
+          await props.onToggle$(props.todo.id);
+          isToggling.value = false;
+        }}
+        class="todo-toggle"
+      >
+        {optimisticCompleted ? '✅' : '⬜'}
+      </button>
+      
+      <span class="todo-title">{props.todo.title}</span>
+      
+      <button
+        onClick$={async () => {
+          isDeleting.value = true;
+          await props.onDelete$(props.todo.id);
+        }}
+        disabled={isDeleting.value}
+      >
+        {isDeleting.value ? '⏳' : '🗑️'}
+      </button>
+    </div>
+  );
+});
+```
+
+## Playground: Полный Todo App
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useMemo, useCallback } from 'react';
+
+const BG = '#0f172a';
+const QWIK = '#ac7ef4';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#22c55e';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+const BLUE = '#38bdf8';
+const YELLOW = '#fbbf24';
+
+type Priority = 'LOW' | 'MEDIUM' | 'HIGH';
+type Filter = 'all' | 'active' | 'done';
+type SortBy = 'date' | 'priority' | 'alpha';
+
+type Todo = {
+  id: string;
+  title: string;
+  description: string;
+  completed: boolean;
+  priority: Priority;
+  createdAt: Date;
+  tags: string[];
+};
+
+const priorityColors: Record<Priority, string> = { LOW: MUTED, MEDIUM: BLUE, HIGH: RED };
+const priorityLabels: Record<Priority, string> = { LOW: 'Низкий', MEDIUM: 'Средний', HIGH: 'Высокий' };
+const priorityWeights: Record<Priority, number> = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+
+const initialTodos: Todo[] = [
+  { id: '1', title: 'Изучить useSignal и useStore', description: 'Понять разницу между signal и store', completed: true, priority: 'HIGH', createdAt: new Date(Date.now() - 86400000 * 3), tags: ['qwik', 'state'] },
+  { id: '2', title: 'Настроить Qwik City проект', description: 'npm create qwik@latest и изучить структуру', completed: true, priority: 'HIGH', createdAt: new Date(Date.now() - 86400000 * 2), tags: ['qwik', 'setup'] },
+  { id: '3', title: 'Изучить routeLoader$', description: 'Разобраться с загрузкой данных на сервере', completed: false, priority: 'HIGH', createdAt: new Date(Date.now() - 86400000), tags: ['qwik', 'data'] },
+  { id: '4', title: 'Написать Todo App', description: 'Применить все концепции Qwik на практике', completed: false, priority: 'MEDIUM', createdAt: new Date(), tags: ['qwik', 'project'] },
+  { id: '5', title: 'Настроить Tailwind CSS', description: 'npm run qwik add tailwind', completed: false, priority: 'LOW', createdAt: new Date(), tags: ['styling'] },
+  { id: '6', title: 'Добавить Prisma ORM', description: 'Подключить базу данных PostgreSQL', completed: false, priority: 'MEDIUM', createdAt: new Date(), tags: ['database'] },
+];
+
+function TodoCard({
+  todo,
+  onToggle,
+  onDelete,
+  onEdit,
+}: {
+  todo: Todo;
+  onToggle: (id: string) => void;
+  onDelete: (id: string) => void;
+  onEdit: (id: string, title: string) => void;
+}) {
+  const [deleting, setDeleting] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(todo.title);
+  const [optimisticDone, setOptimisticDone] = useState(todo.completed);
+
+  const handleToggle = async () => {
+    setOptimisticDone(d => !d); // Оптимистичное обновление
+    await new Promise(r => setTimeout(r, 300)); // Симуляция запроса
+    onToggle(todo.id);
+  };
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    await new Promise(r => setTimeout(r, 400));
+    onDelete(todo.id);
+  };
+
+  const handleEdit = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && editValue.trim()) {
+      onEdit(todo.id, editValue.trim());
+      setEditing(false);
+    }
+    if (e.key === 'Escape') {
+      setEditValue(todo.title);
+      setEditing(false);
+    }
+  };
+
+  return (
+    <div style={{
+      background: CARD, borderRadius: 10, padding: 14,
+      border: \`1px solid \${optimisticDone ? '#334155' : priorityColors[todo.priority] + '44'}\`,
+      opacity: deleting ? 0.5 : 1,
+      transition: 'all 0.3s',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <button
+          onClick={handleToggle}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, padding: 0, flexShrink: 0, marginTop: 2 }}
+        >
+          {optimisticDone ? '✅' : '⬜'}
+        </button>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {editing ? (
+            <input
+              value={editValue}
+              onChange={e => setEditValue(e.target.value)}
+              onKeyDown={handleEdit}
+              autoFocus
+              style={{ width: '100%', background: '#0d1829', border: \`1px solid \${QWIK}\`, borderRadius: 4, padding: '3px 8px', color: TEXT, fontSize: 14 }}
+            />
+          ) : (
+            <div
+              onDoubleClick={() => setEditing(true)}
+              style={{
+                color: optimisticDone ? MUTED : TEXT,
+                fontSize: 14,
+                fontWeight: 600,
+                textDecoration: optimisticDone ? 'line-through' : 'none',
+                cursor: 'pointer',
+                marginBottom: 2,
+              }}
+              title="Двойной клик для редактирования"
+            >
+              {todo.title}
+            </div>
+          )}
+          {todo.description && (
+            <div style={{ color: MUTED, fontSize: 12, marginBottom: 6 }}>{todo.description}</div>
+          )}
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{
+              background: \`\${priorityColors[todo.priority]}22\`,
+              color: priorityColors[todo.priority],
+              fontSize: 9, padding: '1px 6px', borderRadius: 3, fontWeight: 700,
+            }}>
+              {priorityLabels[todo.priority]}
+            </span>
+            {todo.tags.map(tag => (
+              <span key={tag} style={{ background: \`\${QWIK}11\`, color: QWIK, fontSize: 9, padding: '1px 5px', borderRadius: 3 }}>
+                #{tag}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <button
+          onClick={handleDelete}
+          disabled={deleting}
+          style={{ background: 'none', border: 'none', color: deleting ? MUTED : RED, cursor: 'pointer', fontSize: 14, padding: 2, flexShrink: 0 }}
+        >
+          {deleting ? '⏳' : '🗑'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [todos, setTodos] = useState<Todo[]>(initialTodos);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [sortBy, setSortBy] = useState<SortBy>('date');
+  const [search, setSearch] = useState('');
+  const [showForm, setShowForm] = useState(false);
+
+  // Form state
+  const [title, setTitle] = useState('');
+  const [desc, setDesc] = useState('');
+  const [priority, setPriority] = useState<Priority>('MEDIUM');
+  const [tagsInput, setTagsInput] = useState('');
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [creating, setCreating] = useState(false);
+  const [successMsg, setSuccessMsg] = useState('');
+
+  const validate = () => {
+    const e: Record<string, string> = {};
+    if (!title.trim()) e.title = 'Название обязательно';
+    else if (title.length < 3) e.title = 'Минимум 3 символа';
+    else if (title.length > 200) e.title = 'Максимум 200 символов';
+    return e;
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const errs = validate();
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    setErrors({});
+    setCreating(true);
+
+    // Оптимистичное добавление
+    const optimisticId = 'opt-' + Date.now();
+    const newTodo: Todo = {
+      id: optimisticId,
+      title: title.trim(),
+      description: desc.trim(),
+      priority,
+      completed: false,
+      createdAt: new Date(),
+      tags: tagsInput.split(',').map(t => t.trim()).filter(Boolean),
+    };
+    setTodos(prev => [newTodo, ...prev]);
+
+    // Симуляция запроса к серверу
+    await new Promise(r => setTimeout(r, 600));
+
+    // Заменяем оптимистичный ID реальным
+    setTodos(prev => prev.map(t => t.id === optimisticId ? { ...t, id: 'todo-' + Date.now() } : t));
+
+    setCreating(false);
+    setTitle('');
+    setDesc('');
+    setPriority('MEDIUM');
+    setTagsInput('');
+    setShowForm(false);
+    setSuccessMsg(\`Задача "\${newTodo.title}" создана!\`);
+    setTimeout(() => setSuccessMsg(''), 3000);
+  };
+
+  const handleToggle = useCallback((id: string) => {
+    setTodos(prev => prev.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
+  }, []);
+
+  const handleDelete = useCallback((id: string) => {
+    setTodos(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  const handleEdit = useCallback((id: string, newTitle: string) => {
+    setTodos(prev => prev.map(t => t.id === id ? { ...t, title: newTitle } : t));
+  }, []);
+
+  const filtered = useMemo(() => {
+    let result = todos;
+    if (filter === 'active') result = result.filter(t => !t.completed);
+    if (filter === 'done') result = result.filter(t => t.completed);
+    if (search) result = result.filter(t => t.title.toLowerCase().includes(search.toLowerCase()) || t.tags.some(tag => tag.includes(search.toLowerCase())));
+
+    return [...result].sort((a, b) => {
+      if (sortBy === 'date') return b.createdAt.getTime() - a.createdAt.getTime();
+      if (sortBy === 'priority') return priorityWeights[b.priority] - priorityWeights[a.priority];
+      return a.title.localeCompare(b.title);
+    });
+  }, [todos, filter, search, sortBy]);
+
+  const stats = useMemo(() => ({
+    total: todos.length,
+    done: todos.filter(t => t.completed).length,
+    active: todos.filter(t => !t.completed).length,
+    high: todos.filter(t => t.priority === 'HIGH' && !t.completed).length,
+  }), [todos]);
+
+  const progress = stats.total > 0 ? (stats.done / stats.total) * 100 : 0;
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 660, margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <div>
+            <h1 style={{ color: QWIK, margin: 0, fontSize: 26 }}>⚡ Qwik Todo App</h1>
+            <p style={{ color: MUTED, margin: '4px 0 0', fontSize: 12 }}>Симуляция с routeAction$, useSignal, Form</p>
+          </div>
+          <button onClick={() => setShowForm(s => !s)} style={{ background: QWIK, color: '#0f172a', border: 'none', borderRadius: 10, padding: '10px 18px', cursor: 'pointer', fontWeight: 700, fontSize: 14 }}>
+            {showForm ? '✕ Закрыть' : '+ Новая задача'}
+          </button>
+        </div>
+
+        {/* Success message */}
+        {successMsg && (
+          <div style={{ background: \`\${GREEN}22\`, border: \`1px solid \${GREEN}44\`, borderRadius: 8, padding: '10px 14px', marginBottom: 12, color: GREEN, fontSize: 13 }}>
+            ✅ {successMsg}
+          </div>
+        )}
+
+        {/* Stats */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 16 }}>
+          {[
+            { label: 'Всего', value: stats.total, color: TEXT },
+            { label: 'Готово', value: stats.done, color: GREEN },
+            { label: 'Активных', value: stats.active, color: QWIK },
+            { label: 'Срочных', value: stats.high, color: RED },
+          ].map(s => (
+            <div key={s.label} style={{ background: CARD, borderRadius: 8, padding: '10px 12px', border: '1px solid #334155', textAlign: 'center' }}>
+              <div style={{ color: s.color, fontSize: 22, fontWeight: 700, fontFamily: 'monospace' }}>{s.value}</div>
+              <div style={{ color: MUTED, fontSize: 11 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Progress bar */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+            <span style={{ color: MUTED, fontSize: 12 }}>Прогресс</span>
+            <span style={{ color: QWIK, fontSize: 12, fontFamily: 'monospace' }}>{Math.round(progress)}%</span>
+          </div>
+          <div style={{ background: '#1e293b', borderRadius: 6, height: 8 }}>
+            <div style={{ width: \`\${progress}%\`, background: \`linear-gradient(90deg, \${QWIK}, \${GREEN})\`, height: '100%', borderRadius: 6, transition: 'width 0.5s' }} />
+          </div>
+        </div>
+
+        {/* Create form */}
+        {showForm && (
+          <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 16, border: \`1px solid \${QWIK}44\` }}>
+            <h3 style={{ color: QWIK, margin: '0 0 16px', fontSize: 16 }}>+ Новая задача</h3>
+            <div style={{ background: '#0d1829', borderRadius: 8, padding: 10, marginBottom: 16, fontSize: 11, color: MUTED }}>
+              <span style={{ color: QWIK }}>routeAction$</span> + <span style={{ color: GREEN }}>zod$ валидация</span> + <span style={{ color: ORANGE }}>оптимистичный UI</span>
+            </div>
+
+            <form onSubmit={handleCreate}>
+              <div style={{ marginBottom: 12 }}>
+                <input
+                  value={title}
+                  onChange={e => setTitle(e.target.value)}
+                  placeholder="Название задачи (min 3 символа) *"
+                  style={{ width: '100%', background: '#0d1829', border: \`1px solid \${errors.title ? RED : '#334155'}\`, borderRadius: 8, padding: '10px 12px', color: TEXT, fontSize: 14, boxSizing: 'border-box' }}
+                />
+                {errors.title && <div style={{ color: RED, fontSize: 11, marginTop: 3 }}>⚠ {errors.title}</div>}
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <input
+                  value={desc}
+                  onChange={e => setDesc(e.target.value)}
+                  placeholder="Описание (опционально)"
+                  style={{ width: '100%', background: '#0d1829', border: '1px solid #334155', borderRadius: 8, padding: '10px 12px', color: TEXT, fontSize: 14, boxSizing: 'border-box' }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+                <div>
+                  <label style={{ color: MUTED, fontSize: 12, display: 'block', marginBottom: 5 }}>Приоритет</label>
+                  <select value={priority} onChange={e => setPriority(e.target.value as Priority)} style={{ width: '100%', background: '#0d1829', border: '1px solid #334155', borderRadius: 8, padding: '8px 10px', color: TEXT, fontSize: 13 }}>
+                    <option value="LOW">🔵 Низкий</option>
+                    <option value="MEDIUM">🟡 Средний</option>
+                    <option value="HIGH">🔴 Высокий</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ color: MUTED, fontSize: 12, display: 'block', marginBottom: 5 }}>Теги (через запятую)</label>
+                  <input
+                    value={tagsInput}
+                    onChange={e => setTagsInput(e.target.value)}
+                    placeholder="qwik, react, css"
+                    style={{ width: '100%', background: '#0d1829', border: '1px solid #334155', borderRadius: 8, padding: '8px 10px', color: TEXT, fontSize: 13, boxSizing: 'border-box' }}
+                  />
+                </div>
+              </div>
+
+              <button type="submit" disabled={creating} style={{
+                width: '100%', background: creating ? '#334155' : QWIK,
+                color: creating ? MUTED : '#0f172a', border: 'none',
+                borderRadius: 8, padding: '12px 0', cursor: creating ? 'not-allowed' : 'pointer',
+                fontWeight: 700, fontSize: 15,
+              }}>
+                {creating ? '⏳ Сохранение...' : '+ Создать задачу'}
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* Filters and sort */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="🔍 Поиск..."
+            style={{ flex: 1, minWidth: 150, background: CARD, border: '1px solid #334155', borderRadius: 8, padding: '7px 12px', color: TEXT, fontSize: 13 }}
+          />
+          <div style={{ display: 'flex', gap: 4 }}>
+            {(['all', 'active', 'done'] as Filter[]).map(f => (
+              <button key={f} onClick={() => setFilter(f)} style={{ background: filter === f ? QWIK : CARD, color: filter === f ? '#0f172a' : TEXT, border: \`1px solid \${filter === f ? QWIK : '#334155'}\`, borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontSize: 12, fontWeight: filter === f ? 700 : 400 }}>
+                {f === 'all' ? 'Все' : f === 'active' ? 'Активные' : 'Готово'}
+              </button>
+            ))}
+          </div>
+          <select value={sortBy} onChange={e => setSortBy(e.target.value as SortBy)} style={{ background: CARD, border: '1px solid #334155', borderRadius: 6, padding: '6px 10px', color: TEXT, fontSize: 12 }}>
+            <option value="date">По дате</option>
+            <option value="priority">По приоритету</option>
+            <option value="alpha">По алфавиту</option>
+          </select>
+        </div>
+
+        {/* Batch actions */}
+        {stats.done > 0 && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+            <button onClick={() => setTodos(prev => prev.filter(t => !t.completed))} style={{ background: 'transparent', color: RED, border: \`1px solid \${RED}44\`, borderRadius: 6, padding: '5px 12px', cursor: 'pointer', fontSize: 12 }}>
+              🗑 Удалить выполненные ({stats.done})
+            </button>
+          </div>
+        )}
+
+        {/* Todo list */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {filtered.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: MUTED }}>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>
+                {search ? '🔍' : filter === 'done' ? '✅' : '📝'}
+              </div>
+              <div style={{ fontSize: 14 }}>
+                {search ? \`Ничего не найдено по запросу "\${search}"\` : filter === 'done' ? 'Нет выполненных задач' : 'Добавь первую задачу!'}
+              </div>
+            </div>
+          ) : filtered.map(todo => (
+            <TodoCard
+              key={todo.id}
+              todo={todo}
+              onToggle={handleToggle}
+              onDelete={handleDelete}
+              onEdit={handleEdit}
+            />
+          ))}
+        </div>
+
+        {/* Footer hint */}
+        <div style={{ marginTop: 20, background: CARD, borderRadius: 10, padding: 14, border: '1px solid #334155' }}>
+          <div style={{ color: MUTED, fontSize: 12, lineHeight: 1.6 }}>
+            <span style={{ color: QWIK }}>💡 Qwik паттерны в этом приложении:</span>
+            <div style={{ marginTop: 6, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+              {[
+                'useSignal — локальное состояние',
+                'routeLoader$ — загрузка задач',
+                'routeAction$ — CRUD операции',
+                'zod$ — валидация форм',
+                'Оптимистичный UI — мгновенный отклик',
+                'Form компонент — progressive',
+              ].map(item => (
+                <div key={item} style={{ color: TEXT, fontSize: 11 }}>• {item}</div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,340 @@
+import { Playground } from '../../components/Playground'
+
+# Настройка TanStack Router
+
+## Установка
+
+```bash
+npm install @tanstack/react-router
+# Для file-based routing (генерация типов)
+npm install -D @tanstack/router-plugin @tanstack/router-devtools
+```
+
+## Базовая настройка (code-based)
+
+### 1. createRootRoute
+
+Корневой маршрут — родитель всех остальных маршрутов. Обычно содержит общий layout:
+
+```typescript
+import { createRootRoute, Outlet } from '@tanstack/react-router'
+
+export const rootRoute = createRootRoute({
+  component: () => (
+    <div>
+      <Navigation />
+      <Outlet />  {/* Здесь рендерятся дочерние маршруты */}
+    </div>
+  ),
+})
+```
+
+### 2. createRoute
+
+Создание дочерних маршрутов:
+
+```typescript
+import { createRoute } from '@tanstack/react-router'
+
+export const usersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/users',
+  component: UsersPage,
+})
+
+export const userDetailRoute = createRoute({
+  getParentRoute: () => usersRoute,
+  path: '/$userId',
+  component: UserDetail,
+})
+```
+
+### 3. Дерево маршрутов
+
+```typescript
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  usersRoute.addChildren([userDetailRoute]),
+  settingsRoute,
+])
+```
+
+### 4. createRouter и RouterProvider
+
+```typescript
+import { createRouter, RouterProvider } from '@tanstack/react-router'
+
+const router = createRouter({
+  routeTree,
+  defaultPreload: 'intent',  // Prefetch при hover
+})
+
+// Обязательно для TypeScript
+declare module '@tanstack/react-router' {
+  interface Register {
+    router: typeof router
+  }
+}
+
+function App() {
+  return <RouterProvider router={router} />
+}
+```
+
+## File-based маршрутизация
+
+С плагином `@tanstack/router-plugin` структура файлов автоматически генерирует типы:
+
+```
+src/routes/
+  __root.tsx           # Корневой маршрут
+  index.tsx            # /
+  users/
+    index.tsx          # /users
+    $userId.tsx        # /users/:userId
+    $userId/
+      edit.tsx         # /users/:userId/edit
+  _layout/             # Layout без влияния на URL
+    settings.tsx       # /settings (с layout)
+```
+
+## createFileRoute
+
+В file-based роутинге каждый файл использует `createFileRoute`:
+
+```typescript
+// routes/users/$userId.tsx
+import { createFileRoute } from '@tanstack/react-router'
+
+export const Route = createFileRoute('/users/$userId')({
+  component: UserDetail,
+  loader: ({ params }) => fetchUser(params.userId),
+})
+```
+
+## Опции createRouter
+
+```typescript
+const router = createRouter({
+  routeTree,
+  defaultPreload: 'intent',         // 'intent' | 'viewport' | false
+  defaultPreloadStaleTime: 30_000,  // Как долго prefetch актуален
+  defaultStaleTime: 0,              // staleTime для лоадеров
+  context: {                        // Глобальный контекст (queryClient и т.д.)
+    queryClient,
+  },
+})
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+type RouteNode = {
+  path: string
+  file: string
+  type: 'root' | 'index' | 'param' | 'layout' | 'page'
+  children?: RouteNode[]
+  hasLoader?: boolean
+  hasSearch?: boolean
+}
+
+const ROUTE_TREE: RouteNode = {
+  path: '/',
+  file: '__root.tsx',
+  type: 'root',
+  children: [
+    { path: '/', file: 'index.tsx', type: 'index' },
+    {
+      path: '/users',
+      file: 'users/index.tsx',
+      type: 'page',
+      hasLoader: true,
+      hasSearch: true,
+      children: [
+        {
+          path: '/users/$userId',
+          file: 'users/$userId.tsx',
+          type: 'param',
+          hasLoader: true,
+          children: [
+            { path: '/users/$userId/edit', file: 'users/$userId/edit.tsx', type: 'page' },
+            { path: '/users/$userId/posts', file: 'users/$userId/posts.tsx', type: 'page', hasLoader: true, hasSearch: true },
+          ],
+        },
+      ],
+    },
+    { path: '/settings', file: 'settings.tsx', type: 'page' },
+    { path: '/about', file: 'about.tsx', type: 'page' },
+  ],
+}
+
+const TYPE_COLORS = {
+  root: '#6366f1',
+  index: '#22c55e',
+  param: '#ef4444',
+  layout: '#f97316',
+  page: '#06b6d4',
+}
+
+function RouteNodeComponent({ node, depth, selected, onSelect }: {
+  node: RouteNode
+  depth: number
+  selected: RouteNode | null
+  onSelect: (n: RouteNode) => void
+}) {
+  const isSelected = selected?.path === node.path
+  return (
+    <div>
+      <button
+        onClick={() => onSelect(node)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          width: '100%',
+          textAlign: 'left',
+          background: isSelected ? TYPE_COLORS[node.type] + '22' : 'transparent',
+          border: \`1px solid \${isSelected ? TYPE_COLORS[node.type] : 'transparent'}\`,
+          borderRadius: '6px',
+          padding: '6px 8px',
+          marginLeft: depth * 16 + 'px',
+          marginBottom: '3px',
+          cursor: 'pointer',
+          color: '#e2e8f0',
+        }}
+      >
+        <span style={{ fontSize: '10px', background: TYPE_COLORS[node.type] + '33', color: TYPE_COLORS[node.type], padding: '1px 5px', borderRadius: '3px', flexShrink: 0 }}>
+          {node.type}
+        </span>
+        <code style={{ fontSize: '12px', color: '#a5f3fc' }}>{node.file}</code>
+        {node.hasLoader && <span style={{ fontSize: '9px', color: '#22c55e' }}>loader</span>}
+        {node.hasSearch && <span style={{ fontSize: '9px', color: '#f97316' }}>search</span>}
+      </button>
+      {node.children?.map(child => (
+        <RouteNodeComponent key={child.path} node={child} depth={depth + 1} selected={selected} onSelect={onSelect} />
+      ))}
+    </div>
+  )
+}
+
+const SETUP_STEPS = [
+  { title: 'Создать rootRoute', code: \`export const rootRoute = createRootRoute({
+  component: RootLayout,
+})\`, color: '#6366f1' },
+  { title: 'Создать дочерние маршруты', code: \`export const usersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/users',
+  component: UsersPage,
+})\`, color: '#06b6d4' },
+  { title: 'Собрать дерево', code: \`const routeTree = rootRoute.addChildren([
+  indexRoute,
+  usersRoute.addChildren([userDetailRoute]),
+])\`, color: '#22c55e' },
+  { title: 'createRouter', code: \`const router = createRouter({
+  routeTree,
+  defaultPreload: 'intent',
+})\`, color: '#f97316' },
+  { title: 'RouterProvider', code: \`function App() {
+  return <RouterProvider router={router} />
+}\`, color: '#ef4444' },
+]
+
+export default function App() {
+  const [selectedRoute, setSelectedRoute] = useState<RouteNode | null>(null)
+  const [activeStep, setActiveStep] = useState(0)
+  const [activeTab, setActiveTab] = useState<'tree' | 'setup'>('tree')
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>Настройка TanStack Router</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Пошаговая конфигурация роутера</p>
+
+      <div style={{ display: 'flex', gap: '4px', marginBottom: '16px', background: '#1e293b', borderRadius: '8px', padding: '4px', width: 'fit-content' }}>
+        {(['tree', 'setup'] as const).map(tab => (
+          <button key={tab} onClick={() => setActiveTab(tab)} style={{
+            background: activeTab === tab ? '#ef4444' : 'transparent',
+            border: 'none', borderRadius: '6px', padding: '6px 14px',
+            color: activeTab === tab ? 'white' : '#64748b',
+            cursor: 'pointer', fontSize: '13px',
+          }}>
+            {tab === 'tree' ? '🗂️ Дерево файлов' : '🔧 Шаги настройки'}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'tree' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+            <h3 style={{ color: '#e2e8f0', fontSize: '13px', marginBottom: '12px' }}>📁 routes/</h3>
+            <RouteNodeComponent node={ROUTE_TREE} depth={0} selected={selectedRoute} onSelect={setSelectedRoute} />
+          </div>
+
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+            {selectedRoute ? (
+              <>
+                <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>
+                  <code style={{ color: TYPE_COLORS[selectedRoute.type] }}>{selectedRoute.file}</code>
+                </h3>
+                <div style={{ marginBottom: '10px' }}>
+                  <span style={{ fontSize: '12px', color: '#64748b' }}>URL: </span>
+                  <code style={{ fontSize: '12px', color: '#a5f3fc' }}>{selectedRoute.path}</code>
+                </div>
+                <pre style={{ background: '#0f172a', borderRadius: '8px', padding: '12px', fontSize: '11px', color: '#a5f3fc', lineHeight: 1.7 }}>
+{selectedRoute.type === 'root'
+  ? \`export const Route = createRootRoute({
+  component: () => (
+    <div>
+      <Navbar />
+      <Outlet />
+    </div>
+  ),
+})\`
+  : selectedRoute.type === 'param'
+  ? \`export const Route = createFileRoute('\${selectedRoute.path}')({
+  loader: ({ params }) =>
+    fetchUser(params.userId),
+  component: UserDetail,
+})\`
+  : \`export const Route = createFileRoute('\${selectedRoute.path}')({
+  component: () => <div>{selectedRoute.path}</div>,
+})\`}
+                </pre>
+              </>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '40px 0', color: '#475569' }}>
+                Выберите файл маршрута слева
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'setup' && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '16px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {SETUP_STEPS.map((step, i) => (
+              <button key={i} onClick={() => setActiveStep(i)} style={{
+                background: activeStep === i ? step.color + '22' : '#1e293b',
+                border: \`2px solid \${activeStep === i ? step.color : '#334155'}\`,
+                borderRadius: '8px', padding: '10px 14px', cursor: 'pointer',
+                color: activeStep === i ? step.color : '#64748b', textAlign: 'left',
+                fontSize: '12px', fontWeight: activeStep === i ? 600 : 400,
+                whiteSpace: 'nowrap',
+              }}>
+                <span style={{ marginRight: '6px' }}>{i + 1}.</span>{step.title}
+              </button>
+            ))}
+          </div>
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+            <h3 style={{ color: SETUP_STEPS[activeStep].color, fontSize: '14px', marginBottom: '12px' }}>
+              Шаг {activeStep + 1}: {SETUP_STEPS[activeStep].title}
+            </h3>
+            <pre style={{ background: '#0f172a', borderRadius: '8px', padding: '14px', fontSize: '12px', color: '#a5f3fc', lineHeight: 1.7 }}>
+              {SETUP_STEPS[activeStep].code}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+` }} />

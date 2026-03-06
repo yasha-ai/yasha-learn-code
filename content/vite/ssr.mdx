@@ -1,0 +1,356 @@
+import { Playground } from '../../components/Playground'
+
+# SSR с Vite: Server-Side Rendering
+
+Vite предоставляет первоклассную поддержку Server-Side Rendering. В отличие от client-side только приложений, SSR рендерит HTML на сервере и отправляет уже готовую разметку браузеру.
+
+## Принцип работы SSR с Vite
+
+```
+SSR запрос:
+1. Browser → GET /dashboard
+2. Express/Fastify → handler
+3. vite.ssrLoadModule('./src/entry-server.tsx') → рендер
+4. React.renderToString(<App />) → HTML строка
+5. Inject в index.html шаблон
+6. Response → полный HTML
+
+Hydration:
+7. Browser получает HTML → отображает сразу
+8. Browser загружает JS бандл
+9. React "оживляет" (hydrates) существующий DOM
+```
+
+## Структура SSR проекта
+
+```
+my-ssr-app/
+├── index.html                  ← Шаблон с <!--app-html--> placeholder
+├── src/
+│   ├── main.tsx                ← Client entry (для hydration)
+│   ├── entry-server.tsx        ← Server entry
+│   └── App.tsx
+├── server.js                   ← Express/Fastify сервер
+└── vite.config.ts
+```
+
+## Server Entry
+
+```tsx
+// src/entry-server.tsx
+import { renderToString } from 'react-dom/server'
+import { StaticRouter } from 'react-router-dom/server'
+import { App } from './App'
+
+export function render(url: string) {
+  const html = renderToString(
+    <StaticRouter location={url}>
+      <App />
+    </StaticRouter>
+  )
+  return { html }
+}
+```
+
+## Client Entry (Hydration)
+
+```tsx
+// src/main.tsx
+import { hydrateRoot } from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
+import { App } from './App'
+
+hydrateRoot(
+  document.getElementById('root')!,
+  <BrowserRouter>
+    <App />
+  </BrowserRouter>
+)
+```
+
+## Express сервер с Vite SSR
+
+```typescript
+// server.js
+import express from 'express'
+import { createServer as createViteServer } from 'vite'
+
+async function createServer() {
+  const app = express()
+
+  // Dev режим: используем Vite middleware
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'custom',
+    })
+    app.use(vite.middlewares)
+
+    app.use('*', async (req, res, next) => {
+      try {
+        const url = req.originalUrl
+
+        // Читаем index.html шаблон
+        let template = fs.readFileSync('index.html', 'utf-8')
+        // Vite трансформирует шаблон (инжектирует HMR)
+        template = await vite.transformIndexHtml(url, template)
+
+        // Загружаем server entry через Vite SSR
+        const { render } = await vite.ssrLoadModule('/src/entry-server.tsx')
+        const { html: appHtml } = await render(url)
+
+        // Вставляем рендер в шаблон
+        const finalHtml = template.replace('<!--app-html-->', appHtml)
+        res.status(200).set({ 'Content-Type': 'text/html' }).end(finalHtml)
+      } catch (e) {
+        vite.ssrFixStacktrace(e as Error)
+        next(e)
+      }
+    })
+  }
+
+  app.listen(5173)
+}
+
+createServer()
+```
+
+## vite.config.ts для SSR
+
+```typescript
+export default defineConfig({
+  plugins: [react()],
+  build: {
+    // Client build (по умолчанию)
+    outDir: 'dist/client',
+  },
+})
+
+// Для server build:
+// vite build --ssr src/entry-server.tsx --outDir dist/server
+```
+
+## Streaming SSR (React 18+)
+
+```tsx
+import { renderToPipeableStream } from 'react-dom/server'
+
+export function render(url: string, res: Response) {
+  const { pipe } = renderToPipeableStream(
+    <App />,
+    {
+      onShellReady() {
+        res.setHeader('content-type', 'text/html')
+        pipe(res)
+      },
+      onError(error) {
+        console.error(error)
+      },
+    }
+  )
+}
+// HTML начинает отправляться до окончания всего рендера!
+```
+
+## Мета-фреймворки на базе Vite + SSR
+
+```
+Vite SSR ← Базовый слой для:
+├── Nuxt 3          (Vue + SSR/SSG)
+├── SvelteKit       (Svelte + SSR/SSG/SPA)
+├── Astro           (Multi-framework SSR/SSG)
+├── Remix (Vite mode)   (React + SSR)
+└── Qwik City       (Qwik + SSR + Resumability)
+```
+
+Ниже — визуализация SSR пайплайна: от HTTP запроса до отображения страницы в браузере:
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const VITE_COLOR = '#646cff';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#38bdf8';
+const GREEN = '#4ade80';
+const AMBER = '#f59e0b';
+const RED = '#f87171';
+
+type Mode = 'csr' | 'ssr' | 'ssg';
+
+interface PipelineStep {
+  id: string;
+  actor: string;
+  action: string;
+  detail: string;
+  color: string;
+  durationMs: number;
+}
+
+const ssrPipeline: PipelineStep[] = [
+  { id: 's1', actor: '🌐 Browser', action: 'GET /dashboard', detail: 'HTTP запрос к серверу', color: ACCENT, durationMs: 80 },
+  { id: 's2', actor: '⚡ Express', action: 'Route handler', detail: 'req.originalUrl = "/dashboard"', color: VITE_COLOR, durationMs: 120 },
+  { id: 's3', actor: '⚡ Vite SSR', action: 'ssrLoadModule(entry-server)', detail: 'Загрузка и трансформация server entry', color: VITE_COLOR, durationMs: 200 },
+  { id: 's4', actor: '⚛️ React', action: 'renderToString(<App />)', detail: 'Синхронный рендер компонентов', color: '#61dafb', durationMs: 300 },
+  { id: 's5', actor: '⚡ Server', action: 'Inject HTML в template', detail: 'template.replace("<!--app-html-->", html)', color: VITE_COLOR, durationMs: 350 },
+  { id: 's6', actor: '🌐 Browser', action: 'Получает полный HTML', detail: 'LCP: пользователь видит контент!', color: GREEN, durationMs: 430 },
+  { id: 's7', actor: '🌐 Browser', action: 'Загружает JS бандл', detail: 'GET /assets/index-BxS1.js', color: ACCENT, durationMs: 530 },
+  { id: 's8', actor: '⚛️ React', action: 'hydrateRoot()', detail: 'React "оживляет" DOM, слушает события', color: '#61dafb', durationMs: 650 },
+  { id: 's9', actor: '✅ App', action: 'Полностью интерактивно!', detail: 'TTI достигнут', color: GREEN, durationMs: 700 },
+];
+
+const csrPipeline: PipelineStep[] = [
+  { id: 'c1', actor: '🌐 Browser', action: 'GET /', detail: 'HTTP запрос к серверу', color: ACCENT, durationMs: 80 },
+  { id: 'c2', actor: '📦 Server', action: 'Отдаёт пустой index.html', detail: '<div id="root"></div>', color: '#94a3b8', durationMs: 120 },
+  { id: 'c3', actor: '🌐 Browser', action: 'Загружает JS бандл', detail: 'GET /assets/index-BxS1.js (300KB+)', color: AMBER, durationMs: 320 },
+  { id: 'c4', actor: '⚛️ React', action: 'Парсит и выполняет JS', detail: 'Инициализация React, роутера, стейтов', color: '#61dafb', durationMs: 480 },
+  { id: 'c5', actor: '⚛️ React', action: 'createRoot + render()', detail: 'Первый рендер компонентов', color: '#61dafb', durationMs: 580 },
+  { id: 'c6', actor: '✅ App', action: 'Пользователь видит контент', detail: 'LCP + TTI вместе', color: GREEN, durationMs: 650 },
+];
+
+const ssgPipeline: PipelineStep[] = [
+  { id: 'g1', actor: '🔨 Build Time', action: 'vite build + prerender', detail: 'Выполняется при деплое, не при запросе', color: VITE_COLOR, durationMs: 0 },
+  { id: 'g2', actor: '⚛️ React', action: 'renderToString() для каждой страницы', detail: 'Все роуты рендерятся заранее', color: '#61dafb', durationMs: 0 },
+  { id: 'g3', actor: '📄 Files', action: 'Создание dist/dashboard/index.html', detail: 'Статический HTML файл на диске', color: '#94a3b8', durationMs: 0 },
+  { id: 'g4', actor: '🌐 Browser', action: 'GET /dashboard', detail: 'Запрос к статическому файлу (CDN!)', color: ACCENT, durationMs: 40 },
+  { id: 'g5', actor: '📦 CDN/Nginx', action: 'Отдаёт готовый HTML', detail: 'Никакого сервера — чистый файл', color: GREEN, durationMs: 60 },
+  { id: 'g6', actor: '🌐 Browser', action: 'Мгновенный LCP!', detail: 'Пользователь видит контент сразу', color: GREEN, durationMs: 120 },
+  { id: 'g7', actor: '⚛️ React', action: 'hydrateRoot()', detail: 'JS загружается и оживляет DOM', color: '#61dafb', durationMs: 280 },
+];
+
+const pipelines: Record<Mode, PipelineStep[]> = {
+  csr: csrPipeline,
+  ssr: ssrPipeline,
+  ssg: ssgPipeline,
+};
+
+export default function App() {
+  const [mode, setMode] = useState<Mode>('ssr');
+  const [running, setRunning] = useState(false);
+  const [currentStep, setCurrentStep] = useState(-1);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const pipeline = pipelines[mode];
+
+  const runPipeline = () => {
+    setCurrentStep(-1);
+    setRunning(true);
+    pipeline.forEach((step, i) => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      setTimeout(() => {
+        setCurrentStep(i);
+        if (i === pipeline.length - 1) {
+          setTimeout(() => setRunning(false), 500);
+        }
+      }, step.durationMs + 100);
+    });
+  };
+
+  const reset = () => {
+    setCurrentStep(-1);
+    setRunning(false);
+  };
+
+  const modeInfo: Record<Mode, { label: string; icon: string; desc: string; lcpTime: string; ttiTime: string; server: boolean }> = {
+    csr: { label: 'CSR (Client-Side)', icon: '🌐', desc: 'React рендерит в браузере', lcpTime: '~650ms', ttiTime: '~650ms', server: false },
+    ssr: { label: 'SSR (Server-Side)', icon: '⚡', desc: 'Рендер на сервере, гидрация в браузере', lcpTime: '~430ms', ttiTime: '~700ms', server: true },
+    ssg: { label: 'SSG (Static)', icon: '📄', desc: 'Предрендер при сборке', lcpTime: '~60ms', ttiTime: '~280ms', server: false },
+  };
+
+  const info = modeInfo[mode];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '24px 16px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 640, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <h1 style={{
+            margin: 0, fontSize: 22, fontWeight: 800,
+            background: \`linear-gradient(90deg, \${VITE_COLOR}, \${ACCENT})\`,
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+          }}>SSR Pipeline Visualizer</h1>
+          <p style={{ color: '#64748b', fontSize: 13, marginTop: 6 }}>Сравни CSR, SSR и SSG подходы</p>
+        </div>
+
+        {/* Mode selector */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+          {(Object.keys(modeInfo) as Mode[]).map(m => (
+            <button key={m} onClick={() => { setMode(m); reset(); }} style={{
+              flex: 1, padding: '10px 6px', borderRadius: 10, border: 'none', cursor: 'pointer',
+              background: mode === m ? VITE_COLOR : CARD,
+              color: mode === m ? '#fff' : '#94a3b8',
+              fontSize: 12, fontWeight: mode === m ? 700 : 400, transition: 'all 0.2s',
+            }}>
+              {modeInfo[m].icon} {m.toUpperCase()}
+            </button>
+          ))}
+        </div>
+
+        {/* Info card */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 16, marginBottom: 20, border: \`1px solid \${VITE_COLOR}30\` }}>
+          <div style={{ fontWeight: 700, color: VITE_COLOR, marginBottom: 6 }}>{info.label}</div>
+          <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12 }}>{info.desc}</div>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <div style={{ textAlign: 'center', background: BG, borderRadius: 8, padding: '8px 16px' }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: GREEN }}>{info.lcpTime}</div>
+              <div style={{ fontSize: 10, color: '#64748b' }}>LCP (видит контент)</div>
+            </div>
+            <div style={{ textAlign: 'center', background: BG, borderRadius: 8, padding: '8px 16px' }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: ACCENT }}>{info.ttiTime}</div>
+              <div style={{ fontSize: 10, color: '#64748b' }}>TTI (интерактивно)</div>
+            </div>
+            <div style={{ textAlign: 'center', background: BG, borderRadius: 8, padding: '8px 16px' }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: info.server ? AMBER : GREEN }}>{info.server ? 'Да' : 'Нет'}</div>
+              <div style={{ fontSize: 10, color: '#64748b' }}>Нужен сервер</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Pipeline */}
+        <div style={{ background: CARD, borderRadius: 14, padding: 16, border: '1px solid #334155', marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+            {pipeline.map((step, i) => {
+              const done = i <= currentStep;
+              const active = i === currentStep;
+              return (
+                <div key={step.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', opacity: done || !running ? 1 : 0.3, transition: 'opacity 0.3s' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                    <div style={{
+                      width: 32, height: 32, borderRadius: '50%', display: 'flex',
+                      alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                      background: done ? \`\${step.color}20\` : '#334155',
+                      border: \`2px solid \${done ? step.color : '#475569'}\`,
+                      fontSize: 11, color: done ? step.color : '#475569', fontWeight: 700,
+                      transition: 'all 0.3s',
+                    }}>
+                      {done ? (i === pipeline.length - 1 ? '✓' : (i + 1).toString()) : (i + 1).toString()}
+                    </div>
+                    {i < pipeline.length - 1 && <div style={{ width: 2, height: 14, background: done ? step.color + '40' : '#334155' }} />}
+                  </div>
+                  <div style={{ paddingTop: 6, paddingBottom: 4 }}>
+                    <div style={{ fontSize: 10, color: done ? step.color : '#475569', fontWeight: 700, marginBottom: 1 }}>{step.actor}</div>
+                    <div style={{ fontSize: 13, color: done ? TEXT : '#475569', fontWeight: done ? 600 : 400 }}>{step.action}</div>
+                    <div style={{ fontSize: 11, color: '#475569' }}>{step.detail}</div>
+                    {step.durationMs > 0 && <div style={{ fontSize: 10, color: step.color + '80', marginTop: 1 }}>T+{step.durationMs}ms</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={runPipeline} disabled={running} style={{
+            flex: 2, padding: '12px 0', borderRadius: 10, border: 'none', cursor: running ? 'not-allowed' : 'pointer',
+            background: running ? '#334155' : VITE_COLOR, color: '#fff', fontWeight: 700, fontSize: 14,
+          }}>
+            {running ? '⏳ Симуляция...' : '▶ Симулировать запрос'}
+          </button>
+          <button onClick={reset} style={{
+            flex: 1, padding: '12px 0', borderRadius: 10, border: '1px solid #334155', cursor: 'pointer',
+            background: 'transparent', color: TEXT, fontSize: 13,
+          }}>Сброс</button>
+        </div>
+      </div>
+    </div>
+  );
+}` }} />

@@ -1,0 +1,292 @@
+import { Playground } from '../../components/Playground'
+
+# Dockerizing Node.js: Лучшие Практики
+
+Node.js — один из самых популярных стеков для контейнеризации. Правильно составленный Dockerfile для Node.js-приложения обеспечивает быструю сборку, минимальный размер образа и безопасный запуск.
+
+## Базовый Dockerfile для Node.js
+
+```dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci --only=production
+
+COPY . .
+
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+## Файл .dockerignore
+
+Критически важен для уменьшения контекста сборки и предотвращения копирования ненужных файлов:
+
+```
+# .dockerignore
+node_modules/
+npm-debug.log
+.git/
+.gitignore
+.env
+.env.*
+*.test.js
+*.spec.js
+coverage/
+dist/
+.DS_Store
+Dockerfile*
+docker-compose*
+README.md
+```
+
+## npm ci vs npm install
+
+**npm ci** — рекомендуется для продакшена и Docker:
+- Точно воспроизводит зависимости из `package-lock.json`
+- Удаляет `node_modules` перед установкой
+- Не обновляет `package-lock.json`
+- Быстрее в CI/CD окружениях
+
+```bash
+# В Dockerfile всегда используйте npm ci
+RUN npm ci --only=production
+
+# Для разработки
+RUN npm ci
+```
+
+## Production-готовый Dockerfile с TypeScript
+
+```dockerfile
+# ─── Этап 1: Зависимости ───────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+# ─── Этап 2: Сборка TypeScript ─────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build
+
+# ─── Этап 3: Production ────────────────────────────
+FROM node:20-alpine AS production
+
+# Создать непривилегированного пользователя
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+WORKDIR /app
+
+# Только production зависимости
+COPY package*.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+# Скомпилированный код из builder
+COPY --from=builder /app/dist ./dist
+
+# Переключиться на непривилегированного пользователя
+USER appuser
+
+ENV NODE_ENV=production
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+CMD ["node", "dist/server.js"]
+```
+
+## Оптимизация для разработки
+
+Для горячей перезагрузки при разработке используйте bind mount и nodemon:
+
+```dockerfile
+# Dockerfile.dev
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+EXPOSE 3000
+CMD ["npx", "nodemon", "server.js"]
+```
+
+```yaml
+# docker-compose.dev.yml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app               # синхронизация кода
+      - /app/node_modules    # анонимный том для node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+```
+
+## Обработка сигналов: используйте dumb-init
+
+Node.js по умолчанию не обрабатывает SIGTERM корректно в PID 1. Используйте `dumb-init` или `tini`:
+
+```dockerfile
+FROM node:20-alpine
+
+# Установить dumb-init
+RUN apk add --no-cache dumb-init
+
+WORKDIR /app
+COPY --chown=node:node . .
+RUN npm ci --only=production
+
+USER node
+EXPOSE 3000
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["node", "server.js"]
+```
+
+## Размеры образов Node.js
+
+| Базовый образ   | Размер  | Когда использовать |
+|-----------------|---------|-------------------|
+| node:20         | 1.1 GB  | Никогда в prod     |
+| node:20-slim    | 240 MB  | Если нужны системные утилиты |
+| node:20-alpine  | 130 MB  | Рекомендуется      |
+| gcr.io/distroless | 100 MB | Максимальная безопасность |
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const [mode, setMode] = React.useState('bad');
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  const badDockerfile = {
+    lines: [
+      { instr: 'FROM',    val: 'node:20',                    issue: 'node:20 = 1.1 GB базовый образ!', ok: false },
+      { instr: 'WORKDIR', val: '/app',                       issue: null, ok: true },
+      { instr: 'COPY',    val: '. .',                        issue: 'Копируем всё, включая node_modules и .env!', ok: false },
+      { instr: 'RUN',     val: 'npm install',                issue: 'npm install нестабилен, используйте npm ci', ok: false },
+      { instr: 'EXPOSE',  val: '3000',                       issue: null, ok: true },
+      { instr: 'CMD',     val: '["npm", "start"]',           issue: 'npm добавляет промежуточный процесс, сигналы не доходят', ok: false },
+    ],
+    size: 1600,
+    issues: 4,
+  };
+
+  const goodDockerfile = {
+    lines: [
+      { instr: 'FROM',        val: 'node:20-alpine AS base',             issue: null, ok: true },
+      { instr: 'RUN',         val: 'addgroup -S app && adduser -S app -G app', issue: null, ok: true },
+      { instr: 'WORKDIR',     val: '/app',                              issue: null, ok: true },
+      { instr: 'COPY',        val: 'package*.json ./',                   issue: null, ok: true },
+      { instr: 'RUN',         val: 'npm ci --only=production',           issue: null, ok: true },
+      { instr: 'COPY',        val: '--chown=app:app . .',                issue: null, ok: true },
+      { instr: 'USER',        val: 'app',                               issue: null, ok: true },
+      { instr: 'EXPOSE',      val: '3000',                              issue: null, ok: true },
+      { instr: 'HEALTHCHECK', val: '--interval=30s CMD wget -qO- localhost:3000/health', issue: null, ok: true },
+      { instr: 'CMD',         val: '["node", "server.js"]',             issue: null, ok: true },
+    ],
+    size: 160,
+    issues: 0,
+  };
+
+  const current = mode === 'bad' ? badDockerfile : goodDockerfile;
+
+  const checks = [
+    { label: 'Alpine базовый образ',    ok: mode === 'good', desc: 'Уменьшает размер с 1.1 GB до 130 MB' },
+    { label: 'Сначала COPY package*.json', ok: mode === 'good', desc: 'Кеш npm ci при неизменном package.json' },
+    { label: 'npm ci вместо install',   ok: mode === 'good', desc: 'Воспроизводимая установка из lock-файла' },
+    { label: '.dockerignore',           ok: mode === 'good', desc: 'Исключает node_modules, .env, .git' },
+    { label: 'Непривилегированный USER', ok: mode === 'good', desc: 'Безопасность: не запускать от root' },
+    { label: 'HEALTHCHECK',             ok: mode === 'good', desc: 'Docker знает о здоровье контейнера' },
+    { label: 'node server.js напрямую', ok: mode === 'good', desc: 'Корректная обработка SIGTERM' },
+  ];
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        ⚡ Node.js Dockerfile Оптимизатор
+      </h2>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 24 }}>
+        {[['bad', '❌ Плохой Dockerfile'], ['good', '✅ Оптимальный Dockerfile']].map(([id, label]) => (
+          <button key={id} onClick={() => setMode(id)} style={{
+            padding: '8px 20px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            background: mode === id ? (id === 'bad' ? red : green) : card,
+            color: mode === id ? '#fff' : muted,
+          }}>{label}</button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 16, maxWidth: 800, margin: '0 auto', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 280 }}>
+          <div style={{ color: muted, fontSize: 12, marginBottom: 8 }}>DOCKERFILE</div>
+          <div style={{ background: '#0d1117', borderRadius: 10, padding: 14, border: '1px solid #ffffff10' }}>
+            {current.lines.map((l, i) => (
+              <div key={i} style={{
+                display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 4,
+                background: l.issue ? '#ef444411' : 'transparent',
+                borderRadius: 4, padding: '3px 6px',
+              }}>
+                <span style={{ color: docker, fontFamily: 'monospace', fontSize: 12, fontWeight: 700, minWidth: 80 }}>{l.instr}</span>
+                <span style={{ color: '#94a3b8', fontFamily: 'monospace', fontSize: 11, flex: 1 }}>{l.val}</span>
+                {l.issue && <span style={{ color: red, fontSize: 10 }}>⚠</span>}
+              </div>
+            ))}
+          </div>
+
+          {current.lines.filter(l => l.issue).map((l, i) => (
+            <div key={i} style={{ background: red + '11', borderRadius: 8, padding: '8px 12px', marginTop: 6, border: \`1px solid \${red}33\` }}>
+              <span style={{ color: red, fontSize: 11, fontWeight: 700 }}>{l.instr}: </span>
+              <span style={{ color: text, fontSize: 11 }}>{l.issue}</span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div style={{ color: muted, fontSize: 12, marginBottom: 8 }}>РЕЗУЛЬТАТ</div>
+
+          <div style={{ background: card, borderRadius: 10, padding: 16, marginBottom: 12, border: \`1px solid \${mode === 'bad' ? red : green}44\` }}>
+            <div style={{ color: muted, fontSize: 12, marginBottom: 4 }}>Размер образа</div>
+            <div style={{ color: mode === 'bad' ? red : green, fontSize: 32, fontWeight: 700 }}>{current.size} MB</div>
+            <div style={{ marginTop: 8, background: '#ffffff11', borderRadius: 6, height: 10, overflow: 'hidden' }}>
+              <div style={{
+                background: mode === 'bad' ? red : green,
+                height: '100%',
+                width: mode === 'bad' ? '100%' : '10%',
+                transition: 'width 0.5s',
+              }} />
+            </div>
+            {mode === 'good' && <div style={{ color: green, fontSize: 12, marginTop: 6 }}>↓ Экономия 1440 MB (90%)</div>}
+          </div>
+
+          <div style={{ background: card, borderRadius: 10, padding: 14, border: '1px solid #ffffff10' }}>
+            <div style={{ color: muted, fontSize: 12, marginBottom: 10 }}>ЧЕКЛИСТ ЛУЧШИХ ПРАКТИК</div>
+            {checks.map((c, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
+                <span style={{ color: c.ok ? green : red, fontWeight: 700, fontSize: 14, flexShrink: 0 }}>{c.ok ? '✓' : '✗'}</span>
+                <div>
+                  <div style={{ color: c.ok ? text : muted, fontSize: 12, fontWeight: 600 }}>{c.label}</div>
+                  <div style={{ color: muted, fontSize: 11, marginTop: 1 }}>{c.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

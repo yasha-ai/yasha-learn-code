@@ -1,0 +1,266 @@
+import { Playground } from '../../components/Playground'
+
+# Мониторинг Docker: Ресурсы и Метрики
+
+Мониторинг ресурсов контейнеров позволяет выявлять узкие места, предотвращать утечки памяти и оптимизировать производительность. Docker предоставляет встроенные инструменты и интегрируется с профессиональными системами мониторинга.
+
+## docker stats: мониторинг в реальном времени
+
+```bash
+# Статистика всех запущенных контейнеров
+docker stats
+
+# Конкретного контейнера
+docker stats mycontainer
+
+# Без автообновления (один снимок)
+docker stats --no-stream
+
+# Форматированный вывод
+docker stats --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"
+
+# Вывод в JSON
+docker stats --format json --no-stream
+```
+
+Вывод docker stats:
+```
+CONTAINER ID   NAME       CPU %     MEM USAGE / LIMIT     MEM %     NET I/O         BLOCK I/O
+abc123         web-nginx  0.1%      12.5MiB / 512MiB      2.44%     1.2kB / 890B    1MB / 0B
+def456         api-node   2.3%      245MiB / 1GiB         23.9%     45kB / 22kB     5MB / 2MB
+ghi789         postgres   0.5%      128MiB / 2GiB         6.25%     12kB / 8kB      25MB / 10MB
+```
+
+## Ограничение ресурсов контейнера
+
+```bash
+# Ограничение памяти
+docker run -d \
+  --memory=512m \           # максимум 512 МБ RAM
+  --memory-swap=512m \      # отключить swap (swap = memory)
+  --memory-reservation=256m \  # мягкий лимит
+  myapp
+
+# Ограничение CPU
+docker run -d \
+  --cpus=0.5 \              # использовать максимум 0.5 CPU
+  --cpu-shares=512 \        # относительный приоритет (по умолчанию 1024)
+  --cpuset-cpus="0,1" \    # использовать только ядра 0 и 1
+  myapp
+
+# Ограничение I/O
+docker run -d \
+  --device-read-bps=/dev/sda:50mb \   # чтение макс 50 MB/s
+  --device-write-bps=/dev/sda:50mb \  # запись макс 50 MB/s
+  myapp
+
+# В docker-compose.yml
+services:
+  api:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+```
+
+## Профессиональный мониторинг: cAdvisor + Prometheus + Grafana
+
+```yaml
+version: '3.8'
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8080:8080"
+    privileged: true
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+```
+
+## Ключевые метрики для мониторинга
+
+```yaml
+# prometheus.yml
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'docker'
+    static_configs:
+      - targets: ['cadvisor:8080']
+```
+
+**CPU:**
+- `container_cpu_usage_seconds_total` — общее использование CPU
+- `container_cpu_throttled_seconds_total` — время троттлинга
+
+**Memory:**
+- `container_memory_usage_bytes` — текущее использование
+- `container_memory_limit_bytes` — лимит памяти
+- `container_memory_working_set_bytes` — рабочий набор памяти
+
+**Network:**
+- `container_network_receive_bytes_total` — входящий трафик
+- `container_network_transmit_bytes_total` — исходящий трафик
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const [containers] = React.useState([
+    { name: 'nginx',    cpu: 0.1, mem: 12, memLimit: 256,  net: 1.2, rx: 0.8 },
+    { name: 'api-node', cpu: 2.3, mem: 245, memLimit: 512, net: 45, rx: 22 },
+    { name: 'postgres', cpu: 0.5, mem: 128, memLimit: 1024, net: 12, rx: 8 },
+    { name: 'redis',    cpu: 0.2, mem: 30, memLimit: 256,  net: 5, rx: 3 },
+    { name: 'worker',   cpu: 8.5, mem: 180, memLimit: 256,  net: 2, rx: 1 },
+  ]);
+  const [selected, setSelected] = React.useState('api-node');
+  const [history, setHistory] = React.useState({});
+  const [tick, setTick] = React.useState(0);
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  React.useEffect(() => {
+    const iv = setInterval(() => {
+      setTick(t => t + 1);
+      setHistory(h => {
+        const next = { ...h };
+        containers.forEach(c => {
+          const prev = next[c.name] || [];
+          const jitter = (Math.random() - 0.5) * 2;
+          const cpuVal = Math.max(0.1, Math.min(100, c.cpu + jitter + (c.name === 'worker' ? Math.sin(Date.now() / 2000) * 5 : 0)));
+          const memVal = Math.max(1, Math.min(c.memLimit, c.mem + (Math.random() - 0.45) * 3));
+          next[c.name] = [...prev.slice(-19), { cpu: cpuVal, mem: memVal }];
+        });
+        return next;
+      });
+    }, 800);
+    return () => clearInterval(iv);
+  }, []);
+
+  const getColor = (pct) => pct > 80 ? red : pct > 60 ? amber : green;
+
+  const BarChart = ({ data, maxVal, color, height = 40 }) => {
+    if (!data || data.length === 0) return null;
+    const w = 12;
+    const gap = 2;
+    return (
+      <svg width={data.length * (w + gap)} height={height} style={{ overflow: 'visible' }}>
+        {data.map((v, i) => {
+          const h = Math.max(2, (v / maxVal) * height);
+          const c = getColor((v / maxVal) * 100);
+          return <rect key={i} x={i * (w + gap)} y={height - h} width={w} height={h} fill={c} rx={2} opacity={0.7 + (i / data.length) * 0.3} />;
+        })}
+      </svg>
+    );
+  };
+
+  const sel = containers.find(c => c.name === selected) || containers[0];
+  const selHistory = history[selected] || [];
+  const latestCpu = selHistory.length > 0 ? selHistory[selHistory.length - 1].cpu : sel.cpu;
+  const latestMem = selHistory.length > 0 ? selHistory[selHistory.length - 1].mem : sel.mem;
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        📊 Docker Resource Monitor
+      </h2>
+
+      <div style={{ maxWidth: 720, margin: '0 auto' }}>
+        <div style={{ background: card, borderRadius: 12, padding: 4, marginBottom: 16, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {containers.map(c => {
+            const h = history[c.name] || [];
+            const cpu = h.length > 0 ? h[h.length - 1].cpu : c.cpu;
+            return (
+              <button key={c.name} onClick={() => setSelected(c.name)} style={{
+                flex: 1, minWidth: 90, background: selected === c.name ? docker + '22' : 'transparent',
+                border: \`1px solid \${selected === c.name ? docker : 'transparent'}55\`,
+                borderRadius: 8, padding: '8px 12px', cursor: 'pointer', color: text,
+              }}>
+                <div style={{ fontWeight: 600, fontSize: 12 }}>{c.name}</div>
+                <div style={{ color: getColor(cpu), fontSize: 11, marginTop: 2 }}>{cpu.toFixed(1)}% CPU</div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, marginBottom: 16 }}>
+          {[
+            { label: 'CPU Usage', value: latestCpu.toFixed(1) + '%', max: 100, color: getColor(latestCpu), hist: selHistory.map(h => h.cpu) },
+            { label: 'Memory Usage', value: latestMem.toFixed(0) + ' MB / ' + sel.memLimit + ' MB', max: sel.memLimit, color: getColor(latestMem / sel.memLimit * 100), hist: selHistory.map(h => h.mem) },
+          ].map(m => (
+            <div key={m.label} style={{ background: card, borderRadius: 12, padding: 16, border: \`1px solid \${m.color}44\` }}>
+              <div style={{ color: muted, fontSize: 12, marginBottom: 6 }}>{m.label}</div>
+              <div style={{ color: m.color, fontSize: 22, fontWeight: 700, marginBottom: 10 }}>{m.value}</div>
+              <div style={{ background: '#ffffff11', borderRadius: 4, height: 6, marginBottom: 10, overflow: 'hidden' }}>
+                <div style={{ background: m.color, height: '100%', width: \`\${Math.min(100, (parseFloat(m.value) / m.max) * 100)}%\`, transition: 'width 0.5s' }} />
+              </div>
+              <BarChart data={m.hist} maxVal={m.max} color={m.color} height={40} />
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 16, border: '1px solid #ffffff10' }}>
+          <div style={{ color: muted, fontSize: 12, marginBottom: 10 }}>NETWORK I/O</div>
+          <div style={{ display: 'flex', gap: 20 }}>
+            <div>
+              <div style={{ color: text, fontSize: 13 }}>📤 Отправлено</div>
+              <div style={{ color: docker, fontSize: 20, fontWeight: 700 }}>{sel.net} KB/s</div>
+            </div>
+            <div>
+              <div style={{ color: text, fontSize: 13 }}>📥 Получено</div>
+              <div style={{ color: green, fontSize: 20, fontWeight: 700 }}>{sel.rx} KB/s</div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ background: '#0d1117', borderRadius: 12, padding: 14, border: '1px solid #ffffff10', fontFamily: 'monospace', fontSize: 11 }}>
+          <div style={{ color: muted, marginBottom: 6 }}>$ docker stats --format table --no-stream</div>
+          <div style={{ color: docker, marginBottom: 4 }}>{'CONTAINER'.padEnd(14)} {'CPU %'.padEnd(8)} {'MEM USAGE/LIMIT'.padEnd(22)} {'MEM %'.padEnd(8)} {'NET I/O'}</div>
+          {containers.map(c => {
+            const h = history[c.name] || [];
+            const cpu = h.length > 0 ? h[h.length - 1].cpu : c.cpu;
+            const mem = h.length > 0 ? h[h.length - 1].mem : c.mem;
+            const memPct = (mem / c.memLimit * 100).toFixed(1);
+            return (
+              <div key={c.name} style={{ color: c.name === selected ? text : '#64748b', marginBottom: 2 }}>
+                {c.name.padEnd(14)}{(cpu.toFixed(1) + '%').padEnd(8)}{(mem.toFixed(0) + 'MB / ' + c.memLimit + 'MB').padEnd(22)}{(memPct + '%').padEnd(8)}{c.net + 'KB / ' + c.rx + 'KB'}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

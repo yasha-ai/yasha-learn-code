@@ -1,0 +1,249 @@
+import { Playground } from '../../components/Playground'
+
+# Слои Docker: Кеширование и Оптимизация
+
+Каждый Docker-образ состоит из слоёв — неизменяемых (иммутабельных) файловых систем, объединённых с помощью Union File System. Понимание механизма слоёв и кеширования позволяет значительно ускорить сборку образов.
+
+## Как формируются слои
+
+Каждая инструкция `RUN`, `COPY` и `ADD` в Dockerfile создаёт новый слой. Инструкции `FROM`, `ENV`, `ARG`, `EXPOSE`, `CMD`, `ENTRYPOINT`, `WORKDIR` — создают мета-слои, не занимающие дискового пространства.
+
+```dockerfile
+FROM node:20-alpine          # Слой 1: базовый образ (~130 MB)
+WORKDIR /app                 # Мета-данные
+COPY package*.json ./        # Слой 2: файлы зависимостей (~10 KB)
+RUN npm ci                   # Слой 3: node_modules (~50 MB)
+COPY . .                     # Слой 4: исходный код (~5 MB)
+CMD ["node", "server.js"]    # Мета-данные
+```
+
+## Механизм кеширования
+
+Docker кеширует каждый слой. При повторной сборке Docker проверяет каждую инструкцию:
+
+1. Если инструкция и её контекст не изменились → используется кеш
+2. Если что-то изменилось → пересобираются этот и все последующие слои
+
+Это ключевое правило: **как только кеш инвалидируется, все последующие слои пересобираются заново**.
+
+```
+docker build .
+
+Step 1/6 : FROM node:20-alpine
+ ---> 3a1e2b23a4f1        # кеш
+Step 2/6 : WORKDIR /app
+ ---> Using cache         # кеш
+Step 3/6 : COPY package*.json ./
+ ---> Using cache         # кеш (package.json не изменился)
+Step 4/6 : RUN npm ci
+ ---> Using cache         # кеш (зависимости не изменились!)
+Step 5/6 : COPY . .
+ ---> abc123def456        # пересборка (код изменился)
+Step 6/6 : CMD ["node", "server.js"]
+ ---> Rebuilt             # пересборка
+```
+
+## Неправильный порядок vs правильный
+
+Порядок инструкций критически важен для эффективного кеширования:
+
+**❌ Плохой Dockerfile — долгая пересборка:**
+```dockerfile
+FROM node:20-alpine
+WORKDIR /app
+COPY . .          # Копируем всё сразу — кеш сбивается при любом изменении кода!
+RUN npm install   # Пересобирается каждый раз
+CMD ["node", "app.js"]
+```
+
+**✅ Хороший Dockerfile — быстрое кеширование:**
+```dockerfile
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./   # Сначала только зависимости
+RUN npm ci              # Этот слой кешируется, если package.json не менялся
+COPY . .                # Код копируем ПОСЛЕ установки зависимостей
+CMD ["node", "app.js"]
+```
+
+Теперь при изменении только кода приложения npm install не нужно запускать заново — его результат уже закеширован.
+
+## Инспектирование слоёв
+
+```bash
+# История слоёв образа с размерами
+docker history nginx
+
+IMAGE          CREATED      CREATED BY                                      SIZE
+a6bd71f48f68  3 weeks ago  /bin/sh -c #(nop) CMD ["nginx" "-g" "daemon...  0B
+<missing>      3 weeks ago  /bin/sh -c #(nop) EXPOSE 80                    0B
+<missing>      3 weeks ago  /bin/sh -c set -x && ... install nginx          45.4MB
+
+# Просмотр с полными командами
+docker history --no-trunc nginx
+
+# Дайвер для детального анализа (инструмент dive)
+dive nginx
+```
+
+## Оптимизация слоёв
+
+**Объединение RUN-команд:**
+```dockerfile
+# ❌ Три слоя по 10 MB каждый = 30 MB
+RUN apt-get update
+RUN apt-get install -y curl
+RUN rm -rf /var/lib/apt/lists/*
+
+# ✅ Один слой = ~10 MB (кеш apt удаляется в том же слое)
+RUN apt-get update && \
+    apt-get install -y curl && \
+    rm -rf /var/lib/apt/lists/*
+```
+
+**Использование .dockerignore:**
+```
+node_modules/
+.git/
+.env
+*.log
+dist/
+coverage/
+.DS_Store
+```
+
+## BuildKit и параллельная сборка
+
+Docker BuildKit (включён по умолчанию с Docker 23+) улучшает производительность:
+- Параллельная сборка независимых слоёв
+- Улучшенное кеширование (включая удалённый кеш)
+- Поддержка монтирования секретов и SSH
+
+```bash
+# Включить BuildKit для старых версий
+DOCKER_BUILDKIT=1 docker build .
+
+# Сборка с отображением прогресса
+docker build --progress=plain .
+```
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const [changed, setChanged] = React.useState('code');
+  const [building, setBuilding] = React.useState(false);
+  const [buildLog, setBuildLog] = React.useState([]);
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  const badDockerfile = [
+    { step: 1, instr: 'FROM node:20-alpine',    size: '130 MB', cached: true,  key: 'base' },
+    { step: 2, instr: 'WORKDIR /app',            size: '0 B',   cached: true,  key: 'workdir' },
+    { step: 3, instr: 'COPY . .',                size: '5 MB',  cached: false, key: 'code' },
+    { step: 4, instr: 'RUN npm install',         size: '50 MB', cached: false, key: 'npm' },
+    { step: 5, instr: 'CMD ["node", "app.js"]',  size: '0 B',   cached: false, key: 'cmd' },
+  ];
+
+  const goodDockerfile = [
+    { step: 1, instr: 'FROM node:20-alpine',        size: '130 MB', cached: true,  key: 'base' },
+    { step: 2, instr: 'WORKDIR /app',               size: '0 B',   cached: true,  key: 'workdir' },
+    { step: 3, instr: 'COPY package*.json ./',       size: '5 KB',  cached: true,  key: 'pkg' },
+    { step: 4, instr: 'RUN npm ci',                 size: '50 MB', cached: true,  key: 'npm' },
+    { step: 5, instr: 'COPY . .',                   size: '5 MB',  cached: false, key: 'code' },
+    { step: 6, instr: 'CMD ["node", "app.js"]',     size: '0 B',   cached: false, key: 'cmd' },
+  ];
+
+  const invalidatesFrom = {
+    code:    { bad: 3, good: 5 },
+    deps:    { bad: 3, good: 3 },
+    nothing: { bad: 99, good: 99 },
+  };
+
+  const labels = { code: 'Изменился код',   deps: 'Изменился package.json', nothing: 'Ничего не менялось' };
+
+  const getBadLayers = () => badDockerfile.map((l, i) => ({ ...l, cached: i < invalidatesFrom[changed].bad - 1 }));
+  const getGoodLayers = () => goodDockerfile.map((l, i) => ({ ...l, cached: i < invalidatesFrom[changed].good - 1 }));
+
+  const countRebuilt = (layers) => layers.filter(l => !l.cached).length;
+  const rebuildTime = (count) => count === 0 ? '< 1 сек' : count <= 2 ? \`~\${count * 5} сек\` : \`~\${count * 15} сек\`;
+
+  const LayerRow = ({ layer }) => (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      background: layer.cached ? green + '11' : red + '11',
+      border: \`1px solid \${layer.cached ? green : red}33\`,
+      borderRadius: 8, padding: '8px 12px', marginBottom: 4,
+    }}>
+      <span style={{ color: muted, fontSize: 11, width: 20, textAlign: 'right' }}>{layer.step}</span>
+      <code style={{ flex: 1, fontSize: 11, color: text, fontFamily: 'Monaco, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{layer.instr}</code>
+      <span style={{ color: muted, fontSize: 10, minWidth: 48, textAlign: 'right' }}>{layer.size}</span>
+      <span style={{
+        fontSize: 10, fontWeight: 700, minWidth: 60, textAlign: 'center',
+        color: layer.cached ? green : red,
+        background: (layer.cached ? green : red) + '22',
+        borderRadius: 4, padding: '2px 6px',
+      }}>{layer.cached ? '✓ КЕSH' : '↻ REBUILD'}</span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 8, fontSize: 20 }}>
+        🗂️ Визуализатор Кеша Слоёв
+      </h2>
+      <p style={{ textAlign: 'center', color: muted, fontSize: 13, marginBottom: 20 }}>
+        Выберите что изменилось — посмотрите, какие слои пересобираются
+      </p>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 24, flexWrap: 'wrap' }}>
+        {Object.entries(labels).map(([key, label]) => (
+          <button key={key} onClick={() => setChanged(key)} style={{
+            padding: '7px 16px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            background: changed === key ? docker : card,
+            color: changed === key ? '#fff' : muted,
+          }}>{label}</button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 16, maxWidth: 800, margin: '0 auto', flexWrap: 'wrap' }}>
+        {[['❌ Плохой порядок', getBadLayers()], ['✅ Правильный порядок', getGoodLayers()]].map(([title, layers]) => (
+          <div key={title} style={{ flex: 1, minWidth: 280 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12, color: title.includes('✅') ? green : red }}>{title}</div>
+            {layers.map(l => <LayerRow key={l.step} layer={l} />)}
+            <div style={{ marginTop: 12, background: card, borderRadius: 8, padding: 12 }}>
+              <div style={{ display: 'flex', justify: 'space-between', gap: 12 }}>
+                <div>
+                  <div style={{ color: muted, fontSize: 11 }}>Пересобирается слоёв</div>
+                  <div style={{ color: countRebuilt(layers) > 2 ? red : green, fontWeight: 700, fontSize: 18 }}>{countRebuilt(layers)}</div>
+                </div>
+                <div>
+                  <div style={{ color: muted, fontSize: 11 }}>Время сборки</div>
+                  <div style={{ color: countRebuilt(layers) > 2 ? red : green, fontWeight: 700, fontSize: 18 }}>{rebuildTime(countRebuilt(layers))}</div>
+                </div>
+                <div>
+                  <div style={{ color: muted, fontSize: 11 }}>Из кеша</div>
+                  <div style={{ color: docker, fontWeight: 700, fontSize: 18 }}>{layers.filter(l => l.cached).length}/{layers.length}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ maxWidth: 800, margin: '20px auto 0', background: card, borderRadius: 10, padding: 14, border: '1px solid #ffffff10' }}>
+        <div style={{ color: docker, fontWeight: 700, fontSize: 13, marginBottom: 8 }}>💡 Вывод:</div>
+        <div style={{ color: text, fontSize: 13, lineHeight: 1.6 }}>
+          {changed === 'code' && 'При изменении только кода приложения правильный порядок позволяет использовать кеш npm install. Экономия: десятки секунд при каждом билде.'}
+          {changed === 'deps' && 'При изменении package.json обе версии пересобирают npm install — это неизбежно. Но плохой вариант пересоберёт больше слоёв.'}
+          {changed === 'nothing' && 'Если ничего не изменилось — все слои берутся из кеша. Сборка занимает менее секунды!'}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

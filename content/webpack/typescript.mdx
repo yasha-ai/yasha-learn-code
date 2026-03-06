@@ -1,0 +1,437 @@
+import { Playground } from '../../components/Playground'
+
+# TypeScript в Webpack — два подхода к транспиляции
+
+Webpack поддерживает TypeScript через два основных подхода: **ts-loader** (официальный) и **babel-loader** с `@babel/preset-typescript`. Каждый имеет свои преимущества, и выбор зависит от требований проекта.
+
+## Подход 1: ts-loader
+
+`ts-loader` вызывает TypeScript compiler (`tsc`) напрямую:
+
+```bash
+npm install --save-dev typescript ts-loader
+```
+
+```js
+// webpack.config.js
+module: {
+  rules: [{
+    test: /\\.tsx?$/,
+    use: 'ts-loader',
+    exclude: /node_modules/,
+  }],
+},
+resolve: {
+  extensions: ['.tsx', '.ts', '.js'],
+},
+```
+
+### Конфигурация tsconfig.json
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "jsx": "react-jsx",
+    "outDir": "./dist",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@components/*": ["src/components/*"]
+    },
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
+```
+
+### ts-loader: transpileOnly режим
+
+По умолчанию ts-loader выполняет полную проверку типов при каждой компиляции — это медленно. Для разработки используйте `transpileOnly`:
+
+```js
+{
+  loader: 'ts-loader',
+  options: {
+    transpileOnly: true,     // Только транспиляция, без проверки типов
+    happyPackMode: true,     // Для parallel-webpack
+    experimentalWatchApi: true,
+  },
+}
+```
+
+Проверку типов перенесите в отдельный процесс:
+```bash
+npm install --save-dev fork-ts-checker-webpack-plugin
+```
+
+```js
+const ForkTsCheckerWebpackPlugin = require('fork-ts-checker-webpack-plugin');
+
+plugins: [
+  new ForkTsCheckerWebpackPlugin({
+    async: true, // Не блокировать сборку
+    typescript: {
+      diagnosticOptions: {
+        semantic: true,
+        syntactic: true,
+      },
+    },
+  }),
+]
+```
+
+## Подход 2: babel-loader + @babel/preset-typescript
+
+Babel просто **удаляет** TypeScript типы без проверки (только транспиляция):
+
+```bash
+npm install --save-dev @babel/preset-typescript babel-loader @babel/core @babel/preset-env
+```
+
+```js
+// webpack.config.js
+{
+  test: /\\.tsx?$/,
+  use: {
+    loader: 'babel-loader',
+    options: {
+      presets: [
+        '@babel/preset-env',
+        '@babel/preset-react',
+        '@babel/preset-typescript',
+      ],
+    },
+  },
+  exclude: /node_modules/,
+}
+```
+
+### Ограничения babel + TypeScript
+
+Babel не поддерживает некоторые TypeScript возможности:
+- `const enum` — используйте обычный `enum` или `declare const enum`
+- `namespace` — используйте `module`
+- `export =` / `import =` — используйте ES импорты
+- Декораторы (experimental) — нужен `@babel/plugin-proposal-decorators`
+
+## Сравнение подходов
+
+| Характеристика | ts-loader | babel-loader + TS |
+|----------------|-----------|-------------------|
+| Проверка типов | ✅ Полная | ❌ Отсутствует (нужен fork-ts-checker) |
+| Скорость | Медленнее | Быстрее |
+| Конфигурация | Проще | Гибче |
+| Декораторы | Нативная поддержка | Нужен плагин |
+| `const enum` | ✅ | ❌ |
+| React JSX | Нужен `tsx` | Нужен `preset-react` |
+
+## Path Aliases в Webpack
+
+Если в `tsconfig.json` настроены `paths`, нужно дублировать в `resolve.alias`:
+
+```js
+// tsconfig.json
+{
+  "paths": {
+    "@/*": ["src/*"],
+    "@api/*": ["src/api/*"]
+  }
+}
+
+// webpack.config.js
+const path = require('path');
+
+resolve: {
+  alias: {
+    '@': path.resolve(__dirname, 'src'),
+    '@api': path.resolve(__dirname, 'src/api'),
+  },
+}
+```
+
+Или использовать `tsconfig-paths-webpack-plugin`:
+```bash
+npm install --save-dev tsconfig-paths-webpack-plugin
+```
+
+```js
+const TsconfigPathsPlugin = require('tsconfig-paths-webpack-plugin');
+
+resolve: {
+  plugins: [new TsconfigPathsPlugin()],
+}
+// Автоматически читает paths из tsconfig.json!
+```
+
+## Declaration files для Webpack
+
+```ts
+// typings/declarations.d.ts — типы для нетипизированных ресурсов
+declare module '*.svg' { const content: string; export default content; }
+declare module '*.png' { const content: string; export default content; }
+declare module '*.css' { const styles: Record<string, string>; export default styles; }
+declare module '*.module.css' { const styles: Record<string, string>; export default styles; }
+```
+
+Ниже — интерактивный конструктор TypeScript + Webpack конфигурации.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const BLUE = '#3b82f6';
+
+type Approach = 'ts-loader' | 'babel';
+
+interface Config {
+  approach: Approach;
+  transpileOnly: boolean;
+  forkTsChecker: boolean;
+  strictMode: boolean;
+  jsx: boolean;
+  pathAliases: boolean;
+  tsconfigPaths: boolean;
+  declarations: boolean;
+  target: string;
+}
+
+function generateWebpackConfig(cfg: Config): string {
+  const lines: string[] = ["const path = require('path');"];
+  if (cfg.forkTsChecker) lines.push("const ForkTsCheckerPlugin = require('fork-ts-checker-webpack-plugin');");
+  if (cfg.pathAliases && cfg.tsconfigPaths) lines.push("const TsconfigPathsPlugin = require('tsconfig-paths-webpack-plugin');");
+  lines.push('');
+  lines.push('module.exports = {');
+  lines.push("  entry: './src/index.tsx',");
+  lines.push('  resolve: {');
+  if (cfg.pathAliases && !cfg.tsconfigPaths) {
+    lines.push("    extensions: ['.tsx', '.ts', '.js'],");
+    lines.push('    alias: {');
+    lines.push("      '@': path.resolve(__dirname, 'src'),");
+    lines.push('    },');
+  } else if (cfg.pathAliases && cfg.tsconfigPaths) {
+    lines.push("    extensions: ['.tsx', '.ts', '.js'],");
+    lines.push('    plugins: [new TsconfigPathsPlugin()],');
+  } else {
+    lines.push("    extensions: ['.tsx', '.ts', '.js'],");
+  }
+  lines.push('  },');
+  lines.push('  module: {');
+  lines.push('    rules: [{');
+  lines.push(\`      test: /\\\\.\${cfg.jsx ? '(ts|tsx)' : 'ts'}$/,\`);
+  if (cfg.approach === 'ts-loader') {
+    if (cfg.transpileOnly) {
+      lines.push('      use: {');
+      lines.push("        loader: 'ts-loader',");
+      lines.push('        options: {');
+      lines.push('          transpileOnly: true,');
+      lines.push('        },');
+      lines.push('      },');
+    } else {
+      lines.push("      use: 'ts-loader',");
+    }
+  } else {
+    lines.push('      use: {');
+    lines.push("        loader: 'babel-loader',");
+    lines.push('        options: {');
+    lines.push('          presets: [');
+    lines.push("            '@babel/preset-env',");
+    if (cfg.jsx) lines.push("            ['@babel/preset-react', { runtime: 'automatic' }],");
+    lines.push("            '@babel/preset-typescript',");
+    lines.push('          ],');
+    lines.push('        },');
+    lines.push('      },');
+  }
+  lines.push("      exclude: /node_modules/,");
+  lines.push('    }],');
+  lines.push('  },');
+  if (cfg.forkTsChecker) {
+    lines.push('  plugins: [');
+    lines.push('    new ForkTsCheckerPlugin({');
+    lines.push('      async: true,');
+    lines.push('    }),');
+    lines.push('  ],');
+  }
+  lines.push('};');
+  return lines.join('\\n');
+}
+
+function generateTsConfig(cfg: Config): string {
+  const lines = ['{', '  "compilerOptions": {'];
+  lines.push(\`    "target": "\${cfg.target}",\`);
+  lines.push('    "module": "ESNext",');
+  lines.push('    "moduleResolution": "bundler",');
+  if (cfg.strictMode) lines.push('    "strict": true,');
+  if (cfg.jsx) lines.push('    "jsx": "react-jsx",');
+  lines.push('    "esModuleInterop": true,');
+  lines.push('    "skipLibCheck": true,');
+  if (cfg.pathAliases) {
+    lines.push('    "baseUrl": ".",');
+    lines.push('    "paths": {');
+    lines.push('      "@/*": ["src/*"]');
+    lines.push('    }');
+  }
+  lines.push('  },');
+  lines.push('  "include": ["src/**/*"],');
+  lines.push('  "exclude": ["node_modules", "dist"]');
+  lines.push('}');
+  return lines.join('\\n');
+}
+
+function generatePackageInstall(cfg: Config): string {
+  const pkgs = ['typescript'];
+  if (cfg.approach === 'ts-loader') {
+    pkgs.push('ts-loader');
+  } else {
+    pkgs.push('babel-loader', '@babel/core', '@babel/preset-env', '@babel/preset-typescript');
+    if (cfg.jsx) pkgs.push('@babel/preset-react');
+  }
+  if (cfg.forkTsChecker) pkgs.push('fork-ts-checker-webpack-plugin');
+  if (cfg.tsconfigPaths) pkgs.push('tsconfig-paths-webpack-plugin');
+  return 'npm install --save-dev ' + pkgs.join(' ');
+}
+
+export default function App() {
+  const [cfg, setCfg] = useState<Config>({
+    approach: 'ts-loader', transpileOnly: true, forkTsChecker: true,
+    strictMode: true, jsx: true, pathAliases: true, tsconfigPaths: false,
+    declarations: true, target: 'ES2020',
+  });
+  const [activeTab, setActiveTab] = useState<'webpack' | 'tsconfig' | 'install'>('webpack');
+  const [copied, setCopied] = useState(false);
+
+  const update = (field: keyof Config, value: any) => setCfg(prev => ({ ...prev, [field]: value }));
+
+  const content = activeTab === 'webpack'
+    ? generateWebpackConfig(cfg)
+    : activeTab === 'tsconfig'
+    ? generateTsConfig(cfg)
+    : generatePackageInstall(cfg);
+
+  const copy = () => {
+    navigator.clipboard?.writeText(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const Toggle = ({ id, label, desc, disabled }: { id: keyof Config; label: string; desc?: string; disabled?: boolean }) => (
+    <div
+      onClick={() => !disabled && update(id, !cfg[id])}
+      style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', borderRadius: 8, cursor: disabled ? 'default' : 'pointer', background: cfg[id] && !disabled ? '#0f2744' : '#0a0f1e', border: \`1px solid \${cfg[id] && !disabled ? WEBPACK_COLOR : 'transparent'}\`, marginBottom: 6, opacity: disabled ? 0.4 : 1, transition: 'all 0.2s' }}
+    >
+      <div style={{ width: 14, height: 14, borderRadius: 3, border: \`2px solid \${disabled ? MUTED : WEBPACK_COLOR}\`, background: cfg[id] && !disabled ? WEBPACK_COLOR : 'transparent', flexShrink: 0, marginTop: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        {cfg[id] && !disabled && <span style={{ fontSize: 9, color: BG, fontWeight: 900 }}>✓</span>}
+      </div>
+      <div>
+        <div style={{ fontSize: 12, color: cfg[id] && !disabled ? TEXT : MUTED, fontWeight: cfg[id] && !disabled ? 700 : 400 }}>{label}</div>
+        {desc && <div style={{ fontSize: 10, color: MUTED }}>{desc}</div>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>📘 TypeScript + Webpack Config</div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Настройте TypeScript интеграцию и получите готовые конфиги</div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 24 }}>
+          {/* Settings */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {/* Approach */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+              <div style={{ fontSize: 12, color: MUTED, marginBottom: 10, textTransform: 'uppercase' }}>Подход</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                {(['ts-loader', 'babel'] as const).map(a => (
+                  <div key={a} onClick={() => update('approach', a)} style={{ padding: '10px', borderRadius: 8, cursor: 'pointer', textAlign: 'center', background: cfg.approach === a ? '#0f2744' : '#0a0f1e', border: \`2px solid \${cfg.approach === a ? WEBPACK_COLOR : 'transparent'}\`, transition: 'all 0.2s' }}>
+                    <div style={{ fontSize: 12, color: cfg.approach === a ? WEBPACK_COLOR : TEXT, fontWeight: cfg.approach === a ? 700 : 400 }}>{a === 'babel' ? 'babel-loader' : a}</div>
+                    <div style={{ fontSize: 9, color: MUTED, marginTop: 2 }}>{a === 'ts-loader' ? 'tsc интеграция' : 'strip types only'}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* TS Loader options */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+              <div style={{ fontSize: 12, color: MUTED, marginBottom: 10, textTransform: 'uppercase' }}>Настройки лоадера</div>
+              <Toggle id="transpileOnly" label="transpileOnly" desc="Без проверки типов (быстрее)" disabled={cfg.approach === 'babel'} />
+              <Toggle id="forkTsChecker" label="fork-ts-checker" desc="Проверка типов в отдельном процессе" />
+              <Toggle id="jsx" label="JSX / TSX" desc="Поддержка React JSX" />
+            </div>
+
+            {/* TS Config options */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+              <div style={{ fontSize: 12, color: MUTED, marginBottom: 10, textTransform: 'uppercase' }}>tsconfig</div>
+              <Toggle id="strictMode" label="strict: true" desc="Все строгие проверки типов" />
+              <Toggle id="pathAliases" label="Path Aliases" desc='@/* → src/*' />
+              <Toggle id="tsconfigPaths" label="tsconfig-paths-plugin" desc="Авто-синхронизация paths из tsconfig" disabled={!cfg.pathAliases} />
+              <Toggle id="declarations" label="Declaration files" desc="typings/declarations.d.ts" />
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>target</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {['ES5', 'ES2017', 'ES2020', 'ES2022', 'ESNext'].map(t => (
+                    <button key={t} onClick={() => update('target', t)} style={{ padding: '4px 8px', background: cfg.target === t ? ACCENT : '#0a0f1e', color: cfg.target === t ? BG : TEXT, border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 10, fontFamily: 'monospace', fontWeight: cfg.target === t ? 700 : 400 }}>{t}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Config output */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {([['webpack', 'webpack.config.js'], ['tsconfig', 'tsconfig.json'], ['install', 'npm install']] as const).map(([tab, label]) => (
+                <button key={tab} onClick={() => setActiveTab(tab)} style={{ flex: 1, padding: '8px', background: activeTab === tab ? WEBPACK_COLOR : CARD, color: activeTab === tab ? BG : TEXT, border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: activeTab === tab ? 700 : 400, fontFamily: 'monospace' }}>{label}</button>
+              ))}
+            </div>
+
+            <div style={{ background: CARD, borderRadius: 12, padding: 16, flex: 1 }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+                <button onClick={copy} style={{ padding: '4px 12px', background: copied ? SUCCESS : WEBPACK_COLOR, color: BG, border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11, fontFamily: 'monospace', fontWeight: 700 }}>
+                  {copied ? '✓' : '📋'} {copied ? 'Скопировано' : 'Копировать'}
+                </button>
+              </div>
+              <pre style={{ margin: 0, background: '#0a0f1e', borderRadius: 8, padding: '14px', fontSize: 12, lineHeight: 1.7, overflow: 'auto', maxHeight: 500, color: TEXT }}>
+                <code>{content}</code>
+              </pre>
+            </div>
+
+            {/* Comparison */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 14 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div style={{ background: cfg.approach === 'ts-loader' ? '#0f2744' : '#0a0f1e', borderRadius: 8, padding: 10, border: \`1px solid \${cfg.approach === 'ts-loader' ? WEBPACK_COLOR : '#334155'}\` }}>
+                  <div style={{ fontSize: 11, color: WEBPACK_COLOR, fontWeight: 700, marginBottom: 6 }}>ts-loader</div>
+                  <div style={{ fontSize: 10, color: SUCCESS }}>✓ Полная проверка типов</div>
+                  <div style={{ fontSize: 10, color: SUCCESS }}>✓ const enum</div>
+                  <div style={{ fontSize: 10, color: SUCCESS }}>✓ Декораторы</div>
+                  <div style={{ fontSize: 10, color: ACCENT }}>~ Медленнее без transpileOnly</div>
+                </div>
+                <div style={{ background: cfg.approach === 'babel' ? '#0f2744' : '#0a0f1e', borderRadius: 8, padding: 10, border: \`1px solid \${cfg.approach === 'babel' ? ACCENT : '#334155'}\` }}>
+                  <div style={{ fontSize: 11, color: ACCENT, fontWeight: 700, marginBottom: 6 }}>babel-loader</div>
+                  <div style={{ fontSize: 10, color: SUCCESS }}>✓ Быстрее</div>
+                  <div style={{ fontSize: 10, color: SUCCESS }}>✓ Гибкие Babel плагины</div>
+                  <div style={{ fontSize: 10, color: '#f87171' }}>✗ Нет проверки типов</div>
+                  <div style={{ fontSize: 10, color: '#f87171' }}>✗ Нет const enum</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
