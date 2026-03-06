@@ -1,0 +1,637 @@
+## 🖥️ Server-Side Rendering в Solid.js
+
+Яша, SSR в Solid — это одна из его сильнейших сторон. Solid умеет не просто отдавать HTML со сервера, а делать это **с потоковой передачей** (streaming)! HTML начинает приходить клиенту сразу, пока данные ещё загружаются. Плюс — гидратация работает практически без оверхеда. Разберём всё! 🚀
+
+---
+
+## 🏗️ Как работает SSR
+
+```
+Без SSR (SPA):
+1. Браузер получает пустой HTML
+2. Загружает JS бандл
+3. Выполняет JS → рендерит HTML
+4. Загружает данные
+5. Отображает контент
+❌ Медленный первый байт контента (FCP)
+
+С SSR:
+1. Сервер рендерит HTML сразу с данными
+2. Браузер получает готовый HTML → пользователь видит контент
+3. Загружается JS бандл
+4. Гидратация → приложение становится интерактивным
+✅ Быстрый FCP, хорошо для SEO
+```
+
+---
+
+## 📦 renderToString
+
+Самый простой способ — синхронный рендер в строку:
+
+```tsx
+import { renderToString } from 'solid-js/web';
+import App from './App';
+
+// На сервере (Node.js):
+const html = renderToString(() => <App />);
+
+// Полный HTML
+const fullPage = `
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>My App</title>
+  </head>
+  <body>
+    <div id="app">${html}</div>
+    <script src="/bundle.js"></script>
+  </body>
+</html>
+`;
+
+// Отправляем клиенту
+response.send(fullPage);
+```
+
+> ⚠️ `renderToString` **ждёт** завершения всех `createResource` перед рендером. Если данные грузятся долго — клиент ждёт весь HTML целиком.
+
+---
+
+## 🌊 renderToStream (Streaming SSR)
+
+Вот где Solid блистает — потоковый рендер:
+
+```tsx
+import { renderToStream } from 'solid-js/web';
+
+// Express.js
+app.get('/', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  const stream = renderToStream(() => <App />);
+
+  // Сначала отправляем shell (заголовок)
+  res.write(`
+    <!DOCTYPE html>
+    <html>
+      <head><title>App</title></head>
+      <body><div id="app">
+  `);
+
+  // Streaming: каждый Suspense boundary стримится отдельно!
+  stream.pipe(res);
+
+  stream.on('end', () => {
+    res.write(`</div><script src="/bundle.js"></script></body></html>`);
+    res.end();
+  });
+});
+```
+
+---
+
+## 💧 Как работает Streaming
+
+```tsx
+// С Suspense — каждый boundary стримится отдельно
+function App() {
+  return (
+    <div>
+      {/* Этот блок отправится сразу */}
+      <Header />
+
+      {/* Этот блок придёт когда загрузятся пользователи */}
+      <Suspense fallback={<UserSkeleton />}>
+        <UserList />
+      </Suspense>
+
+      {/* Этот блок придёт когда загрузятся продукты */}
+      <Suspense fallback={<ProductSkeleton />}>
+        <ProductList />
+      </Suspense>
+    </div>
+  );
+}
+
+// Порядок получения HTML клиентом:
+// 1. <Header /> — сразу
+// 2. <UserSkeleton /> — сразу (пока данные грузятся)
+// 3. Реальный <UserList /> — когда пришли данные
+// 4. <ProductSkeleton /> → <ProductList /> — независимо!
+```
+
+---
+
+## 🔄 Гидратация
+
+```tsx
+// entry-server.tsx — сервер
+import { renderToString } from 'solid-js/web';
+import App from './App';
+
+export async function render() {
+  return renderToString(() => <App />);
+}
+
+// entry-client.tsx — клиент (гидратация)
+import { hydrate } from 'solid-js/web';  // не render!
+import App from './App';
+
+// hydrate сопоставляет серверный HTML с компонентами
+// Минимальный JS overhead — только привязка обработчиков!
+hydrate(() => <App />, document.getElementById('app')!);
+```
+
+> ⚡ **Гидратация в Solid невероятно быстрая!** Solid не перерисовывает DOM — он только привязывает реактивность к уже существующим DOM-узлам. В React виртуальный DOM заново обходится весь. Solid — только нужные точки.
+
+---
+
+## 🔍 isServer — определение среды
+
+```tsx
+import { isServer } from 'solid-js/web';
+
+function Component() {
+  // Условный код в зависимости от среды
+  if (isServer) {
+    // Выполняется только на сервере
+    console.log('Это сервер');
+  }
+
+  // createEffect не выполняется на сервере!
+  createEffect(() => {
+    if (isServer) return; // Лишняя защита, но ясно показывает намерение
+    window.analytics.track('component-view');
+  });
+
+  return <div>Компонент</div>;
+}
+
+// Серверный код в утилитах
+export function getBaseUrl() {
+  if (isServer) {
+    return process.env.BASE_URL || 'http://localhost:3000';
+  }
+  return window.location.origin;
+}
+```
+
+---
+
+## 🔒 Серверный код — только на сервере
+
+```tsx
+// Это НЕ попадёт в браузер если использовать "use server"
+import { query } from '@solidjs/router';
+
+const getSecretData = query(async () => {
+  'use server';  // Директива — этот код только на сервере
+  const apiKey = process.env.PRIVATE_API_KEY; // Безопасно!
+  return fetch('https://private-api.com/data', {
+    headers: { Authorization: `Bearer ${apiKey}` }
+  }).then(r => r.json());
+}, 'secret');
+
+// Защищённый компонент
+function SecretPanel() {
+  const data = createAsync(() => getSecretData());
+  return (
+    <Suspense fallback={<p>Загрузка...</p>}>
+      <pre>{JSON.stringify(data(), null, 2)}</pre>
+    </Suspense>
+  );
+}
+```
+
+---
+
+## 🏝️ Island Architecture (экспериментально)
+
+```tsx
+// SolidStart Islands — только нужные компоненты гидрируются
+// Остальная страница — чистый HTML, никакого JS!
+
+// app.config.ts
+export default defineConfig({ islands: true });
+
+// components/Counter.tsx — "остров" интерактивности
+// Этот компонент получит свой JS bundle
+export default function Counter() {
+  const [count, setCount] = createSignal(0);
+  return <button onClick={() => setCount(c => c + 1)}>{count()}</button>;
+}
+
+// src/routes/index.tsx
+import Counter from '~/components/Counter';
+
+export default function Home() {
+  return (
+    <main>
+      {/* Статичный HTML — никакого JS */}
+      <h1>Заголовок</h1>
+      <p>Статичный текст...</p>
+
+      {/* "Остров" — получит JS для интерактивности */}
+      <Counter />
+    </main>
+  );
+}
+```
+
+---
+
+## 🎮 Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, CSSProperties } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const PURPLE = '#a78bfa';
+
+type Demo = 'ssr-flow' | 'streaming' | 'hydration' | 'islands';
+
+// ---- SSR Flow Demo ----
+function SSRFlowDemo() {
+  const [step, setStep] = useState(0);
+  const [running, setRunning] = useState(false);
+
+  const steps = [
+    { label: 'Запрос от браузера', icon: '🌐', desc: 'GET / HTTP/1.1', color: SOLID_LIGHT },
+    { label: 'Сервер: renderToString()', icon: '⚙️', desc: 'Solid рендерит компоненты', color: ORANGE },
+    { label: 'Загрузка данных', icon: '💾', desc: 'createResource → await fetch()', color: PURPLE },
+    { label: 'Генерация HTML', icon: '📄', desc: '<div id="app">...</div>', color: SOLID_BLUE },
+    { label: 'Отправка клиенту', icon: '📨', desc: 'res.send(fullHtml)', color: GREEN },
+    { label: 'Загрузка JS бандла', icon: '📦', desc: 'bundle.js (гидратация)', color: ORANGE },
+    { label: 'Гидратация', icon: '💧', desc: 'hydrate() — привязка реактивности', color: SOLID_BLUE },
+    { label: 'Приложение активно!', icon: '✅', desc: 'Interactive!', color: GREEN },
+  ];
+
+  const run = async () => {
+    setRunning(true);
+    setStep(0);
+    for (let i = 1; i <= steps.length; i++) {
+      await new Promise(r => setTimeout(r, 400));
+      setStep(i);
+    }
+    setRunning(false);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        Полный цикл SSR: сервер → клиент → гидратация
+      </p>
+      <button onClick={run} disabled={running} style={{
+        padding: '10px 20px', background: running ? MUTED : SOLID_BLUE,
+        color: TEXT, border: 'none', borderRadius: 8, cursor: running ? 'not-allowed' : 'pointer',
+        fontWeight: 600, fontSize: 14,
+      }}>
+        {running ? '⏳ Выполняется...' : '▶ Симулировать SSR'}
+      </button>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {steps.map((s, i) => (
+          <div key={i} style={{
+            display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px',
+            background: step > i ? s.color + '11' : CARD,
+            borderRadius: 8, border: \`1px solid \${step > i ? s.color + '44' : BORDER}\`,
+            opacity: step > i ? 1 : 0.4,
+            transition: 'all 0.3s',
+          }}>
+            <span style={{ fontSize: 20, width: 28, textAlign: 'center' }}>{s.icon}</span>
+            <div>
+              <div style={{ color: step > i ? s.color : MUTED, fontSize: 13, fontWeight: 600 }}>{s.label}</div>
+              <div style={{ color: MUTED, fontSize: 11 }}>{s.desc}</div>
+            </div>
+            {step > i && <span style={{ marginLeft: 'auto', color: s.color, fontSize: 12 }}>✓</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---- Streaming Demo ----
+function StreamingDemo() {
+  const [streaming, setStreaming] = useState(false);
+  const [chunks, setChunks] = useState<{ id: string; content: string; delay: number; color: string }[]>([]);
+  const [arrived, setArrived] = useState<Set<string>>(new Set());
+
+  const streamChunks = [
+    { id: 'header', content: '<Header /> — отправлен сразу', delay: 100, color: GREEN },
+    { id: 'nav', content: '<Nav /> — отправлен сразу', delay: 200, color: GREEN },
+    { id: 'skeleton1', content: '<UserSkeleton /> — пока грузятся данные', delay: 300, color: ORANGE },
+    { id: 'skeleton2', content: '<ProductSkeleton /> — параллельно', delay: 350, color: ORANGE },
+    { id: 'users', content: '<UserList /> — данные готовы! (1.2s)', delay: 1200, color: SOLID_BLUE },
+    { id: 'products', content: '<ProductList /> — данные готовы! (1.8s)', delay: 1800, color: SOLID_BLUE },
+    { id: 'footer', content: '<Footer /> — последний чанк', delay: 1900, color: GREEN },
+  ];
+
+  const run = async () => {
+    setStreaming(true);
+    setArrived(new Set());
+    setChunks(streamChunks);
+    for (const chunk of streamChunks) {
+      await new Promise(r => setTimeout(r, chunk.delay - (streamChunks[streamChunks.indexOf(chunk) - 1]?.delay || 0)));
+      setArrived(p => new Set([...p, chunk.id]));
+    }
+    setStreaming(false);
+  };
+
+  const reset = () => { setChunks([]); setArrived(new Set()); };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>renderToStream</strong> — чанки приходят по мере готовности
+      </p>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={run} disabled={streaming} style={{
+          flex: 1, padding: '10px', background: streaming ? MUTED : SOLID_BLUE, color: TEXT,
+          border: 'none', borderRadius: 8, cursor: streaming ? 'not-allowed' : 'pointer', fontWeight: 600,
+        }}>
+          {streaming ? '📡 Стриминг...' : '▶ Стримить HTML'}
+        </button>
+        <button onClick={reset} style={{
+          padding: '10px 16px', background: CARD, color: MUTED,
+          border: \`1px solid \${BORDER}\`, borderRadius: 8, cursor: 'pointer',
+        }}>↺</button>
+      </div>
+      {chunks.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {chunks.map((chunk) => (
+            <div key={chunk.id} style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+              background: arrived.has(chunk.id) ? chunk.color + '11' : CARD,
+              borderRadius: 6, border: \`1px solid \${arrived.has(chunk.id) ? chunk.color + '55' : BORDER}\`,
+              transition: 'all 0.4s',
+              opacity: arrived.has(chunk.id) ? 1 : 0.3,
+            }}>
+              <div style={{
+                width: 8, height: 8, borderRadius: '50%',
+                background: arrived.has(chunk.id) ? chunk.color : BORDER,
+                transition: 'background 0.3s',
+                flexShrink: 0,
+              }} />
+              <span style={{ fontSize: 12, color: arrived.has(chunk.id) ? chunk.color : MUTED }}>
+                {chunk.content}
+              </span>
+              {arrived.has(chunk.id) && (
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: MUTED }}>+{chunk.delay}ms</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- Hydration Demo ----
+function HydrationDemo() {
+  const [phase, setPhase] = useState<'server' | 'loading' | 'hydrated'>('server');
+  const [counter, setCounter] = useState(0);
+  const [hydrating, setHydrating] = useState(false);
+  const htmlOutput = \`<div id="app">
+  <h1>Заголовок</h1>
+  <p>Статичный текст</p>
+  <button>
+    Счётчик: 0
+  </button>
+</div>\`;
+
+  const hydrate = async () => {
+    setHydrating(true);
+    setPhase('loading');
+    await new Promise(r => setTimeout(r, 1000));
+    setPhase('hydrated');
+    setHydrating(false);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>hydrate()</strong> — привязка реактивности к серверному HTML
+      </p>
+      {/* HTML вывод */}
+      <div style={{ padding: '12px 14px', background: BG, borderRadius: 8, border: \`1px solid \${BORDER}\`, fontFamily: 'monospace', fontSize: 11, color: MUTED }}>
+        <div style={{ color: GREEN, marginBottom: 6 }}>// Серверный HTML:</div>
+        <pre style={{ margin: 0, color: TEXT }}>{htmlOutput}</pre>
+      </div>
+      {/* Интерактивный компонент */}
+      <div style={{
+        padding: 20, background: CARD, borderRadius: 8,
+        border: \`2px solid \${phase === 'hydrated' ? GREEN : phase === 'loading' ? ORANGE : BORDER}\`,
+        textAlign: 'center', transition: 'border-color 0.3s',
+      }}>
+        <h3 style={{ color: TEXT, margin: '0 0 8px', fontSize: 16 }}>Компонент</h3>
+        <p style={{ color: MUTED, fontSize: 13, margin: '0 0 16px' }}>Статичный текст</p>
+        <button
+          onClick={() => phase === 'hydrated' && setCounter(c => c + 1)}
+          style={{
+            padding: '10px 24px',
+            background: phase === 'hydrated' ? SOLID_BLUE : MUTED,
+            color: TEXT, border: 'none', borderRadius: 8,
+            cursor: phase === 'hydrated' ? 'pointer' : 'not-allowed',
+            fontWeight: 600, fontSize: 14,
+            transition: 'background 0.3s',
+          }}
+        >
+          {phase === 'server' ? 'Счётчик: 0 (не работает)' :
+           phase === 'loading' ? '⏳ Гидратация...' :
+           \`Счётчик: \${counter} ✅\`}
+        </button>
+        <div style={{ marginTop: 8, fontSize: 12, color: phase === 'hydrated' ? GREEN : MUTED }}>
+          {phase === 'server' ? '⚠️ JS не загружен' :
+           phase === 'loading' ? '📦 Загрузка bundle...' :
+           '✅ Интерактивен!'}
+        </div>
+      </div>
+      <button onClick={hydrate} disabled={hydrating || phase === 'hydrated'} style={{
+        padding: '10px', background: phase === 'hydrated' ? GREEN : SOLID_BLUE, color: TEXT,
+        border: 'none', borderRadius: 8, cursor: hydrating || phase === 'hydrated' ? 'not-allowed' : 'pointer',
+        fontWeight: 600,
+      }}>
+        {phase === 'hydrated' ? '✅ Уже гидратирован' : hydrating ? '⏳...' : '💧 Гидратировать'}
+      </button>
+      {phase === 'hydrated' && (
+        <button onClick={() => { setPhase('server'); setCounter(0); }} style={{
+          padding: '8px', background: CARD, color: MUTED,
+          border: \`1px solid \${BORDER}\`, borderRadius: 8, cursor: 'pointer', fontSize: 12,
+        }}>↺ Сброс</button>
+      )}
+    </div>
+  );
+}
+
+// ---- Islands Demo ----
+function IslandsDemo() {
+  const [hydrated, setHydrated] = useState<Set<string>>(new Set());
+  const [counter, setCounter] = useState(0);
+  const [likes, setLikes] = useState(42);
+  const [subscribed, setSubscribed] = useState(false);
+
+  const toggle = (id: string) => setHydrated(p => {
+    const n = new Set(p);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>Islands Architecture</strong> — только нужные компоненты интерактивны
+      </p>
+      <div style={{ fontSize: 12, color: MUTED }}>
+        Кликни на "остров" чтобы гидратировать → он станет интерактивным
+      </div>
+      {/* Static parts */}
+      {[
+        { label: '📄 Статичный заголовок', type: 'static' },
+        { label: '📝 Статичный текст статьи...', type: 'static' },
+      ].map((item, i) => (
+        <div key={i} style={{ padding: '10px 14px', background: BG, borderRadius: 8, border: \`1px solid \${BORDER}\`, color: MUTED, fontSize: 13 }}>
+          {item.label} <span style={{ color: BORDER, fontSize: 11 }}>(нет JS)</span>
+        </div>
+      ))}
+      {/* Islands */}
+      <div onClick={() => toggle('counter')} style={{
+        padding: '12px 16px', background: hydrated.has('counter') ? SOLID_BLUE + '11' : CARD,
+        borderRadius: 8, border: \`2px solid \${hydrated.has('counter') ? SOLID_BLUE : ORANGE + '66'}\`,
+        cursor: 'pointer', transition: 'all 0.2s',
+      }}>
+        <div style={{ fontSize: 11, color: hydrated.has('counter') ? SOLID_BLUE : ORANGE, marginBottom: 6 }}>
+          🏝️ ISLAND: Counter {hydrated.has('counter') ? '(активен)' : '(кликни для гидратации)'}
+        </div>
+        {hydrated.has('counter') ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <button onClick={e => { e.stopPropagation(); setCounter(c => c - 1); }} style={{ padding: '6px 12px', background: CARD, color: TEXT, border: \`1px solid \${BORDER}\`, borderRadius: 6, cursor: 'pointer' }}>−</button>
+            <span style={{ color: TEXT, fontWeight: 700, fontSize: 18 }}>{counter}</span>
+            <button onClick={e => { e.stopPropagation(); setCounter(c => c + 1); }} style={{ padding: '6px 12px', background: SOLID_BLUE, color: TEXT, border: 'none', borderRadius: 6, cursor: 'pointer' }}>+</button>
+          </div>
+        ) : (
+          <div style={{ color: MUTED, fontSize: 13 }}>Счётчик: 0 (статичный)</div>
+        )}
+      </div>
+      <div onClick={() => toggle('social')} style={{
+        padding: '12px 16px', background: hydrated.has('social') ? GREEN + '11' : CARD,
+        borderRadius: 8, border: \`2px solid \${hydrated.has('social') ? GREEN : ORANGE + '66'}\`,
+        cursor: 'pointer', transition: 'all 0.2s',
+      }}>
+        <div style={{ fontSize: 11, color: hydrated.has('social') ? GREEN : ORANGE, marginBottom: 6 }}>
+          🏝️ ISLAND: Social Buttons {hydrated.has('social') ? '(активен)' : '(кликни для гидратации)'}
+        </div>
+        {hydrated.has('social') ? (
+          <div style={{ display: 'flex', gap: 8 }} onClick={e => e.stopPropagation()}>
+            <button onClick={() => setLikes(l => l + 1)} style={{ padding: '6px 14px', background: likes > 42 ? '#ef444422' : CARD, color: '#ef4444', border: '1px solid #ef444444', borderRadius: 6, cursor: 'pointer' }}>❤️ {likes}</button>
+            <button onClick={() => setSubscribed(s => !s)} style={{ padding: '6px 14px', background: subscribed ? GREEN + '22' : CARD, color: subscribed ? GREEN : MUTED, border: \`1px solid \${subscribed ? GREEN + '44' : BORDER}\`, borderRadius: 6, cursor: 'pointer' }}>
+              {subscribed ? '✓ Подписан' : '+ Подписаться'}
+            </button>
+          </div>
+        ) : (
+          <div style={{ color: MUTED, fontSize: 13 }}>❤️ 42 | Подписаться</div>
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: MUTED }}>
+        JS отправляется только для островов: <strong style={{ color: GREEN }}>{hydrated.size}</strong> из 2 гидратировано
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('ssr-flow');
+  const tabs: { id: Demo; label: string }[] = [
+    { id: 'ssr-flow', label: '🔄 SSR Flow' },
+    { id: 'streaming', label: '🌊 Streaming' },
+    { id: 'hydration', label: '💧 Hydration' },
+    { id: 'islands', label: '🏝️ Islands' },
+  ];
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 500, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 22 }}>SSR в Solid.js</h2>
+        <p style={{ color: MUTED, fontSize: 13, margin: '0 0 20px' }}>renderToString, streaming, hydration, islands</p>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 20, flexWrap: 'wrap' }}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setDemo(t.id)} style={{
+              padding: '7px 12px',
+              background: demo === t.id ? SOLID_BLUE : CARD,
+              color: demo === t.id ? TEXT : MUTED,
+              border: \`1px solid \${demo === t.id ? SOLID_BLUE : BORDER}\`,
+              borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            }}>{t.label}</button>
+          ))}
+        </div>
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, border: \`1px solid \${BORDER}\` }}>
+          {demo === 'ssr-flow' && <SSRFlowDemo />}
+          {demo === 'streaming' && <StreamingDemo />}
+          {demo === 'hydration' && <HydrationDemo />}
+          {demo === 'islands' && <IslandsDemo />}
+        </div>
+        <div style={{ marginTop: 16, padding: '12px 16px', background: CARD, borderRadius: 8, border: \`1px solid \${BORDER}\` }}>
+          <p style={{ color: MUTED, fontSize: 12, margin: 0 }}>
+            💡 <strong style={{ color: TEXT }}>Solid SSR:</strong> renderToStream + Suspense = прогрессивная загрузка.
+            Гидратация практически без overhead — не перерисовывает DOM!
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## 🚨 Частые ошибки
+
+```tsx
+// ❌ ОШИБКА: обращение к browser API во время SSR
+function Component() {
+  const width = window.innerWidth; // window не существует на сервере!
+  return <div>Ширина: {width}</div>;
+}
+
+// ✅ ПРАВИЛЬНО: проверяй isServer
+function Component() {
+  const [width, setWidth] = createSignal(0);
+
+  onMount(() => {
+    // onMount не запускается на сервере!
+    setWidth(window.innerWidth);
+  });
+
+  return <div>Ширина: {width() || 'SSR'}</div>;
+}
+
+// ❌ ОШИБКА: разное состояние на сервере и клиенте (hydration mismatch)
+function Random() {
+  return <div>{Math.random()}</div>; // Разные числа на сервере и клиенте!
+}
+
+// ✅ ПРАВИЛЬНО: детерминированный рендер
+function Random() {
+  const id = useId(); // стабильный ID
+  return <div>{id}</div>;
+}
+```
+
+---
+
+## 🎯 Итоги
+
+- **`renderToString`** — синхронный SSR, ждёт все данные
+- **`renderToStream`** — потоковый SSR, HTML приходит по частям с `Suspense`
+- **`hydrate()`** — вместо `render()` на клиенте, привязывает реактивность к серверному HTML
+- **`isServer`** — флаг для условного кода
+- **`createEffect` не выполняется на сервере** — только `createResource` и синхронные вычисления
+- **Islands Architecture** — минимальный JS: интерактивны только "острова"
+- **`"use server"`** — серверные функции в SolidStart, безопасно передают данные клиенту

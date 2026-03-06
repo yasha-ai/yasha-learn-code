@@ -1,0 +1,621 @@
+import { Playground } from '../../components/Playground'
+
+# Resources: createResource и асинхронные данные
+
+`createResource` — встроенный примитив Solid для работы с асинхронными данными. Он связывает **сигнал-источник** с **async-функцией** и автоматически управляет состояниями загрузки, данных и ошибок.
+
+## Базовое использование
+
+```tsx
+import { createResource } from 'solid-js';
+
+// Простая загрузка данных
+const [user] = createResource(async () => {
+  const res = await fetch('/api/user/1');
+  return res.json() as Promise<User>;
+});
+
+// Состояния ресурса:
+user()        // undefined (загружается) | User (готово)
+user.loading  // true | false
+user.error    // undefined | Error
+user.state    // 'unresolved' | 'pending' | 'ready' | 'refreshing' | 'errored'
+```
+
+## Source сигнал — реактивные запросы
+
+Первый аргумент — **source**: если он изменится, ресурс автоматически перезапустится:
+
+```tsx
+import { createSignal, createResource } from 'solid-js';
+
+function UserProfile() {
+  const [userId, setUserId] = createSignal(1);
+
+  // userId() — source: при смене userId запрос повторится
+  const [user] = createResource(userId, async (id) => {
+    const res = await fetch(\`/api/users/\${id}\`);
+    if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
+    return res.json() as Promise<User>;
+  });
+
+  return (
+    <div>
+      <Show when={user.loading}>
+        <Spinner />
+      </Show>
+      <Show when={user.error}>
+        <ErrorMessage message={user.error.message} />
+      </Show>
+      <Show when={user()}>
+        {(u) => <UserCard user={u()} />}
+      </Show>
+      <button onClick={() => setUserId(id => id + 1)}>Следующий</button>
+    </div>
+  );
+}
+```
+
+## Параметры source — объект для сложных запросов
+
+```tsx
+function SearchResults() {
+  const [query, setQuery] = createSignal('');
+  const [page, setPage] = createSignal(1);
+
+  // Источник — объект. Ресурс обновится при изменении query или page
+  const [results] = createResource(
+    () => ({ q: query(), page: page() }),
+    async ({ q, page }) => {
+      if (!q.trim()) return { items: [], total: 0 };
+      const res = await fetch(\`/api/search?q=\${q}&page=\${page}\`);
+      return res.json();
+    }
+  );
+
+  return (
+    <div>
+      <input value={query()} onInput={e => {
+        setQuery(e.target.value);
+        setPage(1); // Сброс страницы при новом запросе
+      }} />
+      <Suspense fallback={<Skeleton />}>
+        <For each={results()?.items}>
+          {item => <ResultCard item={item} />}
+        </For>
+      </Suspense>
+    </div>
+  );
+}
+```
+
+## refetch — ручное обновление
+
+```tsx
+function Dashboard() {
+  const [data, { refetch, mutate }] = createResource(fetchDashboardData);
+
+  // refetch() — повторяет запрос
+  // mutate(newValue) — оптимистично обновляет значение без запроса
+
+  const handleRefresh = () => refetch();
+
+  const handleOptimisticUpdate = () => {
+    // Обновляем UI сразу, без ожидания сервера
+    mutate(prev => prev ? { ...prev, count: prev.count + 1 } : prev);
+    // Затем синхронизируемся с сервером
+    fetch('/api/increment', { method: 'POST' }).catch(() => refetch());
+  };
+
+  return (
+    <div>
+      <button onClick={handleRefresh} disabled={data.loading}>
+        {data.loading ? 'Обновление...' : '🔄 Обновить'}
+      </button>
+      <Show when={data()}>{d => <Stats data={d()} />}</Show>
+    </div>
+  );
+}
+```
+
+## Состояния ресурса
+
+```tsx
+const [resource] = createResource(source, fetcher);
+
+// Полная обработка всех состояний
+function ResourceView() {
+  return (
+    <Switch>
+      <Match when={resource.state === 'pending'}>
+        <LoadingSpinner />
+      </Match>
+      <Match when={resource.state === 'errored'}>
+        <ErrorBoundary error={resource.error} />
+      </Match>
+      <Match when={resource.state === 'ready' || resource.state === 'refreshing'}>
+        <div class={resource.state === 'refreshing' ? 'opacity-50' : ''}>
+          <DataView data={resource()} />
+          {resource.state === 'refreshing' && <RefreshIndicator />}
+        </div>
+      </Match>
+    </Switch>
+  );
+}
+```
+
+## Интеграция с Suspense
+
+```tsx
+// createResource автоматически интегрируется с <Suspense>
+function App() {
+  return (
+    <Suspense fallback={<PageSkeleton />}>
+      {/* UserProfile "приостановит" рендер до загрузки */}
+      <UserProfile />
+    </Suspense>
+  );
+}
+
+function UserProfile() {
+  // При использовании внутри Suspense — не нужно проверять loading вручную
+  const [user] = createResource(fetchUser);
+  // user() будет undefined только до первой загрузки,
+  // затем Suspense заменит компонент fallback'ом
+  return <div>{user()!.name}</div>;
+}
+```
+
+## Серверные ресурсы (SolidStart)
+
+```tsx
+import { createServerResource$ } from 'solid-start/server';
+
+// Выполняется ТОЛЬКО на сервере
+const [serverData] = createResource(
+  () => ({ userId: props.userId }),
+  createServerResource$(async ({ userId }) => {
+    // Прямой доступ к базе данных — без HTTP-запросов
+    return db.users.findById(userId);
+  })
+);
+```
+
+## Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useCallback, useRef } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+interface User { id: number; name: string; role: string; score: number; avatar: string; }
+interface SearchResult { id: number; title: string; type: 'article' | 'video' | 'course'; }
+
+type ResourceState = 'idle' | 'pending' | 'ready' | 'refreshing' | 'errored';
+
+interface Resource<T> {
+  data: T | undefined;
+  state: ResourceState;
+  error: string | undefined;
+}
+
+const MOCK_USERS: User[] = [
+  { id: 1, name: 'Алиса Иванова', role: 'Senior Dev', score: 980, avatar: '👩‍💻' },
+  { id: 2, name: 'Борис Петров', role: 'Junior Dev', score: 450, avatar: '👨‍🎓' },
+  { id: 3, name: 'Вера Сидорова', role: 'Lead Dev', score: 1240, avatar: '🧑‍🚀' },
+  { id: 4, name: 'Геннадий Козлов', role: 'DevOps', score: 670, avatar: '🔧' },
+  { id: 0, name: '???', role: 'Unknown', score: 0, avatar: '👾' },
+];
+
+const MOCK_SEARCH: Record<string, SearchResult[]> = {
+  solid: [
+    { id: 1, title: 'Введение в Solid.js', type: 'article' },
+    { id: 2, title: 'Сигналы и реактивность', type: 'video' },
+    { id: 3, title: 'Полный курс Solid.js', type: 'course' },
+  ],
+  react: [
+    { id: 4, title: 'React vs Solid сравнение', type: 'article' },
+    { id: 5, title: 'Миграция с React на Solid', type: 'video' },
+  ],
+  state: [
+    { id: 6, title: 'Управление состоянием', type: 'article' },
+    { id: 7, title: 'createStore глубокое погружение', type: 'video' },
+    { id: 8, title: 'Patterns курс', type: 'course' },
+  ],
+};
+
+function useMockResource<T>(
+  fetcher: (() => Promise<T>) | null,
+  delay = 1200
+): [Resource<T>, { refetch: () => void; mutate: (fn: (prev: T | undefined) => T) => void }] {
+  const [resource, setResource] = useState<Resource<T>>({ data: undefined, state: 'idle', error: undefined });
+  const abortRef = useRef<AbortController | null>(null);
+  const fetchRef = useRef(fetcher);
+  fetchRef.current = fetcher;
+
+  const execute = useCallback((isRefetch = false) => {
+    if (!fetchRef.current) return;
+    if (abortRef.current) abortRef.current.abort();
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
+    setResource(r => ({ ...r, state: isRefetch && r.data !== undefined ? 'refreshing' : 'pending', error: undefined }));
+
+    fetchRef.current().then(data => {
+      if (signal.aborted) return;
+      setResource({ data, state: 'ready', error: undefined });
+    }).catch(err => {
+      if (signal.aborted) return;
+      setResource(r => ({ ...r, state: 'errored', error: err.message || 'Ошибка загрузки' }));
+    });
+  }, [delay]);
+
+  useEffect(() => {
+    if (fetcher) execute();
+    return () => { abortRef.current?.abort(); };
+  }, [fetcher ? fetcher.toString() : null]);
+
+  const refetch = () => execute(true);
+  const mutate = (fn: (prev: T | undefined) => T) =>
+    setResource(r => ({ ...r, data: fn(r.data) }));
+
+  return [resource, { refetch, mutate }];
+}
+
+type TabKey = 'basic' | 'source' | 'search';
+
+const TYPE_ICONS = { article: '📄', video: '🎬', course: '📚' };
+const TYPE_COLORS = { article: SOLID_LIGHT, video: ORANGE, course: GREEN };
+
+export default function App() {
+  const [tab, setTab] = useState<TabKey>('basic');
+  const [userId, setUserId] = useState(1);
+  const [query, setQuery] = useState('');
+  const [queryInput, setQueryInput] = useState('');
+  const [forceError, setForceError] = useState(false);
+  const [fetchDelay, setFetchDelay] = useState(1200);
+
+  // Basic resource
+  const userFetcher = useCallback(() => new Promise<User>((resolve, reject) => {
+    setTimeout(() => {
+      if (forceError) { reject(new Error('HTTP 500: Ошибка сервера')); return; }
+      const user = MOCK_USERS.find(u => u.id === userId) ?? MOCK_USERS[0];
+      resolve(user);
+    }, fetchDelay);
+  }), [userId, forceError, fetchDelay]);
+
+  const [userResource, { refetch: refetchUser, mutate: mutateUser }] = useMockResource(tab === 'basic' || tab === 'source' ? userFetcher : null, fetchDelay);
+
+  // Search resource
+  const searchFetcher = useCallback(() => new Promise<SearchResult[]>((resolve) => {
+    setTimeout(() => {
+      const key = Object.keys(MOCK_SEARCH).find(k => query.toLowerCase().includes(k));
+      resolve(key ? MOCK_SEARCH[key] : []);
+    }, 800);
+  }), [query]);
+
+  const [searchResource] = useMockResource(tab === 'search' && query ? searchFetcher : null, 800);
+
+  const STATE_COLORS: Record<ResourceState, string> = {
+    idle: MUTED, pending: SOLID_LIGHT, ready: GREEN,
+    refreshing: ORANGE, errored: '#f87171',
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 16,
+      fontFamily: "'Inter', sans-serif", color: TEXT }}>
+      <div style={{ maxWidth: 560, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 18, textAlign: 'center' }}>
+          createResource — Solid.js
+        </h2>
+        <p style={{ color: MUTED, fontSize: 12, textAlign: 'center', margin: '0 0 14px' }}>
+          Async данные · Source сигнал · refetch · mutate
+        </p>
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 5, marginBottom: 14 }}>
+          {([
+            { key: 'basic', label: '📡 Базовый' },
+            { key: 'source', label: '🔗 Source' },
+            { key: 'search', label: '🔍 Search' },
+          ] as const).map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              flex: 1, padding: '7px 0', borderRadius: 8, cursor: 'pointer', fontSize: 13,
+              border: \`1px solid \${tab === t.key ? SOLID_BLUE : BORDER}\`,
+              background: tab === t.key ? SOLID_BLUE : CARD,
+              color: tab === t.key ? '#fff' : MUTED, fontWeight: 600,
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {/* BASIC TAB */}
+        {tab === 'basic' && (
+          <div>
+            <div style={{ background: CARD, borderRadius: 10, padding: 14,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ color: MUTED, fontSize: 12 }}>Задержка:</span>
+                {[400, 1200, 2500].map(d => (
+                  <button key={d} onClick={() => setFetchDelay(d)} style={{
+                    padding: '3px 10px', borderRadius: 5, cursor: 'pointer', fontSize: 11,
+                    border: \`1px solid \${fetchDelay === d ? SOLID_BLUE : BORDER}\`,
+                    background: fetchDelay === d ? SOLID_BLUE + '22' : 'transparent',
+                    color: fetchDelay === d ? SOLID_LIGHT : MUTED,
+                  }}>{d}мс</button>
+                ))}
+                <div style={{ flex: 1 }} />
+                <button onClick={() => setForceError(e => !e)} style={{
+                  padding: '3px 10px', borderRadius: 5, cursor: 'pointer', fontSize: 11,
+                  border: \`1px solid \${forceError ? '#ef4444' : BORDER}\`,
+                  background: forceError ? '#ef444422' : 'transparent',
+                  color: forceError ? '#f87171' : MUTED,
+                }}>
+                  {forceError ? '❌ Ошибка ON' : '✅ Ошибка OFF'}
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => refetchUser()} disabled={userResource.state === 'pending'} style={{
+                  flex: 1, padding: '8px 0', borderRadius: 8, cursor: 'pointer',
+                  border: \`1px solid \${SOLID_BLUE}\`, background: SOLID_BLUE + '22',
+                  color: SOLID_LIGHT, fontSize: 13, fontWeight: 600,
+                  opacity: userResource.state === 'pending' ? 0.5 : 1,
+                }}>🔄 refetch()</button>
+                <button onClick={() => mutateUser(prev => prev ? { ...prev, score: prev.score + 10 } : prev)} style={{
+                  flex: 1, padding: '8px 0', borderRadius: 8, cursor: 'pointer',
+                  border: \`1px solid \${GREEN}\`, background: GREEN + '11',
+                  color: GREEN, fontSize: 13, fontWeight: 600,
+                }}>⚡ mutate(score + 10)</button>
+              </div>
+            </div>
+
+            {/* Resource state badge */}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+              <span style={{ color: MUTED, fontSize: 12 }}>resource.state:</span>
+              <span style={{
+                padding: '3px 10px', borderRadius: 99, fontSize: 12, fontWeight: 700,
+                background: STATE_COLORS[userResource.state] + '22',
+                color: STATE_COLORS[userResource.state],
+              }}>{userResource.state}</span>
+              {userResource.state === 'pending' && (
+                <span style={{ color: SOLID_LIGHT, fontSize: 12 }}>● загрузка...</span>
+              )}
+            </div>
+
+            {/* Resource display */}
+            {userResource.state === 'errored' && (
+              <div style={{ padding: 14, borderRadius: 9, background: '#2a0f0f',
+                border: '1px solid #ef4444', color: '#f87171', fontSize: 13 }}>
+                ❌ {userResource.error}
+              </div>
+            )}
+            {userResource.data && userResource.state !== 'errored' && (
+              <div style={{
+                padding: 16, borderRadius: 10, background: CARD,
+                border: \`1px solid \${userResource.state === 'refreshing' ? ORANGE : BORDER}\`,
+                opacity: userResource.state === 'refreshing' ? 0.7 : 1,
+                transition: 'opacity 0.3s',
+              }}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <div style={{ fontSize: 36 }}>{userResource.data.avatar}</div>
+                  <div>
+                    <div style={{ color: TEXT, fontWeight: 700 }}>{userResource.data.name}</div>
+                    <div style={{ color: MUTED, fontSize: 12 }}>{userResource.data.role}</div>
+                    <div style={{ color: GREEN, fontSize: 13, marginTop: 2 }}>
+                      Очки: <strong>{userResource.data.score}</strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* SOURCE TAB */}
+        {tab === 'source' && (
+          <div>
+            <div style={{ background: CARD, borderRadius: 10, padding: 14,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 10, fontSize: 13 }}>
+                userId — Source сигнал
+              </div>
+              <div style={{ color: MUTED, fontSize: 12, marginBottom: 10 }}>
+                При изменении userId ресурс автоматически перезапрашивает данные
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[1, 2, 3, 4].map(id => (
+                  <button key={id} onClick={() => setUserId(id)} style={{
+                    flex: 1, padding: '8px 0', borderRadius: 8, cursor: 'pointer', fontSize: 13,
+                    border: \`1px solid \${userId === id ? SOLID_BLUE : BORDER}\`,
+                    background: userId === id ? SOLID_BLUE : 'transparent',
+                    color: userId === id ? '#fff' : MUTED, fontWeight: 600,
+                  }}>User #{id}</button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+              <span style={{ color: MUTED, fontSize: 12 }}>state:</span>
+              <span style={{
+                padding: '3px 10px', borderRadius: 99, fontSize: 12, fontWeight: 700,
+                background: STATE_COLORS[userResource.state] + '22',
+                color: STATE_COLORS[userResource.state],
+              }}>{userResource.state}</span>
+            </div>
+
+            {userResource.state === 'pending' && (
+              <div style={{ padding: 16, borderRadius: 10, background: CARD,
+                border: \`1px dashed \${BORDER}\`, textAlign: 'center' }}>
+                <div style={{ color: SOLID_LIGHT, fontSize: 20, marginBottom: 6 }}>⏳</div>
+                <div style={{ color: MUTED, fontSize: 13 }}>Загрузка User #{userId}...</div>
+              </div>
+            )}
+            {userResource.data && userResource.state !== 'pending' && (
+              <div style={{ padding: 16, borderRadius: 10, background: CARD, border: \`1px solid \${BORDER}\` }}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <div style={{ fontSize: 36 }}>{userResource.data.avatar}</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: TEXT, fontWeight: 700 }}>{userResource.data.name}</div>
+                    <div style={{ color: MUTED, fontSize: 12 }}>{userResource.data.role}</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ color: GREEN, fontWeight: 700, fontSize: 18 }}>{userResource.data.score}</div>
+                    <div style={{ color: MUTED, fontSize: 11 }}>очков</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <pre style={{ marginTop: 12, fontSize: 11, color: MUTED, background: '#0d1117', borderRadius: 8, padding: 12 }}>
+{String.raw\`// Source сигнал → автоперезапрос
+const [userId, setUserId] = createSignal(1);
+
+const [user] = createResource(
+  userId,  // ← source
+  async (id) => fetchUser(id)
+);
+
+// При setUserId(2) → запрос повторится автоматически\`}
+            </pre>
+          </div>
+        )}
+
+        {/* SEARCH TAB */}
+        {tab === 'search' && (
+          <div>
+            <div style={{ background: CARD, borderRadius: 10, padding: 14,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 8, fontSize: 13 }}>
+                Реактивный поиск
+              </div>
+              <div style={{ color: MUTED, fontSize: 12, marginBottom: 10 }}>
+                Попробуй: solid, react, state
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                  value={queryInput}
+                  onChange={e => setQueryInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && setQuery(queryInput)}
+                  placeholder="Поиск..."
+                  style={{ flex: 1, padding: '8px 12px', borderRadius: 8,
+                    background: BG, border: \`1px solid \${BORDER}\`, color: TEXT, fontSize: 13 }}
+                />
+                <button onClick={() => setQuery(queryInput)} style={{
+                  padding: '8px 16px', borderRadius: 8, border: 'none',
+                  background: SOLID_BLUE, color: '#fff', cursor: 'pointer', fontWeight: 600,
+                }}>🔍</button>
+              </div>
+            </div>
+
+            {query && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                <span style={{ color: MUTED, fontSize: 12 }}>Запрос: "<span style={{ color: ORANGE }}>{query}</span>"</span>
+                <span style={{
+                  padding: '2px 8px', borderRadius: 99, fontSize: 11,
+                  background: STATE_COLORS[searchResource.state] + '22',
+                  color: STATE_COLORS[searchResource.state],
+                }}>{searchResource.state}</span>
+              </div>
+            )}
+
+            {!query && (
+              <div style={{ textAlign: 'center', color: MUTED, padding: 30, fontSize: 13 }}>
+                Введи запрос и нажми Enter или 🔍
+              </div>
+            )}
+
+            {query && searchResource.state === 'pending' && (
+              <div style={{ padding: 16, borderRadius: 10, background: CARD,
+                border: \`1px dashed \${BORDER}\`, textAlign: 'center', color: MUTED, fontSize: 13 }}>
+                ⏳ Ищем...
+              </div>
+            )}
+
+            {query && searchResource.state === 'ready' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {searchResource.data?.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: MUTED, padding: 20, fontSize: 13 }}>
+                    Ничего не найдено для "{query}"
+                  </div>
+                ) : searchResource.data?.map(item => (
+                  <div key={item.id} style={{
+                    padding: '10px 14px', borderRadius: 9, background: CARD,
+                    border: \`1px solid \${TYPE_COLORS[item.type]}44\`,
+                    display: 'flex', alignItems: 'center', gap: 10,
+                  }}>
+                    <span style={{ fontSize: 18 }}>{TYPE_ICONS[item.type]}</span>
+                    <span style={{ flex: 1, fontSize: 13 }}>{item.title}</span>
+                    <span style={{
+                      padding: '2px 8px', borderRadius: 99, fontSize: 11,
+                      background: TYPE_COLORS[item.type] + '22', color: TYPE_COLORS[item.type],
+                    }}>{item.type}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <pre style={{ marginTop: 12, fontSize: 11, color: MUTED, background: '#0d1117', borderRadius: 8, padding: 12 }}>
+{String.raw\`const [query, setQuery] = createSignal('');
+
+const [results] = createResource(
+  query,  // ← source: обновится при смене query
+  async (q) => {
+    if (!q) return [];
+    return searchAPI(q);
+  }
+);\`}
+            </pre>
+          </div>
+        )}
+
+        <div style={{ marginTop: 14, padding: 12, borderRadius: 8, background: '#1a1a2e',
+          border: \`1px solid \${SOLID_BLUE}44\`, fontSize: 12, color: MUTED }}>
+          <span style={{ color: SOLID_BLUE, fontWeight: 700 }}>💡 Лучший выбор для async: </span>
+          Используй <code style={{ color: SOLID_LIGHT }}>createResource</code> вместо{' '}
+          <code style={{ color: ORANGE }}>createEffect + fetch</code> — ресурс автоматически
+          отслеживает source, управляет состояниями и интегрируется с Suspense.
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+## Сравнение подходов
+
+```tsx
+// ❌ Плохо: createEffect для данных
+createEffect(() => {
+  const id = props.id;
+  setLoading(true);
+  fetch(\`/api/user/\${id}\`)
+    .then(r => r.json())
+    .then(data => { setUser(data); setLoading(false); })
+    .catch(err => { setError(err); setLoading(false); });
+});
+
+// ✅ Хорошо: createResource
+const [user] = createResource(() => props.id, fetchUser);
+// loading, error, data — автоматически
+// Интеграция с Suspense — бесплатно
+// Отмена при смене source — автоматически
+```
+
+## Итог
+
+| Возможность | Описание |
+|---|---|
+| `resource()` | Данные (undefined если загружается) |
+| `resource.loading` | true пока идёт запрос |
+| `resource.error` | Ошибка или undefined |
+| `resource.state` | Детальный статус: pending/ready/refreshing/errored |
+| `refetch()` | Повторить запрос вручную |
+| `mutate(fn)` | Оптимистично обновить данные |
+| Source сигнал | Автоперезапрос при изменении источника |

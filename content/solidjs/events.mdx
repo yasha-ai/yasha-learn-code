@@ -1,0 +1,533 @@
+## 🎯 Обработка событий в Solid.js
+
+Яша, события в Solid.js — это целая философия. На первый взгляд похоже на React: `onClick`, `onChange`... Но за этим скрывается принципиально другой механизм делегирования, нативные события через `on:click`, модификаторы и кое-что, чего в React нет вообще! Разберёмся по порядку 🚀
+
+---
+
+## 🔧 Делегированные vs Нативные события
+
+В Solid есть два синтаксиса для событий:
+
+```tsx
+// Делегированное событие (camelCase) — добавляется на document
+<button onClick={handleClick}>Клик</button>
+
+// Нативное событие (on: + lowercase) — addEventListener напрямую
+<button on:click={handleClick}>Нативный клик</button>
+```
+
+**Разница принципиальная:**
+
+| Свойство | `onClick` | `on:click` |
+|----------|-----------|------------|
+| Механизм | Делегирование на `document` | `addEventListener` на элементе |
+| Производительность | Лучше для множества элементов | Чуть медленнее |
+| Bubbling | Делегируется через DOM | Нативное всплытие |
+| `stopPropagation` | Влияет на Solid-делегатор | Нативный стоп |
+| Кастомные события | ❌ Не работает | ✅ Работает |
+
+```tsx
+// Список из 1000 элементов — один обработчик на document!
+<For each={items()}>
+  {(item) => (
+    <div onClick={() => select(item.id)}>
+      {item.name}
+    </div>
+  )}
+</For>
+
+// Кастомное событие — только нативный синтаксис
+<MyComponent on:customEvent={(e) => console.log(e.detail)} />
+```
+
+---
+
+## ⚡ Делегирование событий в Solid
+
+Solid использует **одну точку делегирования на `document`**, а не на каждом элементе. Это делает создание и удаление элементов очень быстрым:
+
+```tsx
+// Под капотом Solid делает что-то вроде:
+document.addEventListener('click', (e) => {
+  let target = e.target;
+  while (target) {
+    const handler = target.__solid$click;
+    if (handler) handler(e);
+    target = target.parentNode;
+  }
+});
+
+// А твой onClick просто записывается как:
+// element.__solid$click = handler
+```
+
+> ⚡ **Почему это быстро?** При создании 1000 `<div onClick={...}>` Solid не вешает 1000 обработчиков на DOM. Один обработчик на `document` — и всё!
+
+---
+
+## 🎛️ Модификаторы событий
+
+Solid поддерживает модификаторы через двоеточие в названии события:
+
+```tsx
+// :once — обработчик вызовется только один раз
+<button on:click:once={() => console.log('Только раз!')}>
+  Нажми меня
+</button>
+
+// :capture — фаза захвата, не всплытия
+<div on:click:capture={(e) => console.log('Сначала я!')}>
+  <button onClick={() => console.log('Потом я')}>Клик</button>
+</div>
+
+// :passive — оптимизация для scroll/touch (не вызываем preventDefault)
+<div on:scroll:passive={handleScroll} style="overflow: auto">
+  {/* Плавный скролл без блокировки */}
+</div>
+
+// :once:capture — комбинируй!
+<button on:click:once:capture={handler}>Раз и навсегда</button>
+```
+
+---
+
+## 📡 Кастомные события
+
+С нативным синтаксисом `on:` можно слушать кастомные события через `CustomEvent`:
+
+```tsx
+// Компонент, диспатчащий кастомное событие
+function Counter() {
+  const [count, setCount] = createSignal(0);
+
+  return (
+    <button
+      onClick={() => {
+        const next = count() + 1;
+        setCount(next);
+        // Диспатчим кастомное событие
+        const event = new CustomEvent('countChange', {
+          detail: { count: next },
+          bubbles: true,
+        });
+        // Нужна ссылка на элемент
+      }}
+    >
+      {count()}
+    </button>
+  );
+}
+
+// Родитель слушает через on:
+function Parent() {
+  return (
+    <div on:countChange={(e: CustomEvent) => {
+      console.log('Новый count:', e.detail.count);
+    }}>
+      <Counter />
+    </div>
+  );
+}
+```
+
+---
+
+## ⌨️ Клавиатурные события и утилиты
+
+```tsx
+function SearchBox() {
+  const [query, setQuery] = createSignal('');
+
+  const handleKeyDown = (e: KeyboardEvent) => {
+    // Горячие клавиши
+    if (e.key === 'Escape') {
+      setQuery('');
+      (e.target as HTMLInputElement).blur();
+    }
+    if (e.key === 'Enter') {
+      search(query());
+    }
+    // Ctrl+A — выделить всё
+    if (e.ctrlKey && e.key === 'a') {
+      e.preventDefault();
+      (e.target as HTMLInputElement).select();
+    }
+  };
+
+  return (
+    <input
+      value={query()}
+      onInput={(e) => setQuery(e.target.value)}
+      onKeyDown={handleKeyDown}
+      placeholder="Поиск... (Esc — очистить)"
+    />
+  );
+}
+```
+
+---
+
+## 🔄 Отличия от React
+
+```tsx
+// REACT:
+// onChange вызывается при каждом нажатии клавиши
+<input onChange={(e) => setValue(e.target.value)} />
+
+// SOLID:
+// onChange — только после потери фокуса (нативный change!)
+// onInput — при каждом вводе
+<input onChange={(e) => console.log('Потерял фокус')} />
+<input onInput={(e) => setValue(e.target.value)} />  // аналог React onChange
+
+// REACT:
+// Синтетические события (event pooling — устарело в React 17)
+function ReactHandler(e: React.MouseEvent) {
+  e.persist(); // раньше нужно было
+  setTimeout(() => console.log(e.type)); // OK в React 17+
+}
+
+// SOLID:
+// Нативные DOM события, никаких синтетических обёрток
+function SolidHandler(e: MouseEvent) {
+  setTimeout(() => console.log(e.type)); // всегда работает
+}
+```
+
+---
+
+## 🌊 Делегирование и `stopPropagation`
+
+```tsx
+// ⚠️ Осторожно: stopPropagation в делегированных событиях
+function Tricky() {
+  return (
+    <div onClick={() => console.log('Родитель')}>
+      <button onClick={(e) => {
+        e.stopPropagation(); // Останавливает делегатор Solid, не DOM
+        console.log('Кнопка');
+      }}>
+        Кнопка
+      </button>
+    </div>
+  );
+}
+
+// Если нужно остановить нативное всплытие — используй on:click
+<button on:click={(e) => {
+  e.stopPropagation(); // Настоящий stopPropagation
+  console.log('Нативный стоп');
+}}>
+  Нативная кнопка
+</button>
+```
+
+---
+
+## 🎮 Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useRef, useEffect, useCallback, CSSProperties } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+type Demo = 'delegation' | 'native' | 'custom' | 'keyboard';
+
+// ---- Demo 1: Event Delegation Tree ----
+function DelegationDemo() {
+  const [log, setLog] = useState<string[]>([]);
+  const addLog = (msg: string) => setLog(p => [msg, ...p].slice(0, 6));
+
+  const items = ['Яблоко 🍎', 'Банан 🍌', 'Вишня 🍒', 'Груша 🍐', 'Манго 🥭'];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>Solid onClick</strong> — один обработчик на document,
+        не на каждом элементе. Быстро даже для тысяч элементов!
+      </p>
+      <div style={{
+        padding: 12, background: BG, borderRadius: 8,
+        border: \`1px dashed \${BORDER}\`,
+        fontSize: 11, color: MUTED,
+      }}>
+        📌 document → один делегатор
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {items.map((item, i) => (
+          <button key={i} onClick={() => addLog(\`Клик: \${item} (делегированный)\`)} style={{
+            padding: '8px 14px', textAlign: 'left',
+            background: CARD, border: \`1px solid \${BORDER}\`,
+            borderRadius: 6, color: TEXT, cursor: 'pointer', fontSize: 13,
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = '#263452')}
+          onMouseLeave={e => (e.currentTarget.style.background = CARD)}
+          >
+            {item}
+          </button>
+        ))}
+      </div>
+      <div style={{ padding: '10px 12px', background: BG, borderRadius: 8, border: \`1px solid \${BORDER}\`, minHeight: 80 }}>
+        {log.length === 0
+          ? <span style={{ color: MUTED, fontSize: 12 }}>Кликни на элемент...</span>
+          : log.map((l, i) => <div key={i} style={{ fontSize: 12, color: i === 0 ? GREEN : MUTED, padding: '2px 0' }}>▸ {l}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+
+// ---- Demo 2: Native Events (on:click) ----
+function NativeDemo() {
+  const [log, setLog] = useState<string[]>([]);
+  const addLog = (msg: string) => setLog(p => [msg, ...p].slice(0, 6));
+  const [stopProp, setStopProp] = useState(true);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>Solid on:click</strong> — нативный addEventListener.
+        Нужен для кастомных событий и точного контроля.
+      </p>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: TEXT, fontSize: 13, cursor: 'pointer' }}>
+        <input type="checkbox" checked={stopProp} onChange={e => setStopProp(e.target.checked)} />
+        stopPropagation включён
+      </label>
+      <div
+        onClick={() => addLog('Родитель получил клик')}
+        style={{
+          padding: 16, background: BG, borderRadius: 8,
+          border: \`2px dashed \${BORDER}\`, cursor: 'pointer',
+        }}
+      >
+        <span style={{ color: MUTED, fontSize: 12 }}>Родитель (onClick)</span>
+        <div style={{ marginTop: 10 }}>
+          <button
+            onClick={(e) => {
+              if (stopProp) e.stopPropagation();
+              addLog(\`Кнопка (stopProp: \${stopProp})\`);
+            }}
+            style={{
+              padding: '8px 16px',
+              background: stopProp ? SOLID_BLUE : ORANGE,
+              color: TEXT, border: 'none', borderRadius: 6,
+              cursor: 'pointer', fontWeight: 600,
+              transition: 'background 0.2s',
+            }}
+          >
+            Нативная кнопка
+          </button>
+        </div>
+      </div>
+      <div style={{ padding: '10px 12px', background: BG, borderRadius: 8, border: \`1px solid \${BORDER}\`, minHeight: 80 }}>
+        {log.length === 0
+          ? <span style={{ color: MUTED, fontSize: 12 }}>Кликни на кнопку...</span>
+          : log.map((l, i) => <div key={i} style={{ fontSize: 12, color: i === 0 ? GREEN : MUTED, padding: '2px 0' }}>▸ {l}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+
+// ---- Demo 3: Custom Events ----
+function CustomEventsDemo() {
+  const [log, setLog] = useState<string[]>([]);
+  const addLog = (msg: string) => setLog(p => [msg, ...p].slice(0, 6));
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent;
+      addLog(\`CustomEvent: \${ce.type} — \${JSON.stringify(ce.detail)}\`);
+    };
+    el.addEventListener('solidAction', handler);
+    return () => el.removeEventListener('solidAction', handler);
+  }, []);
+
+  const dispatch = (type: string, detail: object) => {
+    const event = new CustomEvent('solidAction', { detail: { type, ...detail }, bubbles: true });
+    containerRef.current?.dispatchEvent(event);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>Solid on:customEvent</strong> — нативные CustomEvent.
+        Только с on: синтаксисом!
+      </p>
+      <div ref={containerRef} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {[
+          { label: '🛒 Добавить в корзину', type: 'addToCart', detail: { id: 42, name: 'Товар' } },
+          { label: '❤️ В избранное', type: 'addToFavorites', detail: { id: 42 } },
+          { label: '🔔 Уведомление', type: 'notify', detail: { msg: 'Готово!' } },
+        ].map(action => (
+          <button
+            key={action.type}
+            onClick={() => dispatch(action.type, action.detail)}
+            style={{
+              padding: '10px 16px', textAlign: 'left',
+              background: CARD, border: \`1px solid \${BORDER}\`,
+              borderRadius: 8, color: TEXT, cursor: 'pointer', fontSize: 13,
+            }}
+          >
+            {action.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ padding: '10px 12px', background: BG, borderRadius: 8, border: \`1px solid \${BORDER}\`, minHeight: 80 }}>
+        {log.length === 0
+          ? <span style={{ color: MUTED, fontSize: 12 }}>Нажми кнопку...</span>
+          : log.map((l, i) => <div key={i} style={{ fontSize: 11, color: i === 0 ? GREEN : MUTED, padding: '2px 0', wordBreak: 'break-all' }}>▸ {l}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+
+// ---- Demo 4: Keyboard Shortcuts ----
+function KeyboardDemo() {
+  const [combo, setCombo] = useState('');
+  const [history, setHistory] = useState<string[]>([]);
+  const [keys, setKeys] = useState<Set<string>>(new Set());
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    const parts: string[] = [];
+    if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+    if (e.shiftKey) parts.push('Shift');
+    if (e.altKey) parts.push('Alt');
+    const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    if (!['Control', 'Shift', 'Alt', 'Meta'].includes(key)) parts.push(key);
+    const combo = parts.join('+');
+    setCombo(combo);
+    setHistory(p => [combo, ...p].slice(0, 5));
+
+    if (e.key === 'Escape') { setCombo(''); inputRef.current?.blur(); }
+    if (e.ctrlKey && e.key === 'a') { e.preventDefault(); inputRef.current?.select(); }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>onKeyDown</strong> — перехват горячих клавиш.
+        Esc очищает, Ctrl+A выделяет всё.
+      </p>
+      <input
+        ref={inputRef}
+        onKeyDown={handleKeyDown}
+        placeholder="Кликни сюда и нажимай клавиши..."
+        style={{
+          padding: '12px 14px',
+          background: CARD, border: \`2px solid \${SOLID_BLUE}\`,
+          borderRadius: 8, color: TEXT, fontSize: 14, outline: 'none',
+        }}
+      />
+      {combo && (
+        <div style={{
+          padding: '10px 16px', background: SOLID_BLUE + '22',
+          border: \`1px solid \${SOLID_BLUE}\`, borderRadius: 8,
+          textAlign: 'center', fontSize: 18, fontWeight: 700, color: SOLID_LIGHT,
+          letterSpacing: 2,
+        }}>
+          ⌨️ {combo}
+        </div>
+      )}
+      <div style={{ padding: '10px 12px', background: BG, borderRadius: 8, border: \`1px solid \${BORDER}\`, minHeight: 80 }}>
+        <div style={{ color: MUTED, fontSize: 11, marginBottom: 6 }}>История:</div>
+        {history.map((h, i) => (
+          <div key={i} style={{ fontSize: 13, color: i === 0 ? GREEN : MUTED, padding: '2px 0' }}>
+            {i === 0 ? '▶ ' : '  '}{h}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---- Main App ----
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('delegation');
+
+  const tabs: { id: Demo; label: string }[] = [
+    { id: 'delegation', label: '🔗 Делегация' },
+    { id: 'native', label: '⚡ Нативные' },
+    { id: 'custom', label: '📡 Кастомные' },
+    { id: 'keyboard', label: '⌨️ Клавиши' },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 480, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 22 }}>События в Solid.js</h2>
+        <p style={{ color: MUTED, fontSize: 13, margin: '0 0 20px' }}>
+          onClick vs on:click — делегирование, нативные события, кастомные события
+        </p>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 20, flexWrap: 'wrap' }}>
+          {tabs.map(tab => (
+            <button key={tab.id} onClick={() => setDemo(tab.id)} style={{
+              padding: '8px 14px',
+              background: demo === tab.id ? SOLID_BLUE : CARD,
+              color: demo === tab.id ? TEXT : MUTED,
+              border: \`1px solid \${demo === tab.id ? SOLID_BLUE : BORDER}\`,
+              borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            }}>{tab.label}</button>
+          ))}
+        </div>
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, border: \`1px solid \${BORDER}\` }}>
+          {demo === 'delegation' && <DelegationDemo />}
+          {demo === 'native' && <NativeDemo />}
+          {demo === 'custom' && <CustomEventsDemo />}
+          {demo === 'keyboard' && <KeyboardDemo />}
+        </div>
+        <div style={{ marginTop: 16, padding: '12px 16px', background: CARD, borderRadius: 8, border: \`1px solid \${BORDER}\` }}>
+          <p style={{ color: MUTED, fontSize: 12, margin: 0 }}>
+            💡 <strong style={{ color: TEXT }}>Запомни:</strong> onClick — делегирование (fast!),
+            on:click — нативный addEventListener (для кастомных событий и точного контроля).
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## 📋 Шпаргалка
+
+```tsx
+// Делегированные (camelCase) — используй по умолчанию
+onClick, onInput, onKeyDown, onKeyUp, onFocus, onBlur
+onMouseEnter, onMouseLeave, onScroll, onSubmit
+
+// Нативные (on: + lowercase) — для кастомных событий и :модификаторов
+on:click, on:input, on:customEvent
+on:click:once       // один раз
+on:click:capture    // фаза захвата
+on:scroll:passive   // пассивный (не блокирует)
+
+// onInput vs onChange
+onInput  // каждое нажатие (аналог React onChange)
+onChange // после потери фокуса (нативный change!)
+```
+
+---
+
+## 🎯 Итоги
+
+- **`onClick`** — делегирование, один обработчик на `document`, максимальная скорость
+- **`on:click`** — нативный `addEventListener`, нужен для кастомных событий и модификаторов
+- **`onInput`** — аналог React `onChange` (при каждом вводе)
+- **`onChange`** — только после потери фокуса (нативное поведение!)
+- Модификаторы `:once`, `:capture`, `:passive` — через `on:click:once` синтаксис
+- В Solid **нет синтетических событий** — всё нативное DOM API

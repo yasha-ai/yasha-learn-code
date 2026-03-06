@@ -1,0 +1,566 @@
+## 🔧 Директивы в Solid.js
+
+Яша, директивы в Solid — это концепция, вдохновлённая Vue и Angular, но реализованная по-настоящему элегантно. Вместо HOC или хуков для работы с DOM — просто функция + `use:directive`. Хочешь drag-and-drop? Tooltip? Click-outside? Intersection Observer? Всё это — директивы! 🎯
+
+---
+
+## 🏗️ Анатомия директивы
+
+Директива — это **функция с двумя аргументами**:
+
+```tsx
+// Сигнатура директивы
+type DirectiveFn<T = undefined> = (
+  element: HTMLElement,   // DOM-элемент
+  accessor: () => T       // getter для параметра (реактивный!)
+) => void;
+
+// Простейшая директива — автофокус
+function autofocus(el: HTMLElement, _accessor: () => undefined) {
+  el.focus();
+}
+
+// Использование
+function App() {
+  return <input use:autofocus />;
+}
+```
+
+> 💡 `accessor` — это **функция**, а не значение. Вызови её `accessor()`, чтобы получить текущее значение. Это нужно для реактивности!
+
+---
+
+## 📤 Передача параметров
+
+```tsx
+// Директива с параметром
+function tooltip(el: HTMLElement, accessor: () => string) {
+  const tooltipEl = document.createElement('div');
+  tooltipEl.className = 'tooltip';
+
+  // Реактивно обновляем текст при изменении параметра
+  createEffect(() => {
+    tooltipEl.textContent = accessor(); // вызываем для реактивности
+  });
+
+  el.addEventListener('mouseenter', () => {
+    document.body.appendChild(tooltipEl);
+    const rect = el.getBoundingClientRect();
+    tooltipEl.style.top = `${rect.top - 30}px`;
+    tooltipEl.style.left = `${rect.left}px`;
+  });
+
+  el.addEventListener('mouseleave', () => {
+    tooltipEl.remove();
+  });
+
+  // Очистка при размонтировании
+  onCleanup(() => tooltipEl.remove());
+}
+
+// Использование
+function App() {
+  const [text, setText] = createSignal('Наведи на меня!');
+
+  return (
+    <>
+      <button use:tooltip={text()}>Кнопка с тултипом</button>
+      <input onInput={(e) => setText(e.target.value)} />
+    </>
+  );
+}
+```
+
+---
+
+## 🖱️ Click Outside
+
+Классический пример — закрытие модального окна при клике снаружи:
+
+```tsx
+import { onCleanup } from 'solid-js';
+
+function clickOutside(el: HTMLElement, accessor: () => () => void) {
+  const handler = (e: MouseEvent) => {
+    if (!el.contains(e.target as Node)) {
+      accessor()(); // accessor() → callback, callback() → вызов
+    }
+  };
+
+  document.addEventListener('click', handler, { capture: true });
+  onCleanup(() => document.removeEventListener('click', handler, { capture: true }));
+}
+
+// Использование
+function Modal() {
+  const [open, setOpen] = createSignal(false);
+
+  return (
+    <Show when={open()}>
+      <div class="overlay">
+        <div
+          class="modal"
+          use:clickOutside={() => setOpen(false)}
+        >
+          <h2>Модальное окно</h2>
+          <p>Кликни снаружи, чтобы закрыть</p>
+        </div>
+      </div>
+    </Show>
+  );
+}
+```
+
+---
+
+## 🗂️ Draggable директива
+
+```tsx
+function draggable(el: HTMLElement, accessor: () => { onMove?: (x: number, y: number) => void }) {
+  let startX = 0, startY = 0;
+  let startLeft = 0, startTop = 0;
+  let isDragging = false;
+
+  const onMouseDown = (e: MouseEvent) => {
+    isDragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    startLeft = el.offsetLeft;
+    startTop = el.offsetTop;
+    el.style.cursor = 'grabbing';
+    e.preventDefault();
+  };
+
+  const onMouseMove = (e: MouseEvent) => {
+    if (!isDragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    el.style.left = `${startLeft + dx}px`;
+    el.style.top = `${startTop + dy}px`;
+    accessor().onMove?.(startLeft + dx, startTop + dy);
+  };
+
+  const onMouseUp = () => {
+    isDragging = false;
+    el.style.cursor = 'grab';
+  };
+
+  el.style.position = 'absolute';
+  el.style.cursor = 'grab';
+  el.addEventListener('mousedown', onMouseDown);
+  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener('mouseup', onMouseUp);
+
+  onCleanup(() => {
+    el.removeEventListener('mousedown', onMouseDown);
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+  });
+}
+
+// Использование
+function App() {
+  const [pos, setPos] = createSignal({ x: 100, y: 100 });
+
+  return (
+    <div style={{ position: 'relative', height: '400px' }}>
+      <div
+        use:draggable={{ onMove: (x, y) => setPos({ x, y }) }}
+        style={{ width: '100px', height: '100px', background: '#2c67d5' }}
+      >
+        Тащи меня!
+      </div>
+      <p>Позиция: x={pos().x}, y={pos().y}</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 👁️ Intersection Observer
+
+```tsx
+function intersectionObserver(
+  el: HTMLElement,
+  accessor: () => { threshold?: number; onVisible?: () => void; onHidden?: () => void }
+) {
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const { onVisible, onHidden } = accessor();
+      entries.forEach(entry => {
+        if (entry.isIntersecting) onVisible?.();
+        else onHidden?.();
+      });
+    },
+    { threshold: accessor().threshold ?? 0.5 }
+  );
+
+  observer.observe(el);
+  onCleanup(() => observer.disconnect());
+}
+
+// Использование — ленивая загрузка
+function LazyImage({ src }: { src: string }) {
+  const [loaded, setLoaded] = createSignal(false);
+
+  return (
+    <div
+      use:intersectionObserver={{
+        threshold: 0.1,
+        onVisible: () => setLoaded(true),
+      }}
+      style={{ min-height: '200px' }}
+    >
+      <Show when={loaded()}>
+        <img src={src} alt="Lazy loaded" />
+      </Show>
+    </div>
+  );
+}
+```
+
+---
+
+## 🚨 TypeScript и директивы
+
+```tsx
+// Чтобы TypeScript знал о директиве — декларация модуля
+declare module 'solid-js' {
+  namespace JSX {
+    interface Directives {
+      tooltip: string;
+      clickOutside: () => void;
+      draggable: { onMove?: (x: number, y: number) => void };
+      intersectionObserver: { threshold?: number; onVisible?: () => void };
+    }
+  }
+}
+
+// Теперь TypeScript проверяет типы параметров:
+<div use:tooltip="Привет!">OK</div>
+<div use:tooltip={42}>Ошибка!</div> // Type error!
+```
+
+---
+
+## 🎮 Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, useCallback, CSSProperties } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+// ---- useClickOutside hook (симуляция директивы) ----
+function useClickOutside(ref: React.RefObject<HTMLElement>, handler: () => void, enabled = true) {
+  useEffect(() => {
+    if (!enabled) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) handler();
+    };
+    document.addEventListener('click', h, true);
+    return () => document.removeEventListener('click', h, true);
+  }, [handler, enabled]);
+}
+
+// ---- useDraggable hook (симуляция директивы) ----
+function useDraggable(ref: React.RefObject<HTMLElement>) {
+  const [pos, setPos] = useState({ x: 60, y: 60 });
+  const drag = useRef({ active: false, sx: 0, sy: 0, ox: 60, oy: 60 });
+
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const onDown = (e: MouseEvent) => {
+      drag.current = { active: true, sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y };
+      el.style.cursor = 'grabbing'; e.preventDefault();
+    };
+    const onMove = (e: MouseEvent) => {
+      if (!drag.current.active) return;
+      const nx = drag.current.ox + e.clientX - drag.current.sx;
+      const ny = drag.current.oy + e.clientY - drag.current.sy;
+      setPos({ x: nx, y: ny });
+    };
+    const onUp = () => { drag.current.active = false; el.style.cursor = 'grab'; };
+    el.addEventListener('mousedown', onDown);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      el.removeEventListener('mousedown', onDown);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, [pos.x, pos.y]);
+  return pos;
+}
+
+// ---- useIntersection hook (симуляция директивы) ----
+function useIntersection(threshold = 0.5) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const obs = new IntersectionObserver(([e]) => setVisible(e.isIntersecting), { threshold });
+    if (ref.current) obs.observe(ref.current);
+    return () => obs.disconnect();
+  }, [threshold]);
+  return [ref, visible] as const;
+}
+
+// ---- Modal with click-outside ----
+function ClickOutsideDemo() {
+  const [open, setOpen] = useState(false);
+  const modalRef = useRef<HTMLDivElement>(null);
+  useClickOutside(modalRef, () => setOpen(false), open);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>use:clickOutside</strong> — кликни вне модалки
+      </p>
+      <button onClick={() => setOpen(true)} style={{
+        padding: '10px 20px', background: SOLID_BLUE, color: TEXT,
+        border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600,
+      }}>
+        Открыть модалку
+      </button>
+      {open && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+        }}>
+          <div ref={modalRef} style={{
+            background: CARD, borderRadius: 12, padding: 32, maxWidth: 320, width: '90%',
+            border: \`1px solid \${BORDER}\`, boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+          }}>
+            <h3 style={{ color: TEXT, margin: '0 0 12px' }}>🪟 Модальное окно</h3>
+            <p style={{ color: MUTED, fontSize: 14, margin: '0 0 20px' }}>
+              Кликни <strong style={{ color: SOLID_LIGHT }}>снаружи</strong> этого блока — и я закроюсь!
+              Это директива <code style={{ color: GREEN }}>use:clickOutside</code>.
+            </p>
+            <button onClick={() => setOpen(false)} style={{
+              padding: '8px 16px', background: SOLID_BLUE, color: TEXT,
+              border: 'none', borderRadius: 6, cursor: 'pointer',
+            }}>
+              Закрыть ✕
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- Tooltip Demo ----
+function TooltipDemo() {
+  const [activeTooltip, setActiveTooltip] = useState<string | null>(null);
+  const buttons = [
+    { label: '💾 Сохранить', tip: 'Сохранить изменения (Ctrl+S)' },
+    { label: '🗑️ Удалить', tip: 'Удалить выбранное (Delete)' },
+    { label: '📋 Копировать', tip: 'Скопировать (Ctrl+C)' },
+    { label: '🔄 Обновить', tip: 'Обновить страницу (F5)' },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>use:tooltip</strong> — тултип при наведении
+      </p>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {buttons.map(btn => (
+          <div key={btn.label} style={{ position: 'relative' }}>
+            <button
+              onMouseEnter={() => setActiveTooltip(btn.label)}
+              onMouseLeave={() => setActiveTooltip(null)}
+              style={{
+                padding: '10px 16px', background: CARD, color: TEXT,
+                border: \`1px solid \${BORDER}\`, borderRadius: 8, cursor: 'pointer', fontSize: 13,
+              }}
+            >
+              {btn.label}
+            </button>
+            {activeTooltip === btn.label && (
+              <div style={{
+                position: 'absolute', bottom: '110%', left: '50%',
+                transform: 'translateX(-50%)',
+                background: '#0a1628', border: \`1px solid \${SOLID_BLUE}\`,
+                borderRadius: 6, padding: '6px 10px',
+                fontSize: 12, color: TEXT, whiteSpace: 'nowrap', zIndex: 10,
+                boxShadow: \`0 4px 12px rgba(0,0,0,0.4)\`,
+              }}>
+                {btn.tip}
+                <div style={{
+                  position: 'absolute', top: '100%', left: '50%', transform: 'translateX(-50%)',
+                  borderLeft: '5px solid transparent', borderRight: '5px solid transparent',
+                  borderTop: \`5px solid \${SOLID_BLUE}\`,
+                }} />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---- Draggable Demo ----
+function DraggableDemo() {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const pos = useDraggable(boxRef);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>use:draggable</strong> — перетаскивай элемент
+      </p>
+      <div style={{ position: 'relative', height: 160, background: BG, borderRadius: 8, border: \`1px dashed \${BORDER}\`, overflow: 'hidden' }}>
+        <div ref={boxRef} style={{
+          position: 'absolute',
+          left: pos.x, top: pos.y,
+          width: 80, height: 80,
+          background: \`linear-gradient(135deg, \${SOLID_BLUE}, \${GREEN})\`,
+          borderRadius: 12, cursor: 'grab',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 28, userSelect: 'none',
+          boxShadow: \`0 4px 20px \${SOLID_BLUE}55\`,
+          transition: 'box-shadow 0.2s',
+        }}>
+          ⚡
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: MUTED }}>
+        x: <strong style={{ color: GREEN }}>{Math.round(pos.x)}</strong> &nbsp;
+        y: <strong style={{ color: GREEN }}>{Math.round(pos.y)}</strong>
+      </div>
+    </div>
+  );
+}
+
+// ---- Intersection Observer Demo ----
+function IntersectionDemo() {
+  const [ref1, visible1] = useIntersection(0.5);
+  const [ref2, visible2] = useIntersection(0.5);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>use:intersectionObserver</strong> — ленивая загрузка
+      </p>
+      <div style={{ height: 160, overflowY: 'auto', border: \`1px solid \${BORDER}\`, borderRadius: 8, padding: 12 }}>
+        <div style={{ height: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', color: MUTED, fontSize: 13 }}>
+          ↓ Прокрути вниз ↓
+        </div>
+        <div ref={ref1} style={{
+          height: 80, borderRadius: 8, marginBottom: 12,
+          background: visible1 ? \`linear-gradient(135deg, \${SOLID_BLUE}33, \${GREEN}33)\` : CARD,
+          border: \`2px solid \${visible1 ? GREEN : BORDER}\`,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.4s', fontSize: 14, color: visible1 ? GREEN : MUTED,
+        }}>
+          {visible1 ? '✅ Виден! Контент загружен' : '⏳ Не виден...'}
+        </div>
+        <div ref={ref2} style={{
+          height: 80, borderRadius: 8,
+          background: visible2 ? \`linear-gradient(135deg, \${ORANGE}33, \${SOLID_BLUE}33)\` : CARD,
+          border: \`2px solid \${visible2 ? ORANGE : BORDER}\`,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.4s', fontSize: 14, color: visible2 ? ORANGE : MUTED,
+        }}>
+          {visible2 ? '🎉 Второй блок виден!' : '⏳ Прокрути ещё...'}
+        </div>
+        <div style={{ height: 100 }} />
+      </div>
+    </div>
+  );
+}
+
+type Demo = 'clickoutside' | 'tooltip' | 'draggable' | 'intersection';
+
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('clickoutside');
+  const tabs: { id: Demo; label: string }[] = [
+    { id: 'clickoutside', label: '🖱️ Click Outside' },
+    { id: 'tooltip', label: '💬 Tooltip' },
+    { id: 'draggable', label: '↔️ Draggable' },
+    { id: 'intersection', label: '👁️ Intersection' },
+  ];
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 480, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 22 }}>Директивы в Solid.js</h2>
+        <p style={{ color: MUTED, fontSize: 13, margin: '0 0 20px' }}>use:directive — переиспользуемая логика для DOM</p>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 20, flexWrap: 'wrap' }}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setDemo(t.id)} style={{
+              padding: '7px 12px',
+              background: demo === t.id ? SOLID_BLUE : CARD,
+              color: demo === t.id ? TEXT : MUTED,
+              border: \`1px solid \${demo === t.id ? SOLID_BLUE : BORDER}\`,
+              borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            }}>{t.label}</button>
+          ))}
+        </div>
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, border: \`1px solid \${BORDER}\` }}>
+          {demo === 'clickoutside' && <ClickOutsideDemo />}
+          {demo === 'tooltip' && <TooltipDemo />}
+          {demo === 'draggable' && <DraggableDemo />}
+          {demo === 'intersection' && <IntersectionDemo />}
+        </div>
+        <div style={{ marginTop: 16, padding: '12px 16px', background: CARD, borderRadius: 8, border: \`1px solid \${BORDER}\` }}>
+          <p style={{ color: MUTED, fontSize: 12, margin: 0 }}>
+            💡 <strong style={{ color: TEXT }}>Solid директива</strong> = function(el, accessor) + use:directive.
+            Чище хуков, переиспользуемее HOC!
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## 📋 Шаблон директивы
+
+```tsx
+// Шаблон любой директивы
+function myDirective(el: HTMLElement, accessor: () => MyParams) {
+  // 1. Получаем параметры (реактивно через createEffect если надо)
+  const params = accessor();
+
+  // 2. Настраиваем DOM
+  el.style.cursor = 'pointer';
+
+  // 3. Добавляем обработчики
+  const handler = () => accessor().onClick?.();
+  el.addEventListener('click', handler);
+
+  // 4. ОБЯЗАТЕЛЬНО чистим!
+  onCleanup(() => {
+    el.removeEventListener('click', handler);
+  });
+}
+
+declare module 'solid-js' {
+  namespace JSX {
+    interface Directives {
+      myDirective: MyParams;
+    }
+  }
+}
+```
+
+---
+
+## 🎯 Итоги
+
+- **Директива** = функция `(el, accessor) => void` + `use:name` синтаксис
+- `accessor()` — геттер параметра, работает **реактивно** внутри `createEffect`
+- Всегда вызывай **`onCleanup`** для удаления обработчиков и очистки ресурсов
+- TypeScript: декларируй директивы в `JSX.Directives` для автодополнения
+- Директивы переиспользуемее HOC и чище чем хуки для DOM-операций

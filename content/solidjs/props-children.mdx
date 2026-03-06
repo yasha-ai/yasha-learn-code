@@ -1,0 +1,564 @@
+import { Playground } from '../../components/Playground'
+
+# Пропсы и Children в Solid.js
+
+В Solid.js пропсы работают принципиально иначе, чем в React. Ключевое отличие: **пропсы реактивны**. Это значит, что деструктуризация пропсов убивает реактивность — нельзя писать `const { name } = props`.
+
+## Пропсы реактивны — нельзя деструктурировать
+
+В React деструктурировать пропсы — норма. В Solid это **антипаттерн**:
+
+```tsx
+// ❌ ПЛОХО в Solid — реактивность теряется
+function Greeting({ name }: { name: string }) {
+  return <h1>Hello, {name}</h1>;
+}
+
+// ✅ ХОРОШО — props читается как геттер, реактивность сохранена
+function Greeting(props: { name: string }) {
+  return <h1>Hello, {props.name}</h1>;
+}
+```
+
+Под капотом `props` — это объект с геттерами, которые при обращении регистрируют зависимость в текущем контексте отслеживания.
+
+## splitProps — разделение пропсов
+
+`splitProps` позволяет безопасно разделить пропсы на части, не теряя реактивность. Это замена деструктуризации для компонентов с «сквозными» пропсами:
+
+```tsx
+import { splitProps } from 'solid-js';
+
+interface ButtonProps {
+  label: string;
+  variant?: 'primary' | 'secondary';
+  class?: string;
+  onClick?: () => void;
+}
+
+function Button(props: ButtonProps) {
+  // Разделяем «свои» пропсы от остальных (которые пойдут в <button>)
+  const [local, rest] = splitProps(props, ['label', 'variant']);
+
+  return (
+    <button
+      class={`btn btn-${local.variant ?? 'primary'} ${rest.class ?? ''}`}
+      onClick={rest.onClick}
+    >
+      {local.label}
+    </button>
+  );
+}
+```
+
+`rest` по-прежнему реактивен — если родитель изменит `class` или `onClick`, компонент обновится.
+
+## mergeProps — дефолтные значения
+
+Вместо `props.value ?? defaultValue` везде по коду используй `mergeProps`:
+
+```tsx
+import { mergeProps } from 'solid-js';
+
+interface CardProps {
+  title?: string;
+  color?: string;
+  size?: 'sm' | 'md' | 'lg';
+  children?: any;
+}
+
+function Card(props: CardProps) {
+  // Дефолты задаются один раз, и они реактивны
+  const merged = mergeProps(
+    { title: 'Без названия', color: 'blue', size: 'md' as const },
+    props
+  );
+
+  return (
+    <div class={`card card-${merged.size}`} style={{ color: merged.color }}>
+      <h3>{merged.title}</h3>
+      {merged.children}
+    </div>
+  );
+}
+```
+
+## children() — правильная работа с дочерними элементами
+
+В Solid **нельзя** просто передавать `props.children` в другой компонент или в `createEffect`. Нужен хелпер `children()`:
+
+```tsx
+import { children, createEffect } from 'solid-js';
+
+function List(props: { children: any }) {
+  // children() создаёт мемоизированный доступ к дочерним элементам
+  const resolved = children(() => props.children);
+
+  createEffect(() => {
+    // Здесь можно безопасно работать с DOM-элементами
+    const items = resolved.toArray();
+    console.log(`Количество дочерних элементов: ${items.length}`);
+  });
+
+  return <ul>{resolved()}</ul>;
+}
+```
+
+Без `children()` дочерние компоненты могут вычисляться несколько раз или не отслеживаться корректно.
+
+## Паттерн JSX Slots
+
+Solid поддерживает «слоты» через именованные пропсы с JSX:
+
+```tsx
+interface ModalProps {
+  header: JSX.Element;
+  footer: JSX.Element;
+  children: JSX.Element;
+}
+
+function Modal(props: ModalProps) {
+  return (
+    <div class="modal">
+      <div class="modal-header">{props.header}</div>
+      <div class="modal-body">{props.children}</div>
+      <div class="modal-footer">{props.footer}</div>
+    </div>
+  );
+}
+
+// Использование:
+function App() {
+  return (
+    <Modal
+      header={<h2>Заголовок</h2>}
+      footer={<button>Закрыть</button>}
+    >
+      <p>Основной контент</p>
+    </Modal>
+  );
+}
+```
+
+## Динамические пропсы и spread
+
+```tsx
+function Input(props: JSX.InputHTMLAttributes<HTMLInputElement>) {
+  return <input {...props} />;
+}
+
+// Реактивный spread — обновится если props изменятся
+function App() {
+  const [disabled, setDisabled] = createSignal(false);
+
+  return (
+    <Input
+      type="text"
+      disabled={disabled()}
+      placeholder="Введите текст..."
+    />
+  );
+}
+```
+
+## Частые ошибки
+
+```tsx
+// ❌ Деструктуризация убивает реактивность
+function Bad({ count }: { count: Accessor<number> }) {
+  // count будет захвачено один раз и не обновится
+  return <div>{count()}</div>;
+}
+
+// ❌ Ранний доступ к props вне отслеживаемого контекста
+function AlsoBad(props: { items: string[] }) {
+  const items = props.items; // Реактивность потеряна!
+  return <For each={items}>{item => <li>{item}</li>}</For>;
+}
+
+// ✅ Правильно — читать props прямо в JSX или внутри реактивного контекста
+function Good(props: { items: string[] }) {
+  return <For each={props.items}>{item => <li>{item}</li>}</For>;
+}
+```
+
+## Интерактивный пример
+
+Демонстрация `splitProps`, `mergeProps` и реактивных пропсов:
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+// Симуляция splitProps
+function splitProps<T extends object, K extends keyof T>(
+  props: T,
+  keys: K[]
+): [Pick<T, K>, Omit<T, K>] {
+  const local = {} as Pick<T, K>;
+  const rest = { ...props } as Omit<T, K>;
+  keys.forEach(k => {
+    (local as any)[k] = props[k];
+    delete (rest as any)[k];
+  });
+  return [local, rest];
+}
+
+// Симуляция mergeProps
+function mergeProps<T extends object>(defaults: Partial<T>, props: T): T {
+  const result = { ...defaults } as T;
+  for (const key in props) {
+    if (props[key] !== undefined) result[key] = props[key];
+  }
+  return result;
+}
+
+interface CardProps {
+  title?: string;
+  color?: string;
+  size?: 'sm' | 'md' | 'lg';
+  extraClass?: string;
+  children?: React.ReactNode;
+}
+
+function Card(rawProps: CardProps) {
+  const props = mergeProps<CardProps>(
+    { title: 'Без названия', color: SOLID_BLUE, size: 'md' },
+    rawProps
+  );
+  const [local, rest] = splitProps(props, ['title', 'color', 'size']);
+
+  const padding = local.size === 'sm' ? '8px 12px' : local.size === 'lg' ? '20px 24px' : '14px 18px';
+  const fontSize = local.size === 'sm' ? '13px' : local.size === 'lg' ? '18px' : '15px';
+
+  return (
+    <div style={{
+      background: CARD,
+      border: \`2px solid \${local.color}\`,
+      borderRadius: 10,
+      padding,
+      fontSize,
+      color: TEXT,
+      marginBottom: 8,
+      boxShadow: \`0 0 12px \${local.color}33\`,
+      transition: 'all 0.3s',
+    }}>
+      <div style={{ fontWeight: 700, color: local.color, marginBottom: 4 }}>
+        {local.title}
+      </div>
+      <div style={{ color: MUTED, fontSize: '11px', marginBottom: 6 }}>
+        splitProps → local: title, color, size | rest: extraClass, children
+      </div>
+      {rest.children}
+    </div>
+  );
+}
+
+interface ButtonProps {
+  label: string;
+  variant?: 'primary' | 'secondary' | 'danger';
+  size?: 'sm' | 'md';
+  onClick?: () => void;
+  disabled?: boolean;
+}
+
+function Button(rawProps: ButtonProps) {
+  const [local, rest] = splitProps(rawProps, ['label', 'variant']);
+  const bg = local.variant === 'secondary' ? MUTED
+    : local.variant === 'danger' ? '#ef4444'
+    : SOLID_BLUE;
+  return (
+    <button
+      onClick={rest.onClick}
+      disabled={rest.disabled}
+      style={{
+        background: rest.disabled ? BORDER : bg,
+        color: TEXT,
+        border: 'none',
+        borderRadius: 6,
+        padding: rest.size === 'sm' ? '4px 10px' : '8px 16px',
+        fontSize: rest.size === 'sm' ? '12px' : '14px',
+        cursor: rest.disabled ? 'not-allowed' : 'pointer',
+        opacity: rest.disabled ? 0.5 : 1,
+        fontWeight: 600,
+        margin: '0 4px',
+        transition: 'all 0.2s',
+      }}
+    >
+      {local.label}
+    </button>
+  );
+}
+
+export default function App() {
+  const [cardTitle, setCardTitle] = useState('Мой компонент');
+  const [cardColor, setCardColor] = useState(SOLID_BLUE);
+  const [cardSize, setCardSize] = useState<'sm' | 'md' | 'lg'>('md');
+  const [btnVariant, setBtnVariant] = useState<'primary' | 'secondary' | 'danger'>('primary');
+  const [btnDisabled, setBtnDisabled] = useState(false);
+  const [clickCount, setClickCount] = useState(0);
+  const [activeTab, setActiveTab] = useState<'splitProps' | 'mergeProps' | 'children'>('splitProps');
+
+  const colors = [SOLID_BLUE, GREEN, ORANGE, '#a78bfa', '#f472b6'];
+
+  const code = {
+    splitProps: \`function Button(props) {
+  const [local, rest] = splitProps(
+    props,
+    ['label', 'variant']  // ← "свои" пропсы
+  );
+  // rest содержит: onClick, disabled, size
+  return (
+    <button
+      onClick={rest.onClick}
+      disabled={rest.disabled}
+      class={\\\`btn-\\\${local.variant}\\\`}
+    >
+      {local.label}
+    </button>
+  );
+}\`,
+    mergeProps: \`function Card(props) {
+  // Дефолты + пришедшие пропсы сливаются реактивно
+  const merged = mergeProps(
+    {
+      title: 'Без названия',
+      color: '#2c67d5',
+      size: 'md'
+    },
+    props
+  );
+  return (
+    <div style={{ color: merged.color }}>
+      <h3>{merged.title}</h3>
+      {merged.children}
+    </div>
+  );
+}\`,
+    children: \`import { children } from 'solid-js';
+
+function List(props) {
+  // Правильный способ работы с children
+  const resolved = children(
+    () => props.children
+  );
+
+  createEffect(() => {
+    // Теперь можно работать с DOM
+    const els = resolved.toArray();
+    console.log(els.length + ' дочерних');
+  });
+
+  return <ul>{resolved()}</ul>;
+}\`,
+  };
+
+  return (
+    <div style={{
+      background: BG, minHeight: '100vh', padding: 20,
+      fontFamily: "'Inter', sans-serif", color: TEXT,
+    }}>
+      <div style={{ maxWidth: 620, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 20 }}>
+          <h2 style={{ color: SOLID_BLUE, margin: 0, fontSize: 20 }}>
+            Props в Solid.js
+          </h2>
+          <p style={{ color: MUTED, fontSize: 13, margin: '4px 0 0' }}>
+            splitProps · mergeProps · children()
+          </p>
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+          {(['splitProps', 'mergeProps', 'children'] as const).map(tab => (
+            <button key={tab} onClick={() => setActiveTab(tab)} style={{
+              flex: 1, padding: '8px 0',
+              background: activeTab === tab ? SOLID_BLUE : CARD,
+              color: activeTab === tab ? '#fff' : MUTED,
+              border: \`1px solid \${activeTab === tab ? SOLID_BLUE : BORDER}\`,
+              borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            }}>
+              {tab}()
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', gap: 12 }}>
+          {/* Controls */}
+          <div style={{ flex: 1, background: CARD, borderRadius: 10, padding: 14, border: \`1px solid \${BORDER}\` }}>
+            {activeTab === 'splitProps' && (
+              <>
+                <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 10, fontSize: 13 }}>
+                  Управление Button (через splitProps)
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>variant (local.variant)</div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {(['primary', 'secondary', 'danger'] as const).map(v => (
+                      <button key={v} onClick={() => setBtnVariant(v)} style={{
+                        padding: '4px 10px', fontSize: 12, border: \`1px solid \${BORDER}\`,
+                        borderRadius: 5, background: btnVariant === v ? SOLID_BLUE : 'transparent',
+                        color: TEXT, cursor: 'pointer',
+                      }}>{v}</button>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>disabled (rest.disabled)</div>
+                  <button onClick={() => setBtnDisabled(d => !d)} style={{
+                    padding: '4px 12px', fontSize: 12, borderRadius: 5, cursor: 'pointer',
+                    background: btnDisabled ? ORANGE : CARD, color: TEXT,
+                    border: \`1px solid \${btnDisabled ? ORANGE : BORDER}\`,
+                  }}>
+                    {btnDisabled ? 'true' : 'false'} — переключить
+                  </button>
+                </div>
+                <div style={{ borderTop: \`1px solid \${BORDER}\`, paddingTop: 10, marginTop: 4 }}>
+                  <div style={{ color: MUTED, fontSize: 12, marginBottom: 6 }}>Результат:</div>
+                  <Button
+                    label="Нажми меня"
+                    variant={btnVariant}
+                    size="md"
+                    disabled={btnDisabled}
+                    onClick={() => setClickCount(c => c + 1)}
+                  />
+                  {clickCount > 0 && (
+                    <div style={{ color: GREEN, fontSize: 12, marginTop: 6 }}>
+                      Кликов: {clickCount}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {activeTab === 'mergeProps' && (
+              <>
+                <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 10, fontSize: 13 }}>
+                  Управление Card (через mergeProps)
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>title (или оставь пустым)</div>
+                  <input
+                    value={cardTitle}
+                    onChange={e => setCardTitle(e.target.value)}
+                    placeholder="Без названия (дефолт)"
+                    style={{
+                      width: '100%', padding: '6px 10px', borderRadius: 6,
+                      background: BG, border: \`1px solid \${BORDER}\`, color: TEXT,
+                      fontSize: 13, boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>color</div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {colors.map(c => (
+                      <button key={c} onClick={() => setCardColor(c)} style={{
+                        width: 28, height: 28, borderRadius: '50%',
+                        background: c, border: \`3px solid \${cardColor === c ? '#fff' : 'transparent'}\`,
+                        cursor: 'pointer',
+                      }} />
+                    ))}
+                  </div>
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>size</div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {(['sm', 'md', 'lg'] as const).map(s => (
+                      <button key={s} onClick={() => setCardSize(s)} style={{
+                        padding: '4px 12px', fontSize: 12, border: \`1px solid \${BORDER}\`,
+                        borderRadius: 5, background: cardSize === s ? SOLID_BLUE : 'transparent',
+                        color: TEXT, cursor: 'pointer',
+                      }}>{s}</button>
+                    ))}
+                  </div>
+                </div>
+                <Card
+                  title={cardTitle || undefined}
+                  color={cardColor}
+                  size={cardSize}
+                >
+                  <div style={{ color: MUTED, fontSize: 12 }}>Дочерний контент (children)</div>
+                </Card>
+              </>
+            )}
+
+            {activeTab === 'children' && (
+              <>
+                <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 10, fontSize: 13 }}>
+                  children() — правила работы
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {[
+                    { icon: '✅', text: 'children() создаёт мемо — дочерние элементы вычисляются один раз', ok: true },
+                    { icon: '✅', text: 'resolved.toArray() возвращает массив реальных DOM-элементов', ok: true },
+                    { icon: '✅', text: 'Безопасно использовать в createEffect после resolved()', ok: true },
+                    { icon: '❌', text: 'props.children напрямую в эффекте — вычислится лишний раз', ok: false },
+                    { icon: '❌', text: 'Передача props.children в другой компонент без children()', ok: false },
+                    { icon: '❌', text: 'Деструктуризация: const { children } = props', ok: false },
+                  ].map((item, i) => (
+                    <div key={i} style={{
+                      padding: '8px 12px', borderRadius: 7,
+                      background: item.ok ? '#0f2a1e' : '#2a0f0f',
+                      border: \`1px solid \${item.ok ? GREEN : '#ef4444'}\`,
+                      color: item.ok ? GREEN : '#fca5a5',
+                      fontSize: 12, display: 'flex', gap: 8, alignItems: 'flex-start',
+                    }}>
+                      <span>{item.icon}</span>
+                      <span>{item.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Code */}
+          <div style={{
+            flex: 1.1, background: '#0d1117', borderRadius: 10,
+            padding: 14, border: \`1px solid \${BORDER}\`, overflow: 'auto',
+          }}>
+            <div style={{ color: MUTED, fontSize: 11, marginBottom: 8, fontFamily: 'monospace' }}>
+              // Solid.js код
+            </div>
+            <pre style={{
+              margin: 0, color: TEXT, fontSize: '11px', lineHeight: 1.6,
+              fontFamily: "'Fira Code', monospace", whiteSpace: 'pre-wrap',
+            }}>
+              {code[activeTab]}
+            </pre>
+          </div>
+        </div>
+
+        <div style={{
+          marginTop: 14, padding: 12, borderRadius: 8,
+          background: '#1a1a2e', border: \`1px solid \${SOLID_BLUE}44\`,
+          fontSize: 12, color: MUTED,
+        }}>
+          <span style={{ color: SOLID_BLUE, fontWeight: 700 }}>💡 Ключевое правило: </span>
+          Пропсы в Solid — это объект с геттерами. Читай их <em style={{ color: TEXT }}>поздно</em> (прямо в JSX или внутри реактивного контекста), а не <em style={{ color: ORANGE }}>рано</em> (при деструктуризации на верхнем уровне компонента).
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+## Итог
+
+| Утилита | Зачем |
+|---|---|
+| `splitProps` | Разделить «свои» пропсы от «сквозных» без потери реактивности |
+| `mergeProps` | Задать дефолтные значения реактивно |
+| `children()` | Безопасно работать с `props.children` в эффектах |
+| Spread `{...rest}` | Прокинуть оставшиеся пропсы в DOM-элемент |
+
+Никогда не деструктурируй пропсы Solid-компонента на верхнем уровне. Это правило — фундамент работы с реактивностью Solid.

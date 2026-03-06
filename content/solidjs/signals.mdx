@@ -1,0 +1,515 @@
+import { Playground } from '../../components/Playground'
+
+## `createSignal`: основной примитив реактивности ⚡
+
+Привет! 👋 Яша здесь. Сегодня мы разбираем **сигналы** — сердце реактивности в Solid.js. Если ты понял сигналы — ты понял Solid на 50%. Всё остальное строится на них.
+
+Сигнал в Solid — это реактивное хранилище значения. Когда значение меняется, все подписчики — эффекты, мемо, DOM-узлы — автоматически получают обновление. При этом компонент **не перезапускается**.
+
+---
+
+## 📦 `createSignal` — базовый синтаксис
+
+```tsx
+import { createSignal } from 'solid-js';
+
+// Создаём сигнал с начальным значением
+const [count, setCount] = createSignal(0);
+//     ↑ геттер   ↑ сеттер
+
+// Читаем значение — вызываем геттер как функцию
+console.log(count()); // 0
+
+// Обновляем значение
+setCount(1);
+console.log(count()); // 1
+
+// Функциональное обновление (получаем предыдущее значение)
+setCount(prev => prev + 1);
+console.log(count()); // 2
+```
+
+TypeScript автоматически определяет тип из начального значения:
+
+```tsx
+const [name, setName] = createSignal('Яша');      // Signal<string>
+const [count, setCount] = createSignal(0);         // Signal<number>
+const [flag, setFlag] = createSignal(false);        // Signal<boolean>
+const [items, setItems] = createSignal<string[]>([]); // явный тип
+
+// Чтение
+const n: string = name(); // тип выводится автоматически
+```
+
+---
+
+## 🔑 Геттер как функция — почему это важно?
+
+Это главное концептуальное отличие от React. В React `count` — это значение. В Solid `count` — это **функция**:
+
+```tsx
+// React
+const [count, setCount] = useState(0);
+console.log(count);   // число: 0
+// В JSX: <p>{count}</p>
+
+// Solid
+const [count, setCount] = createSignal(0);
+console.log(count()); // число: 0, вызываем как функцию!
+// В JSX: <p>{count()}</p>
+```
+
+**Зачем функция?** Потому что Solid отслеживает реактивные зависимости через **вызовы функций**. Когда `count()` вызывается внутри `createEffect`, Solid регистрирует: «этот эффект зависит от `count`». Без вызова функции отслеживание невозможно.
+
+```tsx
+createEffect(() => {
+  // Solid видит вызов count() и знает: этот эффект зависит от сигнала count
+  console.log('Count изменился:', count());
+});
+
+// При setCount(5) — эффект выполнится автоматически
+```
+
+---
+
+## 🔗 Композиция сигналов
+
+Сигналы можно читать внутри других сигналов, эффектов и компонентов, создавая реактивные цепочки:
+
+```tsx
+import { createSignal } from 'solid-js';
+
+function ShoppingCart() {
+  const [quantity, setQuantity] = createSignal(1);
+  const [price, setPrice] = createSignal(99.99);
+  const [discount, setDiscount] = createSignal(0.1); // 10%
+
+  // Вычисляемые значения прямо в JSX (пересчитываются при изменении зависимостей)
+  return (
+    <div>
+      <p>Количество: {quantity()}</p>
+      <p>Цена за штуку: {price()} ₽</p>
+      <p>Скидка: {discount() * 100}%</p>
+      {/* Вычисление прямо в JSX — пересчитывается при любом изменении */}
+      <p>Итого: {(quantity() * price() * (1 - discount())).toFixed(2)} ₽</p>
+      <button onClick={() => setQuantity(q => q + 1)}>+1</button>
+      <button onClick={() => setQuantity(q => Math.max(1, q - 1))}>-1</button>
+    </div>
+  );
+}
+```
+
+---
+
+## 📐 Сигналы с объектами
+
+Сигналы работают с любыми значениями, включая объекты и массивы:
+
+```tsx
+import { createSignal } from 'solid-js';
+
+// Сигнал с объектом
+const [user, setUser] = createSignal({ name: 'Яша', age: 25 });
+
+// ❌ Мутация НЕ триггерит обновление
+user().name = 'Миша'; // ничего не произойдёт!
+
+// ✅ Нужно создать новый объект
+setUser({ ...user(), name: 'Миша' });
+
+// ✅ Или через функциональное обновление
+setUser(prev => ({ ...prev, name: 'Миша' }));
+```
+
+### Сигналы с массивами
+
+```tsx
+const [items, setItems] = createSignal<string[]>([]);
+
+// ❌ push/pop не триггерят обновление
+items().push('новый элемент'); // тихо не работает
+
+// ✅ Создаём новый массив
+setItems([...items(), 'новый элемент']);
+
+// ✅ Функциональное обновление
+setItems(prev => [...prev, 'новый элемент']);
+setItems(prev => prev.filter(item => item !== 'удалить'));
+setItems(prev => prev.map(item => item === 'old' ? 'new' : item));
+```
+
+---
+
+## 🌿 Производные значения в JSX
+
+Для простых вычислений можно считать прямо в JSX или выносить в переменную:
+
+```tsx
+function App() {
+  const [celsius, setCelsius] = createSignal(20);
+
+  // Вариант 1: прямо в JSX
+  return <p>Фаренгейт: {celsius() * 9 / 5 + 32}°F</p>;
+}
+
+// Вариант 2: функция (переиспользуемая «производная»)
+function App() {
+  const [celsius, setCelsius] = createSignal(20);
+  const fahrenheit = () => celsius() * 9 / 5 + 32;
+  //                 ↑ обычная функция, читающая сигнал
+
+  return (
+    <div>
+      <p>Цельсий: {celsius()}°C</p>
+      <p>Фаренгейт: {fahrenheit()}°F</p>
+      {/* fahrenheit() пересчитывается при изменении celsius() */}
+    </div>
+  );
+}
+```
+
+Разница между обычной функцией-производной и `createMemo`:
+- Обычная функция пересчитывается **каждый раз при вызове**
+- `createMemo` пересчитывается только **при изменении зависимостей** и кэширует результат
+
+Для дешёвых вычислений — обычная функция. Для дорогих — `createMemo` (следующий урок!).
+
+---
+
+## 🔄 Сигналы vs `useState` — детальное сравнение
+
+| Аспект | `useState` (React) | `createSignal` (Solid) |
+|---|---|---|
+| Тип геттера | Значение `count` | Функция `count()` |
+| Место использования | Внутри компонента-функции | Где угодно, даже вне компонента |
+| Эффект обновления | Перерендер компонента | Обновление конкретных DOM-узлов |
+| Closure-проблемы | Да (stale closure) | Нет (всегда актуальное значение) |
+| Асинхронные обновления | Batching через React | Немедленные или через `batch()` |
+| Глобальные сигналы | Нужен Context/Redux | Просто вынеси за пределы компонента |
+
+### Сигналы вне компонентов
+
+Это огромное преимущество Solid! Сигналы не привязаны к компонентам:
+
+```tsx
+// signals.ts — отдельный модуль с глобальными сигналами
+import { createSignal } from 'solid-js';
+
+export const [theme, setTheme] = createSignal<'light' | 'dark'>('dark');
+export const [currentUser, setCurrentUser] = createSignal<User | null>(null);
+export const [cartCount, setCartCount] = createSignal(0);
+```
+
+```tsx
+// Используем в любом компоненте без Context!
+import { theme, setTheme, cartCount } from './signals';
+
+function Header() {
+  return (
+    <header>
+      <span>Тема: {theme()}</span>
+      <span>Корзина: {cartCount()}</span>
+      <button onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
+        Переключить тему
+      </button>
+    </header>
+  );
+}
+```
+
+---
+
+## ⏱️ Ленивая инициализация
+
+```tsx
+// Сигнал вычисляет начальное значение только один раз
+const [value, setValue] = createSignal(heavyComputation()); // вычисляется сразу
+
+// Для ленивой инициализации используй функцию в createMemo или просто
+// откладывай создание сигнала до момента, когда он нужен
+```
+
+---
+
+## 🎮 Playground: интерактивная демонстрация сигналов
+
+Три независимых сигнала — счётчик, текст и выбор цвета. Наблюдай, что каждый сигнал обновляет только свой DOM-узел:
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useRef } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const PURPLE = '#a78bfa';
+
+// Симуляция createSignal через React (с логированием изменений)
+interface LogEntry { signal: string; from: string; to: string; time: string }
+
+function pad(n: number) { return n < 10 ? '0' + n : String(n); }
+function timestamp() {
+  const d = new Date();
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+const COLORS = ['#2c67d5', '#34d399', '#fb923c', '#a78bfa', '#f43f5e', '#fbbf24'];
+
+export default function App() {
+  // Три независимых сигнала
+  const [count, setCount] = useState(0);
+  const [message, setMessage] = useState('Привет, Solid!');
+  const [colorIdx, setColorIdx] = useState(0);
+  const [multiplier, setMultiplier] = useState(2);
+
+  // Лог обновлений
+  const [log, setLog] = useState<LogEntry[]>([]);
+
+  function addLog(signal: string, from: string, to: string) {
+    setLog(prev => [{ signal, from, to, time: timestamp() }, ...prev.slice(0, 11)]);
+  }
+
+  // Производные значения (как обычные функции → Solid-стиль)
+  const doubled = () => count * multiplier;
+  const colorValue = COLORS[colorIdx];
+  const messageLength = () => message.length;
+
+  function incCount() {
+    const next = count + 1;
+    addLog('count', String(count), String(next));
+    setCount(next);
+  }
+  function decCount() {
+    const next = count - 1;
+    addLog('count', String(count), String(next));
+    setCount(next);
+  }
+  function resetCount() {
+    addLog('count', String(count), '0');
+    setCount(0);
+  }
+  function changeColor() {
+    const next = (colorIdx + 1) % COLORS.length;
+    addLog('colorSignal', COLORS[colorIdx], COLORS[next]);
+    setColorIdx(next);
+  }
+
+  return (
+    <div style={{ background: BG, color: TEXT, minHeight: '100vh', padding: '14px', fontFamily: 'system-ui, sans-serif', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+
+      {/* Левая колонка: три сигнала */}
+      <div>
+        <h2 style={{ color: SOLID_LIGHT, fontSize: '1rem', marginTop: 0, marginBottom: '12px' }}>
+          ⚡ Три независимых сигнала
+        </h2>
+
+        {/* Сигнал 1: Счётчик */}
+        <div style={{ background: CARD, border: '1px solid ' + SOLID_BLUE + '66', borderRadius: '10px', padding: '14px', marginBottom: '10px' }}>
+          <div style={{ color: SOLID_BLUE, fontFamily: 'monospace', fontSize: '0.8rem', marginBottom: '8px', fontWeight: 700 }}>
+            createSignal(0) → count
+          </div>
+          <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+            <span style={{ color: GREEN, fontSize: '2.5rem', fontWeight: 900 }}>{count}</span>
+          </div>
+          <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', marginBottom: '8px' }}>
+            <button onClick={decCount} style={{ background: CARD, color: TEXT, border: '1px solid ' + BORDER, padding: '5px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '1rem' }}>−</button>
+            <button onClick={incCount} style={{ background: SOLID_BLUE, color: TEXT, border: 'none', padding: '5px 14px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '1rem' }}>+</button>
+            <button onClick={resetCount} style={{ background: CARD, color: MUTED, border: '1px solid ' + BORDER, padding: '5px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '0.8rem' }}>reset</button>
+          </div>
+          <div style={{ background: BG, borderRadius: '6px', padding: '8px', border: '1px solid ' + BORDER }}>
+            <div style={{ color: MUTED, fontSize: '0.7rem', marginBottom: '4px' }}>Производная (multiplier = {multiplier}x)</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <code style={{ color: PURPLE, fontSize: '0.8rem' }}>doubled() = count * {multiplier} =</code>
+              <span style={{ color: ORANGE, fontWeight: 700 }}>{doubled()}</span>
+            </div>
+            <input type="range" min={1} max={5} value={multiplier} onChange={e => setMultiplier(Number(e.target.value))} style={{ width: '100%', marginTop: '6px', accentColor: SOLID_BLUE }} />
+          </div>
+        </div>
+
+        {/* Сигнал 2: Текст */}
+        <div style={{ background: CARD, border: '1px solid ' + GREEN + '66', borderRadius: '10px', padding: '14px', marginBottom: '10px' }}>
+          <div style={{ color: GREEN, fontFamily: 'monospace', fontSize: '0.8rem', marginBottom: '8px', fontWeight: 700 }}>
+            createSignal("Привет") → message
+          </div>
+          <input
+            value={message}
+            onChange={e => {
+              addLog('message', JSON.stringify(message.slice(0, 8) + '...'), JSON.stringify(e.target.value.slice(0, 8) + '...'));
+              setMessage(e.target.value);
+            }}
+            style={{ width: '100%', background: BG, color: TEXT, border: '1px solid ' + BORDER, padding: '8px', borderRadius: '6px', fontSize: '0.9rem', boxSizing: 'border-box', marginBottom: '8px' }}
+          />
+          <div style={{ display: 'flex', gap: '12px' }}>
+            <div style={{ background: BG, borderRadius: '6px', padding: '6px 10px', border: '1px solid ' + BORDER, flex: 1, textAlign: 'center' }}>
+              <div style={{ color: MUTED, fontSize: '0.65rem' }}>Длина</div>
+              <div style={{ color: GREEN, fontWeight: 700 }}>{messageLength()}</div>
+            </div>
+            <div style={{ background: BG, borderRadius: '6px', padding: '6px 10px', border: '1px solid ' + BORDER, flex: 1, textAlign: 'center' }}>
+              <div style={{ color: MUTED, fontSize: '0.65rem' }}>Прописные</div>
+              <div style={{ color: GREEN, fontWeight: 700, fontSize: '0.75rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{message.toUpperCase().slice(0, 8)}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Сигнал 3: Цвет */}
+        <div style={{ background: CARD, border: '1px solid ' + colorValue + '88', borderRadius: '10px', padding: '14px' }}>
+          <div style={{ color: colorValue, fontFamily: 'monospace', fontSize: '0.8rem', marginBottom: '8px', fontWeight: 700 }}>
+            createSignal(0) → colorIdx
+          </div>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+            {COLORS.map((c, i) => (
+              <button key={c} onClick={() => { addLog('colorSignal', COLORS[colorIdx], c); setColorIdx(i); }} style={{
+                width: '28px', height: '28px', borderRadius: '50%', background: c, cursor: 'pointer',
+                border: colorIdx === i ? '3px solid ' + TEXT : '2px solid transparent',
+                transition: 'transform 0.1s', transform: colorIdx === i ? 'scale(1.2)' : 'scale(1)',
+              }} />
+            ))}
+            <button onClick={changeColor} style={{ background: colorValue, color: '#000', border: 'none', padding: '5px 12px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '0.8rem', marginLeft: '4px' }}>
+              Следующий
+            </button>
+          </div>
+          <div style={{ background: colorValue + '22', border: '1px solid ' + colorValue + '55', borderRadius: '8px', padding: '10px', textAlign: 'center' }}>
+            <span style={{ color: colorValue, fontWeight: 700 }}>Текущий цвет: {colorValue}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Правая колонка: лог обновлений */}
+      <div>
+        <h2 style={{ color: SOLID_LIGHT, fontSize: '1rem', marginTop: 0, marginBottom: '12px' }}>
+          📋 Лог обновлений сигналов
+        </h2>
+
+        <div style={{ background: CARD, border: '1px solid ' + BORDER, borderRadius: '10px', padding: '12px', marginBottom: '12px' }}>
+          <div style={{ color: MUTED, fontSize: '0.75rem', marginBottom: '10px' }}>
+            Каждая строка — одно изменение сигнала. В Solid это означает обновление конкретных DOM-узлов, а не перерендер компонента.
+          </div>
+          {log.length === 0 ? (
+            <div style={{ color: MUTED, textAlign: 'center', padding: '20px 0', fontSize: '0.85rem' }}>
+              Измени значение любого сигнала...
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              {log.map((entry, i) => (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  background: i === 0 ? SOLID_BLUE + '22' : BG,
+                  border: '1px solid ' + (i === 0 ? SOLID_BLUE + '55' : BORDER),
+                  borderRadius: '6px', padding: '6px 8px',
+                  transition: 'all 0.3s',
+                }}>
+                  <span style={{ color: MUTED, fontFamily: 'monospace', fontSize: '0.65rem', minWidth: '80px' }}>{entry.time}</span>
+                  <span style={{ color: SOLID_LIGHT, fontFamily: 'monospace', fontSize: '0.75rem', fontWeight: 700, minWidth: '70px' }}>{entry.signal}</span>
+                  <span style={{ color: ORANGE, fontSize: '0.75rem', fontFamily: 'monospace' }}>{entry.from.slice(0, 10)}</span>
+                  <span style={{ color: MUTED }}>→</span>
+                  <span style={{ color: GREEN, fontSize: '0.75rem', fontFamily: 'monospace' }}>{entry.to.slice(0, 10)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {log.length > 0 && (
+            <button onClick={() => setLog([])} style={{ marginTop: '8px', background: 'transparent', color: MUTED, border: '1px solid ' + BORDER, padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', width: '100%' }}>
+              Очистить лог
+            </button>
+          )}
+        </div>
+
+        {/* Подсказка о ключевом поведении */}
+        <div style={{ background: GREEN + '11', border: '1px solid ' + GREEN + '33', borderRadius: '8px', padding: '12px' }}>
+          <div style={{ color: GREEN, fontWeight: 700, marginBottom: '6px', fontSize: '0.85rem' }}>✅ В реальном Solid.js</div>
+          <ul style={{ color: TEXT, fontSize: '0.78rem', lineHeight: 1.8, margin: 0, paddingLeft: '16px' }}>
+            <li>Сигналы независимы друг от друга</li>
+            <li>Изменение count не трогает message или colorSignal</li>
+            <li>Компонент <strong>никогда не перерендерится</strong></li>
+            <li>Обновляется только конкретный DOM-узел</li>
+            <li>Сигналы можно создавать <strong>вне компонентов</strong></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## ⚠️ Частые ошибки с сигналами
+
+### Забытые скобки при чтении
+
+```tsx
+const [count, setCount] = createSignal(0);
+
+// ❌ Вставляет функцию как строку в DOM
+return <p>{count}</p>;
+
+// ✅ Вызывает геттер
+return <p>{count()}</p>;
+```
+
+### Прямая мутация объектов/массивов
+
+```tsx
+const [user, setUser] = createSignal({ name: 'Яша' });
+
+// ❌ Мутация не триггерит обновление!
+user().name = 'Миша';
+
+// ✅ Создаём новый объект
+setUser({ ...user(), name: 'Миша' });
+```
+
+### Чтение сигнала вне реактивного контекста
+
+```tsx
+const [count, setCount] = createSignal(0);
+
+// ❌ Читаем один раз — нет подписки, значение устареет
+const value = count(); // получаем snapshot
+
+// ✅ Читай сигнал внутри эффекта, мемо или JSX
+createEffect(() => {
+  console.log(count()); // правильная подписка
+});
+```
+
+### Передача сигнала vs значения в компонент
+
+```tsx
+function Display(props) {
+  return <span>{props.value()}</span>;
+}
+
+// ❌ Передаём значение — теряем реактивность
+<Display value={count()} />
+
+// ✅ Передаём геттер — реактивность сохранена
+<Display value={count} />
+// Теперь внутри: props.value() читает актуальный сигнал
+```
+
+---
+
+## 🏁 Итоги урока
+
+Сигналы — это фундамент Solid.js. Все остальные примитивы строятся на них.
+
+**Запомни ключевое:**
+
+✅ `const [x, setX] = createSignal(initial)` — создание сигнала
+
+✅ `x()` — чтение (геттер — это функция, не значение!)
+
+✅ `setX(value)` или `setX(prev => next)` — обновление
+
+✅ Сигналы можно создавать **вне компонентов** для глобального состояния
+
+✅ Объекты/массивы: нельзя мутировать, нужно создавать новые
+
+✅ В JSX передавай геттер, а не значение: `value={count}`, не `value={count()}`
+
+**Следующий шаг:** `createEffect` — как реагировать на изменения сигналов! 🔁

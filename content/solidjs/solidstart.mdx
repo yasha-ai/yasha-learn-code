@@ -1,0 +1,558 @@
+## 🚀 SolidStart: мета-фреймворк для Solid.js
+
+Яша, SolidStart — это как Next.js для React, но для Solid.js. И он по-настоящему крутой! File-based роутинг, серверные функции прямо рядом с клиентским кодом, streaming SSR, и всё это на базе Vinxi — нового build-инструмента. Давай разберёмся! ⚡
+
+---
+
+## 📦 Создание проекта
+
+```bash
+npm create solid@latest
+# Выбираем: SolidStart (bare или with tailwind)
+
+# Структура проекта
+my-app/
+├── src/
+│   ├── routes/          # Файловый роутинг
+│   │   ├── index.tsx    # → /
+│   │   ├── about.tsx    # → /about
+│   │   ├── blog/
+│   │   │   ├── index.tsx    # → /blog
+│   │   │   └── [slug].tsx   # → /blog/:slug
+│   │   └── (auth)/          # Route group (не влияет на URL)
+│   │       ├── login.tsx    # → /login
+│   │       └── register.tsx # → /register
+│   ├── app.tsx          # Корневой layout
+│   └── entry-client.tsx # Точка входа клиента
+│   └── entry-server.tsx # Точка входа сервера
+├── app.config.ts        # Конфиг Vinxi/SolidStart
+└── package.json
+```
+
+---
+
+## 📁 Файловый роутинг
+
+```tsx
+// src/routes/index.tsx → /
+export default function Home() {
+  return <h1>Главная страница</h1>;
+}
+
+// src/routes/blog/[slug].tsx → /blog/:slug
+import { useParams } from '@solidjs/router';
+
+export default function BlogPost() {
+  const params = useParams<{ slug: string }>();
+  return <h1>Пост: {params.slug}</h1>;
+}
+
+// src/routes/[...all].tsx → catch-all (404)
+export default function NotFound() {
+  return <h1>404 — Страница не найдена</h1>;
+}
+
+// src/routes/(dashboard)/settings.tsx → /settings
+// Скобки создают группу — не влияет на URL, но группирует layout
+```
+
+---
+
+## ⚡ Серверные функции ("use server")
+
+Главная суперсила SolidStart — функции, которые **всегда выполняются на сервере**:
+
+```tsx
+// src/routes/index.tsx
+import { action, query } from '@solidjs/router';
+
+// Server Query — безопасное чтение данных
+const getUsers = query(async () => {
+  'use server'; // 🔑 Эта строка = этот код только на сервере!
+  const users = await db.query('SELECT * FROM users');
+  return users;
+}, 'users'); // ключ кэша
+
+// Server Action — мутации
+const createUser = action(async (formData: FormData) => {
+  'use server';
+  const name = formData.get('name') as string;
+  await db.query('INSERT INTO users (name) VALUES (?)', [name]);
+  return { success: true };
+});
+
+export default function UsersPage() {
+  const users = createAsync(() => getUsers());
+
+  return (
+    <div>
+      <For each={users()}>
+        {(user) => <div>{user.name}</div>}
+      </For>
+      <form action={createUser} method="post">
+        <input name="name" />
+        <button type="submit">Добавить</button>
+      </form>
+    </div>
+  );
+}
+```
+
+> 🔑 `"use server"` — директива строка (как `"use strict"`). Всё что внутри функции с этой директивой **никогда не попадёт в клиентский бандл**.
+
+---
+
+## 🌐 API Routes
+
+```tsx
+// src/routes/api/users.ts → GET /api/users
+import { json } from '@solidjs/router';
+import type { APIEvent } from '@solidjs/start/server';
+
+export async function GET({ request }: APIEvent) {
+  const users = await db.getUsers();
+  return json(users);
+}
+
+export async function POST({ request }: APIEvent) {
+  const body = await request.json();
+  const user = await db.createUser(body);
+  return json(user, { status: 201 });
+}
+
+// src/routes/api/users/[id].ts → GET /api/users/:id
+export async function GET({ params }: APIEvent) {
+  const user = await db.getUserById(params.id);
+  if (!user) return new Response(null, { status: 404 });
+  return json(user);
+}
+```
+
+---
+
+## 📊 Изоморфная загрузка данных
+
+```tsx
+// route.data.ts — загрузчик данных (выполняется на сервере при SSR,
+// на клиенте при навигации)
+import { cache, createAsync } from '@solidjs/router';
+
+const getProduct = cache(async (id: string) => {
+  'use server';
+  return fetch(`https://api.example.com/products/${id}`).then(r => r.json());
+}, 'product');
+
+// src/routes/products/[id].tsx
+export const route = {
+  preload: ({ params }) => getProduct(params.id), // предзагрузка
+};
+
+export default function ProductPage() {
+  const params = useParams<{ id: string }>();
+  const product = createAsync(() => getProduct(params.id));
+
+  return (
+    <Suspense fallback={<Skeleton />}>
+      <h1>{product()?.name}</h1>
+      <p>{product()?.price}₽</p>
+    </Suspense>
+  );
+}
+```
+
+---
+
+## 🌊 Streaming SSR
+
+```tsx
+// SolidStart поддерживает streaming из коробки!
+// src/entry-server.tsx
+import { createHandler, StartServer } from '@solidjs/start/server';
+
+export default createHandler(() => (
+  <StartServer
+    document={({ assets, children, scripts }) => (
+      <html>
+        <head>{assets}</head>
+        <body>
+          <div id="app">{children}</div>
+          {scripts}
+        </body>
+      </html>
+    )}
+  />
+));
+
+// Streaming включается через renderToStream в конфиге
+```
+
+---
+
+## ⚙️ app.config.ts (Vinxi)
+
+```ts
+// app.config.ts
+import { defineConfig } from '@solidjs/start/config';
+
+export default defineConfig({
+  // Адаптеры для разных хостингов
+  server: {
+    preset: 'node', // node | cloudflare | netlify | vercel | bun
+    // preset: 'cloudflare-pages'
+    // preset: 'netlify'
+  },
+
+  // Алиасы путей
+  vite: {
+    resolve: {
+      alias: {
+        '~': '/src',
+      },
+    },
+  },
+
+  // SSR настройки
+  ssr: true, // false = SPA mode
+
+  // Islands architecture (экспериментально)
+  // islands: true,
+});
+```
+
+---
+
+## 🏝️ Граница клиент/сервер
+
+```tsx
+// Файл на сервере — НИКОГДА не попадает в браузер
+import { isServer } from 'solid-js/web';
+
+const secret = isServer ? process.env.DB_PASSWORD : undefined;
+
+// Серверная функция — безопасно использует секреты
+const getData = query(async () => {
+  'use server';
+  // Здесь можно: process.env, БД, файловая система
+  const data = await prisma.user.findMany({
+    where: { secret: process.env.SECRET_KEY },
+  });
+  return data;
+}, 'data');
+```
+
+---
+
+## 🎮 Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, CSSProperties } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const PURPLE = '#a78bfa';
+
+type Tab = 'structure' | 'server-fn' | 'api-route' | 'adapters';
+
+// ---- File Tree ----
+type FileNode = { name: string; type: 'file' | 'dir'; children?: FileNode[]; note?: string };
+const fileTree: FileNode[] = [
+  { name: 'src/', type: 'dir', children: [
+    { name: 'routes/', type: 'dir', children: [
+      { name: 'index.tsx', type: 'file', note: '→ /' },
+      { name: 'about.tsx', type: 'file', note: '→ /about' },
+      { name: 'blog/', type: 'dir', children: [
+        { name: 'index.tsx', type: 'file', note: '→ /blog' },
+        { name: '[slug].tsx', type: 'file', note: '→ /blog/:slug' },
+      ]},
+      { name: 'api/', type: 'dir', children: [
+        { name: 'users.ts', type: 'file', note: '→ GET /api/users' },
+      ]},
+      { name: '[...404].tsx', type: 'file', note: '→ catch-all' },
+    ]},
+    { name: 'app.tsx', type: 'file', note: 'Root layout' },
+    { name: 'entry-client.tsx', type: 'file', note: 'Client entry' },
+    { name: 'entry-server.tsx', type: 'file', note: 'Server entry' },
+  ]},
+  { name: 'app.config.ts', type: 'file', note: 'Vinxi config' },
+  { name: 'package.json', type: 'file', note: '' },
+];
+
+function FileTree({ nodes, depth = 0 }: { nodes: FileNode[]; depth?: number }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set(['src/', 'routes/', 'blog/', 'api/']));
+  return (
+    <div>
+      {nodes.map(node => (
+        <div key={node.name}>
+          <div
+            onClick={() => node.type === 'dir' && setExpanded(p => {
+              const n = new Set(p);
+              n.has(node.name) ? n.delete(node.name) : n.add(node.name);
+              return n;
+            })}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '3px 6px', paddingLeft: \`\${8 + depth * 16}px\`,
+              borderRadius: 4, cursor: node.type === 'dir' ? 'pointer' : 'default',
+              color: node.type === 'dir' ? SOLID_LIGHT : TEXT,
+              fontSize: 13,
+            }}
+          >
+            <span>{node.type === 'dir' ? (expanded.has(node.name) ? '📂' : '📁') : node.name.endsWith('.ts') || node.name.endsWith('.tsx') ? '📄' : '📝'}</span>
+            <span style={{ fontWeight: node.type === 'dir' ? 600 : 400 }}>{node.name}</span>
+            {node.note && <span style={{ color: GREEN, fontSize: 11, marginLeft: 4 }}>{node.note}</span>}
+          </div>
+          {node.type === 'dir' && expanded.has(node.name) && node.children && (
+            <FileTree nodes={node.children} depth={depth + 1} />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---- Server Function Simulation ----
+function ServerFnDemo() {
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [stage, setStage] = useState<string[]>([]);
+
+  const simulateServerFn = async () => {
+    setLoading(true);
+    setResult(null);
+    setStage([]);
+    const steps = [
+      { delay: 300, msg: '🌐 Клиент: вызов getUsers() [RPC]', color: SOLID_LIGHT },
+      { delay: 600, msg: '🔒 Сервер: "use server" директива', color: ORANGE },
+      { delay: 900, msg: '💾 Сервер: SELECT * FROM users', color: PURPLE },
+      { delay: 1200, msg: '📦 Сервер: сериализация → JSON', color: ORANGE },
+      { delay: 1500, msg: '✅ Клиент: данные получены!', color: GREEN },
+    ];
+    for (const step of steps) {
+      await new Promise(r => setTimeout(r, step.delay));
+      setStage(p => [...p, step.msg]);
+    }
+    setResult([
+      { id: 1, name: 'Яша', role: 'dev' },
+      { id: 2, name: 'Маша', role: 'design' },
+      { id: 3, name: 'Коля', role: 'pm' },
+    ]);
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ padding: '10px 14px', background: BG, borderRadius: 8, border: \`1px solid \${BORDER}\`, fontSize: 12, fontFamily: 'monospace', color: MUTED }}>
+        <div style={{ color: ORANGE }}>const getUsers = query(async () =&gt; {'{'}</div>
+        <div style={{ paddingLeft: 16, color: GREEN }}>"use server"; // 🔑 Только сервер</div>
+        <div style={{ paddingLeft: 16, color: MUTED }}>return await db.getUsers();</div>
+        <div style={{ color: ORANGE }}>{'}'}, "users");</div>
+      </div>
+      <button onClick={simulateServerFn} disabled={loading} style={{
+        padding: '10px 20px', background: loading ? MUTED : SOLID_BLUE,
+        color: TEXT, border: 'none', borderRadius: 8, cursor: loading ? 'not-allowed' : 'pointer',
+        fontWeight: 600, transition: 'background 0.2s',
+      }}>
+        {loading ? '⏳ Загрузка...' : '▶ Вызвать серверную функцию'}
+      </button>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {stage.map((s, i) => (
+          <div key={i} style={{ fontSize: 12, color: i === stage.length - 1 ? GREEN : MUTED, padding: '2px 0', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 6, height: 6, borderRadius: '50%', background: i === stage.length - 1 ? GREEN : MUTED, flexShrink: 0 }} />
+            {s}
+          </div>
+        ))}
+      </div>
+      {result && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {result.map((u: any) => (
+            <div key={u.id} style={{ padding: '8px 12px', background: BG, borderRadius: 6, border: \`1px solid \${GREEN}44\`, display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+              <span style={{ color: TEXT }}>{u.name}</span>
+              <span style={{ color: GREEN }}>{u.role}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- API Route Simulation ----
+function ApiRouteDemo() {
+  const [method, setMethod] = useState<'GET' | 'POST' | 'DELETE'>('GET');
+  const [response, setResponse] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+
+  const call = async () => {
+    setLoading(true);
+    await new Promise(r => setTimeout(r, 600));
+    if (method === 'GET') setResponse({ status: 200, data: [{ id: 1, name: 'Яша' }, { id: 2, name: 'Маша' }] });
+    else if (method === 'POST') setResponse({ status: 201, data: { id: 3, name: 'Новый пользователь' } });
+    else setResponse({ status: 200, data: { deleted: true } });
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {(['GET', 'POST', 'DELETE'] as const).map(m => (
+          <button key={m} onClick={() => { setMethod(m); setResponse(null); }} style={{
+            padding: '8px 14px',
+            background: method === m ? (m === 'GET' ? GREEN : m === 'POST' ? SOLID_BLUE : '#ef4444') + '22' : CARD,
+            color: method === m ? (m === 'GET' ? GREEN : m === 'POST' ? SOLID_BLUE : '#ef4444') : MUTED,
+            border: \`1px solid \${method === m ? (m === 'GET' ? GREEN : m === 'POST' ? SOLID_BLUE : '#ef4444') : BORDER}\`,
+            borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700,
+          }}>{m}</button>
+        ))}
+      </div>
+      <div style={{ padding: '8px 14px', background: BG, borderRadius: 6, fontSize: 12, color: MUTED }}>
+        <span style={{ color: method === 'GET' ? GREEN : method === 'POST' ? SOLID_BLUE : '#ef4444', fontWeight: 700 }}>{method}</span>
+        {' '}<span style={{ color: TEXT }}>/api/users</span>
+        <span style={{ color: MUTED, marginLeft: 8 }}>→ src/routes/api/users.ts</span>
+      </div>
+      <button onClick={call} disabled={loading} style={{
+        padding: '10px', background: SOLID_BLUE, color: TEXT,
+        border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600,
+      }}>
+        {loading ? '⏳...' : '▶ Отправить запрос'}
+      </button>
+      {response && (
+        <div style={{
+          padding: '12px 14px', background: BG, borderRadius: 8,
+          border: \`1px solid \${response.status < 300 ? GREEN : '#ef4444'}44\`,
+          fontSize: 12, fontFamily: 'monospace',
+        }}>
+          <div style={{ color: response.status < 300 ? GREEN : '#ef4444', marginBottom: 6 }}>
+            HTTP {response.status}
+          </div>
+          <pre style={{ margin: 0, color: TEXT, fontSize: 11 }}>{JSON.stringify(response.data, null, 2)}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- Adapters ----
+function AdaptersDemo() {
+  const adapters = [
+    { name: 'Node.js', preset: 'node', icon: '🟢', color: GREEN, desc: 'Express/Fastify сервер' },
+    { name: 'Cloudflare', preset: 'cloudflare-pages', icon: '🟠', color: ORANGE, desc: 'Edge Workers' },
+    { name: 'Netlify', preset: 'netlify', icon: '🟦', color: SOLID_BLUE, desc: 'Netlify Functions' },
+    { name: 'Vercel', preset: 'vercel', icon: '⬛', color: TEXT, desc: 'Serverless Functions' },
+    { name: 'Bun', preset: 'bun', icon: '🟡', color: '#f5a623', desc: 'Bun runtime' },
+    { name: 'Static', preset: 'static', icon: '📄', color: PURPLE, desc: 'SPA / Static export' },
+  ];
+  const [selected, setSelected] = useState('node');
+  const adapter = adapters.find(a => a.preset === selected)!;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+        {adapters.map(a => (
+          <button key={a.preset} onClick={() => setSelected(a.preset)} style={{
+            padding: '10px 12px', background: selected === a.preset ? a.color + '22' : CARD,
+            border: \`1px solid \${selected === a.preset ? a.color : BORDER}\`,
+            borderRadius: 8, cursor: 'pointer', textAlign: 'left', color: TEXT,
+          }}>
+            <div style={{ fontSize: 18 }}>{a.icon}</div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{a.name}</div>
+            <div style={{ fontSize: 11, color: MUTED }}>{a.desc}</div>
+          </button>
+        ))}
+      </div>
+      <div style={{ padding: '12px 14px', background: BG, borderRadius: 8, border: \`1px solid \${adapter.color}44\`, fontFamily: 'monospace', fontSize: 12 }}>
+        <div style={{ color: MUTED }}>// app.config.ts</div>
+        <div><span style={{ color: PURPLE }}>export default</span> <span style={{ color: SOLID_BLUE }}>defineConfig</span>({'('}{'{'}</div>
+        <div style={{ paddingLeft: 16 }}>server: {'{'}</div>
+        <div style={{ paddingLeft: 32 }}>preset: <span style={{ color: GREEN }}>"{adapter.preset}"</span>,</div>
+        <div style={{ paddingLeft: 16 }}>{'}'}</div>
+        <div>{'}'}{')'};</div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [tab, setTab] = useState<Tab>('structure');
+  const tabs: { id: Tab; label: string }[] = [
+    { id: 'structure', label: '📁 Структура' },
+    { id: 'server-fn', label: '⚡ Server Fn' },
+    { id: 'api-route', label: '🌐 API Route' },
+    { id: 'adapters', label: '🔌 Adapters' },
+  ];
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 500, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 22 }}>SolidStart</h2>
+        <p style={{ color: MUTED, fontSize: 13, margin: '0 0 20px' }}>Файловый роутинг, server functions, API routes, адаптеры</p>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 20, flexWrap: 'wrap' }}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              padding: '7px 12px',
+              background: tab === t.id ? SOLID_BLUE : CARD,
+              color: tab === t.id ? TEXT : MUTED,
+              border: \`1px solid \${tab === t.id ? SOLID_BLUE : BORDER}\`,
+              borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+            }}>{t.label}</button>
+          ))}
+        </div>
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, border: \`1px solid \${BORDER}\` }}>
+          {tab === 'structure' && <FileTree nodes={fileTree} />}
+          {tab === 'server-fn' && <ServerFnDemo />}
+          {tab === 'api-route' && <ApiRouteDemo />}
+          {tab === 'adapters' && <AdaptersDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## 🚨 Частые ошибки
+
+```tsx
+// ❌ ОШИБКА: "use server" только в верхнем уровне функции
+const getData = async () => {
+  if (true) {
+    'use server'; // Нельзя! Должна быть первой строкой
+  }
+};
+
+// ✅ ПРАВИЛЬНО
+const getData = async () => {
+  'use server'; // Первой строкой
+  return await db.query('...');
+};
+
+// ❌ ОШИБКА: отправка несериализуемых данных из сервера
+const getClass = query(async () => {
+  'use server';
+  return new MyClass(); // Ошибка! Можно только JSON-совместимые типы
+}, 'class');
+
+// ✅ ПРАВИЛЬНО
+const getClass = query(async () => {
+  'use server';
+  const instance = new MyClass();
+  return instance.toJSON(); // Сериализуемый объект
+}, 'class');
+```
+
+---
+
+## 🎯 Итоги
+
+- **Файловый роутинг** — `src/routes/page.tsx` → URL автоматически
+- **`"use server"`** — магическая директива, код никогда не попадёт в браузер
+- **`query()`** — серверная загрузка с кэшированием
+- **`action()`** — серверные мутации (формы, POST)
+- **API Routes** — файл в `routes/api/` с экспортом `GET`, `POST`, и т.д.
+- **Адаптеры** — один код, деплой куда угодно: Node, Cloudflare, Netlify, Vercel
+- **Vinxi** — build-система под капотом, поддерживает HMR и streaming

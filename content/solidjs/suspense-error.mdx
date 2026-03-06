@@ -1,0 +1,743 @@
+import { Playground } from '../../components/Playground'
+
+# Suspense и ErrorBoundary в Solid.js
+
+`<Suspense>` и `<ErrorBoundary>` — инструменты для декларативной обработки асинхронных состояний и ошибок. Solid поддерживает их нативно, без дополнительных библиотек.
+
+## `<Suspense>` — граница ожидания
+
+Suspense «перехватывает» асинхронные ресурсы в дочерних компонентах и показывает fallback пока данные загружаются:
+
+```tsx
+import { Suspense } from 'solid-js';
+import { createResource } from 'solid-js';
+
+function UserPage() {
+  const [user] = createResource(() => fetch('/api/user').then(r => r.json()));
+
+  // Этот компонент внутри Suspense — пока user загружается, показывается fallback
+  return <div>{user()!.name}</div>;
+}
+
+function App() {
+  return (
+    <Suspense fallback={<div>Загрузка...</div>}>
+      <UserPage />
+    </Suspense>
+  );
+}
+```
+
+## Вложенные Suspense
+
+Можно создавать иерархию Suspense для разных уровней загрузки:
+
+```tsx
+function Dashboard() {
+  return (
+    <Suspense fallback={<PageSkeleton />}>
+      {/* Верхний уровень — если что-то не загружено */}
+      <Header />
+
+      <Suspense fallback={<StatsSkeleton />}>
+        {/* Секция статистики загружается независимо */}
+        <StatsPanel />
+      </Suspense>
+
+      <Suspense fallback={<FeedSkeleton />}>
+        {/* Лента новостей — своя независимая загрузка */}
+        <NewsFeed />
+      </Suspense>
+    </Suspense>
+  );
+}
+```
+
+## `<ErrorBoundary>` — граница ошибок
+
+ErrorBoundary перехватывает ошибки внутри дерева компонентов:
+
+```tsx
+import { ErrorBoundary } from 'solid-js';
+
+function App() {
+  return (
+    <ErrorBoundary
+      fallback={(err, reset) => (
+        <div class="error-container">
+          <h2>Что-то пошло не так</h2>
+          <pre>{err.message}</pre>
+          <button onClick={reset}>Попробовать снова</button>
+        </div>
+      )}
+    >
+      <RiskyComponent />
+    </ErrorBoundary>
+  );
+}
+```
+
+`reset` — функция, которая сбрасывает границу ошибки и перерендеривает дочерние компоненты.
+
+## Suspense + ErrorBoundary вместе
+
+Правильный порядок: ErrorBoundary **снаружи**, Suspense **внутри**:
+
+```tsx
+function DataSection() {
+  return (
+    <ErrorBoundary
+      fallback={(err, reset) => (
+        <ErrorCard error={err} onRetry={reset} />
+      )}
+    >
+      <Suspense fallback={<Spinner />}>
+        {/* Ошибки в ресурсах всплывут до ErrorBoundary */}
+        <DataComponent />
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+```
+
+## startTransition — загрузка без мерцания
+
+`startTransition` позволяет отложить обновление без показа fallback:
+
+```tsx
+import { startTransition } from 'solid-js';
+
+function Navigation() {
+  const [route, setRoute] = createSignal('home');
+
+  const navigate = (newRoute: string) => {
+    // Без startTransition — Suspense сразу показывает fallback
+    // С startTransition — UI остаётся на текущем контенте, пока новый загружается
+    startTransition(() => {
+      setRoute(newRoute);
+    });
+  };
+
+  return (
+    <Suspense fallback={<PageLoader />}>
+      <Show when={route() === 'home'}><HomePage /></Show>
+      <Show when={route() === 'profile'}><ProfilePage /></Show>
+    </Suspense>
+  );
+}
+```
+
+## useTransition — с индикатором загрузки
+
+```tsx
+import { useTransition } from 'solid-js';
+
+function TabBar() {
+  const [activeTab, setActiveTab] = createSignal('posts');
+  const [pending, start] = useTransition();
+
+  return (
+    <div>
+      <nav>
+        <button
+          onClick={() => start(() => setActiveTab('posts'))}
+          // Индикатор пока новая вкладка загружается
+          style={{ opacity: pending() ? 0.7 : 1 }}
+        >
+          Посты {pending() && '...'}
+        </button>
+        <button onClick={() => start(() => setActiveTab('photos'))}>
+          Фото
+        </button>
+      </nav>
+      <Suspense>
+        <Show when={activeTab() === 'posts'}><Posts /></Show>
+        <Show when={activeTab() === 'photos'}><Photos /></Show>
+      </Suspense>
+    </div>
+  );
+}
+```
+
+## Паттерн восстановления после ошибки
+
+```tsx
+function SmartErrorBoundary(props: { children: any }) {
+  return (
+    <ErrorBoundary
+      fallback={(error, reset) => {
+        // Автоматическая повторная попытка через 5 секунд
+        const [countdown, setCountdown] = createSignal(5);
+        const timer = setInterval(() => {
+          setCountdown(c => {
+            if (c <= 1) { clearInterval(timer); reset(); return 0; }
+            return c - 1;
+          });
+        }, 1000);
+        onCleanup(() => clearInterval(timer));
+
+        return (
+          <div class="error-card">
+            <p>{error.message}</p>
+            <p>Повтор через {countdown()} сек...</p>
+            <button onClick={() => { clearInterval(timer); reset(); }}>
+              Повторить сейчас
+            </button>
+          </div>
+        );
+      }}
+    >
+      {props.children}
+    </ErrorBoundary>
+  );
+}
+```
+
+## Ошибки в ресурсах vs ошибки в рендере
+
+```tsx
+// Ошибки createResource всплывают к ErrorBoundary
+function DataComponent() {
+  const [data] = createResource(async () => {
+    throw new Error('Сервер недоступен'); // → попадёт в ErrorBoundary
+  });
+  return <div>{data()!.value}</div>;
+}
+
+// Ошибки в JSX тоже всплывают к ErrorBoundary
+function BadRender() {
+  const [items] = createResource(fetchItems);
+  // TypeScript не поможет, если items() может быть undefined
+  return <div>{items()!.map(i => i.value)}</div>; // → ReferenceError → ErrorBoundary
+}
+```
+
+## Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, Suspense } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+// ── ErrorBoundary simulation ──────────────────────────────
+interface ErrorBoundaryState { hasError: boolean; error: Error | null; }
+
+class ErrorBoundary extends React.Component<
+  { fallback: (err: Error, reset: () => void) => React.ReactNode; children: React.ReactNode },
+  ErrorBoundaryState
+> {
+  state: ErrorBoundaryState = { hasError: false, error: null };
+  static getDerivedStateFromError(error: Error) { return { hasError: true, error }; }
+  reset = () => this.setState({ hasError: false, error: null });
+  render() {
+    if (this.state.hasError && this.state.error) {
+      return this.props.fallback(this.state.error, this.reset);
+    }
+    return this.props.children;
+  }
+}
+
+import React from 'react';
+
+// ── Mock async components ─────────────────────────────────
+type LoadState = 'idle' | 'loading' | 'loaded' | 'error';
+
+function useAsyncLoad(delay: number, shouldError = false): LoadState {
+  const [state, setState] = useState<LoadState>('loading');
+  const mountRef = useRef(true);
+  useEffect(() => {
+    setState('loading');
+    const timer = setTimeout(() => {
+      if (!mountRef.current) return;
+      setState(shouldError ? 'error' : 'loaded');
+    }, delay);
+    return () => { clearTimeout(timer); mountRef.current = false; };
+  }, [delay, shouldError]);
+  return state;
+}
+
+function SlowCard({ delay, label, color, shouldError }: {
+  delay: number; label: string; color: string; shouldError?: boolean;
+}) {
+  const state = useAsyncLoad(delay, shouldError);
+
+  if (state === 'error') {
+    throw new Error(\`\${label}: не удалось загрузить данные\`);
+  }
+
+  if (state === 'loading') {
+    return (
+      <div style={{
+        padding: 16, borderRadius: 10, background: CARD,
+        border: \`1px dashed \${BORDER}\`, textAlign: 'center',
+      }}>
+        <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>{label}</div>
+        <div style={{ color: SOLID_LIGHT, fontSize: 20 }}>⏳</div>
+        <div style={{ color: MUTED, fontSize: 11, marginTop: 4 }}>{delay}мс...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      padding: 16, borderRadius: 10, background: CARD,
+      border: \`2px solid \${color}66\`,
+      boxShadow: \`0 0 16px \${color}22\`,
+    }}>
+      <div style={{ color, fontWeight: 700, fontSize: 14, marginBottom: 4 }}>{label}</div>
+      <div style={{ color: MUTED, fontSize: 12 }}>✅ Загружено за {delay}мс</div>
+    </div>
+  );
+}
+
+// ── Suspense simulation ───────────────────────────────────
+function SuspenseWrapper({ fallback, children }: { fallback: React.ReactNode; children: React.ReactNode }) {
+  // Simplified suspense - uses React.Suspense
+  return (
+    <React.Suspense fallback={
+      <div style={{
+        padding: 14, borderRadius: 10, background: '#1a2040',
+        border: \`1px dashed \${SOLID_BLUE}44\`, color: MUTED,
+        fontSize: 13, textAlign: 'center',
+      }}>
+        {fallback}
+      </div>
+    }>
+      {children}
+    </React.Suspense>
+  );
+}
+
+type DemoMode = 'nested' | 'transition' | 'recovery';
+
+export default function App() {
+  const [mode, setMode] = useState<DemoMode>('nested');
+  const [resetKey, setResetKey] = useState(0);
+  const [errorSection, setErrorSection] = useState<'none' | 'stats' | 'feed' | 'all'>('none');
+  const [fastDelay, setFastDelay] = useState(600);
+  const [slowDelay, setSlowDelay] = useState(2000);
+  const [currentTab, setCurrentTab] = useState<'home' | 'profile' | 'settings'>('home');
+  const [transitioning, setTransitioning] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const reset = () => setResetKey(k => k + 1);
+
+  const simulateTransition = (tab: typeof currentTab) => {
+    setTransitioning(true);
+    setTimeout(() => {
+      setCurrentTab(tab);
+      setTransitioning(false);
+    }, 800);
+  };
+
+  const startCountdown = (onDone: () => void) => {
+    setCountdown(5);
+    countdownRef.current = setInterval(() => {
+      setCountdown(c => {
+        if (c === null || c <= 1) {
+          clearInterval(countdownRef.current!);
+          setCountdown(null);
+          onDone();
+          return null;
+        }
+        return c - 1;
+      });
+    }, 1000);
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 16,
+      fontFamily: "'Inter', sans-serif", color: TEXT }}>
+      <div style={{ maxWidth: 560, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 18, textAlign: 'center' }}>
+          Suspense + ErrorBoundary
+        </h2>
+        <p style={{ color: MUTED, fontSize: 12, textAlign: 'center', margin: '0 0 14px' }}>
+          Async границы · Ошибки · Transitions
+        </p>
+
+        {/* Mode tabs */}
+        <div style={{ display: 'flex', gap: 5, marginBottom: 14 }}>
+          {([
+            { key: 'nested', label: '🪆 Вложенные' },
+            { key: 'transition', label: '🔄 Transition' },
+            { key: 'recovery', label: '🛡️ Recovery' },
+          ] as const).map(t => (
+            <button key={t.key} onClick={() => setMode(t.key)} style={{
+              flex: 1, padding: '7px 0', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+              border: \`1px solid \${mode === t.key ? SOLID_BLUE : BORDER}\`,
+              background: mode === t.key ? SOLID_BLUE : CARD,
+              color: mode === t.key ? '#fff' : MUTED, fontWeight: 600,
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {/* NESTED MODE */}
+        {mode === 'nested' && (
+          <div>
+            <div style={{ background: CARD, borderRadius: 10, padding: 12,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 8, fontSize: 13 }}>
+                Настройки загрузки
+              </div>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                <div>
+                  <div style={{ color: MUTED, fontSize: 11, marginBottom: 4 }}>Быстрые ({fastDelay}мс)</div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {[400, 800, 1500].map(d => (
+                      <button key={d} onClick={() => setFastDelay(d)} style={{
+                        padding: '2px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 11,
+                        border: \`1px solid \${fastDelay === d ? GREEN : BORDER}\`,
+                        background: fastDelay === d ? GREEN + '22' : 'transparent',
+                        color: fastDelay === d ? GREEN : MUTED,
+                      }}>{d}</button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: MUTED, fontSize: 11, marginBottom: 4 }}>Медленные ({slowDelay}мс)</div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {[1500, 2500, 4000].map(d => (
+                      <button key={d} onClick={() => setSlowDelay(d)} style={{
+                        padding: '2px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 11,
+                        border: \`1px solid \${slowDelay === d ? ORANGE : BORDER}\`,
+                        background: slowDelay === d ? ORANGE + '22' : 'transparent',
+                        color: slowDelay === d ? ORANGE : MUTED,
+                      }}>{d}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: MUTED, fontSize: 11, marginBottom: 4 }}>Секция с ошибкой</div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {(['none', 'stats', 'feed', 'all'] as const).map(s => (
+                      <button key={s} onClick={() => setErrorSection(s)} style={{
+                        padding: '2px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 10,
+                        border: \`1px solid \${errorSection === s ? '#ef4444' : BORDER}\`,
+                        background: errorSection === s ? '#ef444422' : 'transparent',
+                        color: errorSection === s ? '#f87171' : MUTED,
+                      }}>{s}</button>
+                    ))}
+                  </div>
+                </div>
+                <button onClick={() => { reset(); }} style={{
+                  padding: '4px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                  border: \`1px solid \${SOLID_BLUE}\`, background: SOLID_BLUE + '11',
+                  color: SOLID_LIGHT,
+                }}>🔄 Перезапустить</button>
+              </div>
+            </div>
+
+            {/* Nested Suspense + ErrorBoundary demo */}
+            <div key={resetKey} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {/* Outer ErrorBoundary */}
+              <div style={{ padding: 10, borderRadius: 9, border: \`1px solid \${ORANGE}44\`, background: ORANGE + '08' }}>
+                <div style={{ color: ORANGE, fontSize: 11, marginBottom: 8 }}>
+                  &lt;ErrorBoundary&gt; внешний
+                </div>
+                <ErrorBoundary fallback={(err, reset) => (
+                  <div style={{ padding: 14, borderRadius: 9, background: '#2a0f0f',
+                    border: '1px solid #ef4444' }}>
+                    <div style={{ color: '#f87171', fontWeight: 700, marginBottom: 6 }}>❌ Ошибка</div>
+                    <div style={{ color: '#fca5a5', fontSize: 13, marginBottom: 10 }}>{err.message}</div>
+                    <button onClick={reset} style={{
+                      padding: '6px 16px', borderRadius: 7, border: 'none',
+                      background: '#ef4444', color: '#fff', cursor: 'pointer', fontSize: 13,
+                    }}>Сбросить</button>
+                  </div>
+                )}>
+                  {/* Header - fast */}
+                  <div style={{ marginBottom: 8 }}>
+                    <SlowCard delay={fastDelay} label="Header" color={GREEN} shouldError={errorSection === 'all'} />
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    {/* Inner ErrorBoundary for Stats */}
+                    <div style={{ padding: 8, borderRadius: 8, border: \`1px solid \${SOLID_BLUE}33\`, background: SOLID_BLUE + '05' }}>
+                      <div style={{ color: SOLID_LIGHT, fontSize: 10, marginBottom: 6 }}>
+                        &lt;ErrorBoundary&gt; Stats
+                      </div>
+                      <ErrorBoundary fallback={(err, reset) => (
+                        <div style={{ padding: 10, borderRadius: 7, background: '#2a0f0f',
+                          border: '1px solid #ef4444', fontSize: 12 }}>
+                          <div style={{ color: '#f87171', marginBottom: 6 }}>❌ {err.message}</div>
+                          <button onClick={reset} style={{
+                            padding: '4px 10px', borderRadius: 5, border: 'none',
+                            background: '#ef4444', color: '#fff', cursor: 'pointer', fontSize: 11,
+                          }}>Retry</button>
+                        </div>
+                      )}>
+                        <SlowCard delay={slowDelay} label="StatsPanel" color={SOLID_LIGHT}
+                          shouldError={errorSection === 'stats' || errorSection === 'all'} />
+                      </ErrorBoundary>
+                    </div>
+
+                    {/* Inner ErrorBoundary for Feed */}
+                    <div style={{ padding: 8, borderRadius: 8, border: \`1px solid \${GREEN}33\`, background: GREEN + '05' }}>
+                      <div style={{ color: GREEN, fontSize: 10, marginBottom: 6 }}>
+                        &lt;ErrorBoundary&gt; Feed
+                      </div>
+                      <ErrorBoundary fallback={(err, reset) => (
+                        <div style={{ padding: 10, borderRadius: 7, background: '#2a0f0f',
+                          border: '1px solid #ef4444', fontSize: 12 }}>
+                          <div style={{ color: '#f87171', marginBottom: 6 }}>❌ {err.message}</div>
+                          <button onClick={reset} style={{
+                            padding: '4px 10px', borderRadius: 5, border: 'none',
+                            background: '#ef4444', color: '#fff', cursor: 'pointer', fontSize: 11,
+                          }}>Retry</button>
+                        </div>
+                      )}>
+                        <SlowCard delay={fastDelay + 200} label="NewsFeed" color={GREEN}
+                          shouldError={errorSection === 'feed' || errorSection === 'all'} />
+                      </ErrorBoundary>
+                    </div>
+                  </div>
+                </ErrorBoundary>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 10, padding: 10, borderRadius: 7, background: '#1a1a2e',
+              border: \`1px solid \${SOLID_BLUE}33\`, fontSize: 11, color: MUTED }}>
+              Каждая секция имеет <strong style={{ color: TEXT }}>свою</strong> ErrorBoundary — ошибка в одной не ломает другие.
+            </div>
+          </div>
+        )}
+
+        {/* TRANSITION MODE */}
+        {mode === 'transition' && (
+          <div>
+            <div style={{ background: CARD, borderRadius: 10, padding: 14,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 10, fontSize: 13 }}>
+                startTransition — без мерцания
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {(['home', 'profile', 'settings'] as const).map(tab => (
+                  <button key={tab} onClick={() => simulateTransition(tab)} style={{
+                    flex: 1, padding: '8px 0', borderRadius: 8, cursor: 'pointer', fontSize: 13,
+                    border: \`1px solid \${currentTab === tab ? SOLID_BLUE : BORDER}\`,
+                    background: currentTab === tab ? SOLID_BLUE : 'transparent',
+                    color: currentTab === tab ? '#fff' : MUTED, fontWeight: 600,
+                    opacity: transitioning ? 0.7 : 1,
+                    transition: 'opacity 0.2s',
+                  }}>
+                    {tab === 'home' ? '🏠' : tab === 'profile' ? '👤' : '⚙️'} {tab}
+                    {transitioning && currentTab !== tab && ' ...'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{
+              padding: 20, borderRadius: 12, background: CARD,
+              border: \`2px solid \${transitioning ? ORANGE : BORDER}\`,
+              opacity: transitioning ? 0.6 : 1, transition: 'all 0.3s', minHeight: 100,
+              display: 'flex', flexDirection: 'column', justifyContent: 'center',
+            }}>
+              {transitioning && (
+                <div style={{ textAlign: 'center', color: ORANGE, fontSize: 13, marginBottom: 8 }}>
+                  ⏳ Переход (pending=true)...
+                </div>
+              )}
+              {currentTab === 'home' && (
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 32 }}>🏠</div>
+                  <div style={{ color: TEXT, fontWeight: 700, marginTop: 8 }}>Главная страница</div>
+                  <div style={{ color: MUTED, fontSize: 13, marginTop: 4 }}>Контент загружен</div>
+                </div>
+              )}
+              {currentTab === 'profile' && (
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 32 }}>👤</div>
+                  <div style={{ color: TEXT, fontWeight: 700, marginTop: 8 }}>Профиль пользователя</div>
+                  <div style={{ color: MUTED, fontSize: 13, marginTop: 4 }}>Данные профиля</div>
+                </div>
+              )}
+              {currentTab === 'settings' && (
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 32 }}>⚙️</div>
+                  <div style={{ color: TEXT, fontWeight: 700, marginTop: 8 }}>Настройки</div>
+                  <div style={{ color: MUTED, fontSize: 13, marginTop: 4 }}>Параметры системы</div>
+                </div>
+              )}
+            </div>
+
+            <pre style={{ marginTop: 12, fontSize: 11, color: MUTED, background: '#0d1117', borderRadius: 8, padding: 12 }}>
+{String.raw\`const [pending, start] = useTransition();
+
+// При клике — старый UI остаётся пока новый загружается
+const navigate = (route) => {
+  start(() => setRoute(route));
+};
+
+// pending() = true пока идёт загрузка
+<button style={{ opacity: pending() ? 0.7 : 1 }}>
+  {pending() ? '...' : 'Навигация'}
+</button>\`}
+            </pre>
+          </div>
+        )}
+
+        {/* RECOVERY MODE */}
+        {mode === 'recovery' && (
+          <div>
+            <div style={{ background: CARD, borderRadius: 10, padding: 14,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 8, fontSize: 13 }}>
+                Автоматическое восстановление
+              </div>
+              <ErrorBoundary
+                key={resetKey}
+                fallback={(err, reset) => {
+                  const handleAutoReset = () => {
+                    if (countdownRef.current) clearInterval(countdownRef.current);
+                    startCountdown(reset);
+                  };
+                  return (
+                    <div style={{ padding: 16, borderRadius: 10, background: '#1a0a0a',
+                      border: '1px solid #ef4444' }}>
+                      <div style={{ color: '#f87171', fontWeight: 700, fontSize: 15, marginBottom: 8 }}>
+                        ❌ Произошла ошибка
+                      </div>
+                      <div style={{ color: '#fca5a5', fontSize: 13, marginBottom: 12,
+                        background: '#2a1010', padding: '8px 12px', borderRadius: 7,
+                        fontFamily: 'monospace' }}>
+                        {err.message}
+                      </div>
+                      {countdown !== null ? (
+                        <div style={{ color: ORANGE, fontSize: 13, marginBottom: 10 }}>
+                          Автоматический повтор через {countdown} сек...
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button onClick={reset} style={{
+                            flex: 1, padding: '8px 0', borderRadius: 8, border: 'none',
+                            background: '#ef4444', color: '#fff', cursor: 'pointer', fontSize: 13,
+                          }}>🔄 Сбросить сейчас</button>
+                          <button onClick={handleAutoReset} style={{
+                            flex: 1, padding: '8px 0', borderRadius: 8,
+                            border: \`1px solid \${ORANGE}\`, background: ORANGE + '11',
+                            color: ORANGE, cursor: 'pointer', fontSize: 13,
+                          }}>⏱️ Автоповтор (5с)</button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }}
+              >
+                <ThrowingComponent key={resetKey} />
+              </ErrorBoundary>
+            </div>
+
+            <button onClick={() => { setResetKey(k => k + 1); setCountdown(null); if (countdownRef.current) clearInterval(countdownRef.current); }} style={{
+              width: '100%', padding: '8px 0', borderRadius: 9, cursor: 'pointer', fontSize: 13,
+              border: \`1px solid \${BORDER}\`, background: CARD, color: MUTED,
+            }}>
+              🆕 Перезапустить демо
+            </button>
+
+            <pre style={{ marginTop: 12, fontSize: 11, color: MUTED, background: '#0d1117', borderRadius: 8, padding: 12 }}>
+{String.raw\`<ErrorBoundary
+  fallback={(error, reset) => {
+    // reset() сбрасывает границу и перерендеривает children
+    return (
+      <div>
+        <p>{error.message}</p>
+        <button onClick={reset}>Попробовать снова</button>
+      </div>
+    );
+  }}
+>
+  <RiskyComponent />
+</ErrorBoundary>\`}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ThrowingComponent() {
+  const [state, setState] = useState<'loading' | 'loaded' | 'error'>('loading');
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setState(Math.random() > 0.4 ? 'error' : 'loaded');
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (state === 'loading') {
+    return (
+      <div style={{ padding: 20, textAlign: 'center', color: MUTED, fontSize: 13 }}>
+        ⏳ Загрузка компонента (50% шанс ошибки)...
+      </div>
+    );
+  }
+
+  if (state === 'error') {
+    throw new Error('Случайная ошибка загрузки данных');
+  }
+
+  return (
+    <div style={{ padding: 20, textAlign: 'center' }}>
+      <div style={{ color: GREEN, fontSize: 32, marginBottom: 8 }}>✅</div>
+      <div style={{ color: GREEN, fontWeight: 700 }}>Компонент загружен успешно!</div>
+      <div style={{ color: MUTED, fontSize: 13, marginTop: 4 }}>На этот раз без ошибок</div>
+    </div>
+  );
+}
+` }} />
+
+## Antpatterns
+
+```tsx
+// ❌ ErrorBoundary не ловит асинхронные ошибки (не в рендере)
+function Bad() {
+  useEffect(() => {
+    fetch('/api').then(r => {
+      if (!r.ok) throw new Error('fail'); // НЕ поймает ErrorBoundary!
+    });
+  }, []);
+}
+
+// ✅ Ошибки ресурсов Solid автоматически всплывают
+const [data] = createResource(async () => {
+  const r = await fetch('/api');
+  if (!r.ok) throw new Error('fail'); // Поймает ErrorBoundary ✅
+  return r.json();
+});
+
+// ❌ Suspense без ErrorBoundary — ошибки ресурсов «замолчат»
+<Suspense fallback={<Loader />}>
+  <DataComponent /> {/* Если ресурс упадёт — ничего не произойдёт */}
+</Suspense>
+
+// ✅ Всегда оборачивай Suspense в ErrorBoundary
+<ErrorBoundary fallback={...}>
+  <Suspense fallback={<Loader />}>
+    <DataComponent />
+  </Suspense>
+</ErrorBoundary>
+```
+
+## Итог
+
+| Компонент | Назначение |
+|---|---|
+| `<Suspense>` | Показать fallback пока загружается `createResource` |
+| `<ErrorBoundary>` | Поймать ошибки рендера и ресурсов |
+| `startTransition` | Обновить без показа fallback Suspense |
+| `useTransition` | `startTransition` + `pending()` индикатор |
+| `reset()` в fallback | Повторная попытка после ошибки |
