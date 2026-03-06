@@ -1,0 +1,580 @@
+## ⚡ Урок 22 — Асинхронные компоненты в Vue 3
+
+Асинхронные компоненты — это способ загружать Vue-компоненты **лениво**, только когда они нужны. Это фундаментальный инструмент для оптимизации размера бандла, ускорения первой загрузки и реализации code-splitting. Vue 3 предоставляет `defineAsyncComponent` — элегантный и мощный API для работы с ними.
+
+---
+
+## 🎯 Зачем нужен code splitting?
+
+При сборке SPA весь код по умолчанию попадает в один бандл. Пользователь скачивает весь JavaScript при первом посещении, даже если большая часть кода нужна только в редких сценариях.
+
+```
+Без code splitting:
+bundle.js → 2.4MB (всё сразу)
+
+С code splitting:
+main.js      → 120KB (критический путь)
+dashboard.js → 380KB (только для авторизованных)
+admin.js     → 240KB (только для админов)
+charts.js    → 560KB (только на странице аналитики)
+```
+
+Пользователь скачивает только то, что нужно прямо сейчас.
+
+---
+
+## 📦 defineAsyncComponent — базовый синтаксис
+
+Простейшее использование:
+
+```javascript
+import { defineAsyncComponent } from 'vue'
+
+// Минимальный вариант — просто ленивый импорт
+const AsyncDashboard = defineAsyncComponent(
+  () => import('./components/Dashboard.vue')
+)
+```
+
+Vite / Webpack автоматически создадут отдельный chunk для `Dashboard.vue`. Компонент загрузится только при первом рендеринге.
+
+```vue
+<template>
+  <!-- Компонент загрузится при первом рендере -->
+  <AsyncDashboard v-if="isLoggedIn" />
+</template>
+```
+
+---
+
+## ⚙️ Расширенный синтаксис с опциями
+
+Полная конфигурация `defineAsyncComponent`:
+
+```javascript
+import { defineAsyncComponent, h } from 'vue'
+import LoadingSpinner from './LoadingSpinner.vue'
+import ErrorDisplay from './ErrorDisplay.vue'
+
+const AsyncChart = defineAsyncComponent({
+  // Функция-загрузчик: возвращает Promise компонента
+  loader: () => import('./components/Chart.vue'),
+
+  // Компонент, показываемый во время загрузки
+  loadingComponent: LoadingSpinner,
+
+  // Задержка перед показом loading (мс)
+  // Предотвращает мигание при быстром соединении
+  delay: 200,
+
+  // Компонент при ошибке загрузки
+  errorComponent: ErrorDisplay,
+
+  // Таймаут: если не загрузился — показываем ошибку
+  timeout: 8000,
+
+  // Кастомная обработка ошибок загрузки
+  onError(error, retry, fail, attempts) {
+    if (error.message.includes('fetch') && attempts < 3) {
+      // Автоматическая повторная попытка
+      retry()
+    } else {
+      fail()
+    }
+  }
+})
+```
+
+---
+
+## 🧩 Loading Component
+
+Компонент загрузки получает специальные пропы:
+
+```vue
+<!-- LoadingSpinner.vue -->
+<template>
+  <div class="loading-wrapper">
+    <div class="spinner" />
+    <p>Загружаем компонент...</p>
+  </div>
+</template>
+
+<style scoped>
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid #f0faf6;
+  border-top-color: #42b883;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+</style>
+```
+
+---
+
+## ❌ Error Component
+
+Компонент ошибки получает проп `error`:
+
+```vue
+<!-- AsyncError.vue -->
+<template>
+  <div class="error-box">
+    <span class="icon">⚠️</span>
+    <h3>Не удалось загрузить компонент</h3>
+    <p class="message">{{ error?.message }}</p>
+    <button @click="$emit('retry')">Попробовать снова</button>
+  </div>
+</template>
+
+<script setup>
+defineProps(['error'])
+defineEmits(['retry'])
+</script>
+```
+
+---
+
+## ⏳ Интеграция с Suspense
+
+`defineAsyncComponent` отлично работает с `<Suspense>`. Когда async компонент загружается, он автоматически приостанавливает ближайший `Suspense`:
+
+```vue
+<template>
+  <Suspense>
+    <template #default>
+      <!-- Несколько async компонентов — все ждут вместе -->
+      <AsyncSidebar />
+      <AsyncMainContent />
+      <AsyncRecommendations />
+    </template>
+
+    <template #fallback>
+      <!-- Один скелетон пока все загружаются -->
+      <PageSkeleton />
+    </template>
+  </Suspense>
+</template>
+
+<script setup>
+import { defineAsyncComponent } from 'vue'
+
+const AsyncSidebar = defineAsyncComponent(
+  () => import('./Sidebar.vue')
+)
+const AsyncMainContent = defineAsyncComponent(
+  () => import('./MainContent.vue')
+)
+const AsyncRecommendations = defineAsyncComponent(
+  () => import('./Recommendations.vue')
+)
+</script>
+```
+
+---
+
+## 🛣️ Code Splitting с Vue Router
+
+Самый распространённый паттерн — ленивая загрузка страниц через Vue Router:
+
+```javascript
+// router/index.js
+import { createRouter, createWebHistory } from 'vue-router'
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes: [
+    {
+      path: '/',
+      // Домашняя страница загружается сразу
+      component: () => import('./views/Home.vue')
+    },
+    {
+      path: '/dashboard',
+      // Дашборд — только для авторизованных, грузится лениво
+      component: () => import('./views/Dashboard.vue')
+    },
+    {
+      path: '/analytics',
+      // Аналитика — тяжёлые чарты, грузятся отдельно
+      component: () => import('./views/Analytics.vue')
+    },
+    {
+      path: '/admin',
+      component: () => import('./views/Admin.vue'),
+      children: [
+        {
+          path: 'users',
+          component: () => import('./views/admin/Users.vue')
+        },
+        {
+          path: 'settings',
+          component: () => import('./views/admin/Settings.vue')
+        }
+      ]
+    }
+  ]
+})
+```
+
+---
+
+## 📦 Группировка chunks через webpackChunkName
+
+Несколько компонентов можно объединить в один chunk:
+
+```javascript
+// Все компоненты попадут в admin.chunk.js
+const AdminUsers = defineAsyncComponent(
+  () => import(/* webpackChunkName: "admin" */ './views/admin/Users.vue')
+)
+
+const AdminSettings = defineAsyncComponent(
+  () => import(/* webpackChunkName: "admin" */ './views/admin/Settings.vue')
+)
+
+const AdminLogs = defineAsyncComponent(
+  () => import(/* webpackChunkName: "admin" */ './views/admin/Logs.vue')
+)
+```
+
+В Vite используется `rollupOptions.output.manualChunks` в `vite.config.ts`:
+
+```typescript
+// vite.config.ts
+export default {
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-charts': ['chart.js', 'vue-chartjs'],
+          'vendor-editor': ['@tiptap/vue-3', '@tiptap/starter-kit'],
+          'admin': ['./src/views/admin/Users.vue', './src/views/admin/Settings.vue']
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## 🔁 Retry паттерн при сетевых ошибках
+
+```javascript
+function createRetryableAsyncComponent(importFn, maxRetries = 3) {
+  return defineAsyncComponent({
+    loader: importFn,
+    onError(error, retry, fail, attempts) {
+      const isNetworkError = !navigator.onLine ||
+        error.message.includes('Failed to fetch') ||
+        error.message.includes('ChunkLoadError')
+
+      if (isNetworkError && attempts <= maxRetries) {
+        console.warn("Попытка " + attempts + " из " + maxRetries + "...")
+        setTimeout(retry, 1000 * attempts) // экспоненциальная задержка
+      } else {
+        fail()
+      }
+    },
+    timeout: 10000
+  })
+}
+
+// Использование:
+const AsyncHeavyComponent = createRetryableAsyncComponent(
+  () => import('./HeavyComponent.vue')
+)
+```
+
+---
+
+## 🖥️ Предзагрузка async компонентов
+
+Чтобы компонент был готов до того, как пользователь перейдёт на страницу:
+
+```javascript
+// Предзагрузка при наведении на ссылку
+const prefetchDashboard = () => import('./views/Dashboard.vue')
+
+// В шаблоне:
+// <router-link to="/dashboard" @mouseenter="prefetchDashboard">
+//   Перейти в дашборд
+// </router-link>
+```
+
+Или через Vue Router Navigation Guards:
+
+```javascript
+router.beforeEach((to) => {
+  if (to.name === 'dashboard') {
+    // Начинаем предзагрузку при навигации
+    import('./heavy-deps/charts.js')
+  }
+})
+```
+
+---
+
+## 🧪 Тестирование async компонентов
+
+```javascript
+import { mount, flushPromises } from '@vue/test-utils'
+import { defineAsyncComponent } from 'vue'
+import { describe, it, expect, vi } from 'vitest'
+
+describe('AsyncComponent', () => {
+  it('показывает loading во время загрузки', () => {
+    const AsyncComp = defineAsyncComponent({
+      loader: () => new Promise(() => {}), // никогда не резолвится
+      loadingComponent: { template: '<div>Loading...</div>' },
+      delay: 0
+    })
+
+    const wrapper = mount(AsyncComp)
+    expect(wrapper.text()).toContain('Loading...')
+  })
+
+  it('показывает компонент после загрузки', async () => {
+    const AsyncComp = defineAsyncComponent(
+      () => Promise.resolve({ template: '<div>Loaded!</div>' })
+    )
+
+    const wrapper = mount(AsyncComp)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Loaded!')
+  })
+
+  it('показывает error при провале загрузки', async () => {
+    const AsyncComp = defineAsyncComponent({
+      loader: () => Promise.reject(new Error('Load failed')),
+      errorComponent: { template: '<div>Error!</div>' },
+      delay: 0
+    })
+
+    const wrapper = mount(AsyncComp)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Error!')
+  })
+})
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useCallback } from "react";
+
+const VUE_GREEN = "#42b883";
+const VUE_DARK = "#35495e";
+
+type LoadState = "idle" | "delay" | "loading" | "done" | "error" | "timeout";
+
+interface ChunkConfig {
+  name: string;
+  size: string;
+  loadTime: number;
+  icon: string;
+}
+
+const CHUNKS: ChunkConfig[] = [
+  { name: "Dashboard.vue", size: "48KB", loadTime: 1200, icon: "📊" },
+  { name: "Analytics.vue", size: "186KB", loadTime: 2800, icon: "📈" },
+  { name: "AdminPanel.vue", size: "94KB", loadTime: 1800, icon: "⚙️" },
+  { name: "HeavyChart.vue", size: "312KB", loadTime: 4200, icon: "🗺️" },
+];
+
+function ChunkLoader({ chunk, onStateChange }: { chunk: ChunkConfig; onStateChange: (s: LoadState) => void }) {
+  const [state, setState] = useState<LoadState>("idle");
+  const [progress, setProgress] = useState(0);
+  const [attempt, setAttempt] = useState(0);
+  const [delay, setDelay] = useState(300);
+  const [timeout, setTimeout2] = useState(5000);
+  const [shouldFail, setShouldFail] = useState(false);
+
+  const load = useCallback((isRetry = false) => {
+    if (isRetry) setAttempt(a => a + 1);
+    setState("delay");
+    setProgress(0);
+
+    const delayTimer = window.setTimeout(() => {
+      setState("loading");
+      let p = 0;
+      const interval = window.setInterval(() => {
+        p += (100 / (chunk.loadTime / 100));
+        setProgress(Math.min(p, 95));
+        if (p >= 95) {
+          clearInterval(interval);
+          window.setTimeout(() => {
+            setProgress(100);
+            setState(shouldFail ? "error" : "done");
+            onStateChange(shouldFail ? "error" : "done");
+          }, 200);
+        }
+      }, 100);
+
+      window.setTimeout(() => {
+        if (p < 95) {
+          clearInterval(interval);
+          setState("timeout");
+          onStateChange("timeout");
+        }
+      }, timeout);
+    }, delay);
+  }, [chunk, delay, timeout, shouldFail, onStateChange]);
+
+  const stateConfig: Record<LoadState, { bg: string; label: string; icon: string }> = {
+    idle: { bg: "#f0f0f0", label: "Ожидание", icon: "⏸" },
+    delay: { bg: "#e8f5e9", label: "delay: " + delay + "ms", icon: "⏳" },
+    loading: { bg: "#fff3e0", label: "Загрузка...", icon: "⬇️" },
+    done: { bg: "#e8f5e9", label: "Загружен!", icon: "✅" },
+    error: { bg: "#fdecea", label: "Ошибка загрузки", icon: "❌" },
+    timeout: { bg: "#fdecea", label: "Таймаут!", icon: "⏰" },
+  };
+
+  const cfg = stateConfig[state];
+
+  return (
+    <div style={{
+      background: cfg.bg, borderRadius: 10, padding: "12px 14px",
+      border: "1px solid " + (state === "done" ? VUE_GREEN : state === "error" || state === "timeout" ? "#f5c6cb" : "#e8e8e8"),
+      transition: "all 0.3s"
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 20 }}>{chunk.icon}</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 600, fontSize: 13, color: VUE_DARK }}>{chunk.name}</div>
+          <div style={{ fontSize: 11, color: "#888" }}>{chunk.size} · ~{chunk.loadTime}ms</div>
+        </div>
+        <span style={{ fontSize: 16 }}>{cfg.icon}</span>
+      </div>
+
+      {(state === "loading" || state === "delay") && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ background: "#ddd", borderRadius: 4, overflow: "hidden", height: 6 }}>
+            <div style={{
+              width: (state === "delay" ? 0 : progress) + "%",
+              height: "100%", background: VUE_GREEN, transition: "width 0.1s"
+            }} />
+          </div>
+          <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>{cfg.label}</div>
+        </div>
+      )}
+
+      {state === "idle" && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          <label style={{ fontSize: 11, color: "#666", display: "flex", alignItems: "center", gap: 4 }}>
+            <input type="checkbox" checked={shouldFail} onChange={e => setShouldFail(e.target.checked)} />
+            Симулировать ошибку
+          </label>
+        </div>
+      )}
+
+      {state === "done" && (
+        <div style={{ fontSize: 12, color: VUE_GREEN, fontWeight: 600 }}>
+          ✓ Компонент смонтирован
+        </div>
+      )}
+
+      {(state === "error" || state === "timeout") && attempt < 3 && (
+        <button onClick={() => load(true)} style={{
+          background: "#e74c3c", color: "#fff", border: "none",
+          borderRadius: 6, padding: "5px 12px", cursor: "pointer",
+          fontSize: 12, fontWeight: 600
+        }}>
+          🔁 Повтор {attempt > 0 ? "(" + attempt + "/3)" : ""}
+        </button>
+      )}
+
+      {state === "idle" && (
+        <button onClick={() => load()} style={{
+          background: VUE_GREEN, color: "#fff", border: "none",
+          borderRadius: 6, padding: "5px 12px", cursor: "pointer",
+          fontSize: 12, fontWeight: 600
+        }}>
+          ⬇️ Загрузить
+        </button>
+      )}
+    </div>
+  );
+}
+
+function BundleViz({ loaded }: { loaded: string[] }) {
+  const total = CHUNKS.reduce((a, c) => a + parseInt(c.size), 0);
+  const loadedSize = CHUNKS.filter(c => loaded.includes(c.name)).reduce((a, c) => a + parseInt(c.size), 0);
+
+  return (
+    <div style={{ background: "#f8fffe", borderRadius: 10, padding: "12px 14px", border: "1px solid #e0f5ec" }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: VUE_DARK, marginBottom: 8 }}>
+        📦 Экономия трафика
+      </div>
+      <div style={{ display: "flex", height: 24, borderRadius: 6, overflow: "hidden", border: "1px solid #ddd", marginBottom: 8 }}>
+        <div style={{
+          width: (loadedSize / (total + 120)) * 100 + "%",
+          background: VUE_GREEN, display: "flex", alignItems: "center",
+          paddingLeft: 6, fontSize: 11, color: "#fff", fontWeight: 600,
+          transition: "width 0.4s ease"
+        }}>
+          {loadedSize > 0 ? loadedSize + "KB" : ""}
+        </div>
+        <div style={{
+          width: (120 / (total + 120)) * 100 + "%",
+          background: VUE_DARK, display: "flex", alignItems: "center",
+          paddingLeft: 6, fontSize: 11, color: "#fff"
+        }}>120KB</div>
+        <div style={{
+          flex: 1, background: "#f0f0f0", display: "flex", alignItems: "center",
+          paddingLeft: 6, fontSize: 11, color: "#aaa"
+        }}>
+          {total - loadedSize}KB
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 12, fontSize: 11 }}>
+        <span><span style={{ color: VUE_GREEN }}>■</span> Загружено: {loadedSize}KB</span>
+        <span><span style={{ color: VUE_DARK }}>■</span> main.js: 120KB</span>
+        <span style={{ color: "#aaa" }}>■ Не загружено: {total - loadedSize}KB</span>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [loaded, setLoaded] = useState<string[]>([]);
+
+  const handleState = useCallback((name: string, state: LoadState) => {
+    if (state === "done") setLoaded(prev => prev.includes(name) ? prev : [...prev, name]);
+  }, []);
+
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", background: "#f5f7fa", minHeight: "100vh", padding: "1.5rem" }}>
+      <div style={{ maxWidth: 580, margin: "0 auto" }}>
+        <div style={{ background: VUE_DARK, color: "#fff", borderRadius: 12, padding: "1.25rem 1.5rem", marginBottom: "1.5rem" }}>
+          <h2 style={{ margin: 0, fontSize: 20 }}>⚡ Асинхронные компоненты</h2>
+          <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 14 }}>Урок 22 — defineAsyncComponent + code splitting</p>
+        </div>
+
+        <div style={{ display: "grid", gap: 10, marginBottom: "1rem" }}>
+          {CHUNKS.map(chunk => (
+            <ChunkLoader
+              key={chunk.name}
+              chunk={chunk}
+              onStateChange={(s) => handleState(chunk.name, s)}
+            />
+          ))}
+        </div>
+
+        <BundleViz loaded={loaded} />
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,761 @@
+## 🛣️ Route Handlers: API-маршруты в App Router
+
+Route Handlers — это способ создать настоящий API прямо в Next.js-приложении. Представь, что твой фронтенд и бэкенд живут в одном доме 🏠. Route Handlers позволяют обрабатывать HTTP-запросы (GET, POST, PUT, DELETE...) прямо из папки `app/`. Это как mini-Express, но встроенный в Next.js!
+
+---
+
+### 📁 Структура файлов
+
+Route Handlers создаются с помощью специального файла `route.ts` (или `route.js`). Важно: в одной папке не может быть одновременно `page.tsx` и `route.ts`!
+
+```
+app/
+├── api/
+│   ├── users/
+│   │   ├── route.ts          # GET /api/users, POST /api/users
+│   │   └── [id]/
+│   │       └── route.ts      # GET /api/users/1, PUT /api/users/1, DELETE /api/users/1
+│   ├── products/
+│   │   └── route.ts          # GET /api/products
+│   └── auth/
+│       └── [...nextauth]/
+│           └── route.ts      # GET/POST /api/auth/*
+```
+
+---
+
+### 🟢 GET-запрос: простейший пример
+
+```typescript
+// app/api/users/route.ts
+import { NextResponse } from 'next/server';
+
+const users = [
+  { id: 1, name: 'Яша', email: 'yasha@example.com' },
+  { id: 2, name: 'Маша', email: 'masha@example.com' },
+];
+
+export async function GET() {
+  // Просто возвращаем JSON
+  return NextResponse.json(users);
+}
+```
+
+Теперь на `GET /api/users` ты получишь список пользователей. Магия! ✨
+
+---
+
+### 📬 POST-запрос: создание данных
+
+```typescript
+// app/api/users/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function GET() {
+  const users = await db.user.findMany();
+  return NextResponse.json(users);
+}
+
+export async function POST(request: NextRequest) {
+  // Читаем тело запроса
+  const body = await request.json();
+
+  // Валидация
+  if (!body.name || !body.email) {
+    return NextResponse.json(
+      { error: 'Имя и email обязательны' },
+      { status: 400 }
+    );
+  }
+
+  // Создаём пользователя
+  const newUser = await db.user.create({
+    data: { name: body.name, email: body.email },
+  });
+
+  // Возвращаем 201 Created
+  return NextResponse.json(newUser, { status: 201 });
+}
+```
+
+---
+
+### 🔧 Динамические маршруты: [id]
+
+```typescript
+// app/api/users/[id]/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+interface Params {
+  params: Promise<{ id: string }>; // В Next.js 15 params — Promise!
+}
+
+export async function GET(request: NextRequest, { params }: Params) {
+  const { id } = await params;
+
+  const user = await db.user.findUnique({
+    where: { id: parseInt(id) },
+  });
+
+  if (!user) {
+    return NextResponse.json({ error: 'Пользователь не найден' }, { status: 404 });
+  }
+
+  return NextResponse.json(user);
+}
+
+export async function PUT(request: NextRequest, { params }: Params) {
+  const { id } = await params;
+  const body = await request.json();
+
+  const updated = await db.user.update({
+    where: { id: parseInt(id) },
+    data: body,
+  });
+
+  return NextResponse.json(updated);
+}
+
+export async function DELETE(request: NextRequest, { params }: Params) {
+  const { id } = await params;
+
+  await db.user.delete({ where: { id: parseInt(id) } });
+
+  // 204 No Content — стандарт для DELETE
+  return new NextResponse(null, { status: 204 });
+}
+```
+
+---
+
+### 🌐 NextRequest: читаем всё что нужно
+
+`NextRequest` — расширенная версия стандартного `Request`. Даёт доступ к заголовкам, кукам, query params и телу запроса:
+
+```typescript
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function GET(request: NextRequest) {
+  // URL и query параметры
+  const url = request.nextUrl;
+  const page = url.searchParams.get('page') ?? '1';
+  const limit = url.searchParams.get('limit') ?? '10';
+  const search = url.searchParams.get('search') ?? '';
+
+  console.log(`URL: ${url.pathname}`);
+  console.log(`Query: page=${page}, limit=${limit}, search=${search}`);
+
+  // Заголовки
+  const authorization = request.headers.get('authorization');
+  const contentType = request.headers.get('content-type');
+  const userAgent = request.headers.get('user-agent');
+
+  // Cookies
+  const sessionToken = request.cookies.get('session-token')?.value;
+  const theme = request.cookies.get('theme')?.value ?? 'light';
+
+  // IP адрес
+  const ip = request.ip ?? request.headers.get('x-forwarded-for');
+
+  // Геолокация (Vercel)
+  const country = request.geo?.country ?? 'RU';
+  const city = request.geo?.city ?? 'Moscow';
+
+  return NextResponse.json({
+    page: parseInt(page),
+    limit: parseInt(limit),
+    search,
+    theme,
+    country,
+    city,
+  });
+}
+```
+
+---
+
+### 🍪 Cookies и заголовки в ответе
+
+```typescript
+import { NextRequest, NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
+
+export async function POST(request: NextRequest) {
+  const { username, password } = await request.json();
+
+  // Проверяем credentials (упрощённо)
+  if (username !== 'admin' || password !== 'secret') {
+    return NextResponse.json({ error: 'Неверные данные' }, { status: 401 });
+  }
+
+  const token = generateToken(username);
+
+  // Способ 1: Через NextResponse
+  const response = NextResponse.json({ success: true });
+
+  response.cookies.set('auth-token', token, {
+    httpOnly: true,        // недоступно из JS
+    secure: true,          // только HTTPS
+    sameSite: 'strict',    // защита от CSRF
+    maxAge: 60 * 60 * 24 * 7, // 7 дней
+    path: '/',
+  });
+
+  response.headers.set('X-Custom-Header', 'Hello from API!');
+
+  return response;
+
+  // Способ 2: Через cookies() из next/headers (Server Context)
+  // const cookieStore = await cookies();
+  // cookieStore.set('auth-token', token, { httpOnly: true });
+}
+
+export async function DELETE() {
+  // Удаляем куку (logout)
+  const response = NextResponse.json({ success: true });
+  response.cookies.delete('auth-token');
+  return response;
+}
+```
+
+---
+
+### 🌍 CORS: настраиваем заголовки
+
+Если твоё API используется другими доменами, нужно настроить CORS:
+
+```typescript
+// lib/cors.ts
+export function corsHeaders(origin: string = '*') {
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
+  };
+}
+
+// app/api/products/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { corsHeaders } from '@/lib/cors';
+
+// Обязательно для pre-flight запросов!
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
+
+export async function GET(request: NextRequest) {
+  const origin = request.headers.get('origin') ?? '*';
+
+  const products = await getProducts();
+
+  return NextResponse.json(products, {
+    headers: corsHeaders(origin),
+  });
+}
+```
+
+---
+
+### 🌊 Streaming Response: стриминг данных
+
+Route Handlers поддерживают стриминг — идеально для AI-ответов и больших данных:
+
+```typescript
+// app/api/stream/route.ts
+import { NextRequest } from 'next/server';
+
+export async function GET(request: NextRequest) {
+  // Создаём ReadableStream
+  const stream = new ReadableStream({
+    async start(controller) {
+      const words = ['Hello', ' from', ' streaming', ' Next.js', '! 🚀'];
+
+      for (const word of words) {
+        // Кодируем и отправляем кусок данных
+        controller.enqueue(new TextEncoder().encode(word));
+        // Имитируем задержку
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Transfer-Encoding': 'chunked',
+    },
+  });
+}
+
+// Для AI стриминга (OpenAI / Vercel AI SDK)
+// app/api/chat/route.ts
+import { streamText } from 'ai';
+import { openai } from '@ai-sdk/openai';
+
+export async function POST(request: NextRequest) {
+  const { messages } = await request.json();
+
+  const result = await streamText({
+    model: openai('gpt-4o'),
+    messages,
+  });
+
+  return result.toDataStreamResponse();
+}
+```
+
+---
+
+### ⚡ Query Parameters: фильтрация и пагинация
+
+```typescript
+// app/api/products/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function GET(request: NextRequest) {
+  const { searchParams } = request.nextUrl;
+
+  // Пагинация
+  const page = Math.max(1, parseInt(searchParams.get('page') ?? '1'));
+  const limit = Math.min(100, parseInt(searchParams.get('limit') ?? '20'));
+  const offset = (page - 1) * limit;
+
+  // Фильтрация
+  const category = searchParams.get('category');
+  const minPrice = searchParams.get('minPrice');
+  const maxPrice = searchParams.get('maxPrice');
+  const sort = searchParams.get('sort') ?? 'createdAt';
+  const order = (searchParams.get('order') ?? 'desc') as 'asc' | 'desc';
+
+  const where: any = {};
+  if (category) where.category = category;
+  if (minPrice) where.price = { ...where.price, gte: parseFloat(minPrice) };
+  if (maxPrice) where.price = { ...where.price, lte: parseFloat(maxPrice) };
+
+  const [products, total] = await Promise.all([
+    db.product.findMany({
+      where,
+      skip: offset,
+      take: limit,
+      orderBy: { [sort]: order },
+    }),
+    db.product.count({ where }),
+  ]);
+
+  return NextResponse.json({
+    data: products,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  });
+}
+```
+
+---
+
+### 🔐 Защита маршрутов: авторизация
+
+```typescript
+// lib/auth.ts
+export async function getAuthUser(request: NextRequest) {
+  const token = request.cookies.get('auth-token')?.value
+    ?? request.headers.get('authorization')?.replace('Bearer ', '');
+
+  if (!token) return null;
+
+  try {
+    const payload = await verifyJwt(token);
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+// app/api/profile/route.ts
+import { getAuthUser } from '@/lib/auth';
+
+export async function GET(request: NextRequest) {
+  const user = await getAuthUser(request);
+
+  if (!user) {
+    return NextResponse.json(
+      { error: 'Не авторизован' },
+      { status: 401 }
+    );
+  }
+
+  const profile = await db.user.findUnique({
+    where: { id: user.id },
+    select: { id: true, name: true, email: true, avatar: true },
+  });
+
+  return NextResponse.json(profile);
+}
+```
+
+---
+
+### ⚖️ Route Handlers vs Server Actions: когда что использовать?
+
+| Критерий | Route Handlers | Server Actions |
+|----------|---------------|----------------|
+| Внешние клиенты (мобильные приложения) | ✅ Отлично | ❌ Нет |
+| Публичное API | ✅ Отлично | ❌ Нет |
+| Webhooks (Stripe, GitHub) | ✅ Отлично | ❌ Нет |
+| Форма в React-компоненте | ⚠️ Можно | ✅ Лучше |
+| Мутации из Server Components | ❌ Нет | ✅ Отлично |
+| Кеш-инвалидация после мутации | ⚠️ Сложно | ✅ `revalidatePath` |
+| Оптимистичные обновления | ⚠️ Вручную | ✅ `useOptimistic` |
+
+**Правило большого пальца:** Если нужно публичное API или webhook — используй Route Handlers. Если это внутренняя мутация из React-компонента — используй Server Actions.
+
+---
+
+### 🛡️ Обработка ошибок
+
+```typescript
+// app/api/users/[id]/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const UpdateUserSchema = z.object({
+  name: z.string().min(2).max(50).optional(),
+  email: z.string().email().optional(),
+  age: z.number().int().min(0).max(150).optional(),
+});
+
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+
+    // Парсим и валидируем тело
+    const body = await request.json();
+    const validationResult = UpdateUserSchema.safeParse(body);
+
+    if (!validationResult.success) {
+      return NextResponse.json(
+        {
+          error: 'Ошибка валидации',
+          details: validationResult.error.flatten().fieldErrors,
+        },
+        { status: 422 }
+      );
+    }
+
+    const user = await db.user.update({
+      where: { id: parseInt(id) },
+      data: validationResult.data,
+    });
+
+    return NextResponse.json(user);
+
+  } catch (error) {
+    // Prisma: запись не найдена
+    if (error instanceof PrismaClientKnownRequestError && error.code === 'P2025') {
+      return NextResponse.json({ error: 'Пользователь не найден' }, { status: 404 });
+    }
+
+    console.error('Unexpected error:', error);
+    return NextResponse.json(
+      { error: 'Внутренняя ошибка сервера' },
+      { status: 500 }
+    );
+  }
+}
+```
+
+---
+
+### 🔄 Revalidation из Route Handler
+
+```typescript
+import { revalidatePath, revalidateTag } from 'next/cache';
+import { NextRequest, NextResponse } from 'next/server';
+
+// Webhook от CMS — обновляем кэш при изменении контента
+export async function POST(request: NextRequest) {
+  const secret = request.headers.get('x-webhook-secret');
+
+  if (secret !== process.env.WEBHOOK_SECRET) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const { type, slug } = await request.json();
+
+  if (type === 'article.published') {
+    // Инвалидируем кэш конкретной страницы
+    revalidatePath(`/blog/${slug}`);
+    // Или весь список статей
+    revalidatePath('/blog');
+    // Или по тегу
+    revalidateTag('articles');
+  }
+
+  return NextResponse.json({ revalidated: true, at: new Date().toISOString() });
+}
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState } from 'react';
+
+const USERS = [
+  { id: 1, name: 'Яша Иванов', email: 'yasha@dev.ru', role: 'admin' },
+  { id: 2, name: 'Маша Петрова', email: 'masha@dev.ru', role: 'user' },
+  { id: 3, name: 'Коля Сидоров', email: 'kolya@dev.ru', role: 'user' },
+];
+
+type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
+
+interface LogEntry {
+  id: number;
+  method: Method;
+  url: string;
+  status: number;
+  body?: string;
+  response: string;
+}
+
+let logId = 0;
+
+export default function App() {
+  const [users, setUsers] = useState(USERS);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [newName, setNewName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [editId, setEditId] = useState<number | null>(null);
+  const [editName, setEditName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'api' | 'logs'>('api');
+
+  const addLog = (method: Method, url: string, status: number, response: string, body?: string) => {
+    setLogs(prev => [{
+      id: ++logId, method, url, status, body, response
+    }, ...prev].slice(0, 10));
+  };
+
+  const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+  const handleGet = async () => {
+    setLoading(true);
+    await delay(400);
+    addLog('GET', '/api/users', 200, JSON.stringify(users, null, 2));
+    setLoading(false);
+  };
+
+  const handlePost = async () => {
+    if (!newName || !newEmail) return;
+    setLoading(true);
+    await delay(500);
+
+    const emailRegex = /^[^@]+@[^@]+\.[^@]+$/;
+    if (!emailRegex.test(newEmail)) {
+      addLog('POST', '/api/users', 400,
+        JSON.stringify({ error: 'Ошибка валидации', details: { email: ['Неверный формат email'] } }, null, 2),
+        JSON.stringify({ name: newName, email: newEmail })
+      );
+      setLoading(false);
+      return;
+    }
+
+    const created = { id: Date.now(), name: newName, email: newEmail, role: 'user' as const };
+    setUsers(prev => [...prev, created]);
+    addLog('POST', '/api/users', 201,
+      JSON.stringify(created, null, 2),
+      JSON.stringify({ name: newName, email: newEmail })
+    );
+    setNewName('');
+    setNewEmail('');
+    setLoading(false);
+  };
+
+  const handlePut = async (id: number) => {
+    if (!editName) return;
+    setLoading(true);
+    await delay(400);
+
+    const user = users.find(u => u.id === id);
+    if (!user) {
+      addLog('PUT', \`/api/users/\${id}\`, 404, JSON.stringify({ error: 'Пользователь не найден' }));
+      setLoading(false);
+      return;
+    }
+
+    const updated = { ...user, name: editName };
+    setUsers(prev => prev.map(u => u.id === id ? updated : u));
+    addLog('PUT', \`/api/users/\${id}\`, 200, JSON.stringify(updated, null, 2), JSON.stringify({ name: editName }));
+    setEditId(null);
+    setEditName('');
+    setLoading(false);
+  };
+
+  const handleDelete = async (id: number) => {
+    setLoading(true);
+    await delay(350);
+    setUsers(prev => prev.filter(u => u.id !== id));
+    addLog('DELETE', \`/api/users/\${id}\`, 204, '— No Content');
+    setLoading(false);
+  };
+
+  const methodColor: Record<Method, string> = {
+    GET: '#4ade80',
+    POST: '#60a5fa',
+    PUT: '#fbbf24',
+    DELETE: '#f87171',
+  };
+
+  const statusColor = (s: number) =>
+    s >= 500 ? '#f87171' : s >= 400 ? '#fbbf24' : s >= 300 ? '#c084fc' : '#4ade80';
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ background: '#020617', borderBottom: '1px solid #1e293b', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ color: '#171717', background: 'white', borderRadius: 4, padding: '2px 8px', fontWeight: 900, fontSize: 13 }}>N</span>
+        <span style={{ color: '#e2e8f0', fontWeight: 700 }}>Route Handlers Demo</span>
+        <span style={{ color: '#64748b', fontSize: 12 }}>app/api/users/route.ts</span>
+      </div>
+
+      <div style={{ display: 'flex', borderBottom: '1px solid #1e293b' }}>
+        {(['api', 'logs'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            style={{
+              padding: '10px 20px', border: 'none', cursor: 'pointer', fontSize: 13,
+              background: activeTab === tab ? '#1e293b' : 'transparent',
+              color: activeTab === tab ? '#e2e8f0' : '#64748b',
+              borderBottom: activeTab === tab ? '2px solid #4ade80' : '2px solid transparent',
+            }}
+          >
+            {tab === 'api' ? '🛣️ API Playground' : \`📋 Request Logs (\${logs.length})\`}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding: 16 }}>
+        {activeTab === 'api' ? (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+              <div style={{ background: '#1e293b', borderRadius: 8, padding: 14 }}>
+                <div style={{ color: '#4ade80', fontWeight: 700, marginBottom: 8, fontSize: 13 }}>GET /api/users</div>
+                <div style={{ color: '#64748b', fontSize: 11, marginBottom: 10 }}>Получить всех пользователей</div>
+                <button
+                  onClick={handleGet}
+                  disabled={loading}
+                  style={{ width: '100%', padding: '8px 0', background: '#166534', color: '#4ade80', border: '1px solid #4ade80', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
+                >
+                  {loading ? '⏳ Загрузка...' : 'Отправить GET'}
+                </button>
+              </div>
+
+              <div style={{ background: '#1e293b', borderRadius: 8, padding: 14 }}>
+                <div style={{ color: '#60a5fa', fontWeight: 700, marginBottom: 8, fontSize: 13 }}>POST /api/users</div>
+                <input
+                  value={newName}
+                  onChange={e => setNewName(e.target.value)}
+                  placeholder="Имя"
+                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: 4, padding: '6px 8px', color: '#e2e8f0', fontSize: 12, marginBottom: 6, boxSizing: 'border-box' }}
+                />
+                <input
+                  value={newEmail}
+                  onChange={e => setNewEmail(e.target.value)}
+                  placeholder="email@example.com"
+                  style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: 4, padding: '6px 8px', color: '#e2e8f0', fontSize: 12, marginBottom: 8, boxSizing: 'border-box' }}
+                />
+                <button
+                  onClick={handlePost}
+                  disabled={loading || !newName || !newEmail}
+                  style={{ width: '100%', padding: '8px 0', background: '#1d4ed8', color: '#93c5fd', border: '1px solid #60a5fa', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700, opacity: (!newName || !newEmail) ? 0.5 : 1 }}
+                >
+                  Создать пользователя
+                </button>
+              </div>
+            </div>
+
+            <div style={{ background: '#1e293b', borderRadius: 8, padding: 14 }}>
+              <div style={{ color: '#e2e8f0', fontWeight: 700, marginBottom: 12, fontSize: 13 }}>
+                👥 Пользователи ({users.length})
+              </div>
+              {users.map(user => (
+                <div key={user.id} style={{ background: '#0f172a', borderRadius: 6, padding: 12, marginBottom: 8, border: '1px solid #334155' }}>
+                  {editId === user.id ? (
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <input
+                        value={editName}
+                        onChange={e => setEditName(e.target.value)}
+                        style={{ flex: 1, background: '#1e293b', border: '1px solid #4ade80', borderRadius: 4, padding: '5px 8px', color: '#e2e8f0', fontSize: 12 }}
+                      />
+                      <button onClick={() => handlePut(user.id)} style={{ padding: '5px 12px', background: '#166534', color: '#4ade80', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>PUT</button>
+                      <button onClick={() => setEditId(null)} style={{ padding: '5px 10px', background: '#374151', color: '#9ca3af', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>✕</button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div>
+                        <span style={{ color: '#e2e8f0', fontWeight: 700, marginRight: 8 }}>{user.name}</span>
+                        <span style={{ color: '#64748b', fontSize: 12, marginRight: 8 }}>{user.email}</span>
+                        <span style={{ color: user.role === 'admin' ? '#fbbf24' : '#4ade80', fontSize: 11, background: '#1e293b', padding: '2px 6px', borderRadius: 4 }}>{user.role}</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          onClick={() => { setEditId(user.id); setEditName(user.name); }}
+                          style={{ padding: '4px 10px', background: '#92400e', color: '#fbbf24', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
+                        >PUT</button>
+                        <button
+                          onClick={() => handleDelete(user.id)}
+                          style={{ padding: '4px 10px', background: '#450a0a', color: '#f87171', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
+                        >DELETE</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div>
+            {logs.length === 0 ? (
+              <div style={{ textAlign: 'center', color: '#64748b', padding: '40px 0', fontSize: 14 }}>
+                Сделайте запрос во вкладке API Playground
+              </div>
+            ) : (
+              logs.map(log => (
+                <div key={log.id} style={{ background: '#1e293b', borderRadius: 8, padding: 12, marginBottom: 10, border: \`1px solid \${methodColor[log.method]}33\` }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <span style={{ color: methodColor[log.method], fontWeight: 900, fontSize: 12 }}>{log.method}</span>
+                    <span style={{ color: '#94a3b8', fontSize: 12 }}>{log.url}</span>
+                    <span style={{ marginLeft: 'auto', color: statusColor(log.status), fontWeight: 700, fontSize: 12 }}>{log.status}</span>
+                  </div>
+                  {log.body && (
+                    <div style={{ marginBottom: 6 }}>
+                      <div style={{ color: '#64748b', fontSize: 10, marginBottom: 2 }}>Request Body:</div>
+                      <pre style={{ background: '#0f172a', borderRadius: 4, padding: 8, fontSize: 10, color: '#fbbf24', margin: 0, overflow: 'auto' }}>{log.body}</pre>
+                    </div>
+                  )}
+                  <div style={{ color: '#64748b', fontSize: 10, marginBottom: 2 }}>Response:</div>
+                  <pre style={{ background: '#0f172a', borderRadius: 4, padding: 8, fontSize: 10, color: '#4ade80', margin: 0, overflow: 'auto', maxHeight: 120 }}>{log.response}</pre>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

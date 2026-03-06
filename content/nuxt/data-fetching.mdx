@@ -1,0 +1,689 @@
+## 📡 Data Fetching: useFetch и useAsyncData
+
+Получение данных — сердце любого приложения. Nuxt 3 предоставляет несколько мощных инструментов для этого, каждый со своей нишей. Главное отличие от обычного `fetch` — они работают и на сервере (SSR), и на клиенте, передавая данные без дополнительного запроса.
+
+---
+
+### Три способа получить данные 🔀
+
+```typescript
+// 1. useFetch — для простых случаев
+const { data } = await useFetch('/api/users')
+
+// 2. useAsyncData — для сложных случаев с контролем
+const { data } = await useAsyncData('users', () => $fetch('/api/users'))
+
+// 3. $fetch — для простых запросов без SSR нужд
+const user = await $fetch('/api/users/1')
+```
+
+---
+
+### useFetch — основной инструмент 🚀
+
+```vue
+<!-- pages/users/index.vue -->
+<script setup lang="ts">
+interface User {
+  id: number
+  name: string
+  email: string
+}
+
+// Базовое использование
+const { data, pending, error, refresh } = await useFetch<User[]>('/api/users')
+
+// С опциями
+const { data: user } = await useFetch<User>('/api/users/1', {
+  // HTTP метод
+  method: 'GET',
+
+  // Query параметры
+  query: { page: 1, limit: 10 },
+
+  // Заголовки
+  headers: { 'Authorization': 'Bearer token' },
+
+  // Тело запроса (для POST/PUT)
+  body: { name: 'John' },
+
+  // Кэширование: уникальный ключ
+  key: 'user-1',
+
+  // Lazy — не блокирует рендеринг страницы
+  lazy: true,
+
+  // Не запускать сразу
+  immediate: false,
+
+  // Трансформация данных
+  transform: (data) => data.map(user => ({
+    ...user,
+    fullName: \`\${user.firstName} \${user.lastName}\`
+  })),
+
+  // Дефолтное значение пока загружается
+  default: () => [],
+
+  // Только на сервере
+  server: true,
+
+  // Только на клиенте
+  // server: false,
+
+  // Коллбэки
+  onRequest({ request, options }) {
+    console.log('Запрос:', request)
+  },
+  onResponse({ response }) {
+    console.log('Ответ:', response.status)
+  },
+  onRequestError({ error }) {
+    console.error('Ошибка запроса:', error)
+  },
+  onResponseError({ error }) {
+    console.error('Ошибка ответа:', error)
+  },
+})
+</script>
+```
+
+---
+
+### useFetch с реактивными параметрами 🔄
+
+```vue
+<script setup lang="ts">
+const page = ref(1)
+const search = ref('')
+
+// URL реагирует на изменения page и search!
+const { data, pending } = await useFetch('/api/posts', {
+  query: {
+    page,           // Реактивный!
+    search,         // Реактивный!
+    limit: 10,      // Статичный
+  }
+})
+
+// При изменении page или search — автоматический повторный запрос
+</script>
+
+<template>
+  <input v-model="search" placeholder="Поиск..." />
+  <div v-if="pending">Загрузка...</div>
+  <PostList v-else :posts="data" />
+  <button @click="page++">Следующая страница</button>
+</template>
+```
+
+---
+
+### useAsyncData — расширенный контроль 🎛️
+
+```vue
+<script setup lang="ts">
+// useAsyncData позволяет использовать любую async функцию
+const { data: posts } = await useAsyncData(
+  // Уникальный ключ (важен для дедупликации и кэша!)
+  'blog-posts',
+
+  // Любая асинхронная функция
+  async () => {
+    const [posts, categories] = await Promise.all([
+      $fetch('/api/posts'),
+      $fetch('/api/categories'),
+    ])
+    return { posts, categories }
+  },
+
+  // Опции (такие же как у useFetch)
+  {
+    lazy: false,
+    default: () => ({ posts: [], categories: [] }),
+    transform: (data) => ({
+      ...data,
+      posts: data.posts.map(p => ({
+        ...p,
+        date: new Date(p.createdAt).toLocaleDateString('ru'),
+      }))
+    })
+  }
+)
+</script>
+```
+
+---
+
+### Возвращаемые значения 📦
+
+```typescript
+const {
+  data,       // Ref<T> — данные ответа
+  pending,    // Ref<boolean> — идёт загрузка?
+  error,      // Ref<Error | null> — ошибка
+  status,     // Ref<'idle' | 'pending' | 'success' | 'error'>
+  refresh,    // () => Promise<void> — повторить запрос
+  execute,    // () => Promise<void> — выполнить (для immediate: false)
+  clear,      // () => void — сбросить данные
+} = await useFetch('/api/data')
+```
+
+---
+
+### Паттерны использования 🎯
+
+#### Оптимистичное обновление
+
+```vue
+<script setup>
+const { data: todos, refresh } = await useFetch('/api/todos')
+
+const addTodo = async (text: string) => {
+  // Оптимистично добавляем в UI
+  todos.value?.push({ id: Date.now(), text, done: false })
+
+  try {
+    await $fetch('/api/todos', {
+      method: 'POST',
+      body: { text }
+    })
+  } catch {
+    // При ошибке — откатываемся
+    await refresh()
+  }
+}
+</script>
+```
+
+#### Пагинация
+
+```vue
+<script setup>
+const currentPage = ref(1)
+
+const { data, pending } = await useFetch('/api/posts', {
+  query: { page: currentPage, limit: 10 },
+  watch: [currentPage], // Следить за изменениями
+})
+</script>
+```
+
+#### Условный запрос
+
+```vue
+<script setup>
+const userId = ref<number | null>(null)
+
+const { data: user } = await useFetch(
+  () => userId.value ? \`/api/users/\${userId.value}\` : null
+)
+// Запрос не выполняется если userId === null
+</script>
+```
+
+---
+
+### $fetch — для клиентских запросов ⚡
+
+```typescript
+// Простой запрос (не создаёт SSR-гидрацию)
+const user = await $fetch('/api/users/1')
+
+// POST запрос
+const created = await $fetch('/api/posts', {
+  method: 'POST',
+  body: {
+    title: 'Новый пост',
+    content: 'Содержимое...'
+  }
+})
+
+// С обработкой ошибок
+try {
+  const data = await $fetch('/api/protected', {
+    headers: {
+      Authorization: \`Bearer \${token}\`
+    }
+  })
+} catch (error) {
+  if (error.status === 401) {
+    navigateTo('/login')
+  }
+}
+```
+
+---
+
+### Интерцепторы $fetch 🔗
+
+```typescript
+// plugins/api.ts
+export default defineNuxtPlugin(() => {
+  const api = $fetch.create({
+    baseURL: useRuntimeConfig().public.apiBase,
+
+    onRequest({ options }) {
+      // Добавляем токен к каждому запросу
+      const token = useCookie('auth-token')
+      if (token.value) {
+        options.headers = {
+          ...options.headers,
+          Authorization: \`Bearer \${token.value}\`
+        }
+      }
+    },
+
+    onResponseError({ response }) {
+      if (response.status === 401) {
+        navigateTo('/login')
+      }
+    }
+  })
+
+  return {
+    provide: {
+      api  // Теперь доступен как $api
+    }
+  }
+})
+```
+
+---
+
+### useRequestFetch — серверные запросы 🖥️
+
+```typescript
+// server/api/combined.ts
+export default defineEventHandler(async (event) => {
+  // Используем для запросов на том же сервере
+  const requestFetch = useRequestFetch()
+
+  const [users, posts] = await Promise.all([
+    requestFetch('/api/users'),
+    requestFetch('/api/posts'),
+  ])
+
+  return { users, posts }
+})
+```
+
+---
+
+### Кэширование и дедупликация 💾
+
+```typescript
+// Ключ определяет кэш — одинаковый ключ = один запрос
+// Даже если вызвать на разных страницах!
+
+// Page A
+const { data } = await useFetch('/api/users', { key: 'users-list' })
+
+// Page B — НЕ делает новый запрос, берёт из кэша!
+const { data } = await useFetch('/api/users', { key: 'users-list' })
+```
+
+```typescript
+// Сброс кэша при мутации
+const { data, refresh } = await useFetch('/api/todos', { key: 'todos' })
+
+const deleteTodo = async (id: number) => {
+  await $fetch(\`/api/todos/\${id}\`, { method: 'DELETE' })
+  // Обновляем данные
+  await refresh()
+}
+```
+
+---
+
+### Обработка ошибок 🚨
+
+```vue
+<script setup>
+const { data, error, pending } = await useFetch('/api/data', {
+  // Не бросать ошибку — обработаем вручную
+  // (по умолчанию useFetch бросает ошибку при !2xx)
+})
+</script>
+
+<template>
+  <div v-if="pending">⏳ Загрузка...</div>
+  <div v-else-if="error">
+    ❌ Ошибка: {{ error.message }}
+    <br>
+    Статус: {{ error.statusCode }}
+  </div>
+  <div v-else>
+    ✅ {{ data }}
+  </div>
+</template>
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect } from "react";
+
+// Симуляция API
+const fakeApi = {
+  posts: [
+    { id: 1, title: "Введение в Nuxt 3", status: 200, time: 300 },
+    { id: 2, title: "SSR и гидрация", status: 200, time: 500 },
+    { id: 3, title: "Файловая маршрутизация", status: 200, time: 200 },
+    { id: 4, title: "Server API с Nitro", status: 200, time: 800 },
+    { id: 5, title: "Управление состоянием", status: 200, time: 400 },
+  ],
+  fetch: async (endpoint, opts = {}) => {
+    await new Promise(r => setTimeout(r, opts.delay || 600));
+    if (opts.fail) throw { status: 500, message: "Internal Server Error" };
+    return { data: fakeApi.posts, total: fakeApi.posts.length };
+  }
+};
+
+// Симуляция useFetch
+function useFetch(url, options = {}) {
+  const [state, setState] = useState({ data: options.default?.() ?? null, pending: true, error: null, status: "pending" });
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    setState(prev => ({ ...prev, pending: true, status: "pending" }));
+    fakeApi.fetch(url, { delay: options.delay || 600, fail: options.fail })
+      .then(result => {
+        const data = options.transform ? options.transform(result.data) : result.data;
+        setState({ data, pending: false, error: null, status: "success" });
+      })
+      .catch(err => {
+        setState({ data: null, pending: false, error: err, status: "error" });
+      });
+  }, [refreshKey, url, options.fail]);
+
+  const refresh = () => setRefreshKey(k => k + 1);
+  return { ...state, refresh };
+}
+
+const comparisons = [
+  {
+    name: "useFetch",
+    color: "#00dc82",
+    icon: "🚀",
+    when: "Простые запросы к API",
+    ssr: true, cache: true, reactive: true, lazy: true,
+    example: "useFetch('/api/posts')",
+  },
+  {
+    name: "useAsyncData",
+    color: "#00b4d8",
+    icon: "🎛️",
+    when: "Сложная логика, несколько запросов",
+    ssr: true, cache: true, reactive: true, lazy: true,
+    example: "useAsyncData('key', async () => { ... })",
+  },
+  {
+    name: "$fetch",
+    color: "#7c3aed",
+    icon: "⚡",
+    when: "Клиентские мутации, POST/PUT/DELETE",
+    ssr: false, cache: false, reactive: false, lazy: false,
+    example: "$fetch('/api/posts', { method: 'POST', body })",
+  },
+];
+
+export default function App() {
+  const [tab, setTab] = useState("demo");
+  const [failRequest, setFailRequest] = useState(false);
+  const [delay, setDelay] = useState(600);
+
+  const { data, pending, error, status, refresh } = useFetch("/api/posts", {
+    default: () => [],
+    delay,
+    fail: failRequest,
+    transform: posts => posts.map(p => ({ ...p, label: "📝 " + p.title })),
+  });
+
+  return (
+    <div style={{
+      background: "#0f172a",
+      minHeight: "100vh",
+      padding: "20px",
+      fontFamily: "'Segoe UI', sans-serif",
+      color: "#e2e8f0",
+    }}>
+      <div style={{ textAlign: "center", marginBottom: "20px" }}>
+        <h1 style={{ color: "#00dc82", margin: 0, fontSize: "22px" }}>📡 Data Fetching — живое демо</h1>
+      </div>
+
+      <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+        {["demo", "compare"].map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            padding: "6px 14px",
+            borderRadius: "999px",
+            border: "none",
+            cursor: "pointer",
+            background: tab === t ? "#00dc82" : "#1a1a2e",
+            color: tab === t ? "#0f172a" : "#94a3b8",
+            fontWeight: 600, fontSize: "12px",
+          }}>
+            {t === "demo" ? "🚀 useFetch демо" : "📊 Сравнение"}
+          </button>
+        ))}
+      </div>
+
+      {tab === "demo" && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+          <div>
+            {/* Controls */}
+            <div style={{
+              background: "#1a1a2e",
+              borderRadius: "10px",
+              padding: "14px",
+              marginBottom: "12px",
+            }}>
+              <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "12px" }}>
+                Настройки запроса
+              </div>
+
+              <div style={{ marginBottom: "10px" }}>
+                <label style={{ color: "#94a3b8", fontSize: "12px", display: "block", marginBottom: "6px" }}>
+                  Задержка: {delay}мс
+                </label>
+                <input
+                  type="range"
+                  min="200"
+                  max="2000"
+                  step="100"
+                  value={delay}
+                  onChange={e => setDelay(Number(e.target.value))}
+                  style={{ width: "100%", accentColor: "#00dc82" }}
+                />
+              </div>
+
+              <label style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                cursor: "pointer",
+                marginBottom: "12px",
+              }}>
+                <input
+                  type="checkbox"
+                  checked={failRequest}
+                  onChange={e => setFailRequest(e.target.checked)}
+                  style={{ accentColor: "#ef4444" }}
+                />
+                <span style={{ color: "#94a3b8", fontSize: "12px" }}>
+                  Симулировать ошибку (status 500)
+                </span>
+              </label>
+
+              <button onClick={refresh} style={{
+                background: "#00dc8222",
+                color: "#00dc82",
+                border: "1px solid #00dc8244",
+                borderRadius: "8px",
+                padding: "8px 16px",
+                cursor: "pointer",
+                fontSize: "12px",
+                fontWeight: 700,
+                width: "100%",
+              }}>
+                🔄 refresh()
+              </button>
+            </div>
+
+            {/* Status */}
+            <div style={{
+              background: "#1a1a2e",
+              borderRadius: "10px",
+              padding: "14px",
+            }}>
+              <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "8px" }}>
+                Возвращаемые значения
+              </div>
+              {[
+                { key: "pending", value: String(pending), color: pending ? "#f59e0b" : "#64748b" },
+                { key: "status", value: status, color: status === "success" ? "#00dc82" : status === "error" ? "#ef4444" : "#f59e0b" },
+                { key: "error", value: error ? error.message || "Error " + error.status : "null", color: error ? "#ef4444" : "#475569" },
+                { key: "data.length", value: data ? String(data.length) + " items" : "null", color: "#00b4d8" },
+              ].map(item => (
+                <div key={item.key} style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  padding: "5px 8px",
+                  borderRadius: "4px",
+                  background: "#0f172a",
+                  marginBottom: "4px",
+                }}>
+                  <code style={{ color: "#94a3b8", fontSize: "11px" }}>{item.key}</code>
+                  <code style={{ color: item.color, fontSize: "11px" }}>{item.value}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Result */}
+          <div style={{
+            background: "#1a1a2e",
+            borderRadius: "10px",
+            padding: "14px",
+            minHeight: "200px",
+          }}>
+            <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "12px" }}>
+              Результат (data)
+            </div>
+            {pending ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {[1, 2, 3, 4, 5].map(i => (
+                  <div key={i} style={{
+                    height: "36px",
+                    background: "#ffffff0a",
+                    borderRadius: "6px",
+                    position: "relative",
+                    overflow: "hidden",
+                  }}>
+                    <div style={{
+                      position: "absolute",
+                      top: 0,
+                      left: "-100%",
+                      right: "-100%",
+                      bottom: 0,
+                      background: "linear-gradient(90deg, transparent, #00dc8111, transparent)",
+                      animation: "shimmer 1.5s infinite",
+                    }} />
+                  </div>
+                ))}
+                <div style={{ textAlign: "center", color: "#64748b", fontSize: "12px", marginTop: "8px" }}>
+                  ⏳ pending...
+                </div>
+              </div>
+            ) : error ? (
+              <div style={{
+                background: "#ef444422",
+                border: "1px solid #ef444444",
+                borderRadius: "8px",
+                padding: "16px",
+                textAlign: "center",
+              }}>
+                <div style={{ fontSize: "24px", marginBottom: "8px" }}>❌</div>
+                <div style={{ color: "#ef4444", fontWeight: 700, marginBottom: "4px" }}>
+                  Ошибка {error.status}
+                </div>
+                <div style={{ color: "#94a3b8", fontSize: "12px" }}>{error.message}</div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {data?.map(post => (
+                  <div key={post.id} style={{
+                    background: "#0f172a",
+                    borderRadius: "6px",
+                    padding: "8px 12px",
+                    fontSize: "12px",
+                    color: "#e2e8f0",
+                    borderLeft: "3px solid #00dc82",
+                  }}>
+                    {post.label}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "compare" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {comparisons.map(c => (
+            <div key={c.name} style={{
+              background: "#1a1a2e",
+              border: \`1px solid \${c.color}33\`,
+              borderRadius: "10px",
+              padding: "14px",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
+                <span style={{ fontSize: "20px" }}>{c.icon}</span>
+                <div>
+                  <div style={{ color: c.color, fontWeight: 800, fontSize: "16px" }}>{c.name}</div>
+                  <div style={{ color: "#64748b", fontSize: "12px" }}>{c.when}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: "8px", marginBottom: "10px", flexWrap: "wrap" }}>
+                {[
+                  { label: "SSR", value: c.ssr },
+                  { label: "Cache", value: c.cache },
+                  { label: "Reactive", value: c.reactive },
+                  { label: "Lazy", value: c.lazy },
+                ].map(prop => (
+                  <span key={prop.label} style={{
+                    padding: "3px 8px",
+                    borderRadius: "4px",
+                    background: prop.value ? c.color + "22" : "#ffffff11",
+                    color: prop.value ? c.color : "#475569",
+                    fontSize: "11px",
+                    fontWeight: 600,
+                  }}>
+                    {prop.value ? "✓" : "✗"} {prop.label}
+                  </span>
+                ))}
+              </div>
+              <code style={{
+                display: "block",
+                background: "#0f172a",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                fontSize: "11px",
+                color: c.color,
+                fontFamily: "monospace",
+              }}>
+                {c.example}
+              </code>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

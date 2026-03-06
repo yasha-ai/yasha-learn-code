@@ -1,0 +1,1251 @@
+## 🆕 Next.js 15: Всё, что тебе нужно знать
+
+Привет! 👋 Next.js 15 вышел и принёс с собой несколько изменений, которые **ломают обратную совместимость**. Паниковать не нужно — большинство изменений можно мигрировать автоматически. Но понять их важно, иначе приложение начнёт вести себя странно.
+
+Думай об этом как об обновлении операционной системы 💻. Большинство программ работает как раньше, но некоторые API изменились, и нужно обновить свои привычки. Погнали разбираться!
+
+---
+
+## 🗺️ Обзор Next.js 15: что нового и почему это важно
+
+Next.js 15 — это не революция, а **эволюция**. Команда Vercel исправила несколько архитектурных решений, которые создавали неожиданное поведение:
+
+- **⚡ Async Request APIs** — `cookies()`, `headers()`, `params` теперь возвращают Promise
+- **🗄️ Изменения кэширования** — `fetch` больше НЕ кэшируется автоматически
+- **🚀 Turbopack стабилен** — `next dev --turbo` выходит из beta
+- **🔀 Partial Prerendering** — PPR экспериментально стабилизирован
+- **⏰ `unstable_after()`** — выполнение кода после отправки response
+- **📝 Новый `<Form>`** — умный компонент формы с prefetch
+- **⚛️ React 19** — полная поддержка React 19 с новыми хуками
+- **📁 `next.config.ts`** — TypeScript конфиг вместо `.mjs`
+
+Версия React минимум — 18.2.0, но рекомендуется 19.x.
+
+---
+
+## ⚡ Async Request APIs: самое важное изменение
+
+Это **самое важное breaking change** в Next.js 15. Функции `cookies()`, `headers()`, `params` и `searchParams` теперь асинхронные!
+
+**Почему это сломает твой код:**
+
+```typescript
+// ❌ Next.js 14 — синхронный доступ (скоро устареет!)
+import { cookies, headers } from 'next/headers';
+
+export default function Page({ params }: { params: { id: string } }) {
+  const cookieStore = cookies(); // синхронно
+  const headersList = headers(); // синхронно
+  const token = cookieStore.get('auth-token');
+  const id = params.id; // синхронно
+
+  return <div>User ID: {id}</div>;
+}
+```
+
+```typescript
+// ✅ Next.js 15 — асинхронный доступ
+import { cookies, headers } from 'next/headers';
+
+export default async function Page({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const cookieStore = await cookies(); // обязательный await
+  const headersList = await headers(); // обязательный await
+  const token = cookieStore.get('auth-token');
+  const { id } = await params; // await params тоже!
+
+  return <div>User ID: {id}</div>;
+}
+```
+
+**Это касается всех API динамических данных:**
+
+```typescript
+// app/products/[id]/page.tsx
+import { cookies, headers } from 'next/headers';
+import type { NextRequest } from 'next/server';
+
+// Все эти API теперь асинхронные:
+export default async function ProductPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string; category: string }>;
+  searchParams: Promise<{ sort: string; page: string }>;
+}) {
+  // params — динамические сегменты пути
+  const { id, category } = await params;
+
+  // searchParams — параметры строки запроса
+  const { sort, page } = await searchParams;
+
+  // cookies и headers — тоже async
+  const cookieStore = await cookies();
+  const headersList = await headers();
+
+  const userAgent = headersList.get('user-agent');
+  const session = cookieStore.get('session');
+
+  return (
+    <div>
+      <h1>Продукт {id} в категории {category}</h1>
+      <p>Сортировка: {sort}, Страница: {page}</p>
+    </div>
+  );
+}
+```
+
+---
+
+## 🤔 Почему сделали Async? Философия изменения
+
+Это может казаться усложнением, но за этим стоит важная причина!
+
+В Next.js 14 `cookies()` и `headers()` были **синхронными**, но при этом делали весь роут **динамическим** — даже если ты только импортировал их, но не вызывал!
+
+```typescript
+// Next.js 14: ВЕСЬ роут становится динамическим из-за импорта!
+import { cookies } from 'next/headers'; // ← импорт = динамический роут
+
+export default async function Page() {
+  // Даже если ты не вызываешь cookies() —
+  // Next.js всё равно не может статически рендерить эту страницу
+  const data = await fetch('https://api.example.com/static-data');
+  return <div>{data}</div>;
+}
+```
+
+**С асинхронными API:** динамичность происходит **только в момент вызова** `await cookies()`. Это открывает путь к Partial Prerendering (PPR), где статическая и динамическая части могут сосуществовать!
+
+---
+
+## 🔧 Практика миграции: `await cookies()`, `await headers()`, `await params`
+
+Вот конкретные сценарии миграции:
+
+**Middleware — без изменений! (уже использовал async)**
+
+```typescript
+// middleware.ts — не меняется
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  // request.cookies — всё ещё синхронный в middleware
+  const token = request.cookies.get('token');
+  if (!token) {
+    return NextResponse.redirect(new URL('/login', request.url));
+  }
+  return NextResponse.next();
+}
+```
+
+**Route Handlers:**
+
+```typescript
+// app/api/profile/route.ts
+import { cookies, headers } from 'next/headers';
+import { NextResponse } from 'next/server';
+
+export async function GET() {
+  const cookieStore = await cookies(); // await!
+  const headersList = await headers(); // await!
+
+  const session = cookieStore.get('session')?.value;
+  const contentType = headersList.get('content-type');
+
+  if (!session) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  return NextResponse.json({ session, contentType });
+}
+```
+
+**Server Actions:**
+
+```typescript
+// app/actions.ts
+'use server';
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+
+export async function login(formData: FormData) {
+  const email = formData.get('email') as string;
+  const password = formData.get('password') as string;
+
+  const user = await authenticate(email, password);
+
+  if (user) {
+    const cookieStore = await cookies(); // await!
+    cookieStore.set('session', user.token, {
+      httpOnly: true,
+      secure: true,
+      maxAge: 60 * 60 * 24 * 7, // 7 дней
+    });
+    redirect('/dashboard');
+  }
+}
+```
+
+---
+
+## 🤖 `@next/codemod`: автоматическая миграция
+
+Не хочешь менять вручную? Next.js предлагает автоматический codemod!
+
+```bash
+# Автоматически обновляет весь проект до Next.js 15
+npx @next/codemod@canary upgrade latest
+
+# Только конкретный codemod для async API
+npx @next/codemod@canary next-async-request-api .
+
+# Проверить что изменится (dry-run)
+npx @next/codemod@canary next-async-request-api . --dry
+
+# С подробным выводом
+npx @next/codemod@canary next-async-request-api . --verbose
+```
+
+**Что делает codemod:**
+
+```typescript
+// До запуска codemod
+export default function Page({ params }: { params: { id: string } }) {
+  const id = params.id;
+  return <div>{id}</div>;
+}
+
+// После запуска codemod (автоматически!)
+export default async function Page({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  return <div>{id}</div>;
+}
+```
+
+> **💡 Совет:** Codemod хорошо справляется с очевидными случаями, но может не распознать сложные паттерны. После запуска проверь изменения вручную!
+
+---
+
+## ⚛️ React 19: поддержка и новые хуки
+
+Next.js 15 полностью поддерживает React 19. Давай посмотрим на самые полезные новинки.
+
+**`useActionState` (бывший `useFormState`):**
+
+```typescript
+// Улучшенная обработка состояния формы
+'use client';
+import { useActionState } from 'react'; // из react, не из react-dom!
+import { createPost } from '@/app/actions';
+
+type FormState = {
+  success: boolean;
+  error?: string;
+  post?: { id: string; title: string };
+};
+
+const initialState: FormState = { success: false };
+
+export function CreatePostForm() {
+  const [state, formAction, isPending] = useActionState(
+    createPost,
+    initialState
+  );
+
+  return (
+    <form action={formAction}>
+      {state.error && (
+        <div className="error">{state.error}</div>
+      )}
+      {state.success && (
+        <div className="success">Пост создан: {state.post?.title}</div>
+      )}
+      <input name="title" placeholder="Заголовок" disabled={isPending} />
+      <textarea name="content" placeholder="Текст" disabled={isPending} />
+      <button type="submit" disabled={isPending}>
+        {isPending ? '⏳ Создаём...' : '✨ Создать пост'}
+      </button>
+    </form>
+  );
+}
+```
+
+**`useFormStatus`:**
+
+```typescript
+// Компонент знает о состоянии родительской формы
+'use client';
+import { useFormStatus } from 'react-dom';
+
+function SubmitButton() {
+  const { pending, data, method, action } = useFormStatus();
+
+  return (
+    <button
+      type="submit"
+      disabled={pending}
+      style={{ opacity: pending ? 0.6 : 1 }}
+    >
+      {pending ? '⏳ Отправляем...' : '🚀 Отправить'}
+    </button>
+  );
+}
+
+// Используется внутри <form>
+export function MyForm() {
+  return (
+    <form action={someServerAction}>
+      <input name="email" type="email" />
+      <SubmitButton /> {/* автоматически получает pending состояние */}
+    </form>
+  );
+}
+```
+
+**`use()` хук для Promise:**
+
+```typescript
+// use() — разворачивает Promise или Context в рендере
+'use client';
+import { use, Suspense } from 'react';
+
+// Можно передать Promise как проп из Server Component!
+function UserProfile({ userPromise }: { userPromise: Promise<User> }) {
+  const user = use(userPromise); // разворачивает Promise синхронно!
+  return <div>{user.name}</div>;
+}
+
+// Server Component передаёт Promise клиенту
+export default function Page() {
+  const userPromise = getUser(); // не await!
+  return (
+    <Suspense fallback={<div>Загрузка...</div>}>
+      <UserProfile userPromise={userPromise} />
+    </Suspense>
+  );
+}
+```
+
+---
+
+## 🚀 Turbopack Dev: стабильный и быстрый
+
+Turbopack — это новый бандлер, написанный на Rust. В Next.js 15 он **официально стабилен** для `next dev`!
+
+```bash
+# Next.js 15: стабильный Turbopack
+npx next dev --turbo
+
+# Или в package.json:
+# "dev": "next dev --turbo"
+```
+
+**Сравнение производительности (реальные проекты):**
+
+| Метрика | Webpack | Turbopack | Улучшение |
+|---------|---------|-----------|-----------|
+| Cold start (большой проект) | ~8-15s | ~1-3s | **5x быстрее** |
+| HMR update | ~500ms-2s | ~50-200ms | **7x быстрее** |
+| Initial compilation | ~5-12s | ~1-2.5s | **5x быстрее** |
+| Использование памяти | ~1-2 GB | ~400-600 MB | **3x меньше** |
+
+**Как это работает:**
+
+```
+Webpack (JavaScript):
+  Изменение файла → пересборка зависимостей → обновление
+  Время: медленно, линейно растёт с проектом
+
+Turbopack (Rust, инкрементальный):
+  Изменение файла → только затронутые модули
+  Время: стабильно быстро независимо от размера проекта
+```
+
+> **⚠️ Важно:** Turbopack стабилен только для `next dev`. Для `next build` всё ещё используется webpack. Поддержка `next build --turbo` — в планах!
+
+**Несовместимые плагины webpack:**
+
+```javascript
+// next.config.ts — некоторые webpack плагины не работают с Turbopack
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  // Turbopack не поддерживает webpack плагины напрямую
+  // Используй turbopack-специфичные алиасы если нужно:
+  turbopack: {
+    resolveAlias: {
+      '@/utils': './src/utils',
+    },
+    rules: {
+      '*.svg': {
+        loaders: ['@svgr/webpack'],
+        as: '*.js',
+      },
+    },
+  },
+};
+
+export default nextConfig;
+```
+
+---
+
+## 🔀 Partial Prerendering (PPR): статическая оболочка + динамические дыры
+
+PPR — это одна из самых инновационных концепций в Next.js. Представь страницу как **Swiss cheese** 🧀: большая часть статическая (предсгенерированная), а "дырки" — это динамические части, которые стримятся при запросе.
+
+**Проблема без PPR:**
+
+```
+Статическая страница (fast):    /about, /blog — весь HTML предсгенерирован
+Динамическая страница (slow):   /dashboard — нужно ждать ответа сервера
+
+Что если нам нужно и то, и другое на одной странице?
+Product Page: заголовок статический + корзина динамическая → всё медленно!
+```
+
+**PPR решает это:**
+
+```typescript
+// next.config.ts — включаем PPR экспериментально
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  experimental: {
+    ppr: 'incremental', // включаем постепенно (per-route)
+  },
+};
+
+export default nextConfig;
+```
+
+```typescript
+// app/products/[id]/page.tsx — PPR в действии
+import { Suspense } from 'react';
+import { unstable_noStore as noStore } from 'next/cache';
+
+// Оптимистично включаем PPR для этого роута
+export const experimental_ppr = true;
+
+// Эта функция статическая — рендерится при сборке
+async function ProductInfo({ id }: { id: string }) {
+  const product = await fetch('https://api.example.com/products/' + id, {
+    next: { revalidate: 3600 }, // статические данные
+  }).then(r => r.json());
+
+  return (
+    <div>
+      <h1>{product.name}</h1>
+      <p>{product.description}</p>
+      <p className="price">{product.price} ₽</p>
+    </div>
+  );
+}
+
+// Эта функция динамическая — выполняется при каждом запросе
+async function PersonalizedRecommendations() {
+  noStore(); // явно помечаем как динамическую
+  const recommendations = await getPersonalizedRecs(); // использует cookies
+  return <div>{recommendations.map(r => <ProductCard key={r.id} {...r} />)}</div>;
+}
+
+// Основная страница — статическая оболочка + динамические "дыры"
+export default async function ProductPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+
+  return (
+    <div>
+      {/* Статическая часть — рендерится при сборке */}
+      <ProductInfo id={id} />
+
+      {/* Динамическая "дыра" — стримится при запросе */}
+      <Suspense fallback={<RecommendationsSkeleton />}>
+        <PersonalizedRecommendations />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+**Визуально PPR работает так:**
+
+```
+При сборке (build time):
+  ┌─────────────────────────────────┐
+  │  <ProductInfo>                  │ ← Статический HTML
+  │    Название: iPhone 15 Pro      │
+  │    Цена: 99 990 ₽               │
+  │  </ProductInfo>                 │
+  │  <Suspense fallback={skeleton}> │ ← "Дыра" в HTML
+  │    ░░░░░░░░░░░░░░░░░░░░░░░░    │
+  │  </Suspense>                    │
+  └─────────────────────────────────┘
+
+При запросе пользователя (request time):
+  1. Статический HTML приходит МГНОВЕННО
+  2. "Дыра" заполняется динамическим контентом через стриминг
+```
+
+---
+
+## 🗄️ Изменения кэширования в Next.js 15
+
+Это **второе важное breaking change**. В Next.js 14 `fetch` кэшировался по умолчанию. В Next.js 15 — нет!
+
+**Next.js 14 (кэш по умолчанию):**
+
+```typescript
+// Next.js 14: АВТОМАТИЧЕСКОЕ кэширование!
+export default async function Page() {
+  // Этот запрос кэшируется навсегда (cache: 'force-cache' по умолчанию)
+  const data = await fetch('https://api.example.com/data');
+
+  // Чтобы НЕ кэшировать — нужно явно указать
+  const fresh = await fetch('https://api.example.com/fresh', {
+    cache: 'no-store', // отключаем кэш
+  });
+
+  return <div>{/* ... */}</div>;
+}
+```
+
+**Next.js 15 (нет кэша по умолчанию):**
+
+```typescript
+// Next.js 15: fetch НЕ кэшируется по умолчанию!
+export default async function Page() {
+  // Этот запрос ДИНАМИЧЕСКИЙ — выполняется при каждом запросе
+  const data = await fetch('https://api.example.com/data');
+
+  // Для кэширования теперь нужно явно указать:
+  const cached = await fetch('https://api.example.com/cached', {
+    cache: 'force-cache', // или next: { revalidate: 3600 }
+  });
+
+  // ISR — обновлять каждый час
+  const isr = await fetch('https://api.example.com/posts', {
+    next: { revalidate: 3600 },
+  });
+
+  return <div>{/* ... */}</div>;
+}
+```
+
+**Таблица изменений кэша:**
+
+| Поведение | Next.js 14 | Next.js 15 |
+|-----------|-----------|-----------|
+| `fetch()` без опций | `force-cache` (кэш) | `no-store` (без кэша) |
+| GET Route Handlers | Кэшируется | НЕ кэшируется |
+| Client Router Cache | Кэш на 30 сек | Нет кэша по умолчанию |
+| `cache: 'force-cache'` | Работает | Работает |
+| `next: { revalidate }` | Работает | Работает |
+
+**Как адаптировать существующий код:**
+
+```typescript
+// Если раньше полагался на автокэш — нужно добавить явно:
+const posts = await fetch('https://api.example.com/posts', {
+  next: { revalidate: 3600 }, // ISR: обновлять каждый час
+});
+
+// Или настроить кэш на уровне роута:
+export const revalidate = 3600; // все fetch в этом файле кэшируются 1 час
+export const dynamic = 'force-static'; // весь роут статический
+
+// Или через fetchCache:
+export const fetchCache = 'force-cache'; // старое поведение Next.js 14
+```
+
+---
+
+## ⏰ `unstable_after()`: код после отправки Response
+
+Часто нужно выполнить что-то после того, как пользователь уже получил ответ: логирование, аналитика, очистка кэша. `unstable_after()` позволяет это!
+
+**Без `unstable_after` — пользователь ждёт всего:**
+
+```typescript
+// ❌ Аналитика блокирует ответ пользователю!
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const product = await getProduct(id);
+
+  // Пользователь ждёт, пока мы пишем в базу аналитики...
+  await logPageView({ page: '/products/' + id, productId: id });
+  await updatePopularProducts(id);
+
+  return <ProductPage product={product} />;
+}
+```
+
+**С `unstable_after` — пользователь получает ответ сразу:**
+
+```typescript
+// ✅ Аналитика выполняется ПОСЛЕ ответа!
+import { unstable_after as after } from 'next/server';
+
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const product = await getProduct(id);
+
+  // Регистрируем задачу — она выполнится после response
+  after(async () => {
+    // Пользователь уже видит страницу, пока это выполняется
+    await logPageView({ page: '/products/' + id, productId: id });
+    await updatePopularProducts(id);
+    await sendAnalyticsEvent('product_view', { id });
+  });
+
+  // Ответ отправляется немедленно!
+  return <ProductPage product={product} />;
+}
+```
+
+**`after()` также работает в Route Handlers и Server Actions:**
+
+```typescript
+// app/api/orders/route.ts
+import { unstable_after as after } from 'next/server';
+import { NextResponse } from 'next/server';
+
+export async function POST(request: Request) {
+  const order = await createOrder(await request.json());
+
+  after(async () => {
+    // Email, уведомления, обновление статистики — после response
+    await sendOrderConfirmationEmail(order);
+    await updateInventory(order.items);
+    await notifyWarehouse(order);
+  });
+
+  // Клиент получает ответ сразу
+  return NextResponse.json(order, { status: 201 });
+}
+```
+
+> **⚠️ Ограничение:** `after()` не работает в static rendering. Только для динамических страниц и роутов.
+
+---
+
+## 🔬 `instrumentation.ts`: улучшения мониторинга
+
+Файл `instrumentation.ts` позволяет подключиться к жизненному циклу Next.js сервера. В Next.js 15 он стал более стабильным.
+
+```typescript
+// instrumentation.ts (в корне проекта)
+export async function register() {
+  // Выполняется один раз при старте сервера
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    // Node.js runtime — для тяжёлой инициализации
+    const { NodeSDK } = await import('@opentelemetry/sdk-node');
+    const sdk = new NodeSDK({
+      // конфигурация OpenTelemetry
+    });
+    sdk.start();
+  }
+
+  if (process.env.NEXT_RUNTIME === 'edge') {
+    // Edge runtime — лёгкая инициализация
+    await import('./lib/edge-monitoring');
+  }
+}
+
+// Новое в Next.js 15: onRequestError
+export async function onRequestError(
+  error: Error,
+  request: { path: string; method: string },
+  context: { routerKind: string; routePath: string }
+) {
+  // Вызывается при каждой ошибке запроса
+  await reportErrorToMonitoring({
+    error: error.message,
+    stack: error.stack,
+    path: request.path,
+    method: request.method,
+  });
+}
+```
+
+---
+
+## 📝 Новый `<Form>` компонент (`next/form`)
+
+`next/form` — это умный компонент, который расширяет HTML `<form>` для Next.js. Он автоматически обрабатывает prefetch и soft navigation!
+
+**Обычная HTML форма vs `next/form`:**
+
+```typescript
+// ❌ Обычная HTML форма — full page reload при отправке
+export default function SearchPage() {
+  return (
+    <form action="/search">
+      <input name="q" placeholder="Поиск..." />
+      <button type="submit">Найти</button>
+      {/* При отправке → полная перезагрузка страницы */}
+    </form>
+  );
+}
+```
+
+```typescript
+// ✅ next/form — soft navigation + prefetch!
+import Form from 'next/form';
+
+export default function SearchPage() {
+  return (
+    <Form action="/search">
+      {/*
+        - При hover/focus на input → prefetch layout страницы /search
+        - При submit → soft navigation (без перезагрузки)
+        - Параметры формы → URL search params (?q=запрос)
+        - Работает с Server Actions тоже!
+      */}
+      <input name="q" placeholder="Поиск..." />
+      <button type="submit">Найти</button>
+    </Form>
+  );
+}
+```
+
+**`next/form` с Server Actions:**
+
+```typescript
+// app/search/page.tsx
+import Form from 'next/form';
+import { searchProducts } from '@/app/actions';
+
+export default function SearchPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string }>;
+}) {
+  return (
+    <div>
+      <Form action={searchProducts}>
+        <input
+          name="q"
+          placeholder="Найти продукты..."
+          autoComplete="off"
+        />
+        <select name="category">
+          <option value="">Все категории</option>
+          <option value="electronics">Электроника</option>
+          <option value="clothing">Одежда</option>
+        </select>
+        <button type="submit">🔍 Поиск</button>
+      </Form>
+    </div>
+  );
+}
+```
+
+---
+
+## 📁 TypeScript конфигурация: `next.config.ts`
+
+Next.js 15 добавил нативную поддержку TypeScript для конфигурационного файла!
+
+**До: `next.config.mjs` (JavaScript):**
+
+```javascript
+// next.config.mjs
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  experimental: {
+    ppr: true,
+  },
+  images: {
+    remotePatterns: [
+      { protocol: 'https', hostname: 'example.com' },
+    ],
+  },
+};
+
+export default nextConfig;
+```
+
+**После: `next.config.ts` (TypeScript):**
+
+```typescript
+// next.config.ts — нативный TypeScript!
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  experimental: {
+    ppr: 'incremental',
+    // TypeScript подскажет доступные поля с автодополнением!
+  },
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'example.com',
+        port: '',
+        pathname: '/images/**',
+      },
+    ],
+  },
+  turbopack: {
+    resolveAlias: {
+      '@/utils': './src/utils/index.ts',
+    },
+  },
+  // TypeScript проверяет типы — нельзя написать неверные опции!
+  // Ошибка компиляции сразу укажет на проблему
+};
+
+export default nextConfig;
+```
+
+> **💡 Бонус:** Теперь в `next.config.ts` можно импортировать типы и утилиты из TypeScript-проекта. Никаких проблем с `require` vs `import`!
+
+---
+
+## 🔄 Обновление с Next.js 14 → 15
+
+Пошаговое руководство:
+
+**Шаг 1: Обновить зависимости:**
+
+```bash
+# Автоматическое обновление через codemod
+npx @next/codemod@canary upgrade latest
+
+# Или вручную
+npm install next@15 react@19 react-dom@19
+npm install --save-dev @types/react@19 @types/react-dom@19
+```
+
+**Шаг 2: Запустить автомиграцию:**
+
+```bash
+# Мигрирует async APIs автоматически
+npx @next/codemod@canary next-async-request-api .
+
+# Мигрирует устаревший useFormState → useActionState
+npx @next/codemod@canary next-form-request-api .
+```
+
+**Шаг 3: Проверить кэширование:**
+
+```typescript
+// Проверь все fetch запросы — теперь они динамические!
+// Добавь явное кэширование там, где нужно:
+
+// ISR — каждый час
+const data = await fetch(url, { next: { revalidate: 3600 } });
+
+// Статический — навсегда (до следующего деплоя)
+const data = await fetch(url, { cache: 'force-cache' });
+
+// Динамический — при каждом запросе (поведение по умолчанию в Next.js 15)
+const data = await fetch(url); // или { cache: 'no-store' }
+```
+
+**Шаг 4: Переименовать конфиг (опционально):**
+
+```bash
+# next.config.mjs → next.config.ts
+mv next.config.mjs next.config.ts
+# Добавить типы вручную или через codemod
+```
+
+**Шаг 5: Протестировать:**
+
+```bash
+# Запустить dev с Turbopack
+npm run dev -- --turbo
+
+# Проверить build
+npm run build
+
+# Запустить тесты
+npm test
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState } from 'react';
+
+const FEATURES = [
+  {
+    id: 'async-apis',
+    icon: '⚡',
+    title: 'Async Request APIs',
+    subtitle: 'cookies(), headers(), params → Promise',
+    color: '#f59e0b',
+    before:
+      '// Next.js 14 — синхронный доступ\n' +
+      'import { cookies, headers } from "next/headers";\n\n' +
+      'export default function Page({ params }) {\n' +
+      '  const cookieStore = cookies(); // синхронно\n' +
+      '  const headersList = headers(); // синхронно\n' +
+      '  const token = cookieStore.get("auth-token");\n' +
+      '  const id = params.id; // синхронно\n' +
+      '  return <div>User: {id}</div>;\n' +
+      '}',
+    after:
+      '// Next.js 15 — асинхронный доступ (breaking change!)\n' +
+      'import { cookies, headers } from "next/headers";\n\n' +
+      'export default async function Page({\n' +
+      '  params,\n' +
+      '}: {\n' +
+      '  params: Promise<{ id: string }>;\n' +
+      '}) {\n' +
+      '  const cookieStore = await cookies(); // await!\n' +
+      '  const headersList = await headers(); // await!\n' +
+      '  const { id } = await params;         // await!\n' +
+      '  const token = cookieStore.get("auth-token");\n' +
+      '  return <div>User: {id}</div>;\n' +
+      '}',
+  },
+  {
+    id: 'caching',
+    icon: '🗄️',
+    title: 'Изменения кэширования',
+    subtitle: 'fetch() больше не кэшируется автоматически',
+    color: '#06b6d4',
+    before:
+      '// Next.js 14 — fetch кэшируется по умолчанию!\n' +
+      'export default async function Page() {\n' +
+      '  // Кэшируется навсегда (force-cache по умолчанию)\n' +
+      '  const data = await fetch("https://api.example.com/data");\n\n' +
+      '  // Нужно явно отключать кэш:\n' +
+      '  const fresh = await fetch("https://api.example.com/fresh", {\n' +
+      '    cache: "no-store", // явное отключение\n' +
+      '  });\n' +
+      '  return <div>Data loaded</div>;\n' +
+      '}',
+    after:
+      '// Next.js 15 — fetch НЕ кэшируется по умолчанию!\n' +
+      'export default async function Page() {\n' +
+      '  // Динамический запрос при каждом посещении\n' +
+      '  const data = await fetch("https://api.example.com/data");\n\n' +
+      '  // Для кэша нужно явно указать:\n' +
+      '  const cached = await fetch("https://api.example.com/posts", {\n' +
+      '    next: { revalidate: 3600 }, // ISR: раз в час\n' +
+      '  });\n' +
+      '  return <div>Data loaded</div>;\n' +
+      '}',
+  },
+  {
+    id: 'ppr',
+    icon: '🔀',
+    title: 'Partial Prerendering',
+    subtitle: 'Статическая оболочка + динамические "дыры"',
+    color: '#8b5cf6',
+    before:
+      '// Без PPR: или всё статично, или всё динамично\n' +
+      'export default async function ProductPage({ params }) {\n' +
+      '  // Этот fetch делает ВЕСЬ роут динамическим!\n' +
+      '  const cart = await getCart(); // использует cookies внутри\n' +
+      '  const product = await getProduct(params.id);\n' +
+      '  return (\n' +
+      '    <div>\n' +
+      '      <ProductInfo product={product} />\n' +
+      '      <Cart cart={cart} />\n' +
+      '    </div>\n' +
+      '  );\n' +
+      '  // Итог: медленный TTFB из-за корзины!\n' +
+      '}',
+    after:
+      '// С PPR: статическая оболочка стримится мгновенно!\n' +
+      'import { Suspense } from "react";\n' +
+      'export const experimental_ppr = true;\n\n' +
+      'export default async function ProductPage({ params }) {\n' +
+      '  const { id } = await params;\n' +
+      '  const product = await getProduct(id); // статические данные\n' +
+      '  return (\n' +
+      '    <div>\n' +
+      '      {/* Статическая часть — приходит мгновенно */}\n' +
+      '      <ProductInfo product={product} />\n' +
+      '      {/* Динамическая дыра — стримится после */}\n' +
+      '      <Suspense fallback={<CartSkeleton />}>\n' +
+      '        <Cart /> {/* использует cookies */}\n' +
+      '      </Suspense>\n' +
+      '    </div>\n' +
+      '  );\n' +
+      '}',
+  },
+  {
+    id: 'after',
+    icon: '⏰',
+    title: 'unstable_after()',
+    subtitle: 'Выполнение кода после отправки response',
+    color: '#ec4899',
+    before:
+      '// ❌ Аналитика блокирует ответ пользователю!\n' +
+      'export default async function Page({ params }) {\n' +
+      '  const { id } = await params;\n' +
+      '  const product = await getProduct(id);\n\n' +
+      '  // Пользователь ЖДЁТ всего этого...\n' +
+      '  await logPageView({ page: "/products/" + id });\n' +
+      '  await updatePopularityScore(id);\n' +
+      '  await sendAnalyticsEvent("product_view", { id });\n\n' +
+      '  // Только теперь получает страницу!\n' +
+      '  return <ProductPage product={product} />;\n' +
+      '}',
+    after:
+      '// ✅ Пользователь получает ответ мгновенно!\n' +
+      'import { unstable_after as after } from "next/server";\n\n' +
+      'export default async function Page({ params }) {\n' +
+      '  const { id } = await params;\n' +
+      '  const product = await getProduct(id);\n\n' +
+      '  // Регистрируем — выполнится ПОСЛЕ response\n' +
+      '  after(async () => {\n' +
+      '    await logPageView({ page: "/products/" + id });\n' +
+      '    await updatePopularityScore(id);\n' +
+      '    await sendAnalyticsEvent("product_view", { id });\n' +
+      '  });\n\n' +
+      '  // Response отправляется СРАЗУ!\n' +
+      '  return <ProductPage product={product} />;\n' +
+      '}',
+  },
+  {
+    id: 'form',
+    icon: '📝',
+    title: 'Новый <Form> компонент',
+    subtitle: 'next/form: prefetch + soft navigation',
+    color: '#10b981',
+    before:
+      '// Обычная HTML форма — full page reload\n' +
+      'export default function SearchPage() {\n' +
+      '  return (\n' +
+      '    <form action="/search">\n' +
+      '      <input name="q" placeholder="Поиск..." />\n' +
+      '      <button type="submit">Найти</button>\n' +
+      '    </form>\n' +
+      '  );\n' +
+      '  // При отправке: полная перезагрузка страницы!\n' +
+      '  // Нет prefetch загрузки\n' +
+      '  // Нет soft navigation\n' +
+      '}',
+    after:
+      '// next/form — умная форма с prefetch!\n' +
+      'import Form from "next/form";\n\n' +
+      'export default function SearchPage() {\n' +
+      '  return (\n' +
+      '    <Form action="/search">\n' +
+      '      {/* При hover/focus → prefetch layout /search */}\n' +
+      '      {/* При submit → soft navigation! */}\n' +
+      '      {/* q становится ?q=... в URL */}\n' +
+      '      <input name="q" placeholder="Поиск..." />\n' +
+      '      <button type="submit">Найти</button>\n' +
+      '    </Form>\n' +
+      '  );\n' +
+      '}',
+  },
+  {
+    id: 'turbopack',
+    icon: '🚀',
+    title: 'Turbopack Dev (стабильный)',
+    subtitle: 'next dev --turbo: до 5x быстрее',
+    color: '#f97316',
+    before:
+      '# Next.js 14 — webpack по умолчанию\nnpm run dev\n\n' +
+      '# Метрики (большой проект, ~500 модулей):\n' +
+      '# Cold start:  ~8-15 секунд\n' +
+      '# HMR update:  ~500ms - 2s\n' +
+      '# Память:       ~1-2 GB\n\n' +
+      '# Turbopack был экспериментальным:\n' +
+      '# next dev --turbo  (может ломаться!)',
+    after:
+      '# Next.js 15 — Turbopack стабилен!\nnpx next dev --turbo\n\n' +
+      '# Метрики (тот же проект, ~500 модулей):\n' +
+      '# Cold start:  ~1-3 секунды  (5x быстрее!)\n' +
+      '# HMR update:  ~50-200ms     (7x быстрее!)\n' +
+      '# Память:       ~400-600 MB  (3x меньше!)\n\n' +
+      '# next.config.ts (TypeScript конфиг!):\n' +
+      'import type { NextConfig } from "next";\n' +
+      'const config: NextConfig = { ... };\n' +
+      'export default config;',
+  },
+];
+
+export default function NextJS15Explorer() {
+  const [activeId, setActiveId] = useState(null);
+  const [showAfter, setShowAfter] = useState(false);
+
+  const selected = FEATURES.find((f) => f.id === activeId);
+
+  return (
+    <div style={{
+      fontFamily: 'system-ui, sans-serif',
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '24px',
+      color: '#e2e8f0',
+      boxSizing: 'border-box',
+    }}>
+      <h1 style={{ color: '#4ade80', margin: '0 0 6px', fontSize: '20px' }}>
+        🚀 Next.js 15 Features Explorer
+      </h1>
+      <p style={{ color: '#64748b', margin: '0 0 20px', fontSize: '13px' }}>
+        Нажми на карточку → увидишь код до/после
+      </p>
+
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+        gap: '10px',
+        marginBottom: '24px',
+      }}>
+        {FEATURES.map((feature) => {
+          const isActive = feature.id === activeId;
+          return (
+            <button
+              key={feature.id}
+              onClick={() => {
+                setActiveId(isActive ? null : feature.id);
+                setShowAfter(false);
+              }}
+              style={{
+                background: isActive ? '#1e293b' : '#0f172a',
+                border: '1px solid',
+                borderColor: isActive ? feature.color : '#1e293b',
+                borderRadius: '12px',
+                padding: '14px',
+                cursor: 'pointer',
+                textAlign: 'left',
+                transition: 'all 0.2s',
+                outline: 'none',
+              }}
+            >
+              <div style={{ fontSize: '22px', marginBottom: '6px' }}>{feature.icon}</div>
+              <div style={{
+                color: feature.color,
+                fontWeight: '700',
+                fontSize: '13px',
+                marginBottom: '4px',
+                fontFamily: 'system-ui',
+              }}>
+                {feature.title}
+              </div>
+              <div style={{ color: '#475569', fontSize: '11px', fontFamily: 'system-ui', lineHeight: '1.4' }}>
+                {feature.subtitle}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {selected && (
+        <div>
+          <h2 style={{
+            color: selected.color,
+            marginBottom: '14px',
+            fontSize: '16px',
+            fontFamily: 'system-ui',
+          }}>
+            {selected.icon} {selected.title}
+          </h2>
+
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+            <button
+              onClick={() => setShowAfter(false)}
+              style={{
+                padding: '7px 18px',
+                borderRadius: '8px',
+                border: '2px solid',
+                borderColor: !showAfter ? '#f87171' : '#1e293b',
+                background: !showAfter ? 'rgba(248,113,113,0.12)' : 'transparent',
+                color: !showAfter ? '#f87171' : '#475569',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: 'bold',
+                fontFamily: 'system-ui',
+                transition: 'all 0.15s',
+              }}
+            >
+              ❌ Next.js 14
+            </button>
+            <button
+              onClick={() => setShowAfter(true)}
+              style={{
+                padding: '7px 18px',
+                borderRadius: '8px',
+                border: '2px solid',
+                borderColor: showAfter ? '#4ade80' : '#1e293b',
+                background: showAfter ? 'rgba(74,222,128,0.12)' : 'transparent',
+                color: showAfter ? '#4ade80' : '#475569',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: 'bold',
+                fontFamily: 'system-ui',
+                transition: 'all 0.15s',
+              }}
+            >
+              ✅ Next.js 15
+            </button>
+          </div>
+
+          <div style={{
+            background: '#171717',
+            borderRadius: '12px',
+            padding: '20px',
+            border: '1px solid',
+            borderColor: showAfter ? '#4ade80' : '#f87171',
+            transition: 'border-color 0.25s',
+          }}>
+            <div style={{
+              marginBottom: '10px',
+              fontSize: '11px',
+              letterSpacing: '0.05em',
+              textTransform: 'uppercase',
+              color: showAfter ? '#4ade80' : '#f87171',
+              fontFamily: 'system-ui',
+            }}>
+              {showAfter ? '✅ Next.js 15 (новый)' : '❌ Next.js 14 (устаревший)'}
+            </div>
+            <pre style={{
+              fontFamily: "'Fira Code', 'Cascadia Code', monospace",
+              color: '#e2e8f0',
+              fontSize: '12.5px',
+              lineHeight: '1.75',
+              margin: 0,
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}>
+              {showAfter ? selected.after : selected.before}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {!selected && (
+        <div style={{
+          textAlign: 'center',
+          padding: '32px',
+          color: '#1e293b',
+          fontSize: '40px',
+        }}>
+          👆<br />
+          <span style={{ fontSize: '14px', color: '#334155', fontFamily: 'system-ui' }}>
+            Выбери карточку выше
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

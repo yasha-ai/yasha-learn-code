@@ -1,0 +1,814 @@
+## ⚡ Производительность Svelte: Почему это так быстро
+
+Привет! 👋 Svelte часто называют "самым быстрым фреймворком" — и это не просто маркетинг. Разберём почему Svelte быстр, как сделать его ещё быстрее, и как правильно измерять производительность.
+
+Представь двух поваров 🍳. Первый (React) готовит через посредника (виртуальный DOM): сначала рисует блюдо на бумаге, сравнивает с предыдущим рисунком, и только потом идёт на кухню. Второй (Svelte) идёт прямо на кухню и меняет только то, что нужно. Кто быстрее?
+
+---
+
+## 🧠 Почему нет Virtual DOM — это хорошо
+
+Virtual DOM — это концепция React/Vue, при которой каждое обновление проходит через:
+
+```
+1. Создать новый Virtual DOM (дерево объектов в памяти)
+2. Сравнить с предыдущим Virtual DOM (diffing)
+3. Вычислить минимальные изменения (reconciliation)
+4. Применить изменения к реальному DOM
+```
+
+```javascript
+// React — при каждом setState происходит вся цепочка выше:
+function Counter() {
+  const [count, setCount] = useState(0);
+  // Re-render всего компонента → VDOM diff → DOM update
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>;
+}
+```
+
+```svelte
+<!-- Svelte — компилятор генерирует прямые DOM операции: -->
+<script>
+  let count = $state(0);
+</script>
+<!-- Компилируется в что-то вроде: -->
+<!-- document.createTextNode(count) -->
+<!-- при изменении: textNode.data = count -->
+<button onclick={() => count++}>{count}</button>
+```
+
+**Что генерирует Svelte компилятор:**
+
+```javascript
+// Упрощённый вывод компилятора для <p>{count}</p>:
+function create_fragment(ctx) {
+  let p, t;
+
+  return {
+    c() {
+      p = element("p");
+      t = text(ctx[0]); // count
+    },
+    m(target, anchor) {
+      insert(target, p, anchor);
+      append(p, t);
+    },
+    p(ctx, [dirty]) {
+      // dirty — битовая маска того, что изменилось
+      if (dirty & 1) set_data(t, ctx[0]); // Обновляем только текст!
+    },
+    d(detaching) {
+      if (detaching) detach(p);
+    }
+  };
+}
+```
+
+---
+
+## 📦 Размер бандла: сравнение
+
+```
+Фреймворк          Runtime в бандле     Hello World приложение
+────────────────────────────────────────────────────────────────
+Vanilla JS         0 KB                 ~1 KB
+Svelte 5           ~10-15 KB            ~5-10 KB
+Vue 3              ~22 KB (min+gzip)    ~30-40 KB
+React 18           ~47 KB (min+gzip)    ~130 KB (с ReactDOM)
+Angular 17         ~70+ KB              ~200+ KB
+```
+
+Почему Svelte такой маленький? Потому что **нет runtime** — компилятор генерирует эффективный JavaScript напрямую. Каждое приложение использует только то, что ему нужно.
+
+---
+
+## 🎯 svelte:options immutable
+
+`immutable={true}` говорит Svelte: "Мои props никогда не мутируются — новое значение всегда новый объект." Это позволяет делать быстрые проверки по ссылке:
+
+```svelte
+<!-- ❌ Без immutable — Svelte проверяет каждый prop глубоко -->
+<script>
+  let { user } = $props();
+</script>
+
+<!-- ✅ С immutable — Svelte только сравнивает ссылки (===) -->
+<svelte:options immutable={true} />
+<script>
+  let { user } = $props();
+  // Теперь если user === prevUser → компонент НЕ перерисовывается
+  // Только при user !== prevUser (новый объект)
+</script>
+
+<div>{user.name}</div>
+```
+
+```svelte
+<!-- Практичный пример — список элементов: -->
+<!-- ListItem.svelte -->
+<svelte:options immutable={true} />
+<script lang="ts">
+  let { item }: { item: { id: string; name: string; price: number } } = $props();
+</script>
+<div>{item.name}: {item.price} ₽</div>
+```
+
+```svelte
+<!-- Родительский компонент -->
+<script lang="ts">
+  let items = $state([
+    { id: '1', name: 'Ноутбук', price: 80000 },
+    { id: '2', name: 'Мышь', price: 2000 },
+  ]);
+
+  function updatePrice(id: string, price: number) {
+    // НОВЫЙ объект для элемента — immutable правило соблюдено
+    items = items.map(item =>
+      item.id === id ? { ...item, price } : item
+    );
+    // Svelte перерисует только тот ListItem, у которого изменилась ссылка
+  }
+</script>
+
+{#each items as item (item.id)}
+  <ListItem {item} />
+{/each}
+```
+
+---
+
+## 🔑 `{#key}`: принудительный ремонтинг
+
+`{#key}` — это способ сказать Svelte: "Когда это значение меняется, создай компонент заново (ремонтируй)":
+
+```svelte
+<script lang="ts">
+  let userId = $state('user-1');
+
+  // При смене userId компонент UserProfile будет уничтожен и создан заново
+  // Это полезно когда у компонента есть внутреннее состояние,
+  // которое нужно сбросить
+</script>
+
+{#key userId}
+  <UserProfile id={userId} />
+{/key}
+
+<!-- Без #key: компонент обновится (lifecycle сохранится) -->
+<!-- С #key: компонент уничтожится и создастся заново -->
+```
+
+```svelte
+<!-- Анимации при смене контента: -->
+<script lang="ts">
+  import { fade } from 'svelte/transition';
+  let currentPage = $state(1);
+</script>
+
+{#key currentPage}
+  <div transition:fade={{ duration: 200 }}>
+    <PageContent page={currentPage} />
+  </div>
+{/key}
+```
+
+---
+
+## 💤 Lazy loading компонентов
+
+```svelte
+<script lang="ts">
+  // Ленивая загрузка — компонент не включается в начальный бандл:
+  let HeavyChart: any = null;
+  let showChart = $state(false);
+
+  async function loadChart() {
+    // Динамический импорт — создаёт отдельный чанк
+    const module = await import('./HeavyChart.svelte');
+    HeavyChart = module.default;
+    showChart = true;
+  }
+</script>
+
+<button onclick={loadChart}>Показать граф</button>
+
+{#if showChart && HeavyChart}
+  <svelte:component this={HeavyChart} data={chartData} />
+{/if}
+```
+
+**Code splitting в SvelteKit (автоматический):**
+
+```typescript
+// SvelteKit автоматически разбивает код по маршрутам
+// src/routes/heavy-page/+page.svelte → отдельный чанк
+
+// Можно также lazy load внутри страницы:
+// src/routes/dashboard/+page.svelte
+```
+
+```svelte
+<script lang="ts">
+  import { onMount } from 'svelte';
+
+  let DashboardChart: any = null;
+
+  onMount(async () => {
+    // Загружаем только когда компонент смонтирован (клиент)
+    const mod = await import('$lib/components/DashboardChart.svelte');
+    DashboardChart = mod.default;
+  });
+</script>
+
+{#if DashboardChart}
+  <svelte:component this={DashboardChart} />
+{:else}
+  <div class="skeleton">Загружаем граф...</div>
+{/if}
+```
+
+---
+
+## 🎨 svelte/motion: анимации без потерь производительности
+
+Svelte поставляется с двумя утилитами для плавных анимаций: `tweened` и `spring`. Они используют `requestAnimationFrame` и не влияют на реактивную систему.
+
+```svelte
+<script lang="ts">
+  import { tweened, spring } from 'svelte/motion';
+  import { cubicOut, elasticOut } from 'svelte/easing';
+
+  // tweened — линейная анимация с easing
+  const progress = tweened(0, {
+    duration: 400,
+    easing: cubicOut,
+  });
+
+  // spring — физическая симуляция (пружина)
+  const position = spring({ x: 0, y: 0 }, {
+    stiffness: 0.1,   // Жёсткость пружины (0-1)
+    damping: 0.8,     // Затухание (0-1)
+    precision: 0.001, // Порог остановки
+  });
+
+  let score = $state(0);
+
+  function updateScore(newScore: number) {
+    score = newScore;
+    progress.set(newScore / 100); // Анимируем прогресс-бар
+  }
+
+  function handleMouseMove(event: MouseEvent) {
+    position.set({ x: event.clientX, y: event.clientY });
+    // spring автоматически анимирует до нового значения!
+  }
+</script>
+
+<!-- Прогресс-бар с анимацией: -->
+<div class="progress-container">
+  <div class="progress-bar" style="width: {$progress * 100}%"></div>
+</div>
+
+<!-- Следящий элемент: -->
+<div
+  class="follower"
+  style="transform: translate({$position.x}px, {$position.y}px)"
+  onmousemove={handleMouseMove}
+></div>
+
+<!-- Счётчик с tweened: -->
+<button onclick={() => updateScore(Math.floor(Math.random() * 100))}>
+  Рандомный счёт
+</button>
+```
+
+**Разница между tweened и spring:**
+
+```
+tweened:
+  - Фиксированная длительность
+  - Точный контроль через easing функции
+  - Идеально: прогресс-бары, счётчики, transitions
+
+spring:
+  - Динамическая длительность (пока не "успокоится")
+  - Физическая симуляция — естественное движение
+  - Идеально: курсоры, drag&drop, card hover effects
+```
+
+---
+
+## 📊 Web Vitals в SvelteKit
+
+```typescript
+// src/routes/+layout.ts — измерение Web Vitals
+import type { LayoutLoad } from './$types';
+
+export const load: LayoutLoad = () => {
+  // Запускаем измерение Web Vitals только на клиенте
+  if (typeof window !== 'undefined') {
+    import('web-vitals').then(({ onCLS, onFID, onFCP, onLCP, onTTFB }) => {
+      onCLS(sendToAnalytics);
+      onFID(sendToAnalytics);
+      onFCP(sendToAnalytics);
+      onLCP(sendToAnalytics);
+      onTTFB(sendToAnalytics);
+    });
+  }
+  return {};
+};
+
+function sendToAnalytics(metric: any) {
+  // Отправляем в Vercel Analytics, Plausible, etc.
+  console.log('Web Vital:', metric.name, metric.value);
+
+  if (typeof window !== 'undefined' && 'sendBeacon' in navigator) {
+    navigator.sendBeacon('/api/analytics', JSON.stringify({
+      name: metric.name,
+      value: metric.value,
+      id: metric.id,
+      delta: metric.delta,
+    }));
+  }
+}
+```
+
+**Оптимизация LCP (Largest Contentful Paint):**
+
+```svelte
+<!-- src/routes/+layout.svelte — предзагрузка критических ресурсов -->
+<svelte:head>
+  <!-- Preload критического шрифта: -->
+  <link
+    rel="preload"
+    href="/fonts/inter.woff2"
+    as="font"
+    type="font/woff2"
+    crossorigin="anonymous"
+  />
+
+  <!-- Preload LCP изображения: -->
+  <link
+    rel="preload"
+    href="/hero-image.webp"
+    as="image"
+    type="image/webp"
+  />
+</svelte:head>
+```
+
+---
+
+## 🔍 Bundle Analyzer
+
+```bash
+# Установка плагина для анализа бандла:
+npm install -D rollup-plugin-visualizer
+```
+
+```typescript
+// vite.config.ts
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+import { visualizer } from 'rollup-plugin-visualizer';
+
+export default defineConfig({
+  plugins: [
+    sveltekit(),
+    visualizer({
+      open: true,           // Автооткрытие в браузере
+      filename: 'stats.html',
+      gzipSize: true,       // Показывать gzip размер
+      brotliSize: true,     // Показывать brotli размер
+      template: 'treemap',  // Тип диаграммы: treemap | sunburst | network
+    }),
+  ],
+});
+
+// npm run build → откроется stats.html с визуализацией бандла
+```
+
+---
+
+## 🏎️ Оптимизация изображений
+
+```svelte
+<script lang="ts">
+  // @sveltejs/enhanced-img — оптимизация изображений в SvelteKit
+  import { Picture } from '@sveltejs/enhanced-img';
+  import heroImg from '$lib/assets/hero.jpg';
+</script>
+
+<!-- Автоматически:
+  - Конвертирует в WebP/AVIF
+  - Генерирует srcset для разных размеров
+  - Добавляет lazy loading
+  - Предотвращает layout shift (width/height)
+-->
+<enhanced:img src={heroImg} alt="Hero" />
+
+<!-- Или с Picture для art direction: -->
+<Picture
+  src={heroImg}
+  alt="Hero"
+  sizes="(max-width: 768px) 100vw, 50vw"
+/>
+```
+
+```javascript
+// vite.config.ts — настройка enhancedImages:
+import { enhancedImages } from '@sveltejs/enhanced-img';
+
+export default defineConfig({
+  plugins: [
+    enhancedImages(),
+    sveltekit(),
+  ],
+});
+```
+
+---
+
+## 📈 Профилирование и измерение
+
+```svelte
+<script lang="ts">
+  import { onMount, tick } from 'svelte';
+
+  let items = $state(Array.from({ length: 1000 }, (_, i) => ({ id: i, name: `Item ${i}` })));
+
+  // Измеряем время рендеринга:
+  async function measure() {
+    const start = performance.now();
+
+    items = Array.from({ length: 1000 }, (_, i) => ({ id: i, name: `Updated ${i}` }));
+
+    // tick() — ждём когда Svelte обновит DOM
+    await tick();
+
+    const end = performance.now();
+    console.log(`Обновление 1000 элементов: ${(end - start).toFixed(2)}ms`);
+  }
+
+  // Performance observer:
+  onMount(() => {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        console.log(`${entry.name}: ${entry.duration.toFixed(2)}ms`);
+      }
+    });
+
+    observer.observe({ entryTypes: ['measure', 'navigation', 'paint'] });
+
+    return () => observer.disconnect();
+  });
+</script>
+```
+
+---
+
+## 🧮 Чеклист оптимизации
+
+```
+Базовая оптимизация:
+  ✅ Используй $derived вместо $effect для вычислений
+  ✅ Используй {#each items as item (item.id)} с key
+  ✅ immutable={true} для компонентов с неизменяемыми props
+  ✅ Используй tweened/spring вместо CSS transitions для JS анимаций
+
+Средняя оптимизация:
+  ✅ Lazy load тяжёлых компонентов (графики, таблицы)
+  ✅ {#key} для сброса состояния компонента
+  ✅ Кэшируй дорогие вычисления в $derived
+  ✅ Используй $state.raw() для неизменяемых данных
+
+Продвинутая оптимизация:
+  ✅ Bundle analyzer для анализа зависимостей
+  ✅ Preload критических ресурсов
+  ✅ Web Vitals мониторинг
+  ✅ Оптимизированные изображения (@sveltejs/enhanced-img)
+  ✅ Правильные HTTP кэш заголовки
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, useCallback } from "react";
+
+const SVELTE_ORANGE = "#ff3e00";
+const SVELTE_YELLOW = "#ffba00";
+const BG = "#0f172a";
+const BG2 = "#1e293b";
+const BG3 = "#334155";
+
+type Tab = "why" | "motion" | "lazy" | "vitals";
+
+const tabs = [
+  { id: "why" as Tab, label: "Почему быстро", emoji: "🧠" },
+  { id: "motion" as Tab, label: "svelte/motion", emoji: "🎨" },
+  { id: "lazy" as Tab, label: "Lazy Loading", emoji: "💤" },
+  { id: "vitals" as Tab, label: "Web Vitals", emoji: "📊" },
+];
+
+// "Почему быстро" — симуляция VDOM vs Direct DOM
+function WhyDemo() {
+  const [mode, setMode] = useState<"vdom" | "direct">("vdom");
+  const [items, setItems] = useState(Array.from({ length: 5 }, (_, i) => ({ id: i, val: i * 10 })));
+  const [log, setLog] = useState<string[]>([]);
+  const [updateCount, setUpdateCount] = useState(0);
+
+  const update = async () => {
+    setUpdateCount((n) => n + 1);
+    const start = performance.now();
+
+    setItems((prev) =>
+      prev.map((item) => ({ ...item, val: item.val + 1 }))
+    );
+
+    await new Promise((r) => setTimeout(r, 0));
+    const time = performance.now() - start;
+
+    const steps =
+      mode === "vdom"
+        ? ["Create new VDOM tree...", "Diff with previous VDOM...", "Calculate patches...", "Apply to real DOM"]
+        : ["Detect changed item.val...", "Update text node directly"];
+
+    setLog(steps);
+  };
+
+  const sizes: Record<string, string> = { react: "~47KB", vue: "~22KB", svelte: "~10KB" };
+  const frameworks = [
+    { name: "React", size: "~130KB", runtime: "47KB", color: "#61dafb" },
+    { name: "Vue", size: "~50KB", runtime: "22KB", color: "#4fc08d" },
+    { name: "Svelte", size: "~10KB", runtime: "~0KB (компилятор!)", color: SVELTE_ORANGE },
+  ];
+
+  return (
+    <div>
+      <div style={{ marginBottom: "12px" }}>
+        <div style={{ fontSize: "12px", color: "#64748b", marginBottom: "8px" }}>Bundle size comparison (Hello World app):</div>
+        {frameworks.map((f) => (
+          <div key={f.name} style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+            <div style={{ fontSize: "12px", color: f.color, minWidth: "60px" }}>{f.name}</div>
+            <div style={{ flex: 1, background: BG3, borderRadius: "4px", height: "20px", overflow: "hidden", position: "relative" }}>
+              <div style={{ width: f.name === "React" ? "100%" : f.name === "Vue" ? "38%" : "8%", height: "100%", background: \`\${f.color}44\`, border: \`1px solid \${f.color}88\`, transition: "width 0.5s ease", display: "flex", alignItems: "center", paddingLeft: "6px" }}>
+                <span style={{ fontSize: "10px", color: f.color, whiteSpace: "nowrap" }}>{f.size}</span>
+              </div>
+            </div>
+            <div style={{ fontSize: "10px", color: "#64748b", minWidth: "130px" }}>runtime: {f.runtime}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: "6px", marginBottom: "10px" }}>
+        {(["vdom", "direct"] as const).map((m) => (
+          <button key={m} onClick={() => { setMode(m); setLog([]); }} style={{ flex: 1, padding: "8px", border: \`1px solid \${mode === m ? SVELTE_ORANGE : "#475569"}\`, borderRadius: "6px", background: mode === m ? \`\${SVELTE_ORANGE}22\` : BG3, cursor: "pointer", color: "#e2e8f0", fontSize: "11px" }}>
+            {m === "vdom" ? "⚛️ Virtual DOM" : "⚡ Svelte direct"}
+          </button>
+        ))}
+      </div>
+
+      <button onClick={update} style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "8px", cursor: "pointer", fontSize: "12px", marginBottom: "10px" }}>
+        Обновить элемент #{updateCount + 1}
+      </button>
+
+      {log.length > 0 && (
+        <div style={{ background: BG, borderRadius: "6px", padding: "8px" }}>
+          {log.map((step, i) => (
+            <div key={i} style={{ fontSize: "11px", fontFamily: "monospace", color: i === log.length - 1 ? "#34d399" : "#64748b", padding: "2px 0" }}>
+              {i + 1}. {step}
+            </div>
+          ))}
+          <div style={{ fontSize: "10px", color: mode === "direct" ? "#34d399" : SVELTE_ORANGE, marginTop: "4px" }}>
+            {mode === "vdom" ? "4 шага для каждого обновления" : "2 шага — прямое обновление!"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Симуляция tweened и spring
+function MotionDemo() {
+  const [progress, setProgress] = useState(0);
+  const [targetProgress, setTargetProgress] = useState(0);
+  const [springPos, setSpringPos] = useState({ x: 0, y: 0 });
+  const [targetSpring, setTargetSpring] = useState({ x: 0, y: 0 });
+  const animRef = useRef<number>();
+  const springRef = useRef({ x: 0, y: 0, vx: 0, vy: 0 });
+
+  // Tweened симуляция
+  useEffect(() => {
+    if (Math.abs(progress - targetProgress) < 0.001) return;
+    const id = requestAnimationFrame(() => {
+      setProgress((p) => p + (targetProgress - p) * 0.08);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [progress, targetProgress]);
+
+  // Spring симуляция
+  useEffect(() => {
+    const STIFFNESS = 0.1;
+    const DAMPING = 0.8;
+
+    const animate = () => {
+      const dx = targetSpring.x - springRef.current.x;
+      const dy = targetSpring.y - springRef.current.y;
+
+      springRef.current.vx = springRef.current.vx * DAMPING + dx * STIFFNESS;
+      springRef.current.vy = springRef.current.vy * DAMPING + dy * STIFFNESS;
+      springRef.current.x += springRef.current.vx;
+      springRef.current.y += springRef.current.vy;
+
+      setSpringPos({ x: springRef.current.x, y: springRef.current.y });
+
+      if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1 || Math.abs(springRef.current.vx) > 0.1) {
+        animRef.current = requestAnimationFrame(animate);
+      }
+    };
+
+    animRef.current = requestAnimationFrame(animate);
+    return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
+  }, [targetSpring]);
+
+  return (
+    <div>
+      <div style={{ marginBottom: "12px" }}>
+        <div style={{ fontSize: "12px", color: SVELTE_YELLOW, fontFamily: "monospace", marginBottom: "6px" }}>tweened — прогресс-бар</div>
+        <div style={{ background: BG3, borderRadius: "8px", height: "20px", overflow: "hidden", marginBottom: "8px" }}>
+          <div style={{ height: "100%", background: SVELTE_ORANGE, width: \`\${progress * 100}%\`, transition: "none", borderRadius: "8px" }} />
+        </div>
+        <div style={{ display: "flex", gap: "6px" }}>
+          {[0, 0.25, 0.5, 0.75, 1].map((v) => (
+            <button key={v} onClick={() => setTargetProgress(v)} style={{ flex: 1, padding: "5px", background: Math.abs(targetProgress - v) < 0.01 ? SVELTE_ORANGE : BG3, border: "none", borderRadius: "4px", cursor: "pointer", color: "#e2e8f0", fontSize: "11px" }}>
+              {v * 100}%
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <div style={{ fontSize: "12px", color: SVELTE_YELLOW, fontFamily: "monospace", marginBottom: "6px" }}>spring — физическая симуляция</div>
+        <div
+          style={{ background: BG3, borderRadius: "8px", height: "100px", position: "relative", overflow: "hidden", cursor: "crosshair" }}
+          onMouseMove={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setTargetSpring({ x: e.clientX - rect.left - 12, y: e.clientY - rect.top - 12 });
+          }}
+        >
+          <div style={{ position: "absolute", left: springPos.x, top: springPos.y, width: "24px", height: "24px", background: SVELTE_ORANGE, borderRadius: "50%", pointerEvents: "none", transition: "none" }} />
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <span style={{ fontSize: "11px", color: "#64748b" }}>Двигай мышку →</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Lazy Loading симуляция
+function LazyDemo() {
+  const [loaded, setLoaded] = useState<Record<string, boolean>>({});
+  const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [bundleSizes] = useState({ main: 45, chart: 120, table: 85, editor: 200 });
+
+  const components = [
+    { name: "HeavyChart", size: bundleSizes.chart, icon: "📈" },
+    { name: "DataTable", size: bundleSizes.table, icon: "📊" },
+    { name: "RichEditor", size: bundleSizes.editor, icon: "✏️" },
+  ];
+
+  const loadComponent = async (name: string) => {
+    if (loaded[name] || loading[name]) return;
+    setLoading((prev) => ({ ...prev, [name]: true }));
+    await new Promise((r) => setTimeout(r, name === "RichEditor" ? 1200 : 600));
+    setLoaded((prev) => ({ ...prev, [name]: true }));
+    setLoading((prev) => ({ ...prev, [name]: false }));
+  };
+
+  const totalLoaded = Object.values(loaded).filter(Boolean).length;
+  const loadedSize = components.filter((c) => loaded[c.name]).reduce((sum, c) => sum + c.size, 0);
+
+  return (
+    <div>
+      <div style={{ background: BG3, borderRadius: "8px", padding: "10px", marginBottom: "12px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px" }}>
+          <span style={{ color: "#94a3b8" }}>Начальный бандл</span>
+          <span style={{ color: SVELTE_ORANGE }}>{bundleSizes.main} KB</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginTop: "4px" }}>
+          <span style={{ color: "#94a3b8" }}>Лениво загружено</span>
+          <span style={{ color: loadedSize > 0 ? "#818cf8" : "#64748b" }}>+{loadedSize} KB</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px", fontWeight: "bold", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid #1e293b" }}>
+          <span style={{ color: "#e2e8f0" }}>Итого</span>
+          <span style={{ color: SVELTE_YELLOW }}>{bundleSizes.main + loadedSize} KB</span>
+        </div>
+      </div>
+
+      {components.map((comp) => (
+        <div key={comp.name} style={{ background: BG3, borderRadius: "8px", padding: "10px", marginBottom: "8px", border: \`1px solid \${loaded[comp.name] ? "#818cf844" : "#334155"}\` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: loading[comp.name] ? "8px" : loaded[comp.name] ? "8px" : "0" }}>
+            <span style={{ fontSize: "18px" }}>{comp.icon}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: "12px", color: "#e2e8f0", fontWeight: "bold" }}>{comp.name}</div>
+              <div style={{ fontSize: "10px", color: "#64748b" }}>{comp.size} KB чанк</div>
+            </div>
+            <button
+              onClick={() => loadComponent(comp.name)}
+              disabled={loaded[comp.name] || loading[comp.name]}
+              style={{ background: loaded[comp.name] ? "#34d39922" : SVELTE_ORANGE, color: loaded[comp.name] ? "#34d399" : "#fff", border: loaded[comp.name] ? "1px solid #34d39944" : "none", borderRadius: "6px", padding: "5px 10px", cursor: loaded[comp.name] ? "default" : "pointer", fontSize: "11px" }}
+            >
+              {loading[comp.name] ? "⏳" : loaded[comp.name] ? "✅ Loaded" : "Загрузить"}
+            </button>
+          </div>
+          {loading[comp.name] && (
+            <div style={{ fontSize: "10px", color: "#64748b", fontFamily: "monospace" }}>
+              import('./{comp.name}.svelte').then(...)
+            </div>
+          )}
+          {loaded[comp.name] && (
+            <div style={{ background: "#818cf822", borderRadius: "4px", padding: "6px", fontSize: "11px", color: "#818cf8", fontFamily: "monospace" }}>
+              ✅ {'<svelte:component this={' + comp.name + '} />'}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Web Vitals визуализация
+function VitalsDemo() {
+  const [vitals] = useState([
+    { name: "LCP", value: 1.8, unit: "s", good: 2.5, poor: 4.0, desc: "Largest Contentful Paint — загрузка главного контента" },
+    { name: "FID", value: 45, unit: "ms", good: 100, poor: 300, desc: "First Input Delay — задержка первого взаимодействия" },
+    { name: "CLS", value: 0.05, unit: "", good: 0.1, poor: 0.25, desc: "Cumulative Layout Shift — стабильность макета" },
+    { name: "FCP", value: 0.9, unit: "s", good: 1.8, poor: 3.0, desc: "First Contentful Paint — первый контент на экране" },
+    { name: "TTFB", value: 180, unit: "ms", good: 800, poor: 1800, desc: "Time to First Byte — время ответа сервера" },
+  ]);
+
+  const getStatus = (value: number, good: number, poor: number) =>
+    value <= good ? "good" : value <= poor ? "needs-improvement" : "poor";
+
+  const statusColors = { good: "#34d399", "needs-improvement": SVELTE_YELLOW, poor: "#f87171" };
+  const statusLabels = { good: "Хорошо ✅", "needs-improvement": "Улучшить ⚠️", poor: "Плохо ❌" };
+
+  return (
+    <div>
+      {vitals.map((vital) => {
+        const status = getStatus(vital.value, vital.good, vital.poor);
+        const pct = Math.min((vital.value / vital.poor) * 100, 100);
+
+        return (
+          <div key={vital.name} style={{ background: BG3, borderRadius: "8px", padding: "10px", marginBottom: "8px", border: \`1px solid \${statusColors[status]}44\` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+              <div>
+                <span style={{ fontSize: "13px", fontWeight: "bold", color: "#e2e8f0" }}>{vital.name}</span>
+                <span style={{ fontSize: "12px", color: statusColors[status], marginLeft: "8px" }}>{vital.value}{vital.unit}</span>
+              </div>
+              <span style={{ fontSize: "11px", color: statusColors[status] }}>{statusLabels[status]}</span>
+            </div>
+            <div style={{ background: BG, borderRadius: "4px", height: "8px", overflow: "hidden", marginBottom: "6px" }}>
+              <div style={{ height: "100%", width: \`\${pct}%\`, background: statusColors[status], borderRadius: "4px", transition: "width 0.5s ease" }} />
+            </div>
+            <div style={{ fontSize: "10px", color: "#64748b" }}>{vital.desc}</div>
+            <div style={{ fontSize: "10px", color: "#475569", marginTop: "3px" }}>
+              Хорошо: ≤{vital.good}{vital.unit} · Плохо: >{vital.poor}{vital.unit}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("why");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "20px", fontFamily: "system-ui, sans-serif", color: "#e2e8f0" }}>
+      <div style={{ maxWidth: "540px", margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: "20px" }}>
+          <div style={{ fontSize: "26px", fontWeight: "bold", color: SVELTE_ORANGE }}>Производительность</div>
+          <div style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>Svelte — быстро по определению ⚡</div>
+        </div>
+
+        <div style={{ display: "flex", gap: "6px", marginBottom: "16px", background: BG2, padding: "4px", borderRadius: "10px" }}>
+          {tabs.map((tab) => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "8px 2px", border: "none", borderRadius: "7px", cursor: "pointer", background: activeTab === tab.id ? SVELTE_ORANGE : "transparent", color: activeTab === tab.id ? "#fff" : "#94a3b8", fontSize: "11px", fontWeight: activeTab === tab.id ? "bold" : "normal", transition: "all 0.15s" }}>
+              {tab.emoji} {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: BG2, borderRadius: "12px", padding: "16px", border: "1px solid #1e293b" }}>
+          {activeTab === "why" && <WhyDemo />}
+          {activeTab === "motion" && <MotionDemo />}
+          {activeTab === "lazy" && <LazyDemo />}
+          {activeTab === "vitals" && <VitalsDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

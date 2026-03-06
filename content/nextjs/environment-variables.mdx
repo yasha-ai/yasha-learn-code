@@ -1,0 +1,1118 @@
+## 22. Переменные окружения в Next.js 🔐
+
+Представь: ты написал сервис и хочешь подключить базу данных. Пишешь прямо в коде: `password: "super_secret_123"`. Коммитишь на GitHub. А там — публичный репозиторий... 💀
+
+Именно для этого и существуют **переменные окружения** — секретные записки, которые хранятся вне кода!
+
+**Аналогия:** Переменные окружения — как сейф в офисе. Ключи от сервера, пароли, API-токены лежат в сейфе (`.env` файл), а не на рабочем столе всех сотрудников (в коде). Каждый сотрудник знает, что "ключ от сейфа лежит в сейфе", но сам ключ — секрет.
+
+```
+Что НЕЛЬЗЯ хардкодить в коде      │ Что использовать вместо этого
+──────────────────────────────────┼──────────────────────────────────────────
+"password": "qwerty123"           │ process.env.DB_PASSWORD
+apiKey: "sk-abc123def456"         │ process.env.OPENAI_API_KEY
+host: "prod.db.example.com"       │ process.env.DATABASE_URL
+secret: "jwt-super-secret"        │ process.env.JWT_SECRET
+"https://api.staging.com"         │ process.env.NEXT_PUBLIC_API_URL
+```
+
+---
+
+### 📁 Файлы .env и их приоритет
+
+Next.js поддерживает несколько `.env` файлов с разным приоритетом:
+
+```
+Приоритет загрузки (от высшего к низшему):
+──────────────────────────────────────────────
+1. .env.local         ← ВСЕГДА загружается (кроме test), gitignore!
+2. .env.[mode].local  ← .env.development.local или .env.production.local
+3. .env.[mode]        ← .env.development или .env.production
+4. .env               ← базовый файл, для всех окружений
+
+Пример:
+   .env             → DATABASE_URL=postgres://localhost/mydb
+   .env.local       → DATABASE_URL=postgres://localhost/mydb_local
+   
+   Итого: DATABASE_URL = postgres://localhost/mydb_local (локальный приоритет!)
+```
+
+```bash
+# .env — базовые значения для всех окружений (можно коммитить)
+NEXT_PUBLIC_APP_NAME="My Awesome App"
+NEXT_PUBLIC_APP_VERSION="1.0.0"
+NEXT_PUBLIC_SUPPORT_EMAIL="support@example.com"
+
+# Значения по умолчанию (не секреты!)
+DEFAULT_LOCALE="en"
+MAX_FILE_SIZE_MB="10"
+```
+
+```bash
+# .env.local — СЕКРЕТЫ (в .gitignore! никогда не коммитить!)
+DATABASE_URL="postgresql://user:password@localhost:5432/mydb"
+JWT_SECRET="your-super-secret-jwt-key-here"
+OPENAI_API_KEY="sk-proj-abc123..."
+STRIPE_SECRET_KEY="sk_test_abc123..."
+NEXTAUTH_SECRET="random-secret-32-chars-minimum"
+NEXTAUTH_URL="http://localhost:3000"
+```
+
+```bash
+# .env.development — только для разработки
+NEXT_PUBLIC_API_URL="http://localhost:3000/api"
+NEXT_PUBLIC_DEBUG_MODE="true"
+DATABASE_URL="postgresql://user:pass@localhost:5432/mydb_dev"
+LOG_LEVEL="debug"
+```
+
+```bash
+# .env.production — только для продакшена
+NEXT_PUBLIC_API_URL="https://api.example.com"
+NEXT_PUBLIC_DEBUG_MODE="false"
+LOG_LEVEL="error"
+# DATABASE_URL берём из .env.local на сервере или из Vercel env vars
+```
+
+```bash
+# .env.test — для тестов (Jest, Playwright)
+DATABASE_URL="postgresql://user:pass@localhost:5432/mydb_test"
+NEXTAUTH_URL="http://localhost:3000"
+```
+
+> ⚠️ **Важно:** `.env.local` загружается ВСЕГДА (кроме тестов, где используется `.env.test`). Добавь его в `.gitignore` немедленно!
+
+---
+
+### 🌐 NEXT_PUBLIC_ — что попадает в браузер?
+
+Это КРИТИЧЕСКИ важное различие! 🚨
+
+```typescript
+// Серверные переменные (БЕЗОПАСНЫЕ) — только на сервере
+const dbUrl = process.env.DATABASE_URL;         // ✅ Только сервер
+const jwtSecret = process.env.JWT_SECRET;       // ✅ Только сервер
+const apiKey = process.env.OPENAI_API_KEY;      // ✅ Только сервер
+
+// Публичные переменные (NEXT_PUBLIC_) — попадают в браузер!
+const appUrl = process.env.NEXT_PUBLIC_API_URL;     // ⚠️ Видно в браузере
+const appName = process.env.NEXT_PUBLIC_APP_NAME;   // ⚠️ Видно в браузере
+```
+
+**Как это работает под капотом:**
+
+```typescript
+// Next.js при сборке делает буквальную замену строк!
+// Твой код:
+console.log(process.env.NEXT_PUBLIC_APP_NAME);
+
+// Превращается в бандле в:
+console.log("My Awesome App");  // ← значение зашито в JS файл!
+
+// Поэтому открыв DevTools → Sources → main.js, ты увидишь это значение!
+```
+
+```
+Что МОЖНО делать с NEXT_PUBLIC_    │ Что НЕЛЬЗЯ делать с NEXT_PUBLIC_
+───────────────────────────────────┼──────────────────────────────────────────
+URL публичного API                 │ Секретные ключи API
+Название приложения                │ Пароли базы данных
+Версия приложения                  │ JWT секреты
+ID аналитики (GA4)                 │ Stripe/Paypal секретные ключи
+Feature flags (публичные)          │ Ключи шифрования
+Публичный ключ Stripe (pk_*)       │ OAuth client secrets
+```
+
+```typescript
+// ✅ Правильно — публичный ключ Stripe (pk_ — Public Key)
+const stripe = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!);
+
+// ❌ ОПАСНО! Секретный ключ никогда не должен быть NEXT_PUBLIC_!
+// process.env.NEXT_PUBLIC_STRIPE_SECRET_KEY ← НИКОГДА!
+```
+
+---
+
+### 💻 Использование в коде
+
+```typescript
+// app/page.tsx — Server Component
+export default async function HomePage() {
+  // Серверные переменные доступны напрямую
+  const apiUrl = process.env.INTERNAL_API_URL; // undefined в браузере
+  const data = await fetch(`${apiUrl}/products`);
+  
+  return <div>...</div>;
+}
+```
+
+```typescript
+// components/Analytics.tsx — Client Component
+'use client';
+
+import { useEffect } from 'react';
+
+export function Analytics() {
+  useEffect(() => {
+    // Только NEXT_PUBLIC_ доступны в клиентских компонентах
+    const gaId = process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID;
+    if (gaId) {
+      // Инициализация Google Analytics
+      window.gtag('config', gaId);
+    }
+  }, []);
+
+  return null;
+}
+```
+
+```typescript
+// app/api/chat/route.ts — API Route (только сервер)
+import OpenAI from 'openai';
+import { NextRequest, NextResponse } from 'next/server';
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY, // Безопасно — только сервер!
+});
+
+export async function POST(req: NextRequest) {
+  const { message } = await req.json();
+  
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: message }],
+  });
+  
+  return NextResponse.json({ reply: response.choices[0].message.content });
+}
+```
+
+---
+
+### 🛡️ Валидация с Zod — делаем это правильно
+
+Просто использовать `process.env.SOMETHING` опасно. Что если переменная не задана? Приложение сломается в рантайме с непонятной ошибкой.
+
+**Решение:** валидируем все переменные при старте приложения!
+
+```bash
+npm install zod
+```
+
+```typescript
+// env.ts — центральный файл валидации
+import { z } from 'zod';
+
+// Схема для серверных переменных
+const serverSchema = z.object({
+  // База данных
+  DATABASE_URL: z.string().url('DATABASE_URL должен быть валидным URL'),
+  
+  // Аутентификация
+  NEXTAUTH_SECRET: z.string().min(32, 'NEXTAUTH_SECRET минимум 32 символа'),
+  NEXTAUTH_URL: z.string().url(),
+  
+  // Внешние сервисы
+  OPENAI_API_KEY: z.string().startsWith('sk-', 'Некорректный OpenAI API key'),
+  STRIPE_SECRET_KEY: z.string().startsWith('sk_'),
+  
+  // Опциональные
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  MAX_FILE_SIZE_MB: z.coerce.number().positive().default(10),
+  
+  // Окружение
+  NODE_ENV: z.enum(['development', 'production', 'test']),
+});
+
+// Схема для публичных переменных (клиент + сервер)
+const clientSchema = z.object({
+  NEXT_PUBLIC_APP_NAME: z.string().min(1),
+  NEXT_PUBLIC_API_URL: z.string().url(),
+  NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: z.string().startsWith('pk_'),
+  NEXT_PUBLIC_GA_MEASUREMENT_ID: z.string().optional(),
+});
+
+// Валидируем при импорте модуля
+function validateEnv() {
+  const serverParsed = serverSchema.safeParse(process.env);
+  
+  if (!serverParsed.success) {
+    console.error('❌ Ошибка валидации серверных env переменных:');
+    console.error(serverParsed.error.flatten().fieldErrors);
+    throw new Error('Невалидные переменные окружения');
+  }
+
+  const clientParsed = clientSchema.safeParse(process.env);
+  
+  if (!clientParsed.success) {
+    console.error('❌ Ошибка валидации публичных env переменных:');
+    console.error(clientParsed.error.flatten().fieldErrors);
+    throw new Error('Невалидные публичные переменные окружения');
+  }
+
+  return {
+    server: serverParsed.data,
+    client: clientParsed.data,
+  };
+}
+
+export const env = validateEnv();
+// Теперь env.server.DATABASE_URL — строго типизирован и гарантированно существует!
+// env.client.NEXT_PUBLIC_APP_NAME — тоже!
+```
+
+```typescript
+// Использование в коде
+import { env } from '@/env';
+
+// ✅ Строго типизировано, автодополнение работает!
+const dbUrl = env.server.DATABASE_URL;  // string
+const appName = env.client.NEXT_PUBLIC_APP_NAME;  // string
+const logLevel = env.server.LOG_LEVEL;  // "debug" | "info" | "warn" | "error"
+```
+
+---
+
+### 🏆 t3-env — лучшая практика от T3 Stack
+
+[T3 Stack](https://create.t3.gg/) — популярный стек от Theo. Они создали библиотеку специально для типобезопасных env переменных в Next.js:
+
+```bash
+npm install @t3-oss/env-nextjs zod
+```
+
+```typescript
+// env.ts — с @t3-oss/env-nextjs
+import { createEnv } from '@t3-oss/env-nextjs';
+import { z } from 'zod';
+
+export const env = createEnv({
+  /**
+   * Серверные переменные — только Node.js
+   * НЕ попадают в браузер
+   */
+  server: {
+    DATABASE_URL: z.string().url(),
+    NEXTAUTH_SECRET: z.string().min(32),
+    NEXTAUTH_URL: z.preprocess(
+      (str) => process.env.VERCEL_URL ?? str,
+      process.env.VERCEL ? z.string() : z.string().url()
+    ),
+    OPENAI_API_KEY: z.string().startsWith('sk-'),
+    STRIPE_SECRET_KEY: z.string().startsWith('sk_'),
+    NODE_ENV: z.enum(['development', 'production', 'test']),
+  },
+
+  /**
+   * Клиентские переменные — попадают в браузер
+   * ОБЯЗАТЕЛЬНО должны начинаться с NEXT_PUBLIC_
+   */
+  client: {
+    NEXT_PUBLIC_APP_URL: z.string().url(),
+    NEXT_PUBLIC_APP_NAME: z.string().min(1),
+    NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: z.string().startsWith('pk_'),
+  },
+
+  /**
+   * Маппинг переменных (нужен для проверки)
+   * Убеждаемся что переменные действительно берутся из process.env
+   */
+  runtimeEnv: {
+    DATABASE_URL: process.env.DATABASE_URL,
+    NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET,
+    NEXTAUTH_URL: process.env.NEXTAUTH_URL,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
+    NODE_ENV: process.env.NODE_ENV,
+    NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+    NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
+    NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY:
+      process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
+  },
+
+  /**
+   * По умолчанию @t3-oss/env-nextjs выдаёт ошибку если
+   * серверные переменные используются в клиентском коде.
+   * skipValidation=true для тестов или CI без полных env
+   */
+  skipValidation: !!process.env.SKIP_ENV_VALIDATION,
+});
+```
+
+```typescript
+// Использование — максимально удобно!
+import { env } from '@/env';
+
+// Сервер
+const client = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+await db.connect(env.DATABASE_URL);
+
+// Клиент
+const stripe = loadStripe(env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY);
+document.title = env.NEXT_PUBLIC_APP_NAME;
+```
+
+---
+
+### 🔒 Secrets Management
+
+#### Vercel Environment Variables
+
+```bash
+# Через Vercel CLI
+vercel env add DATABASE_URL production
+vercel env add JWT_SECRET production
+
+# Просмотр
+vercel env ls
+
+# Удаление
+vercel env rm DATABASE_URL production
+```
+
+В Vercel Dashboard: Settings → Environment Variables. Можно задавать разные значения для Preview/Development/Production.
+
+```
+Vercel окружения:
+──────────────────────────────────────────
+Production    ← Только main ветка
+Preview       ← Pull Request ветки
+Development   ← vercel dev (локально)
+```
+
+#### GitHub Actions Secrets
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # Берём секреты из GitHub Secrets
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+```
+
+```bash
+# Через GitHub CLI
+gh secret set DATABASE_URL
+gh secret set NEXTAUTH_SECRET --body "$(openssl rand -base64 32)"
+gh secret list
+```
+
+---
+
+### ⏱️ Runtime vs Build-time переменные
+
+Это тонкий, но важный момент! 🎯
+
+```
+Build-time (при сборке)              │ Runtime (при запуске)
+─────────────────────────────────────┼─────────────────────────────────────────
+NEXT_PUBLIC_* переменные             │ Серверные переменные (без NEXT_PUBLIC_)
+Зашиваются в JS бандл                │ Читаются из process.env при запросе
+Меняются ТОЛЬКО при пересборке       │ Можно менять без пересборки
+Одинаковы для всех пользователей     │ Могут быть разными на разных серверах
+```
+
+```typescript
+// ⚠️ Ловушка! NEXT_PUBLIC_ — build-time!
+// Если ты изменишь NEXT_PUBLIC_API_URL на сервере без пересборки — ничего не изменится!
+// Значение уже зашито в бандл.
+
+// Решение: для динамических публичных значений используй API endpoint
+// app/api/config/route.ts
+export async function GET() {
+  return Response.json({
+    // Эти значения читаются в РАНТАЙМЕ каждый раз!
+    featureFlags: {
+      newCheckout: process.env.FEATURE_NEW_CHECKOUT === 'true',
+      darkMode: process.env.FEATURE_DARK_MODE === 'true',
+    },
+  });
+}
+```
+
+```typescript
+// next.config.mjs — можно задавать env прямо в конфиге
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  env: {
+    // Это значение будет доступно как process.env.BUILD_TIME
+    // и зашито в бандл при сборке
+    BUILD_TIME: new Date().toISOString(),
+    APP_VERSION: process.env.npm_package_version,
+  },
+};
+
+export default nextConfig;
+```
+
+---
+
+### 🐳 Docker и переменные окружения
+
+```dockerfile
+# Dockerfile — правильный подход
+
+FROM node:20-alpine AS base
+
+# --- Зависимости ---
+FROM base AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+# --- Сборка ---
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# NEXT_PUBLIC_ нужны при сборке!
+# Передаём через build args
+ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_APP_NAME
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME
+
+# Серверные секреты НЕ должны быть в образе!
+# Они будут переданы при запуске контейнера
+RUN npm run build
+
+# --- Production ---
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  app:
+    build:
+      context: .
+      args:
+        # Build-time переменные (NEXT_PUBLIC_)
+        NEXT_PUBLIC_API_URL: https://api.example.com
+        NEXT_PUBLIC_APP_NAME: My App
+    ports:
+      - "3000:3000"
+    environment:
+      # Runtime переменные (серверные секреты)
+      # НЕ зашиваются в образ, передаются при запуске
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+    env_file:
+      - .env.production.local  # Или через secrets в swarm/k8s
+```
+
+```bash
+# Запуск с переменными
+docker run \
+  -e DATABASE_URL="postgresql://..." \
+  -e JWT_SECRET="secret" \
+  -p 3000:3000 \
+  my-next-app
+
+# Или через файл
+docker run --env-file .env.production -p 3000:3000 my-next-app
+```
+
+---
+
+### 😱 Типичные ошибки и как их избежать
+
+#### Ошибка 1: Случайно выставить секрет через NEXT_PUBLIC_
+
+```bash
+# ❌ КАТАСТРОФА! Stripe секретный ключ в браузере!
+NEXT_PUBLIC_STRIPE_SECRET_KEY=sk_live_abc123...
+
+# ✅ Правильно — секретный ключ только на сервере
+STRIPE_SECRET_KEY=sk_live_abc123...
+# А публичный ключ — через NEXT_PUBLIC_
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_live_xyz789...
+```
+
+#### Ошибка 2: Undefined в браузере
+
+```typescript
+// ❌ Не работает в Client Components!
+'use client';
+const dbUrl = process.env.DATABASE_URL; // undefined в браузере!
+
+// ✅ Только NEXT_PUBLIC_ в клиентском коде
+const apiUrl = process.env.NEXT_PUBLIC_API_URL; // работает!
+
+// ✅ Или передавай через props из Server Component
+// Server Component:
+export default function Layout() {
+  return <ClientComp config={{ apiUrl: process.env.INTERNAL_API_URL }} />;
+}
+```
+
+#### Ошибка 3: Нет .env.example
+
+```bash
+# ❌ Новый разработчик клонирует проект и не знает какие переменные нужны
+
+# ✅ Создавай .env.example (коммитить в git! без реальных значений)
+```
+
+```bash
+# .env.example — документация для команды (коммитить!)
+DATABASE_URL="postgresql://user:password@localhost:5432/mydb"
+NEXTAUTH_SECRET="generate-with-openssl-rand-base64-32"
+NEXTAUTH_URL="http://localhost:3000"
+OPENAI_API_KEY="sk-..."
+STRIPE_SECRET_KEY="sk_test_..."
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY="pk_test_..."
+NEXT_PUBLIC_APP_URL="http://localhost:3000"
+NEXT_PUBLIC_APP_NAME="My App"
+```
+
+#### Ошибка 4: Нет .gitignore для .env файлов
+
+```gitignore
+# .gitignore — убедись что это есть!
+.env
+.env.local
+.env*.local
+# НО: .env.example и .env.development (без секретов) — можно коммитить
+```
+
+#### Ошибка 5: Опечатка в названии переменной
+
+```typescript
+// ❌ Опечатка — получим undefined молча
+const key = process.env.OPNEAI_API_KEY; // Typo! OPNEAI вместо OPENAI
+
+// ✅ С zod валидацией сразу увидишь ошибку при старте!
+// ❌ Ошибка: "OPENAI_API_KEY" is required but received undefined
+```
+
+---
+
+### 📄 .env.example как документация команды
+
+Отличная практика — держать `.env.example` актуальным с комментариями:
+
+```bash
+# .env.example — копируй в .env.local и заполняй реальными значениями
+# Генерация: cp .env.example .env.local
+
+# ═══════════════════════════════════════
+# БАЗА ДАННЫХ
+# ═══════════════════════════════════════
+# PostgreSQL URL. Для локальной разработки: docker-compose up -d db
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/myapp_dev"
+
+# ═══════════════════════════════════════
+# АУТЕНТИФИКАЦИЯ (NextAuth.js)
+# ═══════════════════════════════════════
+# Генерация: openssl rand -base64 32
+NEXTAUTH_SECRET=""
+# URL приложения. В продакшене: https://your-domain.com
+NEXTAUTH_URL="http://localhost:3000"
+
+# GitHub OAuth (создай на github.com/settings/apps)
+GITHUB_CLIENT_ID=""
+GITHUB_CLIENT_SECRET=""
+
+# ═══════════════════════════════════════
+# ПЛАТЕЖИ (Stripe)
+# ═══════════════════════════════════════
+# Тестовые ключи: dashboard.stripe.com/test/apikeys
+STRIPE_SECRET_KEY="sk_test_..."
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY="pk_test_..."
+STRIPE_WEBHOOK_SECRET="whsec_..."
+
+# ═══════════════════════════════════════
+# AI (OpenAI)
+# ═══════════════════════════════════════
+# Получи на: platform.openai.com/api-keys
+OPENAI_API_KEY="sk-proj-..."
+
+# ═══════════════════════════════════════
+# ПУБЛИЧНЫЕ ПЕРЕМЕННЫЕ (видны в браузере!)
+# ═══════════════════════════════════════
+NEXT_PUBLIC_APP_NAME="My Awesome App"
+NEXT_PUBLIC_APP_URL="http://localhost:3000"
+NEXT_PUBLIC_GA_MEASUREMENT_ID="G-XXXXXXXXXX"
+```
+
+---
+
+### ⚙️ next.config.mjs — загрузка и переопределение
+
+```javascript
+// next.config.mjs
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // Добавить переменные окружения в бандл
+  env: {
+    CUSTOM_KEY: 'my-value',
+    BUILD_TIMESTAMP: new Date().toISOString(),
+  },
+
+  // Rewrites используют env переменные
+  async rewrites() {
+    return [
+      {
+        source: '/api/proxy/:path*',
+        destination: `${process.env.BACKEND_URL}/:path*`,
+      },
+    ];
+  },
+
+  // Проверка переменных при сборке
+  webpack(config) {
+    const required = ['DATABASE_URL', 'NEXTAUTH_SECRET'];
+    const missing = required.filter((key) => !process.env[key]);
+    
+    if (missing.length > 0 && process.env.NODE_ENV === 'production') {
+      throw new Error(
+        `Отсутствуют обязательные env переменные: ${missing.join(', ')}`
+      );
+    }
+
+    return config;
+  },
+};
+
+export default nextConfig;
+```
+
+---
+
+### 🔐 Генерация секретов
+
+```bash
+# Генерация NEXTAUTH_SECRET (32 байта = 64 hex символа)
+openssl rand -base64 32
+
+# Или через Node.js
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+
+# JWT Secret
+node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+
+# Для быстрой настройки используй Vercel CLI
+vercel env pull .env.local
+# Скачивает переменные из Vercel проекта в .env.local
+```
+
+---
+
+### 📊 Итоговая шпаргалка
+
+```
+Файл                │ Gitignore? │ Когда загружается
+────────────────────┼────────────┼──────────────────────────────────────
+.env                │ Нет        │ Всегда
+.env.local          │ Да!        │ Всегда (кроме test)
+.env.development    │ Нет        │ next dev
+.env.production     │ Нет        │ next build + next start
+.env.test           │ Нет        │ jest, playwright
+.env.*.local        │ Да!        │ Соответствующий режим
+.env.example        │ Нет        │ Никогда (только документация)
+```
+
+```
+Переменная              │ Server │ Client │ Пример использования
+────────────────────────┼────────┼────────┼──────────────────────────────
+DATABASE_URL            │ ✅     │ ❌     │ Подключение к БД
+JWT_SECRET              │ ✅     │ ❌     │ Подпись токенов
+OPENAI_API_KEY          │ ✅     │ ❌     │ OpenAI запросы
+NEXT_PUBLIC_APP_NAME    │ ✅     │ ✅     │ Название в заголовке
+NEXT_PUBLIC_GA_ID       │ ✅     │ ✅     │ Google Analytics
+NEXT_PUBLIC_API_URL     │ ✅     │ ✅     │ URL публичного API
+```
+
+---
+
+### 🎯 Чек-лист переменных окружения
+
+```
+✅ .env.example создан и актуален (с комментариями)
+✅ .env.local в .gitignore
+✅ Все секреты без NEXT_PUBLIC_ префикса
+✅ Валидация через zod или @t3-oss/env-nextjs
+✅ Переменные добавлены в Vercel/CI/CD
+✅ .env.test для тестовых значений
+✅ Docker build args для NEXT_PUBLIC_ переменных
+✅ Нет секретов в git истории (проверь!)
+✅ NEXTAUTH_SECRET сгенерирован безопасно
+✅ Нет захардкоженных URL, ключей, паролей в коде
+```
+
+Теперь твои секреты — под надёжной охраной! 🔐🛡️
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `
+import { useState } from 'react';
+
+type ValidationStatus = 'idle' | 'success' | 'error';
+
+interface EnvVar {
+  key: string;
+  value: string;
+  isPublic: boolean;
+  description: string;
+  required: boolean;
+}
+
+const defaultVars: EnvVar[] = [
+  { key: 'DATABASE_URL', value: 'postgresql://user:pass@localhost/db', isPublic: false, description: 'PostgreSQL connection string', required: true },
+  { key: 'JWT_SECRET', value: 'my-super-secret-key', isPublic: false, description: 'JWT signing secret (min 32 chars)', required: true },
+  { key: 'OPENAI_API_KEY', value: 'sk-proj-abc123', isPublic: false, description: 'OpenAI API key', required: false },
+  { key: 'NEXT_PUBLIC_APP_NAME', value: 'My App', isPublic: true, description: 'App name shown in browser', required: true },
+  { key: 'NEXT_PUBLIC_API_URL', value: 'https://api.example.com', isPublic: true, description: 'Public API URL', required: true },
+  { key: 'NEXT_PUBLIC_GA_ID', value: 'G-XXXXXXXXXX', isPublic: true, description: 'Google Analytics ID', required: false },
+];
+
+const zodSchemaText =
+  'z.object({\\n' +
+  '  DATABASE_URL: z.string().url(),\\n' +
+  '  JWT_SECRET: z.string().min(32),\\n' +
+  '  OPENAI_API_KEY: z.string().startsWith("sk-"),\\n' +
+  '  NEXT_PUBLIC_APP_NAME: z.string().min(1),\\n' +
+  '  NEXT_PUBLIC_API_URL: z.string().url(),\\n' +
+  '})';
+
+function validateVar(v: EnvVar): string | null {
+  if (v.required && !v.value.trim()) return 'Required but empty';
+  if (v.key === 'DATABASE_URL' && v.value && !v.value.startsWith('postgresql://') && !v.value.startsWith('postgres://')) {
+    return 'Must be a valid PostgreSQL URL (postgresql://...)';
+  }
+  if (v.key === 'JWT_SECRET' && v.value && v.value.length < 32) {
+    return 'Must be at least 32 characters';
+  }
+  if (v.key === 'OPENAI_API_KEY' && v.value && !v.value.startsWith('sk-')) {
+    return 'Must start with "sk-"';
+  }
+  if ((v.key === 'NEXT_PUBLIC_API_URL' || v.key === 'DATABASE_URL') && v.value) {
+    try { new URL(v.value); } catch { return 'Must be a valid URL'; }
+  }
+  return null;
+}
+
+export default function App() {
+  const [vars, setVars] = useState<EnvVar[]>(defaultVars);
+  const [showSecrets, setShowSecrets] = useState(false);
+  const [validationStatus, setValidationStatus] = useState<ValidationStatus>('idle');
+  const [activeTab, setActiveTab] = useState<'inspector' | 'validator'>('inspector');
+
+  const updateVar = (index: number, value: string) => {
+    setVars((prev) => prev.map((v, i) => i === index ? { ...v, value } : v));
+    setValidationStatus('idle');
+  };
+
+  const validate = () => {
+    const hasErrors = vars.some((v) => validateVar(v) !== null);
+    setValidationStatus(hasErrors ? 'error' : 'success');
+  };
+
+  const publicVars = vars.filter((v) => v.isPublic);
+  const privateVars = vars.filter((v) => !v.isPublic);
+
+  const styles = {
+    app: {
+      fontFamily: 'system-ui, sans-serif',
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '20px',
+      color: '#e2e8f0',
+    },
+    title: {
+      fontSize: '20px',
+      fontWeight: 700,
+      color: '#4ade80',
+      margin: '0 0 4px',
+    },
+    subtitle: {
+      fontSize: '13px',
+      color: '#64748b',
+      margin: '0 0 16px',
+    },
+    tabs: {
+      display: 'flex',
+      gap: '8px',
+      marginBottom: '16px',
+    },
+    tab: (active: boolean) => ({
+      padding: '7px 16px',
+      borderRadius: '8px',
+      border: 'none',
+      background: active ? '#171717' : '#1e293b',
+      color: active ? '#4ade80' : '#94a3b8',
+      cursor: 'pointer',
+      fontSize: '13px',
+      fontWeight: active ? 700 : 400,
+      borderBottom: active ? '2px solid #4ade80' : '2px solid transparent',
+    }),
+    section: {
+      marginBottom: '16px',
+    },
+    sectionTitle: (isPublic: boolean) => ({
+      fontSize: '12px',
+      fontWeight: 700,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.08em',
+      color: isPublic ? '#60a5fa' : '#f87171',
+      marginBottom: '8px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+    }),
+    varRow: (hasError: boolean) => ({
+      background: '#1e293b',
+      border: '1px solid ' + (hasError ? '#f87171' : '#334155'),
+      borderRadius: '10px',
+      padding: '10px 14px',
+      marginBottom: '8px',
+    }),
+    varHeader: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      marginBottom: '6px',
+    },
+    varKey: {
+      fontSize: '12px',
+      fontFamily: 'monospace',
+      fontWeight: 700,
+      color: '#f1f5f9',
+    },
+    varBadge: (isPublic: boolean) => ({
+      fontSize: '10px',
+      padding: '2px 8px',
+      borderRadius: '20px',
+      background: isPublic ? '#1e3a5f' : '#2d1515',
+      color: isPublic ? '#60a5fa' : '#f87171',
+      fontWeight: 600,
+    }),
+    varDesc: {
+      fontSize: '11px',
+      color: '#64748b',
+      marginBottom: '6px',
+    },
+    varInput: {
+      width: '100%',
+      background: '#0f172a',
+      border: '1px solid #334155',
+      borderRadius: '6px',
+      padding: '6px 10px',
+      color: '#e2e8f0',
+      fontSize: '12px',
+      fontFamily: 'monospace',
+      boxSizing: 'border-box' as const,
+      outline: 'none',
+    },
+    errorText: {
+      fontSize: '11px',
+      color: '#f87171',
+      marginTop: '4px',
+    },
+    btn: {
+      padding: '10px 20px',
+      background: '#171717',
+      border: '1px solid #4ade80',
+      borderRadius: '8px',
+      color: '#4ade80',
+      cursor: 'pointer',
+      fontSize: '14px',
+      fontWeight: 600,
+      width: '100%',
+      marginTop: '8px',
+    },
+    result: (status: ValidationStatus) => ({
+      marginTop: '12px',
+      padding: '12px 16px',
+      borderRadius: '10px',
+      background: status === 'success' ? '#14532d' : status === 'error' ? '#450a0a' : '#1e293b',
+      border: '1px solid ' + (status === 'success' ? '#4ade80' : status === 'error' ? '#f87171' : '#334155'),
+      color: status === 'success' ? '#4ade80' : status === 'error' ? '#f87171' : '#94a3b8',
+      fontSize: '13px',
+    }),
+    codeBlock: {
+      background: '#020617',
+      borderRadius: '10px',
+      padding: '14px',
+      fontFamily: 'monospace',
+      fontSize: '12px',
+      color: '#94a3b8',
+      whiteSpace: 'pre' as const,
+      overflowX: 'auto' as const,
+      marginBottom: '12px',
+    },
+    toggleRow: {
+      display: 'flex',
+      justifyContent: 'flex-end',
+      marginBottom: '8px',
+    },
+    toggleBtn: {
+      background: 'none',
+      border: '1px solid #334155',
+      borderRadius: '6px',
+      color: '#94a3b8',
+      cursor: 'pointer',
+      fontSize: '11px',
+      padding: '3px 10px',
+    },
+  };
+
+  const maskValue = (v: EnvVar) => {
+    if (v.isPublic || showSecrets || !v.value) return v.value;
+    return v.value.slice(0, 4) + '•'.repeat(Math.max(0, v.value.length - 4));
+  };
+
+  return (
+    <div style={styles.app}>
+      <h1 style={styles.title}>🔐 Env Variables Inspector</h1>
+      <p style={styles.subtitle}>Визуализация public vs private переменных + валидация Zod</p>
+
+      <div style={styles.tabs}>
+        <button style={styles.tab(activeTab === 'inspector')} onClick={() => setActiveTab('inspector')}>
+          🔍 Inspector
+        </button>
+        <button style={styles.tab(activeTab === 'validator')} onClick={() => setActiveTab('validator')}>
+          ✅ Validator
+        </button>
+      </div>
+
+      {activeTab === 'inspector' && (
+        <div>
+          <div style={styles.toggleRow}>
+            <button style={styles.toggleBtn} onClick={() => setShowSecrets((s) => !s)}>
+              {showSecrets ? '🙈 Hide secrets' : '👁 Show secrets'}
+            </button>
+          </div>
+
+          <div style={styles.section}>
+            <div style={styles.sectionTitle(true)}>
+              🌐 Public (NEXT_PUBLIC_) — видны в браузере
+            </div>
+            {publicVars.map((v, i) => {
+              const globalIndex = vars.indexOf(v);
+              const err = validateVar(v);
+              return (
+                <div key={v.key} style={styles.varRow(!!err)}>
+                  <div style={styles.varHeader}>
+                    <span style={styles.varKey}>{v.key}</span>
+                    <span style={styles.varBadge(true)}>PUBLIC</span>
+                  </div>
+                  <div style={styles.varDesc}>{v.description}</div>
+                  <input
+                    style={styles.varInput}
+                    value={v.value}
+                    onChange={(e) => updateVar(globalIndex, e.target.value)}
+                    placeholder={'Enter value...'}
+                  />
+                  {err && <div style={styles.errorText}>⚠ {err}</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={styles.section}>
+            <div style={styles.sectionTitle(false)}>
+              🔒 Private (server-only) — только на сервере
+            </div>
+            {privateVars.map((v) => {
+              const globalIndex = vars.indexOf(v);
+              const err = validateVar(v);
+              return (
+                <div key={v.key} style={styles.varRow(!!err)}>
+                  <div style={styles.varHeader}>
+                    <span style={styles.varKey}>{v.key}</span>
+                    <span style={styles.varBadge(false)}>SERVER</span>
+                  </div>
+                  <div style={styles.varDesc}>{v.description}</div>
+                  <input
+                    style={styles.varInput}
+                    value={maskValue(v)}
+                    onChange={(e) => updateVar(globalIndex, e.target.value)}
+                    placeholder={'Enter value...'}
+                    readOnly={!showSecrets}
+                  />
+                  {err && <div style={styles.errorText}>⚠ {err}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'validator' && (
+        <div>
+          <div style={styles.codeBlock}>{zodSchemaText}</div>
+
+          <div style={{ marginBottom: '12px' }}>
+            {vars.map((v, i) => {
+              const err = validateVar(v);
+              return (
+                <div key={v.key} style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  padding: '7px 12px',
+                  background: '#1e293b',
+                  borderRadius: '8px',
+                  marginBottom: '6px',
+                  border: '1px solid ' + (err ? '#f87171' : '#334155'),
+                }}>
+                  <span style={{ fontFamily: 'monospace', fontSize: '12px', color: '#e2e8f0' }}>{v.key}</span>
+                  <span style={{ fontSize: '11px', color: err ? '#f87171' : v.value ? '#4ade80' : '#64748b' }}>
+                    {err ? ('✗ ' + err) : v.value ? '✓ valid' : '— optional'}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          <button style={styles.btn} onClick={validate}>
+            Run Zod Validation
+          </button>
+
+          {validationStatus !== 'idle' && (
+            <div style={styles.result(validationStatus)}>
+              {validationStatus === 'success'
+                ? '✅ All environment variables are valid! Safe to start the app.'
+                : '❌ Validation failed. Fix the errors above before starting.'}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,597 @@
+## 🛡️ Продвинутый Vue Router
+
+Базовую навигацию ты уже знаешь. Теперь — настоящая магия: защита маршрутов, ленивая загрузка, мета-данные, анимации переходов и именованные виды. Это то, что отличает junior-разработчика от профи 🚀
+
+---
+
+## Navigation Guards — охранники маршрутов
+
+Guards — это функции-перехватчики, которые могут разрешить, запретить или перенаправить навигацию. Думай о них как о middleware для роутов.
+
+### Global Guards — глобальные охранники
+
+```typescript
+// router/index.ts
+import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
+
+const router = createRouter({ /* ... */ })
+
+// beforeEach — выполняется ПЕРЕД каждой навигацией
+router.beforeEach(async (to, from, next) => {
+  const authStore = useAuthStore()
+
+  // to — куда идём
+  // from — откуда идём
+  // next — функция для подтверждения навигации
+
+  // Ждём инициализации авторизации
+  if (!authStore.isInitialized) {
+    await authStore.initialize()
+  }
+
+  // Проверяем, требует ли маршрут авторизации
+  if (to.meta.requiresAuth && !authStore.isLoggedIn) {
+    // Редиректим на логин, запоминая куда хотели попасть
+    next({
+      name: 'login',
+      query: { redirect: to.fullPath }
+    })
+    return
+  }
+
+  // Гость пытается зайти на страницу только для авторизованных
+  if (to.meta.guestOnly && authStore.isLoggedIn) {
+    next({ name: 'dashboard' })
+    return
+  }
+
+  // Проверяем роль пользователя
+  if (to.meta.role && authStore.user?.role !== to.meta.role) {
+    next({ name: 'forbidden' })
+    return
+  }
+
+  // Всё хорошо — продолжаем
+  next()
+})
+
+// afterEach — выполняется ПОСЛЕ каждой навигации (без next)
+router.afterEach((to, from) => {
+  // Аналитика
+  gtag('config', 'GA-ID', { page_path: to.path })
+
+  // Обновляем заголовок страницы
+  document.title = to.meta.title
+    ? \`\${to.meta.title} | Мой сайт\`
+    : 'Мой сайт'
+})
+
+// Глобальная обработка ошибок навигации
+router.onError((error) => {
+  console.error('Router error:', error)
+})
+```
+
+### Per-Route Guards — охранники маршрута
+
+```typescript
+const routes = [
+  {
+    path: '/admin',
+    component: AdminView,
+    // beforeEnter — выполняется только для этого маршрута
+    beforeEnter: (to, from) => {
+      const auth = useAuthStore()
+
+      if (!auth.isAdmin) {
+        return { name: 'forbidden' }
+        // Можно вернуть false для отмены навигации
+        // Или объект маршрута для редиректа
+      }
+      // undefined или true — продолжаем
+    },
+  },
+  {
+    path: '/settings',
+    component: SettingsView,
+    // Массив guards
+    beforeEnter: [checkAuth, checkEmailVerified, logAccess],
+  },
+]
+
+// Guards как отдельные функции
+function checkAuth(to: RouteLocationNormalized) {
+  if (!isLoggedIn()) {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
+}
+
+function checkEmailVerified() {
+  if (!currentUser()?.emailVerified) {
+    return { name: 'verify-email' }
+  }
+}
+```
+
+### In-Component Guards
+
+```vue
+<script setup lang="ts">
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
+
+const hasUnsavedChanges = ref(false)
+
+// Перед уходом со страницы
+onBeforeRouteLeave((to, from) => {
+  if (hasUnsavedChanges.value) {
+    const confirmed = confirm('Есть несохранённые изменения. Уйти?')
+    if (!confirmed) {
+      return false  // Отменяем навигацию
+    }
+  }
+})
+
+// При обновлении маршрута (изменение params без смены компонента)
+// Например: /users/1 → /users/2 — компонент тот же, params меняются
+onBeforeRouteUpdate(async (to) => {
+  // Загружаем новые данные для нового пользователя
+  await fetchUser(to.params.id as string)
+})
+</script>
+```
+
+---
+
+## Route Meta — метаданные маршрутов
+
+```typescript
+// Расширяем типы для meta
+import 'vue-router'
+
+declare module 'vue-router' {
+  interface RouteMeta {
+    requiresAuth?: boolean
+    guestOnly?: boolean
+    role?: 'admin' | 'moderator'
+    title?: string
+    breadcrumb?: string[]
+    transition?: string
+    layout?: 'default' | 'auth' | 'admin'
+  }
+}
+
+// Использование в routes
+const routes = [
+  {
+    path: '/',
+    component: HomeView,
+    meta: {
+      title: 'Главная',
+      breadcrumb: ['Главная'],
+    },
+  },
+  {
+    path: '/admin',
+    component: AdminView,
+    meta: {
+      requiresAuth: true,
+      role: 'admin',
+      title: 'Панель администратора',
+      layout: 'admin',
+      transition: 'slide-left',
+    },
+  },
+  {
+    path: '/login',
+    component: LoginView,
+    meta: {
+      guestOnly: true,  // Только для неавторизованных
+      title: 'Вход',
+      layout: 'auth',
+    },
+  },
+]
+```
+
+```vue
+<!-- Использование meta в компоненте -->
+<script setup lang="ts">
+import { useRoute } from 'vue-router'
+
+const route = useRoute()
+
+// Хлебные крошки из meta
+const breadcrumbs = computed(() => route.meta.breadcrumb || [])
+</script>
+```
+
+---
+
+## Lazy Loading — ленивая загрузка
+
+```typescript
+const routes = [
+  // 1. Базовая ленивая загрузка
+  {
+    path: '/dashboard',
+    component: () => import('./views/Dashboard.vue'),
+  },
+
+  // 2. Именованный чанк (для группировки)
+  {
+    path: '/admin',
+    component: () => import(/* webpackChunkName: "admin" */ './views/Admin.vue'),
+  },
+
+  // 3. С обработкой ошибок — defineAsyncComponent
+  {
+    path: '/heavy',
+    component: defineAsyncComponent({
+      loader: () => import('./views/HeavyView.vue'),
+      loadingComponent: LoadingSpinner,
+      errorComponent: ErrorComponent,
+      delay: 200,       // Показываем loading через 200мс
+      timeout: 10000,   // Ошибка через 10 секунд
+    }),
+  },
+]
+```
+
+```typescript
+// Prefetching — предзагрузка следующих маршрутов
+router.beforeEach((to) => {
+  // При переходе на главную, предзагружаем дашборд
+  if (to.name === 'home') {
+    import('./views/Dashboard.vue')
+  }
+})
+```
+
+---
+
+## Scroll Behavior — поведение скролла
+
+```typescript
+const router = createRouter({
+  history: createWebHistory(),
+  routes,
+  scrollBehavior(to, from, savedPosition) {
+    // Возвращаем позицию скролла при нажатии "Назад"
+    if (savedPosition) {
+      return savedPosition
+    }
+
+    // Якорные ссылки (#section)
+    if (to.hash) {
+      return {
+        el: to.hash,
+        behavior: 'smooth',
+        top: 80,  // Отступ для фиксированного хедера
+      }
+    }
+
+    // Плавный скролл наверх при каждой навигации
+    return {
+      top: 0,
+      behavior: 'smooth',
+    }
+  },
+})
+```
+
+---
+
+## Named Views — несколько RouterView
+
+Когда нужно несколько независимых областей с разным контентом:
+
+```typescript
+// router/index.ts
+{
+  path: '/dashboard',
+  components: {
+    default: DashboardMain,  // <RouterView />
+    header: DashboardHeader, // <RouterView name="header" />
+    sidebar: DashboardSidebar, // <RouterView name="sidebar" />
+  }
+}
+```
+
+```vue
+<!-- App.vue -->
+<template>
+  <RouterView name="header" />
+  <div class="layout">
+    <RouterView name="sidebar" />
+    <main>
+      <RouterView />
+    </main>
+  </div>
+</template>
+```
+
+---
+
+## Transitions — анимации переходов
+
+```vue
+<!-- App.vue — анимации при смене маршрутов -->
+<template>
+  <RouterView v-slot="{ Component, route }">
+    <Transition
+      :name="route.meta.transition || 'fade'"
+      mode="out-in"
+    >
+      <component :is="Component" :key="route.path" />
+    </Transition>
+  </RouterView>
+</template>
+
+<style>
+/* Fade */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* Slide left */
+.slide-left-enter-active,
+.slide-left-leave-active {
+  transition: all 0.3s ease;
+}
+.slide-left-enter-from {
+  opacity: 0;
+  transform: translateX(30px);
+}
+.slide-left-leave-to {
+  opacity: 0;
+  transform: translateX(-30px);
+}
+</style>
+```
+
+---
+
+## Динамические маршруты
+
+```typescript
+// Добавление маршрутов в рантайме
+router.addRoute({
+  name: 'plugin-page',
+  path: '/plugin',
+  component: PluginComponent,
+})
+
+// Добавление дочернего маршрута
+router.addRoute('admin', {
+  path: 'users',
+  component: AdminUsers,
+})
+
+// Удаление маршрута
+const removeRoute = router.addRoute(routeConfig)
+removeRoute()  // Удаляет добавленный маршрут
+
+// Проверка существования маршрута
+if (router.hasRoute('admin')) {
+  console.log('Маршрут admin существует')
+}
+
+// Получение всех маршрутов
+const allRoutes = router.getRoutes()
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useCallback } from 'react';
+
+const BG = '#0f172a';
+const GREEN = '#42b883';
+const DARK = '#35495e';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const RED = '#ef4444';
+const YELLOW = '#f59e0b';
+
+interface MockRoute {
+  path: string;
+  name: string;
+  meta: {
+    requiresAuth?: boolean;
+    role?: string;
+    title: string;
+    transition?: string;
+  };
+}
+
+const ROUTES: MockRoute[] = [
+  { path: '/', name: 'home', meta: { title: 'Главная', transition: 'fade' } },
+  { path: '/about', name: 'about', meta: { title: 'О нас', transition: 'fade' } },
+  { path: '/dashboard', name: 'dashboard', meta: { requiresAuth: true, title: 'Дашборд', transition: 'slide-left' } },
+  { path: '/admin', name: 'admin', meta: { requiresAuth: true, role: 'admin', title: 'Админ', transition: 'slide-left' } },
+  { path: '/login', name: 'login', meta: { title: 'Вход', transition: 'fade' } },
+];
+
+interface GuardResult {
+  allowed: boolean;
+  redirectTo?: string;
+  reason: string;
+}
+
+export default function App() {
+  const [currentPath, setCurrentPath] = useState('/');
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [userRole, setUserRole] = useState<'user' | 'admin'>('user');
+  const [guardLog, setGuardLog] = useState<Array<{ type: string; msg: string; ok: boolean }>>([]);
+
+  const addLog = useCallback((type: string, msg: string, ok: boolean) =>
+    setGuardLog(prev => [{ type, msg, ok }, ...prev.slice(0, 8)]), []);
+
+  const navigate = (to: MockRoute) => {
+    const results: GuardResult[] = [];
+
+    // Симуляция beforeEach
+    if (to.meta.requiresAuth && !isLoggedIn) {
+      results.push({ allowed: false, redirectTo: '/login', reason: 'requiresAuth: true, но пользователь не авторизован' });
+    } else if (to.meta.role && userRole !== to.meta.role) {
+      results.push({ allowed: false, reason: \`role: '\${to.meta.role}', у пользователя роль '\${userRole}'\` });
+    } else {
+      results.push({ allowed: true, reason: 'Все guard проверки пройдены ✅' });
+    }
+
+    const result = results[0];
+    addLog('beforeEach', result.reason, result.allowed);
+
+    if (result.allowed) {
+      setCurrentPath(to.path);
+      addLog('afterEach', \`Переход завершён → \${to.path}\`, true);
+    } else if (result.redirectTo) {
+      setCurrentPath(result.redirectTo);
+      addLog('redirect', \`Перенаправлен на \${result.redirectTo}\`, false);
+    }
+  };
+
+  const currentRoute = ROUTES.find(r => r.path === currentPath) || ROUTES[0];
+
+  const renderPage = () => {
+    switch (currentPath) {
+      case '/': return (
+        <div style={{ padding: '1rem' }}>
+          <h3 style={{ color: GREEN, marginBottom: '0.5rem' }}>🏠 Главная страница</h3>
+          <p style={{ color: '#94a3b8', fontSize: '0.82rem' }}>Публичный маршрут — доступен всем.</p>
+        </div>
+      );
+      case '/about': return (
+        <div style={{ padding: '1rem' }}>
+          <h3 style={{ color: GREEN, marginBottom: '0.5rem' }}>📖 О нас</h3>
+          <p style={{ color: '#94a3b8', fontSize: '0.82rem' }}>Тоже публичный маршрут.</p>
+        </div>
+      );
+      case '/dashboard': return (
+        <div style={{ padding: '1rem' }}>
+          <h3 style={{ color: GREEN, marginBottom: '0.5rem' }}>📊 Дашборд</h3>
+          <p style={{ color: '#94a3b8', fontSize: '0.82rem' }}>
+            Требует авторизации. Ты залогинен как <strong style={{ color: GREEN }}>{userRole}</strong>.
+          </p>
+        </div>
+      );
+      case '/admin': return (
+        <div style={{ padding: '1rem' }}>
+          <h3 style={{ color: GREEN, marginBottom: '0.5rem' }}>⚙️ Админ панель</h3>
+          <p style={{ color: '#94a3b8', fontSize: '0.82rem' }}>
+            Только для <strong style={{ color: YELLOW }}>admin</strong>. Твоя роль: <strong style={{ color: GREEN }}>{userRole}</strong>
+          </p>
+        </div>
+      );
+      case '/login': return (
+        <div style={{ padding: '1rem' }}>
+          <h3 style={{ color: YELLOW, marginBottom: '0.5rem' }}>🔐 Страница входа</h3>
+          <p style={{ color: '#94a3b8', fontSize: '0.82rem' }}>Тебя перенаправил Navigation Guard.</p>
+          <button onClick={() => { setIsLoggedIn(true); setCurrentPath('/'); addLog('login', 'Успешный вход в систему', true); }}
+            style={{ marginTop: '0.5rem', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', background: GREEN, color: '#0f172a', fontWeight: 700, cursor: 'pointer', fontSize: '0.82rem' }}>
+            Войти
+          </button>
+        </div>
+      );
+      default: return <div style={{ padding: '1rem', color: RED }}>404</div>;
+    }
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: GREEN, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🛡️ Navigation Guards Playground</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>beforeEach · beforeEnter · meta · lazy loading</p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+        {/* Левая колонка */}
+        <div>
+          {/* Auth controls */}
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', marginBottom: '0.75rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.7rem', marginBottom: '0.5rem', textTransform: 'uppercase' }}>Симуляция пользователя</div>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+              <button onClick={() => { setIsLoggedIn(!isLoggedIn); addLog('auth', isLoggedIn ? 'Выход из системы' : 'Вход в систему', !isLoggedIn); }} style={{
+                flex: 1, padding: '0.4rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                background: isLoggedIn ? RED : GREEN,
+                color: isLoggedIn ? '#fff' : '#0f172a',
+                fontWeight: 700, fontSize: '0.78rem',
+              }}>
+                {isLoggedIn ? '🚪 Выйти' : '🔐 Войти'}
+              </button>
+            </div>
+            {isLoggedIn && (
+              <div style={{ display: 'flex', gap: '0.4rem' }}>
+                {(['user', 'admin'] as const).map(r => (
+                  <button key={r} onClick={() => setUserRole(r)} style={{
+                    flex: 1, padding: '0.3rem', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                    background: userRole === r ? YELLOW : BORDER,
+                    color: userRole === r ? '#0f172a' : '#94a3b8',
+                    fontSize: '0.75rem', fontWeight: userRole === r ? 700 : 400,
+                  }}>
+                    {r}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#475569' }}>
+              Статус: <span style={{ color: isLoggedIn ? GREEN : RED }}>{isLoggedIn ? '✅ Авторизован' : '❌ Гость'}</span>
+              {isLoggedIn && <span style={{ color: YELLOW }}> · {userRole}</span>}
+            </div>
+          </div>
+
+          {/* Routes */}
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', marginBottom: '0.75rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.7rem', marginBottom: '0.5rem', textTransform: 'uppercase' }}>Маршруты</div>
+            {ROUTES.map(route => (
+              <button key={route.path} onClick={() => navigate(route)} style={{
+                display: 'flex', width: '100%', textAlign: 'left', alignItems: 'center', gap: '0.5rem',
+                padding: '0.45rem 0.6rem', marginBottom: '0.3rem', borderRadius: '6px',
+                border: 'none', cursor: 'pointer',
+                background: currentPath === route.path ? DARK : 'transparent',
+                color: currentPath === route.path ? GREEN : '#94a3b8',
+                fontWeight: currentPath === route.path ? 700 : 400, fontSize: '0.8rem',
+              }}>
+                <span style={{ flex: 1 }}>{route.path}</span>
+                {route.meta.requiresAuth && <span style={{ fontSize: '0.68rem', background: route.meta.role ? 'rgba(245,158,11,0.2)' : 'rgba(66,184,131,0.2)', color: route.meta.role ? YELLOW : GREEN, padding: '0.1rem 0.35rem', borderRadius: '3px' }}>
+                  {route.meta.role || 'auth'}
+                </span>}
+              </button>
+            ))}
+          </div>
+
+          {/* RouterView */}
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px' }}>
+            <div style={{ color: '#334155', fontSize: '0.7rem', padding: '0.35rem 0.75rem', borderBottom: \`1px solid \${BORDER}\` }}>
+              {'<RouterView>'} — {currentRoute.meta.title}
+            </div>
+            {renderPage()}
+          </div>
+        </div>
+
+        {/* Guard log */}
+        <div>
+          <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', height: '100%' }}>
+            <div style={{ color: '#475569', fontSize: '0.7rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+              Navigation Guard Log
+            </div>
+            {guardLog.length === 0 ? (
+              <div style={{ color: '#334155', fontSize: '0.78rem' }}>// Кликай по маршрутам выше...</div>
+            ) : guardLog.map((l, i) => (
+              <div key={i} style={{ marginBottom: '0.5rem', padding: '0.5rem', borderRadius: '6px', background: l.ok ? 'rgba(66,184,131,0.05)' : 'rgba(239,68,68,0.05)', border: \`1px solid \${l.ok ? 'rgba(66,184,131,0.2)' : 'rgba(239,68,68,0.2)'}\` }}>
+                <div style={{ fontSize: '0.7rem', color: l.ok ? GREEN : RED, fontWeight: 700, marginBottom: '0.2rem' }}>
+                  {l.ok ? '✅' : '🚫'} {l.type}
+                </div>
+                <div style={{ fontSize: '0.72rem', color: i === 0 ? '#e2e8f0' : '#475569' }}>{l.msg}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

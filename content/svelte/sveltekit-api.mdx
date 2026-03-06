@@ -1,0 +1,833 @@
+## 🔌 SvelteKit API Routes: Сервер внутри приложения
+
+Привет! 👋 Иногда тебе нужен не просто сайт — тебе нужен **API**. SvelteKit позволяет создавать полноценные HTTP endpoints прямо в своём приложении. Файл `+server.ts` превращает папку в API маршрут, который умеет отвечать на GET, POST, PUT, DELETE и PATCH запросы.
+
+Думай об API routes как о почтовых ящиках 📬: каждый URL — это отдельный ящик, а метод (GET/POST/etc.) — это тип входящей почты. SvelteKit автоматически доставляет запрос нужному обработчику.
+
+---
+
+## 📁 Базовый +server.ts
+
+```typescript
+// src/routes/api/hello/+server.ts
+import type { RequestHandler } from './$types';
+import { json } from '@sveltejs/kit';
+
+// GET /api/hello
+export const GET: RequestHandler = async ({ url, locals }) => {
+  const name = url.searchParams.get('name') ?? 'World';
+
+  return json({ message: `Hello, ${name}!` });
+  // json() эквивалентно:
+  // return new Response(JSON.stringify({ message: ... }), {
+  //   headers: { 'Content-Type': 'application/json' },
+  // });
+};
+
+// POST /api/hello
+export const POST: RequestHandler = async ({ request }) => {
+  const body = await request.json();
+
+  return json({
+    received: body,
+    timestamp: new Date().toISOString(),
+  }, { status: 201 });
+};
+```
+
+---
+
+## 🌐 RequestEvent: всё что нужно знает обработчик
+
+```typescript
+// src/routes/api/users/+server.ts
+import type { RequestHandler } from './$types';
+import { json, error } from '@sveltejs/kit';
+
+export const GET: RequestHandler = async ({
+  request,      // Request объект
+  url,          // URL объект с params, pathname, searchParams
+  params,       // Параметры роута (для /api/users/[id])
+  locals,       // Данные из хуков (auth user, db connection)
+  cookies,      // Cookies API
+  platform,     // Платформо-специфичные данные (Cloudflare env)
+  fetch,        // SvelteKit fetch (поддерживает относительные URL)
+  setHeaders,   // Установить заголовки ответа
+  getClientAddress, // IP клиента
+}) => {
+  // Авторизация:
+  if (!locals.user) {
+    error(401, 'Необходима авторизация');
+  }
+
+  // Query параметры:
+  const page = Number(url.searchParams.get('page') ?? '1');
+  const limit = Number(url.searchParams.get('limit') ?? '10');
+  const search = url.searchParams.get('q') ?? '';
+
+  // IP клиента (для rate limiting):
+  const clientIP = getClientAddress();
+
+  // Кастомные заголовки:
+  setHeaders({
+    'X-Total-Count': '100',
+    'X-Page': String(page),
+  });
+
+  const users = await db.user.findMany({
+    where: search ? { name: { contains: search } } : {},
+    skip: (page - 1) * limit,
+    take: limit,
+  });
+
+  return json(users);
+};
+```
+
+---
+
+## 📝 CRUD API: полный пример
+
+```typescript
+// src/routes/api/posts/+server.ts
+import type { RequestHandler } from './$types';
+import { json, error } from '@sveltejs/kit';
+
+// GET /api/posts — список постов
+export const GET: RequestHandler = async ({ url, locals }) => {
+  const page = Number(url.searchParams.get('page') ?? '1');
+  const limit = Math.min(Number(url.searchParams.get('limit') ?? '10'), 100);
+  const authorId = url.searchParams.get('author');
+  const tag = url.searchParams.get('tag');
+
+  const [posts, total] = await Promise.all([
+    db.post.findMany({
+      where: {
+        published: true,
+        ...(authorId && { authorId }),
+        ...(tag && { tags: { some: { name: tag } } }),
+      },
+      include: { author: { select: { id: true, name: true, avatar: true } } },
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    db.post.count({ where: { published: true } }),
+  ]);
+
+  return json({ posts, total, page, limit, pages: Math.ceil(total / limit) });
+};
+
+// POST /api/posts — создать пост
+export const POST: RequestHandler = async ({ request, locals }) => {
+  if (!locals.user) error(401, 'Требуется авторизация');
+
+  const body = await request.json();
+
+  // Валидация:
+  if (!body.title?.trim()) error(400, 'Заголовок обязателен');
+  if (!body.content?.trim()) error(400, 'Содержимое обязательно');
+  if (body.title.length > 200) error(400, 'Заголовок слишком длинный');
+
+  const slug = body.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+
+  // Проверяем уникальность слага:
+  const existing = await db.post.findUnique({ where: { slug } });
+  if (existing) error(409, `Пост с slug "${slug}" уже существует`);
+
+  const post = await db.post.create({
+    data: {
+      title: body.title,
+      slug,
+      content: body.content,
+      excerpt: body.excerpt ?? body.content.slice(0, 200),
+      published: body.published ?? false,
+      authorId: locals.user.id,
+      tags: {
+        connectOrCreate: (body.tags ?? []).map((tag: string) => ({
+          where: { name: tag },
+          create: { name: tag },
+        })),
+      },
+    },
+    include: { author: true, tags: true },
+  });
+
+  return json(post, { status: 201 });
+};
+```
+
+```typescript
+// src/routes/api/posts/[id]/+server.ts — единственный пост
+import type { RequestHandler } from './$types';
+
+// GET /api/posts/[id]
+export const GET: RequestHandler = async ({ params }) => {
+  const post = await db.post.findUnique({
+    where: { id: params.id },
+    include: { author: true, tags: true, comments: true },
+  });
+
+  if (!post) error(404, 'Пост не найден');
+
+  return json(post);
+};
+
+// PUT /api/posts/[id] — полное обновление
+export const PUT: RequestHandler = async ({ params, request, locals }) => {
+  if (!locals.user) error(401, 'Требуется авторизация');
+
+  const post = await db.post.findUnique({ where: { id: params.id } });
+  if (!post) error(404, 'Пост не найден');
+  if (post.authorId !== locals.user.id && !locals.user.isAdmin) {
+    error(403, 'Нет прав для редактирования');
+  }
+
+  const body = await request.json();
+  const updated = await db.post.update({
+    where: { id: params.id },
+    data: body,
+  });
+
+  return json(updated);
+};
+
+// PATCH /api/posts/[id] — частичное обновление
+export const PATCH: RequestHandler = async ({ params, request, locals }) => {
+  if (!locals.user) error(401, 'Требуется авторизация');
+
+  const body = await request.json();
+
+  const updated = await db.post.update({
+    where: { id: params.id },
+    data: body,  // Только переданные поля
+  });
+
+  return json(updated);
+};
+
+// DELETE /api/posts/[id]
+export const DELETE: RequestHandler = async ({ params, locals }) => {
+  if (!locals.user) error(401, 'Требуется авторизация');
+
+  const post = await db.post.findUnique({ where: { id: params.id } });
+  if (!post) error(404, 'Пост не найден');
+  if (post.authorId !== locals.user.id && !locals.user.isAdmin) {
+    error(403, 'Нет прав для удаления');
+  }
+
+  await db.post.delete({ where: { id: params.id } });
+
+  return new Response(null, { status: 204 }); // 204 No Content
+};
+```
+
+---
+
+## 🌊 Стриминг ответов
+
+```typescript
+// src/routes/api/stream/+server.ts
+import type { RequestHandler } from './$types';
+
+// Стриминг Server-Sent Events:
+export const GET: RequestHandler = () => {
+  let count = 0;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const encoder = new TextEncoder();
+
+      // Отправляем события каждую секунду:
+      while (count < 10) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        count++;
+
+        const data = JSON.stringify({ count, timestamp: Date.now() });
+        controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+      }
+
+      controller.close();
+    },
+    cancel() {
+      // Клиент отключился
+      count = 999; // Прерываем цикл
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    },
+  });
+};
+
+// Стриминг JSON (NDJSON):
+export const POST: RequestHandler = async ({ request }) => {
+  const { prompt } = await request.json();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const encoder = new TextEncoder();
+
+      // Имитация AI стриминга:
+      const words = `Ответ на "${prompt}": Svelte — отличный фреймворк!`.split(' ');
+
+      for (const word of words) {
+        await new Promise(r => setTimeout(r, 100));
+        controller.enqueue(encoder.encode(JSON.stringify({ token: word + ' ' }) + '\n'));
+      }
+
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: { 'Content-Type': 'application/x-ndjson' },
+  });
+};
+```
+
+---
+
+## 🪝 Хуки (hooks.server.ts): middleware для SvelteKit
+
+Хуки — это функции, которые запускаются при каждом запросе. Это аналог middleware в Express:
+
+```typescript
+// src/hooks.server.ts
+import type { Handle, HandleFetch, HandleServerError } from '@sveltejs/kit';
+import { sequence } from '@sveltejs/kit/hooks';
+
+// Основной хук — запускается для КАЖДОГО запроса:
+const auth: Handle = async ({ event, resolve }) => {
+  const session = event.cookies.get('session');
+
+  if (session) {
+    try {
+      const user = await verifySession(session);
+      event.locals.user = user;
+    } catch {
+      event.cookies.delete('session', { path: '/' });
+    }
+  }
+
+  return resolve(event);
+};
+
+// Хук для логирования:
+const logger: Handle = async ({ event, resolve }) => {
+  const start = Date.now();
+  const response = await resolve(event);
+  const duration = Date.now() - start;
+
+  console.log(`${event.request.method} ${event.url.pathname} → ${response.status} (${duration}ms)`);
+
+  return response;
+};
+
+// Хук для заголовков безопасности:
+const security: Handle = async ({ event, resolve }) => {
+  const response = await resolve(event);
+
+  response.headers.set('X-Frame-Options', 'DENY');
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  response.headers.set(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+  );
+
+  return response;
+};
+
+// Комбинируем хуки с sequence():
+export const handle = sequence(auth, logger, security);
+
+// Хук для модификации fetch запросов (SSR):
+export const handleFetch: HandleFetch = async ({ request, fetch, event }) => {
+  // Добавляем авторизационный заголовок для API запросов:
+  if (request.url.startsWith('https://api.example.com/')) {
+    request = new Request(request, {
+      headers: {
+        ...Object.fromEntries(request.headers),
+        Authorization: `Bearer ${event.locals.user?.token}`,
+      },
+    });
+  }
+
+  return fetch(request);
+};
+
+// Хук для обработки серверных ошибок:
+export const handleError: HandleServerError = async ({ error, event }) => {
+  // Логируем в Sentry, Axiom, etc.:
+  console.error('Server error:', error);
+  await logToSentry(error, {
+    url: event.url.href,
+    user: event.locals.user?.id,
+  });
+
+  // Возвращаем безопасное сообщение (без деталей ошибки для клиента):
+  return {
+    message: 'Что-то пошло не так. Мы уже работаем над этим!',
+    code: (error as any)?.code ?? 'UNKNOWN',
+  };
+};
+```
+
+---
+
+## 🔐 Серверные переменные окружения
+
+```typescript
+// src/lib/server/env.ts — ТОЛЬКО серверный код
+import { env } from '$env/static/private';
+// import { env } from '$env/dynamic/private'; // Для runtime переменных
+
+// static/private — вшивается при сборке, безопасно:
+const { DATABASE_URL, SECRET_KEY, STRIPE_SECRET_KEY } = env;
+
+// Никогда не попадёт в клиентский бандл — $env/static/private
+// доступен ТОЛЬКО в файлах .server.ts и hooks.server.ts
+
+export const db = new PrismaClient({
+  datasources: { db: { url: DATABASE_URL } },
+});
+```
+
+```typescript
+// $env/static/public — доступен и на клиенте, и на сервере
+// Переменные должны начинаться с PUBLIC_
+import { PUBLIC_API_URL, PUBLIC_ANALYTICS_ID } from '$env/static/public';
+
+// $env/dynamic/private — читается при каждом запросе (runtime)
+// Для Docker/Platform.sh где env меняется без пересборки
+import { env as dynamicPrivate } from '$env/dynamic/private';
+
+// $env/dynamic/public — runtime переменные для клиента
+import { env as dynamicPublic } from '$env/dynamic/public';
+```
+
+**Переменные в .env файлах:**
+
+```bash
+# .env — для разработки (НЕ коммитить!)
+DATABASE_URL="postgresql://localhost/myapp"
+SECRET_KEY="super-secret-key"
+STRIPE_SECRET_KEY="sk_test_..."
+
+# Публичные переменные:
+PUBLIC_API_URL="http://localhost:3000"
+PUBLIC_ANALYTICS_ID="G-XXXXXXXXXX"
+
+# .env.production — для прода
+DATABASE_URL="postgresql://prod-server/myapp"
+```
+
+---
+
+## 🌍 CORS настройка
+
+```typescript
+// src/routes/api/public/+server.ts — публичный API с CORS
+import type { RequestHandler } from './$types';
+import { json } from '@sveltejs/kit';
+
+const ALLOWED_ORIGINS = [
+  'https://myapp.com',
+  'https://www.myapp.com',
+  'http://localhost:3000', // dev
+];
+
+function corsHeaders(origin: string | null) {
+  const allowed = origin && ALLOWED_ORIGINS.includes(origin);
+
+  return {
+    'Access-Control-Allow-Origin': allowed ? origin : ALLOWED_ORIGINS[0],
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
+  };
+}
+
+// Preflight запрос:
+export const OPTIONS: RequestHandler = ({ request }) => {
+  const origin = request.headers.get('Origin');
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(origin),
+  });
+};
+
+export const GET: RequestHandler = ({ request }) => {
+  const origin = request.headers.get('Origin');
+  return json({ data: 'public data' }, {
+    headers: corsHeaders(origin),
+  });
+};
+```
+
+```typescript
+// Глобальный CORS через хук:
+// src/hooks.server.ts
+export const handle: Handle = async ({ event, resolve }) => {
+  if (event.url.pathname.startsWith('/api/public')) {
+    const origin = event.request.headers.get('Origin');
+
+    if (event.request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        },
+      });
+    }
+
+    const response = await resolve(event);
+    response.headers.set('Access-Control-Allow-Origin', '*');
+    return response;
+  }
+
+  return resolve(event);
+};
+```
+
+---
+
+## 🔑 Rate limiting
+
+```typescript
+// src/lib/server/rateLimit.ts
+const requests = new Map<string, { count: number; resetAt: number }>();
+
+export function rateLimit(key: string, limit = 100, windowMs = 60000) {
+  const now = Date.now();
+  const entry = requests.get(key);
+
+  if (!entry || now > entry.resetAt) {
+    requests.set(key, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, remaining: limit - 1 };
+  }
+
+  if (entry.count >= limit) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  entry.count++;
+  return { allowed: true, remaining: limit - entry.count };
+}
+
+// В API route:
+export const POST: RequestHandler = async ({ getClientAddress, request }) => {
+  const ip = getClientAddress();
+  const { allowed, remaining } = rateLimit(ip, 10, 60000); // 10 запросов/минуту
+
+  if (!allowed) {
+    return new Response('Too Many Requests', {
+      status: 429,
+      headers: {
+        'Retry-After': '60',
+        'X-RateLimit-Remaining': '0',
+      },
+    });
+  }
+
+  return json({ result: 'ok' }, {
+    headers: { 'X-RateLimit-Remaining': String(remaining) },
+  });
+};
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useCallback } from "react";
+
+const SVELTE_ORANGE = "#ff3e00";
+const SVELTE_YELLOW = "#ffba00";
+const BG = "#0f172a";
+const BG2 = "#1e293b";
+const BG3 = "#334155";
+
+type Tab = "crud" | "hooks" | "env" | "cors";
+
+const tabs = [
+  { id: "crud" as Tab, label: "CRUD API", emoji: "🗄️" },
+  { id: "hooks" as Tab, label: "Hooks", emoji: "🪝" },
+  { id: "env" as Tab, label: "Env Vars", emoji: "🔐" },
+  { id: "cors" as Tab, label: "CORS", emoji: "🌍" },
+];
+
+interface ApiRequest {
+  method: string;
+  path: string;
+  status?: number;
+  time?: number;
+  response?: object;
+  error?: string;
+}
+
+// CRUD симулятор
+function CrudDemo() {
+  const [log, setLog] = useState<ApiRequest[]>([]);
+  const [loading, setLoading] = useState<string | null>(null);
+  const [posts, setPosts] = useState([
+    { id: "1", title: "Hello Svelte", author: "Яша" },
+    { id: "2", title: "SvelteKit Rules", author: "Дима" },
+  ]);
+
+  const fakeRequest = useCallback(async (method: string, path: string, expectedStatus: number, responseData: object, delay = 300) => {
+    setLoading(\`\${method} \${path}\`);
+    const start = Date.now();
+    await new Promise((r) => setTimeout(r, delay));
+    const time = Date.now() - start;
+
+    setLog((prev) => [...prev.slice(-6), { method, path, status: expectedStatus, time, response: responseData }]);
+    setLoading(null);
+    return responseData;
+  }, []);
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px", marginBottom: "12px" }}>
+        {[
+          { method: "GET", label: "Получить посты", color: "#34d399", action: () => fakeRequest("GET", "/api/posts", 200, { posts, total: posts.length }) },
+          { method: "POST", label: "Создать пост", color: SVELTE_ORANGE, action: async () => { const newPost = { id: String(Date.now()), title: "Новый пост " + posts.length, author: "Яша" }; setPosts((p) => [...p, newPost]); await fakeRequest("POST", "/api/posts", 201, newPost, 400); } },
+          { method: "DELETE", label: "Удалить пост", color: "#f87171", action: async () => { if (posts.length === 0) return; const deleted = posts[posts.length - 1]; setPosts((p) => p.slice(0, -1)); await fakeRequest("DELETE", \`/api/posts/\${deleted.id}\`, 204, {}, 300); } },
+        ].map((btn) => (
+          <button
+            key={btn.method}
+            onClick={btn.action}
+            disabled={!!loading}
+            style={{ padding: "8px", border: \`1px solid \${btn.color}44\`, borderRadius: "6px", background: \`\${btn.color}11\`, cursor: loading ? "not-allowed" : "pointer", color: btn.color, fontSize: "11px", fontFamily: "monospace", transition: "all 0.15s" }}
+          >
+            <div style={{ fontWeight: "bold" }}>{btn.method}</div>
+            <div style={{ fontSize: "10px", color: "#94a3b8", marginTop: "2px" }}>{btn.label}</div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ background: BG3, borderRadius: "6px", padding: "8px", marginBottom: "10px", minHeight: "60px" }}>
+        <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "6px" }}>Посты в "базе данных":</div>
+        {posts.map((p) => (
+          <div key={p.id} style={{ fontSize: "12px", color: "#e2e8f0", padding: "3px 0", borderBottom: "1px solid #1e293b" }}>
+            [{p.id.slice(0, 6)}] {p.title} — {p.author}
+          </div>
+        ))}
+        {posts.length === 0 && <div style={{ color: "#64748b", fontSize: "12px" }}>Пусто</div>}
+      </div>
+
+      <div style={{ background: BG, borderRadius: "8px", padding: "10px" }}>
+        <div style={{ fontSize: "11px", color: "#64748b", fontFamily: "monospace", marginBottom: "6px" }}>HTTP лог:</div>
+        {loading && <div style={{ fontSize: "11px", fontFamily: "monospace", color: SVELTE_YELLOW }}>⏳ {loading}...</div>}
+        {log.map((req, i) => (
+          <div key={i} style={{ display: "flex", gap: "8px", fontSize: "11px", fontFamily: "monospace", padding: "2px 0", color: i === log.length - 1 ? "#e2e8f0" : "#64748b" }}>
+            <span style={{ color: req.method === "GET" ? "#34d399" : req.method === "POST" ? SVELTE_ORANGE : "#f87171", minWidth: "50px" }}>{req.method}</span>
+            <span style={{ color: "#94a3b8" }}>{req.path}</span>
+            <span style={{ marginLeft: "auto", color: req.status && req.status < 300 ? "#34d399" : "#f87171" }}>{req.status}</span>
+            <span style={{ color: "#475569" }}>{req.time}ms</span>
+          </div>
+        ))}
+        {log.length === 0 && !loading && <div style={{ color: "#475569", fontSize: "11px" }}>Нажми кнопку для запроса</div>}
+      </div>
+    </div>
+  );
+}
+
+// Hooks визуализация
+function HooksDemo() {
+  const [running, setRunning] = useState(false);
+  const [steps, setSteps] = useState<{ name: string; desc: string; status: "pending" | "running" | "done" }[]>([]);
+
+  const simulate = async () => {
+    const pipeline = [
+      { name: "auth hook", desc: "Проверяем сессию → locals.user" },
+      { name: "logger hook", desc: "Логируем запрос (start)" },
+      { name: "security hook", desc: "Добавляем CSP заголовки" },
+      { name: "API handler", desc: "GET /api/posts → 200 OK" },
+      { name: "logger hook", desc: "Логируем ответ (time: 42ms)" },
+      { name: "security hook", desc: "Добавляем X-Frame-Options" },
+    ];
+
+    setRunning(true);
+    setSteps(pipeline.map((s) => ({ ...s, status: "pending" })));
+
+    for (let i = 0; i < pipeline.length; i++) {
+      setSteps((prev) => prev.map((s, j) => ({ ...s, status: j === i ? "running" : j < i ? "done" : "pending" })));
+      await new Promise((r) => setTimeout(r, 400));
+    }
+
+    setSteps((prev) => prev.map((s) => ({ ...s, status: "done" })));
+    setRunning(false);
+  };
+
+  const statusColors = { pending: "#334155", running: SVELTE_YELLOW, done: "#34d399" };
+  const statusIcons = { pending: "○", running: "●", done: "✓" };
+
+  return (
+    <div>
+      <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+        sequence(auth, logger, security) — pipeline хуков
+      </div>
+
+      <button onClick={simulate} disabled={running} style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "10px", cursor: running ? "not-allowed" : "pointer", fontSize: "13px", marginBottom: "12px" }}>
+        {running ? "⏳ Обработка запроса..." : "▶ Симулировать запрос"}
+      </button>
+
+      {steps.map((step, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px", background: step.status === "running" ? \`\${SVELTE_YELLOW}11\` : step.status === "done" ? "#34d39911" : BG3, borderRadius: "6px", marginBottom: "4px", border: \`1px solid \${statusColors[step.status]}44\`, transition: "all 0.3s" }}>
+          <span style={{ color: statusColors[step.status], fontFamily: "monospace", fontSize: "16px", minWidth: "20px" }}>{statusIcons[step.status]}</span>
+          <div>
+            <div style={{ fontSize: "12px", color: statusColors[step.status], fontFamily: "monospace", fontWeight: "bold" }}>{step.name}</div>
+            <div style={{ fontSize: "11px", color: "#64748b" }}>{step.desc}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Env vars visualization
+function EnvDemo() {
+  const envVars = [
+    { name: "DATABASE_URL", module: "$env/static/private", scope: "server", value: "postgresql://..." },
+    { name: "SECRET_KEY", module: "$env/static/private", scope: "server", value: "sk_test_xxx" },
+    { name: "PUBLIC_API_URL", module: "$env/static/public", scope: "both", value: "https://api.app.com" },
+    { name: "PUBLIC_ANALYTICS_ID", module: "$env/static/public", scope: "both", value: "G-XXXXXXXXXX" },
+    { name: "RUNTIME_CONFIG", module: "$env/dynamic/private", scope: "server", value: "runtime-value" },
+  ];
+
+  const [showValues, setShowValues] = useState(false);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+        <div style={{ flex: 1, background: BG3, borderRadius: "6px", padding: "8px", textAlign: "center" }}>
+          <div style={{ fontSize: "10px", color: "#64748b" }}>🖥️ Server only</div>
+          <div style={{ fontSize: "11px", color: "#f87171", fontFamily: "monospace" }}>$env/static/private</div>
+        </div>
+        <div style={{ flex: 1, background: BG3, borderRadius: "6px", padding: "8px", textAlign: "center" }}>
+          <div style={{ fontSize: "10px", color: "#64748b" }}>🌐 Server + Client</div>
+          <div style={{ fontSize: "11px", color: "#34d399", fontFamily: "monospace" }}>$env/static/public</div>
+        </div>
+      </div>
+
+      <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#94a3b8", cursor: "pointer", marginBottom: "10px" }}>
+        <input type="checkbox" checked={showValues} onChange={(e) => setShowValues(e.target.checked)} style={{ accentColor: SVELTE_ORANGE }} />
+        Показать значения
+      </label>
+
+      {envVars.map((v, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px", background: BG3, borderRadius: "6px", marginBottom: "4px" }}>
+          <span style={{ fontSize: "14px" }}>{v.scope === "server" ? "🔒" : "🌐"}</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: "12px", color: SVELTE_YELLOW, fontFamily: "monospace" }}>{v.name}</div>
+            <div style={{ fontSize: "10px", color: v.scope === "server" ? "#f87171" : "#34d399", fontFamily: "monospace" }}>{v.module}</div>
+          </div>
+          <div style={{ fontSize: "11px", color: "#64748b", fontFamily: "monospace" }}>
+            {showValues ? v.value : "•".repeat(8)}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// CORS demo
+function CorsDemo() {
+  const [origin, setOrigin] = useState("https://myapp.com");
+  const [method, setMethod] = useState("GET");
+  const [result, setResult] = useState<{ allowed: boolean; reason: string } | null>(null);
+
+  const ALLOWED = ["https://myapp.com", "https://www.myapp.com", "http://localhost:3000"];
+
+  const testCors = () => {
+    const isAllowed = ALLOWED.includes(origin);
+    const isPreflight = method === "OPTIONS";
+
+    if (isPreflight) {
+      setResult({ allowed: true, reason: \`Preflight OK → Access-Control-Allow-Origin: \${isAllowed ? origin : ALLOWED[0]}\` });
+    } else if (isAllowed) {
+      setResult({ allowed: true, reason: \`Origin разрешён → заголовок добавлен\` });
+    } else {
+      setResult({ allowed: false, reason: \`Origin "\${origin}" не в списке разрешённых!\` });
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ marginBottom: "10px" }}>
+        <label style={{ fontSize: "12px", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Origin:</label>
+        <select value={origin} onChange={(e) => setOrigin(e.target.value)} style={{ width: "100%", padding: "8px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px" }}>
+          {[...ALLOWED, "https://evil.com", "https://attacker.io"].map((o) => (
+            <option key={o} value={o}>{o}</option>
+          ))}
+        </select>
+      </div>
+
+      <div style={{ marginBottom: "12px" }}>
+        <label style={{ fontSize: "12px", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Method:</label>
+        <div style={{ display: "flex", gap: "4px" }}>
+          {["GET", "POST", "OPTIONS"].map((m) => (
+            <button key={m} onClick={() => setMethod(m)} style={{ flex: 1, padding: "6px", border: \`1px solid \${method === m ? SVELTE_ORANGE : "#475569"}\`, borderRadius: "6px", background: method === m ? \`\${SVELTE_ORANGE}22\` : BG3, cursor: "pointer", color: "#e2e8f0", fontSize: "12px" }}>{m}</button>
+          ))}
+        </div>
+      </div>
+
+      <button onClick={testCors} style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "10px", cursor: "pointer", fontSize: "13px", marginBottom: "12px" }}>
+        🧪 Тест CORS запроса
+      </button>
+
+      {result && (
+        <div style={{ background: BG, borderRadius: "8px", padding: "12px", border: \`1px solid \${result.allowed ? "#34d399" : "#f87171"}44\` }}>
+          <div style={{ fontSize: "14px", fontWeight: "bold", color: result.allowed ? "#34d399" : "#f87171", marginBottom: "6px" }}>
+            {result.allowed ? "✅ Разрешено" : "❌ Заблокировано"}
+          </div>
+          <div style={{ fontSize: "12px", color: "#94a3b8" }}>{result.reason}</div>
+        </div>
+      )}
+
+      <div style={{ marginTop: "10px", background: BG3, borderRadius: "6px", padding: "8px" }}>
+        <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "4px" }}>Разрешённые origins:</div>
+        {ALLOWED.map((o) => <div key={o} style={{ fontSize: "11px", color: "#34d399", fontFamily: "monospace" }}>✓ {o}</div>)}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("crud");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "20px", fontFamily: "system-ui, sans-serif", color: "#e2e8f0" }}>
+      <div style={{ maxWidth: "540px", margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: "20px" }}>
+          <div style={{ fontSize: "26px", fontWeight: "bold", color: SVELTE_ORANGE }}>API Routes</div>
+          <div style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>SvelteKit +server.ts 🔌</div>
+        </div>
+
+        <div style={{ display: "flex", gap: "6px", marginBottom: "16px", background: BG2, padding: "4px", borderRadius: "10px" }}>
+          {tabs.map((tab) => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "8px 2px", border: "none", borderRadius: "7px", cursor: "pointer", background: activeTab === tab.id ? SVELTE_ORANGE : "transparent", color: activeTab === tab.id ? "#fff" : "#94a3b8", fontSize: "11px", fontWeight: activeTab === tab.id ? "bold" : "normal", transition: "all 0.15s" }}>
+              {tab.emoji} {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: BG2, borderRadius: "12px", padding: "16px", border: "1px solid #1e293b" }}>
+          {activeTab === "crud" && <CrudDemo />}
+          {activeTab === "hooks" && <HooksDemo />}
+          {activeTab === "env" && <EnvDemo />}
+          {activeTab === "cors" && <CorsDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

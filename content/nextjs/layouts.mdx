@@ -1,0 +1,653 @@
+## 🏗️ Layouts и Templates в Next.js
+
+Layout — это компонент-обёртка, который **сохраняется** между навигациями. Это суперсила App Router: ты пишешь навигацию, сайдбар, хедер один раз — и он не перерендеривается при переходах между страницами. Экономия ресурсов и плавный UX! ✨
+
+```
+                    Навигация /dashboard → /dashboard/settings
+                    
+Pages Router:       DashboardLayout  РАЗМОНТИРУЕТСЯ и МОНТИРУЕТСЯ заново 😢
+App Router:         DashboardLayout  ОСТАЁТСЯ, обновляется только children 🎉
+```
+
+---
+
+### 📐 Root Layout: Фундамент всего приложения
+
+Root layout — **единственный обязательный** файл в App Router. Он должен содержать теги `<html>` и `<body>`:
+
+```typescript
+// app/layout.tsx — обязательный root layout
+import type { Metadata } from 'next';
+import { Inter } from 'next/font/google';
+import './globals.css';
+
+const inter = Inter({ subsets: ['latin', 'cyrillic'] });
+
+// Метаданные для всего сайта (наследуются дочерними)
+export const metadata: Metadata = {
+  title: {
+    template: '%s | Мой сайт', // %s — заголовок страницы
+    default: 'Мой сайт',       // если страница не указала title
+  },
+  description: 'Описание сайта',
+  metadataBase: new URL('https://mysite.com'),
+  openGraph: {
+    type: 'website',
+    locale: 'ru_RU',
+  },
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="ru" suppressHydrationWarning>
+      <body className={inter.className}>
+        <ThemeProvider>
+          <Header />
+          {children}
+          <Footer />
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+**Что обязательно в Root Layout:**
+- Теги `<html>` и `<body>` (только в root!)
+- Может быть `async` (Server Component)
+- Должен принимать `children`
+
+---
+
+### 🪆 Вложенные Layouts
+
+Каждый сегмент маршрута может иметь свой layout. Они вкладываются друг в друга:
+
+```
+app/
+├── layout.tsx            ← Root: Header + Footer для всего сайта
+├── page.tsx              → /
+├── blog/
+│   ├── layout.tsx        ← Blog: ширина контента, теги
+│   ├── page.tsx          → /blog
+│   └── [slug]/
+│       └── page.tsx      → /blog/:slug
+└── dashboard/
+    ├── layout.tsx        ← Dashboard: сайдбар
+    ├── page.tsx          → /dashboard
+    └── settings/
+        ├── layout.tsx    ← Settings: вкладки настроек
+        └── page.tsx      → /dashboard/settings
+```
+
+```typescript
+// app/dashboard/layout.tsx
+import { DashboardSidebar } from '@/components/DashboardSidebar';
+import { getCurrentUser } from '@/lib/auth';
+import { redirect } from 'next/navigation';
+
+export default async function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  // Server Component — можем делать запросы к БД!
+  const user = await getCurrentUser();
+  
+  // Защита роутов прямо в layout
+  if (!user) {
+    redirect('/login');
+  }
+  
+  return (
+    <div style={{ display: 'flex', minHeight: '100vh' }}>
+      <DashboardSidebar user={user} />
+      <main style={{ flex: 1, padding: '24px' }}>
+        {children}
+      </main>
+    </div>
+  );
+}
+```
+
+```typescript
+// app/dashboard/settings/layout.tsx
+export default function SettingsLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <h1>Настройки</h1>
+      <nav>
+        <Link href="/dashboard/settings">Профиль</Link>
+        <Link href="/dashboard/settings/security">Безопасность</Link>
+        <Link href="/dashboard/settings/billing">Оплата</Link>
+      </nav>
+      <div className="settings-content">{children}</div>
+    </div>
+  );
+}
+```
+
+Итоговое дерево для `/dashboard/settings`:
+
+```jsx
+<RootLayout>          {/* app/layout.tsx */}
+  <DashboardLayout>   {/* app/dashboard/layout.tsx */}
+    <SettingsLayout>  {/* app/dashboard/settings/layout.tsx */}
+      <SettingsPage>  {/* app/dashboard/settings/page.tsx */}
+      </SettingsPage>
+    </SettingsLayout>
+  </DashboardLayout>
+</RootLayout>
+```
+
+---
+
+### 🔄 template.tsx vs layout.tsx
+
+Это тонкое, но важное различие:
+
+```typescript
+// layout.tsx — ПЕРСИСТЕНТНЫЙ: сохраняется, НЕ перемонтируется
+export default function Layout({ children }) {
+  const [count, setCount] = useState(0); // Сохраняется между переходами!
+  return (
+    <div>
+      <p>Счётчик: {count}</p> {/* Не сбросится при навигации */}
+      {children}
+    </div>
+  );
+}
+
+// template.tsx — ЭФЕМЕРНЫЙ: перемонтируется при каждой навигации
+export default function Template({ children }) {
+  const [count, setCount] = useState(0); // Сбрасывается при каждом переходе!
+  return (
+    <div>
+      <p>Счётчик: {count}</p> {/* Сбросится при переходе на другую страницу */}
+      {children}
+    </div>
+  );
+}
+```
+
+**Когда использовать `template.tsx`:**
+
+```typescript
+// 1. Анимации входа/выхода страниц
+// app/template.tsx
+'use client';
+
+import { motion } from 'framer-motion';
+
+export default function Template({ children }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      transition={{ duration: 0.3 }}
+    >
+      {children}
+    </motion.div>
+  );
+}
+// Анимация будет воспроизводиться при КАЖДОМ переходе!
+
+// 2. Трекинг просмотров страниц
+// app/template.tsx
+'use client';
+import { useEffect } from 'react';
+import { usePathname } from 'next/navigation';
+
+export default function Template({ children }) {
+  const pathname = usePathname();
+  
+  useEffect(() => {
+    // Выполнится при каждом переходе на новую страницу
+    analytics.track('page_view', { path: pathname });
+  }, [pathname]);
+  
+  return <>{children}</>;
+}
+```
+
+---
+
+### 📋 Метаданные в Layouts
+
+Next.js предоставляет два способа задать метаданные:
+
+```typescript
+// 1. Статические метаданные
+// app/blog/layout.tsx
+import type { Metadata } from 'next';
+
+export const metadata: Metadata = {
+  title: 'Блог',
+  description: 'Статьи о программировании',
+  keywords: ['Next.js', 'React', 'TypeScript'],
+  openGraph: {
+    title: 'Блог | Мой сайт',
+    description: 'Статьи о программировании',
+    url: 'https://mysite.com/blog',
+    images: [
+      {
+        url: '/og-blog.jpg',
+        width: 1200,
+        height: 630,
+        alt: 'Блог',
+      },
+    ],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Блог | Мой сайт',
+    description: 'Статьи о программировании',
+  },
+};
+
+export default function BlogLayout({ children }) {
+  return <div className="blog-layout">{children}</div>;
+}
+```
+
+```typescript
+// 2. Динамические метаданные (для страниц с данными)
+// app/blog/[slug]/page.tsx
+import type { Metadata } from 'next';
+
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+// generateMetadata — async функция для динамических метаданных
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const { slug } = await params;
+  const post = await getPost(slug);
+  
+  if (!post) {
+    return { title: 'Пост не найден' };
+  }
+  
+  return {
+    title: post.title,
+    description: post.excerpt,
+    openGraph: {
+      title: post.title,
+      description: post.excerpt,
+      images: [post.coverImage],
+      type: 'article',
+      publishedTime: post.publishedAt,
+      authors: [post.author.name],
+    },
+  };
+}
+
+export default async function BlogPost({ params }: Props) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+  return <article>{post.content}</article>;
+}
+```
+
+**Наследование и слияние метаданных:**
+
+```typescript
+// app/layout.tsx
+export const metadata = {
+  title: { template: '%s | MySite', default: 'MySite' },
+  description: 'Лучший сайт в интернете',
+};
+
+// app/blog/layout.tsx
+export const metadata = {
+  // title не указан → возьмёт из родителя template
+  description: 'Статьи о коде', // Переопределяет родительский
+};
+
+// app/blog/[slug]/page.tsx
+export const metadata = {
+  title: 'Мой пост', // Итог: 'Мой пост | MySite'
+  // description не указан → 'Статьи о коде'
+};
+```
+
+---
+
+### 🖥️ Server vs Client Layouts
+
+Layouts **по умолчанию** — Server Components. Это значит ты можешь делать запросы к БД прямо в них:
+
+```typescript
+// app/dashboard/layout.tsx — Server Component (по умолчанию)
+import { db } from '@/lib/db';
+import { getSession } from '@/lib/auth';
+
+export default async function DashboardLayout({ children }) {
+  // Прямой запрос к базе данных!
+  const session = await getSession();
+  const notifications = await db.notification.findMany({
+    where: { userId: session.user.id, read: false },
+    orderBy: { createdAt: 'desc' },
+    take: 5,
+  });
+
+  return (
+    <div>
+      <DashboardHeader 
+        user={session.user}
+        notificationCount={notifications.length}
+      />
+      <main>{children}</main>
+    </div>
+  );
+}
+```
+
+```typescript
+// app/dashboard/layout.tsx — Client Component (если нужны hooks/events)
+'use client';
+
+import { useState, useEffect } from 'react';
+
+export default function DashboardLayout({ children }) {
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  
+  // localStorage, window, DOM
+  useEffect(() => {
+    const saved = localStorage.getItem('sidebar');
+    if (saved) setSidebarOpen(saved === 'true');
+  }, []);
+  
+  return (
+    <div>
+      <button onClick={() => setSidebarOpen(!sidebarOpen)}>
+        {sidebarOpen ? '◀' : '▶'}
+      </button>
+      {sidebarOpen && <Sidebar />}
+      <main>{children}</main>
+    </div>
+  );
+}
+```
+
+---
+
+### 💡 Лучшие практики
+
+```typescript
+// 1. Держи Root Layout минимальным и серверным
+// app/layout.tsx — ХОРОШО
+export default function RootLayout({ children }) {
+  return (
+    <html lang="ru">
+      <body>
+        {children}  {/* Минимум логики */}
+      </body>
+    </html>
+  );
+}
+
+// 2. Используй вложенные layouts для изоляции
+// Плохо: один жирный layout для всего
+// Хорошо: отдельные layouts для разных секций
+
+// 3. Server Components по умолчанию
+// Добавляй 'use client' только когда нужны:
+// - useState, useEffect, useRef
+// - Event handlers
+// - Browser APIs (window, localStorage)
+// - Third-party клиентские библиотеки
+
+// 4. Параметры из URL в layout
+// app/dashboard/[userId]/layout.tsx
+export default async function UserLayout({ 
+  children, 
+  params 
+}: {
+  children: React.ReactNode;
+  params: Promise<{ userId: string }>;
+}) {
+  const { userId } = await params;
+  const user = await getUser(userId);
+  
+  return (
+    <UserProvider user={user}>
+      {children}
+    </UserProvider>
+  );
+}
+```
+
+---
+
+### 🎯 Резюме урока
+
+1. **Root Layout** — обязательный, содержит `<html>` и `<body>`
+2. **Вложенные Layouts** — создаются в подпапках, вкладываются автоматически
+3. **template.tsx** — как layout, но перемонтируется при каждой навигации
+4. **Метаданные** — `export const metadata` или `generateMetadata()` async
+5. **Server by default** — layouts серверные, добавляй `'use client'` только если нужно
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+type Page = "home" | "blog" | "blog-post" | "dashboard" | "settings";
+
+const pages: Record<Page, { title: string; path: string; layouts: string[] }> = {
+  home: {
+    title: "Главная",
+    path: "/",
+    layouts: ["RootLayout (app/layout.tsx)"],
+  },
+  blog: {
+    title: "Блог",
+    path: "/blog",
+    layouts: ["RootLayout (app/layout.tsx)", "BlogLayout (app/blog/layout.tsx)"],
+  },
+  "blog-post": {
+    title: "Пост: Hello World",
+    path: "/blog/hello-world",
+    layouts: ["RootLayout (app/layout.tsx)", "BlogLayout (app/blog/layout.tsx)"],
+  },
+  dashboard: {
+    title: "Дашборд",
+    path: "/dashboard",
+    layouts: ["RootLayout (app/layout.tsx)", "DashboardLayout (app/dashboard/layout.tsx)"],
+  },
+  settings: {
+    title: "Настройки",
+    path: "/dashboard/settings",
+    layouts: [
+      "RootLayout (app/layout.tsx)",
+      "DashboardLayout (app/dashboard/layout.tsx)",
+      "SettingsLayout (app/dashboard/settings/layout.tsx)",
+    ],
+  },
+};
+
+const layoutColors: Record<string, string> = {
+  "RootLayout (app/layout.tsx)": "#4ade80",
+  "BlogLayout (app/blog/layout.tsx)": "#60a5fa",
+  "DashboardLayout (app/dashboard/layout.tsx)": "#a78bfa",
+  "SettingsLayout (app/dashboard/settings/layout.tsx)": "#fb923c",
+};
+
+export default function App() {
+  const [current, setCurrent] = useState<Page>("home");
+  const [prev, setPrev] = useState<Page | null>(null);
+  const [mode, setMode] = useState<"layout" | "template">("layout");
+
+  const navigate = (page: Page) => {
+    setPrev(current);
+    setCurrent(page);
+  };
+
+  const currentInfo = pages[current];
+  const prevInfo = prev ? pages[prev] : null;
+
+  const persistedLayouts = prevInfo
+    ? currentInfo.layouts.filter(l => prevInfo.layouts.includes(l))
+    : [];
+  const remountedLayouts = currentInfo.layouts;
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: 24,
+      fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ maxWidth: 640, margin: "0 auto" }}>
+        <h2 style={{ color: "#fff", fontSize: 20, marginBottom: 4 }}>
+          🏗️ Симулятор Layouts
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 13, marginBottom: 20 }}>
+          Навигируй по страницам и смотри, какие layouts сохраняются
+        </p>
+
+        {/* Mode toggle */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          {(["layout", "template"] as const).map(m => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              style={{
+                padding: "8px 16px", borderRadius: 8, border: "none",
+                background: mode === m ? "#000" : "#1e293b",
+                color: mode === m ? "#4ade80" : "#64748b",
+                fontWeight: mode === m ? 700 : 400,
+                cursor: "pointer", fontSize: 13,
+                borderBottom: mode === m ? "2px solid #4ade80" : "2px solid transparent"
+              }}
+            >
+              {m === "layout" ? "🔒 layout.tsx" : "🔄 template.tsx"}
+            </button>
+          ))}
+        </div>
+
+        {mode === "template" && (
+          <div style={{
+            background: "#451a03", borderRadius: 8, padding: 12,
+            marginBottom: 16, color: "#fdba74", fontSize: 13
+          }}>
+            🔄 В режиме <strong>template.tsx</strong> — все компоненты перемонтируются при каждой навигации. Состояние сбрасывается!
+          </div>
+        )}
+
+        {/* Navigation */}
+        <div style={{
+          background: "#1e293b", borderRadius: 10, padding: 16, marginBottom: 20
+        }}>
+          <div style={{ color: "#64748b", fontSize: 12, marginBottom: 10 }}>
+            НАВИГАЦИЯ — кликни для перехода:
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {(Object.entries(pages) as [Page, typeof pages[Page]][]).map(([key, info]) => (
+              <button
+                key={key}
+                onClick={() => navigate(key)}
+                style={{
+                  padding: "8px 14px", borderRadius: 8, border: "none",
+                  background: current === key ? "#000" : "#0f172a",
+                  color: current === key ? "#4ade80" : "#94a3b8",
+                  fontWeight: current === key ? 700 : 400,
+                  cursor: "pointer", fontSize: 12,
+                  borderLeft: current === key ? "3px solid #4ade80" : "3px solid transparent"
+                }}
+              >
+                {info.path}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Layout tree */}
+        <div style={{ background: "#111827", borderRadius: 10, padding: 20, border: "1px solid #1e293b" }}>
+          <div style={{ color: "#94a3b8", fontSize: 13, marginBottom: 16 }}>
+            Дерево компонентов для <strong style={{ color: "#fff" }}>{currentInfo.path}</strong>
+          </div>
+
+          {currentInfo.layouts.map((layout, i) => {
+            const persisted = mode === "layout" && persistedLayouts.includes(layout);
+            const color = layoutColors[layout] || "#4ade80";
+
+            return (
+              <div
+                key={layout}
+                style={{
+                  marginLeft: i * 20,
+                  padding: "10px 14px",
+                  borderRadius: 8,
+                  marginBottom: 6,
+                  background: persisted ? color + "15" : "#0f172a",
+                  border: \`1px solid \${persisted ? color : "#1e293b"}\`,
+                  transition: "all 0.3s"
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ color: color, fontSize: 13, fontFamily: "monospace" }}>
+                    {i > 0 ? "└─ " : ""}{layout}
+                  </span>
+                  <span style={{
+                    fontSize: 11, padding: "2px 8px", borderRadius: 4,
+                    background: (mode === "layout" && persisted) ? "#052e16" : mode === "template" ? "#2d1515" : "#0f172a",
+                    color: (mode === "layout" && persisted) ? "#4ade80" : mode === "template" ? "#f87171" : "#475569"
+                  }}>
+                    {mode === "template"
+                      ? "🔄 Перемонтирован"
+                      : persisted
+                        ? "✅ Сохранён"
+                        : prev
+                          ? "🆕 Новый"
+                          : "🆕 Инициализирован"}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Page */}
+          <div style={{
+            marginLeft: currentInfo.layouts.length * 20,
+            padding: "10px 14px", borderRadius: 8, marginBottom: 6,
+            background: "#1e293b", border: "1px solid #334155"
+          }}>
+            <span style={{ color: "#e2e8f0", fontSize: 13, fontFamily: "monospace" }}>
+              {"└─ "}{currentInfo.title} (page.tsx)
+            </span>
+            <span style={{
+              marginLeft: 12, fontSize: 11, padding: "2px 8px",
+              borderRadius: 4, background: "#2d1515", color: "#f87171"
+            }}>
+              🔄 Всегда рендерится
+            </span>
+          </div>
+        </div>
+
+        {prev && (
+          <div style={{
+            marginTop: 12, background: "#0f172a", borderRadius: 8,
+            padding: "10px 14px", fontSize: 12, color: "#64748b",
+            border: "1px solid #1e293b"
+          }}>
+            Переход: <span style={{ color: "#94a3b8" }}>{pages[prev].path}</span>
+            {" → "}
+            <span style={{ color: "#4ade80" }}>{currentInfo.path}</span>
+            {mode === "layout" && persistedLayouts.length > 0 && (
+              <span style={{ color: "#4ade80" }}>
+                {" "}— {persistedLayouts.length} layout(s) сохранено, не перерендерилось
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

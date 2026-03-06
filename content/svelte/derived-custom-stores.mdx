@@ -1,0 +1,944 @@
+## 🔄 Derived и Custom Stores
+
+Если `writable` — это «ящик с данными», то `derived` — это **вычислительная машина**, которая автоматически пересчитывает значение, когда исходные данные меняются. Думай о `derived` как о формуле в Excel: ты вводишь числа в ячейки, а формула пересчитывает результат сама 🧮
+
+---
+
+## Зачем нужны derived stores?
+
+Представь: у тебя есть список задач и ты хочешь показать количество выполненных. Можно хранить отдельный счётчик и обновлять его вручную... или просто вычислять из основного списка:
+
+```
+Без derived:                    С derived:
+let todos = writable([...])     const todos = writable([...])
+let completed = writable(0)     const completed = derived(
+                                  todos,
+// Не забудь обновить!           t => t.filter(t => t.done).length
+completed.set(newCount)         )  // Автоматически!
+```
+
+`derived` даёт **синхронизацию бесплатно** — никаких ручных обновлений!
+
+---
+
+## Базовый derived store
+
+```typescript
+import { writable, derived } from 'svelte/store'
+
+// Исходный store
+const count = writable(0)
+
+// Производный store — удваивает значение
+const doubled = derived(count, $count => $count * 2)
+
+// Сколько угодно производных от одного источника!
+const tripled  = derived(count, $count => $count * 3)
+const isEven   = derived(count, $count => $count % 2 === 0)
+const absolute = derived(count, $count => Math.abs($count))
+
+// В компоненте — подписываемся как обычно
+// $doubled, $tripled, $isEven обновляются автоматически!
+```
+
+```svelte
+<script>
+  import { writable, derived } from 'svelte/store'
+
+  const temperature = writable(0) // Цельсий
+
+  const fahrenheit = derived(
+    temperature,
+    $temp => ($temp * 9) / 5 + 32
+  )
+
+  const kelvin = derived(
+    temperature,
+    $temp => $temp + 273.15
+  )
+</script>
+
+<input type="number" bind:value={$temperature} />
+<p>Цельсий: {$temperature}°C</p>
+<p>Фаренгейт: {$fahrenheit.toFixed(1)}°F</p>
+<p>Кельвин: {$kelvin.toFixed(2)}K</p>
+```
+
+---
+
+## Derived с начальным значением
+
+Если вычисление синхронное — первое значение появляется сразу. Но можно явно задать начальное:
+
+```typescript
+const count = writable(5)
+
+// Без начального значения — derived начинает с undefined пока не вычислится
+const doubled = derived(count, $count => $count * 2)
+
+// С явным начальным значением
+const doubledWithInit = derived(
+  count,
+  ($count) => $count * 2,
+  0 // начальное значение — третий аргумент
+)
+```
+
+---
+
+## Derived из нескольких stores 🔗
+
+Вот где начинается магия! `derived` может принимать **массив** stores:
+
+```typescript
+import { writable, derived } from 'svelte/store'
+
+const firstName = writable('Яша')
+const lastName  = writable('Иванов')
+const age       = writable(10)
+
+// Берём из нескольких источников!
+const fullName = derived(
+  [firstName, lastName],
+  ([$firstName, $lastName]) => `${$firstName} ${$lastName}`
+)
+
+const greeting = derived(
+  [firstName, age],
+  ([$firstName, $age]) => {
+    if ($age < 18) return `Привет, ${$firstName}! 👋`
+    return `Добро пожаловать, ${$firstName}!`
+  }
+)
+
+// Можно комбинировать любые stores
+const userProfile = derived(
+  [firstName, lastName, age],
+  ([$firstName, $lastName, $age]) => ({
+    fullName: `${$firstName} ${$lastName}`,
+    isAdult: $age >= 18,
+    initials: `${$firstName[0]}${$lastName[0]}`,
+  })
+)
+```
+
+```svelte
+<script>
+  // Корзина и скидки из разных частей приложения
+  const cartItems = writable<CartItem[]>([])
+  const discountPercent = writable(0)
+  const promoCode = writable<string | null>(null)
+
+  const cartSummary = derived(
+    [cartItems, discountPercent, promoCode],
+    ([$items, $discount, $promo]) => {
+      const subtotal = $items.reduce((sum, item) => sum + item.price * item.qty, 0)
+      const discountAmount = subtotal * ($discount / 100)
+      const promoDiscount = $promo === 'YASHA10' ? subtotal * 0.1 : 0
+      const total = subtotal - discountAmount - promoDiscount
+
+      return {
+        subtotal,
+        discountAmount,
+        promoDiscount,
+        total,
+        itemCount: $items.reduce((sum, item) => sum + item.qty, 0),
+      }
+    }
+  )
+</script>
+
+<p>Товаров: {$cartSummary.itemCount}</p>
+<p>Итого: {$cartSummary.total.toFixed(2)} ₽</p>
+```
+
+---
+
+## Async Derived — производный с `set` 🕐
+
+Иногда вычисление производного значения требует **асинхронного запроса**. Для этого в `derived` предусмотрен callback с `set`:
+
+```typescript
+import { writable, derived } from 'svelte/store'
+
+const userId = writable<number>(1)
+
+// Async derived: вторая функция получает (stores, set) вместо просто stores
+const userProfile = derived(
+  userId,
+  ($userId, set) => {
+    // Немедленно устанавливаем состояние загрузки
+    set({ loading: true, data: null, error: null })
+
+    const controller = new AbortController()
+
+    fetch(`https://jsonplaceholder.typicode.com/users/${$userId}`, {
+      signal: controller.signal,
+    })
+      .then(res => res.json())
+      .then(data => set({ loading: false, data, error: null }))
+      .catch(err => {
+        if (err.name !== 'AbortError') {
+          set({ loading: false, data: null, error: err.message })
+        }
+      })
+
+    // Функция очистки — вызывается при смене userId!
+    return () => controller.abort()
+  },
+  { loading: true, data: null, error: null } // начальное значение
+)
+```
+
+```svelte
+<script>
+  import { writable, derived } from 'svelte/store'
+
+  const searchQuery = writable('')
+
+  const searchResults = derived(
+    searchQuery,
+    ($query, set) => {
+      if (!$query.trim()) {
+        set([])
+        return
+      }
+
+      const timer = setTimeout(() => {
+        fetch(`/api/search?q=${encodeURIComponent($query)}`)
+          .then(r => r.json())
+          .then(results => set(results))
+          .catch(() => set([]))
+      }, 300) // debounce встроенный!
+
+      // Очистка: отменяем таймер если query изменился
+      return () => clearTimeout(timer)
+    },
+    [] as SearchResult[]
+  )
+</script>
+
+<input bind:value={$searchQuery} placeholder="Поиск..." />
+{#each $searchResults as result}
+  <li>{result.title}</li>
+{/each}
+```
+
+---
+
+## Custom Stores — создаём свои хранилища 🏗️
+
+Custom store — это объект с методом `subscribe` (обязательно!) плюс любые методы, которые ты захочешь. Svelte автоматически определяет store по наличию `subscribe`:
+
+```typescript
+import { writable } from 'svelte/store'
+import type { Writable } from 'svelte/store'
+
+// Простой custom store — обёртка над writable с ограниченным API
+function createCounter(initialValue = 0) {
+  const { subscribe, set, update } = writable(initialValue)
+
+  return {
+    subscribe, // ОБЯЗАТЕЛЬНО! Иначе не store
+    increment: () => update(n => n + 1),
+    decrement: () => update(n => n - 1),
+    reset: () => set(0),
+    setValue: (n: number) => set(n),
+  }
+}
+
+// Использование
+const counter = createCounter(10)
+// $counter — реактивно!
+// counter.increment() — встроенный метод
+// НЕТ прямого counter.set() — API ограничен!
+```
+
+```svelte
+<script>
+  const counter = createCounter(0)
+</script>
+
+<button on:click={counter.decrement}>−</button>
+<span>{$counter}</span>
+<button on:click={counter.increment}>+</button>
+<button on:click={counter.reset}>Reset</button>
+```
+
+---
+
+## Custom Store с TypeScript
+
+```typescript
+import { writable } from 'svelte/store'
+
+interface Todo {
+  id: number
+  text: string
+  done: boolean
+}
+
+function createTodoStore() {
+  const { subscribe, update, set } = writable<Todo[]>([])
+  let nextId = 1
+
+  return {
+    subscribe,
+
+    add(text: string) {
+      update(todos => [...todos, { id: nextId++, text, done: false }])
+    },
+
+    toggle(id: number) {
+      update(todos =>
+        todos.map(todo =>
+          todo.id === id ? { ...todo, done: !todo.done } : todo
+        )
+      )
+    },
+
+    remove(id: number) {
+      update(todos => todos.filter(todo => todo.id !== id))
+    },
+
+    clear() {
+      set([])
+    },
+
+    clearCompleted() {
+      update(todos => todos.filter(todo => !todo.done))
+    },
+  }
+}
+
+export const todos = createTodoStore()
+```
+
+---
+
+## Паттерн Undo/Redo Store 🕰️
+
+```typescript
+import { writable, derived } from 'svelte/store'
+
+function createUndoable<T>(initialValue: T) {
+  const history = writable<T[]>([initialValue])
+  const cursor  = writable(0) // текущая позиция в истории
+
+  // Текущее значение — производное от истории и курсора
+  const current = derived(
+    [history, cursor],
+    ([$history, $cursor]) => $history[$cursor]
+  )
+
+  const canUndo = derived(cursor, $cursor => $cursor > 0)
+  const canRedo = derived(
+    [history, cursor],
+    ([$history, $cursor]) => $cursor < $history.length - 1
+  )
+
+  return {
+    subscribe: current.subscribe,
+    canUndo: canUndo,
+    canRedo: canRedo,
+
+    set(value: T) {
+      history.update($history => {
+        let $cursor = 0
+        cursor.update(c => { $cursor = c; return c; })
+
+        // Обрезаем будущее (как в любом редакторе)
+        const newHistory = [...$history.slice(0, $cursor + 1), value]
+        cursor.set(newHistory.length - 1)
+        return newHistory
+      })
+    },
+
+    undo() {
+      cursor.update(c => Math.max(0, c - 1))
+    },
+
+    redo() {
+      history.update($history => {
+        cursor.update(c => Math.min($history.length - 1, c + 1))
+        return $history
+      })
+    },
+  }
+}
+
+// Использование
+const text = createUndoable('')
+// $text — текущий текст
+// text.set('новый') — изменить с записью в историю
+// text.undo() — отменить
+// text.redo() — повторить
+// $text.canUndo — можно ли отменить?
+```
+
+---
+
+## Паттерн Pagination Store 📄
+
+```typescript
+function createPaginationStore(totalItems: number, itemsPerPage = 10) {
+  const { subscribe, update, set } = writable({
+    currentPage: 1,
+    itemsPerPage,
+    totalItems,
+  })
+
+  const pagination = {
+    subscribe,
+
+    // Производные вычисления
+    get totalPages() {
+      let state = { currentPage: 1, itemsPerPage, totalItems }
+      subscribe(s => { state = s })()
+      return Math.ceil(state.totalItems / state.itemsPerPage)
+    },
+
+    setPage(page: number) {
+      update(s => ({
+        ...s,
+        currentPage: Math.max(1, Math.min(page, Math.ceil(s.totalItems / s.itemsPerPage))),
+      }))
+    },
+
+    nextPage() { this.setPage(this.page + 1) },
+    prevPage() { this.setPage(this.page - 1) },
+
+    setTotalItems(total: number) {
+      update(s => ({ ...s, totalItems: total, currentPage: 1 }))
+    },
+
+    getRange() {
+      let state = { currentPage: 1, itemsPerPage, totalItems }
+      subscribe(s => { state = s })()
+      const start = (state.currentPage - 1) * state.itemsPerPage
+      const end   = Math.min(start + state.itemsPerPage, state.totalItems)
+      return { start, end }
+    },
+  }
+
+  return pagination
+}
+```
+
+---
+
+## Паттерн Form Store 📝
+
+```typescript
+import { writable, derived } from 'svelte/store'
+
+interface FormField {
+  value: string
+  error: string | null
+  touched: boolean
+}
+
+type FormSchema<T extends Record<string, unknown>> = {
+  [K in keyof T]: {
+    initial: string
+    validate: (value: string) => string | null
+  }
+}
+
+function createFormStore<T extends Record<string, string>>(
+  schema: FormSchema<T>
+) {
+  const keys = Object.keys(schema) as (keyof T)[]
+
+  const fields = writable<Record<keyof T, FormField>>(
+    Object.fromEntries(
+      keys.map(key => [
+        key,
+        { value: schema[key].initial, error: null, touched: false },
+      ])
+    ) as Record<keyof T, FormField>
+  )
+
+  const isValid = derived(fields, $fields =>
+    keys.every(key => {
+      const field = $fields[key]
+      const error = schema[key].validate(field.value)
+      return error === null
+    })
+  )
+
+  const isDirty = derived(fields, $fields =>
+    keys.some(key => $fields[key].value !== schema[key].initial)
+  )
+
+  return {
+    fields,
+    isValid,
+    isDirty,
+
+    setValue(key: keyof T, value: string) {
+      fields.update($fields => ({
+        ...$fields,
+        [key]: {
+          ...$fields[key],
+          value,
+          touched: true,
+          error: schema[key].validate(value),
+        },
+      }))
+    },
+
+    touch(key: keyof T) {
+      fields.update($fields => ({
+        ...$fields,
+        [key]: {
+          ...$fields[key],
+          touched: true,
+          error: schema[key].validate($fields[key].value),
+        },
+      }))
+    },
+
+    reset() {
+      fields.set(
+        Object.fromEntries(
+          keys.map(key => [
+            key,
+            { value: schema[key].initial, error: null, touched: false },
+          ])
+        ) as Record<keyof T, FormField>
+      )
+    },
+
+    getValues() {
+      let result = {} as T
+      fields.subscribe($fields => {
+        result = Object.fromEntries(
+          keys.map(key => [key, $fields[key].value])
+        ) as T
+      })()
+      return result
+    },
+  }
+}
+
+// Использование!
+const loginForm = createFormStore({
+  email: {
+    initial: '',
+    validate: (v) => v.includes('@') ? null : 'Некорректный email',
+  },
+  password: {
+    initial: '',
+    validate: (v) => v.length >= 6 ? null : 'Минимум 6 символов',
+  },
+})
+```
+
+---
+
+## Readable Store — только для чтения
+
+Когда данные должны меняться только внутри (внешний код не может `set`):
+
+```typescript
+import { readable } from 'svelte/store'
+
+// Текущее время — меняется само, нельзя изменить снаружи
+const time = readable(new Date(), function start(set) {
+  const interval = setInterval(() => {
+    set(new Date())
+  }, 1000)
+
+  // Функция очистки
+  return function stop() {
+    clearInterval(interval)
+  }
+})
+
+// Состояние геолокации
+const geolocation = readable<GeolocationPosition | null>(null, set => {
+  const id = navigator.geolocation.watchPosition(
+    position => set(position),
+    () => set(null)
+  )
+  return () => navigator.geolocation.clearWatch(id)
+})
+```
+
+---
+
+## Дерево решений: какой store выбрать? 🌳
+
+```
+Тебе нужно хранить данные?
+│
+├─ Данные меняются СНАРУЖИ компонента?
+│  ├─ ДА → writable()
+│  └─ НЕТ → readable()
+│
+├─ Данные ВЫЧИСЛЯЮТСЯ из других stores?
+│  └─ derived()
+│
+├─ Нужны КАСТОМНЫЕ МЕТОДЫ (add, remove, toggle)?
+│  └─ createCustomStore() — фабричная функция
+│
+└─ Данные нужны только ВНУТРИ компонента?
+   └─ Просто let в <script> — это реактивно в Svelte!
+
+
+Подсказка: Начни с writable. Если:
+  - Нужно вычислять → derived
+  - Нужны методы → custom store  
+  - Нельзя изменить снаружи → readable
+  - Только в компоненте → let (Svelte реактивность)
+```
+
+---
+
+## Паттерн: Store как синглтон vs фабрика
+
+```typescript
+// ❌ Синглтон — одно состояние на всё приложение
+// stores/counter.ts
+export const counter = writable(0)  // Один экземпляр на всех!
+
+// ✅ Фабрика — каждый компонент получает свой экземпляр
+// stores/counter.ts
+export function createCounter(initial = 0) {
+  return writable(initial)
+}
+
+// В компоненте:
+// const myCounter = createCounter(5)  // Свой счётчик!
+```
+
+---
+
+## Подписка вне компонента
+
+```typescript
+import { count } from './stores'
+
+// Подписка с немедленным вызовом
+const unsubscribe = count.subscribe(value => {
+  console.log('count изменился:', value)
+})
+
+// Не забудь отписаться! (Svelte делает это автоматически в компоненте)
+unsubscribe()
+
+// Получить текущее значение БЕЗ подписки
+let currentValue: number
+const unsub = count.subscribe(v => currentValue = v)
+unsub() // Отписываемся сразу
+// currentValue теперь содержит текущее значение
+```
+
+---
+
+## Stores в TypeScript: типизация
+
+```typescript
+import { writable, derived, readable } from 'svelte/store'
+import type { Readable, Writable } from 'svelte/store'
+
+// Явная типизация
+const count: Writable<number> = writable(0)
+const name: Writable<string> = writable('')
+const user: Writable<User | null> = writable(null)
+
+// Typed custom store
+interface CounterStore extends Readable<number> {
+  increment: () => void
+  decrement: () => void
+  reset: () => void
+}
+
+function createTypedCounter(initial = 0): CounterStore {
+  const { subscribe, update, set } = writable(initial)
+  return {
+    subscribe,
+    increment: () => update(n => n + 1),
+    decrement: () => update(n => n - 1),
+    reset: () => set(0),
+  }
+}
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useCallback } from 'react';
+
+const BG = '#0f172a';
+const SVELTE = '#ff3e00';
+const YELLOW = '#ffba00';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+
+// ---- Симуляция Svelte stores ----
+
+function writable<T>(initial: T) {
+  let value = initial;
+  const subs: Array<(v: T) => void> = [];
+  return {
+    get: () => value,
+    set: (v: T) => { value = v; subs.forEach(fn => fn(v)); },
+    update: (fn: (v: T) => T) => { value = fn(value); subs.forEach(f => f(value)); },
+    subscribe: (fn: (v: T) => void) => { subs.push(fn); fn(value); return () => subs.splice(subs.indexOf(fn), 1); },
+  };
+}
+
+type Demo = 'basic' | 'multi' | 'custom' | 'undo';
+
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('basic');
+
+  // --- Basic derived ---
+  const [baseCount, setBaseCount] = useState(5);
+  const doubled  = baseCount * 2;
+  const squared  = baseCount * baseCount;
+  const isEven   = baseCount % 2 === 0;
+  const absVal   = Math.abs(baseCount);
+
+  // --- Multi-source derived ---
+  const [firstName, setFirstName] = useState('Яша');
+  const [lastName, setLastName] = useState('Иванов');
+  const [age, setAge] = useState(10);
+  const fullName = firstName + ' ' + lastName;
+  const greeting = age < 18
+    ? ('Привет, ' + firstName + '! 👋')
+    : ('Добро пожаловать, ' + firstName + '!');
+  const initials = (firstName[0] || '') + (lastName[0] || '');
+
+  // --- Custom store ---
+  const [todos, setTodos] = useState<{id:number;text:string;done:boolean}[]>([
+    {id:1, text:'Выучить Svelte stores', done: true},
+    {id:2, text:'Написать custom store', done: false},
+    {id:3, text:'Сделать derived store', done: false},
+  ]);
+  const [newTodo, setNewTodo] = useState('');
+  const doneCount = todos.filter(t => t.done).length;
+  const todoCount = todos.filter(t => !t.done).length;
+  const progress  = todos.length > 0 ? Math.round((doneCount / todos.length) * 100) : 0;
+
+  const addTodo = () => {
+    if (!newTodo.trim()) return;
+    setTodos(prev => [...prev, {id: Date.now(), text: newTodo.trim(), done: false}]);
+    setNewTodo('');
+  };
+  const toggleTodo = (id: number) => {
+    setTodos(prev => prev.map(t => t.id === id ? {...t, done: !t.done} : t));
+  };
+  const removeTodo = (id: number) => {
+    setTodos(prev => prev.filter(t => t.id !== id));
+  };
+
+  // --- Undo/Redo ---
+  const [undoHistory, setUndoHistory] = useState<string[]>(['']);
+  const [undoCursor, setUndoCursor] = useState(0);
+  const currentText = undoHistory[undoCursor] || '';
+
+  const undoSetText = (text: string) => {
+    setUndoHistory(prev => {
+      const newHistory = [...prev.slice(0, undoCursor + 1), text];
+      setUndoCursor(newHistory.length - 1);
+      return newHistory;
+    });
+  };
+  const undo = () => setUndoCursor(c => Math.max(0, c - 1));
+  const redo = () => setUndoCursor(c => Math.min(undoHistory.length - 1, c + 1));
+  const canUndo = undoCursor > 0;
+  const canRedo = undoCursor < undoHistory.length - 1;
+
+  const tabs: {key: Demo; label: string; icon: string}[] = [
+    {key: 'basic',  label: 'derived(store, fn)',        icon: '📐'},
+    {key: 'multi',  label: 'derived([a,b], fn)',        icon: '🔗'},
+    {key: 'custom', label: 'Custom Store',              icon: '🏗️'},
+    {key: 'undo',   label: 'Undo/Redo Store',           icon: '↩️'},
+  ];
+
+  const inputStyle = {
+    padding: '0.5rem 0.75rem', borderRadius: '6px',
+    border: '1px solid ' + BORDER, background: '#0a0f1e',
+    color: TEXT, fontSize: '0.85rem', outline: 'none', width: '100%',
+    boxSizing: 'border-box' as const,
+  };
+
+  const btnStyle = (color: string, disabled = false) => ({
+    padding: '0.4rem 0.9rem', borderRadius: '6px', border: 'none',
+    background: disabled ? '#1e293b' : color,
+    color: disabled ? MUTED : (color === SVELTE || color === YELLOW ? '#0f172a' : TEXT),
+    cursor: disabled ? 'not-allowed' : 'pointer', fontSize: '0.82rem', fontWeight: 600,
+  });
+
+  return (
+    <div style={{background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: TEXT}}>
+      <h2 style={{color: SVELTE, marginBottom: '0.25rem', fontSize: '1.2rem'}}>🔄 Derived &amp; Custom Stores</h2>
+      <p style={{color: MUTED, fontSize: '0.78rem', marginBottom: '1.25rem'}}>
+        Интерактивное демо — производные и кастомные хранилища Svelte
+      </p>
+
+      <div style={{display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '1.25rem'}}>
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setDemo(t.key)} style={{
+            padding: '0.4rem 0.8rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+            background: demo === t.key ? SVELTE : CARD,
+            color: demo === t.key ? '#0f172a' : '#94a3b8',
+            fontWeight: demo === t.key ? 700 : 400, fontSize: '0.78rem',
+          }}>
+            {t.icon} {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{background: CARD, border: '1px solid ' + BORDER, borderRadius: '10px', padding: '1.25rem'}}>
+
+        {demo === 'basic' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// const doubled = derived(count, $c => $c * 2)'}
+            </div>
+            <div style={{display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem'}}>
+              <button onClick={() => setBaseCount(c => c - 1)} style={btnStyle(SVELTE)}>−</button>
+              <div style={{textAlign: 'center', minWidth: '80px'}}>
+                <div style={{fontSize: '2.5rem', fontWeight: 900, color: SVELTE, lineHeight: 1}}>{baseCount}</div>
+                <div style={{color: MUTED, fontSize: '0.7rem'}}>$count (writable)</div>
+              </div>
+              <button onClick={() => setBaseCount(c => c + 1)} style={btnStyle(SVELTE)}>+</button>
+              <button onClick={() => setBaseCount(0)} style={btnStyle(BORDER)}>Reset</button>
+            </div>
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem'}}>
+              {[
+                {label: 'doubled', formula: '$count * 2', value: doubled, color: YELLOW},
+                {label: 'squared', formula: '$count ** 2', value: squared, color: '#60a5fa'},
+                {label: 'isEven',  formula: '$count % 2 === 0', value: String(isEven), color: '#34d399'},
+                {label: 'absolute',formula: 'Math.abs($count)', value: absVal, color: '#c084fc'},
+              ].map(item => (
+                <div key={item.label} style={{background: '#0a0f1e', borderRadius: '8px', padding: '0.75rem', border: '1px solid ' + BORDER}}>
+                  <div style={{color: item.color, fontWeight: 700, marginBottom: '0.25rem'}}>{'$' + item.label}</div>
+                  <div style={{fontSize: '1.8rem', fontWeight: 900, color: item.color, marginBottom: '0.25rem'}}>{String(item.value)}</div>
+                  <div style={{color: MUTED, fontSize: '0.7rem'}}>{item.formula}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {demo === 'multi' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// derived([firstName, lastName, age], ([$a,$b,$c]) => ...)'}
+            </div>
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem'}}>
+              <div>
+                <label style={{color: MUTED, fontSize: '0.7rem', display: 'block', marginBottom: '0.3rem'}}>firstName (writable)</label>
+                <input value={firstName} onChange={e => setFirstName(e.target.value)} style={inputStyle} />
+              </div>
+              <div>
+                <label style={{color: MUTED, fontSize: '0.7rem', display: 'block', marginBottom: '0.3rem'}}>lastName (writable)</label>
+                <input value={lastName} onChange={e => setLastName(e.target.value)} style={inputStyle} />
+              </div>
+            </div>
+            <div style={{marginBottom: '1rem'}}>
+              <label style={{color: MUTED, fontSize: '0.7rem', display: 'block', marginBottom: '0.3rem'}}>age: {age}</label>
+              <input type="range" min={1} max={30} value={age} onChange={e => setAge(Number(e.target.value))} style={{width: '100%', accentColor: SVELTE}} />
+            </div>
+            <div style={{display: 'flex', flexDirection: 'column', gap: '0.5rem'}}>
+              {[
+                {label: '$fullName', value: fullName, color: SVELTE},
+                {label: '$greeting', value: greeting, color: YELLOW},
+                {label: '$initials', value: initials, color: '#60a5fa'},
+              ].map(item => (
+                <div key={item.label} style={{background: '#0a0f1e', padding: '0.6rem 0.9rem', borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                  <span style={{color: MUTED, fontSize: '0.78rem'}}>{item.label}</span>
+                  <span style={{color: item.color, fontWeight: 700}}>{item.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {demo === 'custom' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// createTodoStore() — subscribe + add, toggle, remove методы'}
+            </div>
+            <div style={{marginBottom: '1rem'}}>
+              <div style={{display: 'grid', gridTemplateColumns: '1fr auto', gap: '0.5rem'}}>
+                <input
+                  value={newTodo} onChange={e => setNewTodo(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addTodo()}
+                  placeholder="Новая задача..." style={inputStyle}
+                />
+                <button onClick={addTodo} style={btnStyle(SVELTE)}>+ Add</button>
+              </div>
+            </div>
+            <div style={{marginBottom: '1rem', display: 'flex', flexDirection: 'column', gap: '0.4rem', maxHeight: '160px', overflowY: 'auto'}}>
+              {todos.map(todo => (
+                <div key={todo.id} style={{display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#0a0f1e', padding: '0.5rem 0.75rem', borderRadius: '6px', border: '1px solid ' + BORDER}}>
+                  <input type="checkbox" checked={todo.done} onChange={() => toggleTodo(todo.id)} style={{accentColor: SVELTE}} />
+                  <span style={{flex: 1, color: todo.done ? MUTED : TEXT, textDecoration: todo.done ? 'line-through' : 'none', fontSize: '0.85rem'}}>{todo.text}</span>
+                  <button onClick={() => removeTodo(todo.id)} style={{background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', padding: 0}}>✕</button>
+                </div>
+              ))}
+            </div>
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.5rem'}}>
+              {[
+                {label: '$doneCount (derived)', value: doneCount, color: '#34d399'},
+                {label: '$todoCount (derived)', value: todoCount, color: YELLOW},
+                {label: '$progress (derived)', value: progress + '%', color: SVELTE},
+              ].map(item => (
+                <div key={item.label} style={{background: '#0a0f1e', padding: '0.6rem', borderRadius: '6px', textAlign: 'center' as const}}>
+                  <div style={{fontSize: '1.4rem', fontWeight: 900, color: item.color}}>{item.value}</div>
+                  <div style={{color: MUTED, fontSize: '0.62rem', marginTop: '0.2rem'}}>{item.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {demo === 'undo' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+              {'// createUndoable() — writable + история изменений'}
+            </div>
+            <textarea
+              value={currentText}
+              onChange={e => undoSetText(e.target.value)}
+              placeholder="Печатай текст..."
+              rows={4}
+              style={{...inputStyle, resize: 'vertical', fontFamily: 'monospace', display: 'block', marginBottom: '0.75rem'}}
+            />
+            <div style={{display: 'flex', gap: '0.5rem', marginBottom: '1rem'}}>
+              <button onClick={undo} disabled={!canUndo} style={btnStyle(SVELTE, !canUndo)}>↩ Undo</button>
+              <button onClick={redo} disabled={!canRedo} style={btnStyle(YELLOW, !canRedo)}>Redo ↪</button>
+            </div>
+            <div style={{background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.78rem'}}>
+              <div style={{color: MUTED, marginBottom: '0.25rem'}}>История ({undoHistory.length} шагов):</div>
+              <div style={{display: 'flex', gap: '0.25rem', flexWrap: 'wrap' as const}}>
+                {undoHistory.map((h, i) => (
+                  <span key={i} style={{
+                    padding: '0.15rem 0.4rem', borderRadius: '4px',
+                    background: i === undoCursor ? SVELTE : BORDER,
+                    color: i === undoCursor ? '#0f172a' : MUTED,
+                    fontSize: '0.7rem',
+                  }}>
+                    {h.slice(0, 8) || '(empty)'}
+                  </span>
+                ))}
+              </div>
+              <div style={{color: MUTED, marginTop: '0.5rem', fontSize: '0.7rem'}}>
+                Позиция: {undoCursor + 1} / {undoHistory.length} &nbsp;|&nbsp; canUndo: <span style={{color: canUndo ? '#34d399' : '#ef4444'}}>{String(canUndo)}</span> &nbsp;|&nbsp; canRedo: <span style={{color: canRedo ? '#34d399' : '#ef4444'}}>{String(canRedo)}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+` }} />

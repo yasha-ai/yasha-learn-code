@@ -1,0 +1,739 @@
+## Composition API — сердце Vue 3 🧩
+
+Представь, что ты переехал в новую квартиру и расставляешь вещи. Options API говорит: «Все книги — в одну комнату, все инструменты — в другую, всю одежду — в третью». Удобно? Наверное. Но когда тебе нужно готовить завтрак, ты прыгаешь между кухней, кладовкой и ванной. Composition API говорит: «Всё для завтрака — на кухне, всё для работы — в кабинете». Вот разница! 🏠
+
+---
+
+### Почему Composition API? 🤔
+
+**Проблема Options API с большими компонентами:**
+
+```
+Options API — код одной фичи разбросан по файлу:
+
+data() {        ← 🟦 user данные здесь
+  user: null,
+  userLoading: false,
+  cart: [],     ← 🟥 cart данные тут
+}
+
+computed: {
+  userFullName() {...},  ← 🟦 user логика
+  cartTotal() {...},     ← 🟥 cart логика
+}
+
+methods: {
+  fetchUser() {...},    ← 🟦 user логика (далеко от data!)
+  addToCart() {...},    ← 🟥 cart логика
+  removeFromCart() {...} ← 🟥 cart логика
+}
+
+mounted() {
+  this.fetchUser()      ← 🟦 user логика (ещё дальше!)
+}
+```
+
+**Composition API — каждая фича вместе:**
+
+```typescript
+// useUser.ts — ВСЯ user логика в одном месте 🟦
+export function useUser() {
+  const user = ref(null)
+  const loading = ref(false)
+  const fullName = computed(() => user.value?.name)
+  const fetchUser = async () => { loading.value = true; ... }
+  onMounted(fetchUser)
+  return { user, loading, fullName, fetchUser }
+}
+
+// useCart.ts — ВСЯ cart логика в одном месте 🟥
+export function useCart() {
+  const cart = ref([])
+  const total = computed(() => cart.value.reduce(...))
+  const addToCart = (item) => cart.value.push(item)
+  return { cart, total, addToCart }
+}
+```
+
+---
+
+### `<script setup>` — магия без шаблонного кода ✨
+
+`<script setup>` — это синтаксический сахар Vue 3.2. Компилятор Vue превращает его в `setup()` автоматически:
+
+```vue
+<!-- С <script setup> — чисто и кратко -->
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+const count = ref(0)
+const doubled = computed(() => count.value * 2)
+const increment = () => count.value++
+
+// Всё автоматически доступно в шаблоне! ✅
+</script>
+```
+
+```vue
+<!-- Без <script setup> — verbose эквивалент -->
+<script lang="ts">
+import { ref, computed, defineComponent } from 'vue'
+
+export default defineComponent({
+  setup() {
+    const count = ref(0)
+    const doubled = computed(() => count.value * 2)
+    const increment = () => count.value++
+
+    // Нужно явно возвращать всё! ❌
+    return { count, doubled, increment }
+  }
+})
+</script>
+```
+
+---
+
+### `setup()` функция — подробно 🔍
+
+```typescript
+import { ref, computed, onMounted, defineComponent } from 'vue'
+
+export default defineComponent({
+  name: 'UserProfile',
+
+  props: {
+    userId: { type: Number, required: true }
+  },
+
+  emits: ['updated'],
+
+  // setup() получает props и context
+  setup(props, context) {
+    // context содержит:
+    // context.attrs  — нереактивные атрибуты (fallthrough attrs)
+    // context.slots  — слоты
+    // context.emit   — функция emit
+    // context.expose — контроль публичного API компонента
+
+    const { emit, expose } = context
+
+    const user = ref(null)
+
+    // props реактивны! props.userId — Proxy
+    const userId = computed(() => props.userId)
+
+    const loadUser = async () => {
+      // Используем props.userId напрямую
+      user.value = await fetchUser(props.userId)
+    }
+
+    onMounted(loadUser)
+
+    // expose — что видно через template refs
+    expose({ reload: loadUser })
+
+    return { user, loadUser }
+  }
+})
+```
+
+---
+
+### defineProps — типизированные props 📥
+
+```vue
+<script setup lang="ts">
+// Способ 1: Generic тип — только TypeScript (рекомендуется!)
+const props = defineProps<{
+  title: string
+  count?: number           // опциональный
+  items: string[]
+  user: { name: string; age: number }
+}>()
+
+// Способ 2: Runtime объект — работает и без TypeScript
+const props = defineProps({
+  title: {
+    type: String,
+    required: true
+  },
+  count: {
+    type: Number,
+    default: 0
+  },
+  items: {
+    type: Array as PropType<string[]>,
+    default: () => []
+  }
+})
+</script>
+```
+
+#### withDefaults — значения по умолчанию для generic props
+
+```vue
+<script setup lang="ts">
+import { withDefaults } from 'vue'
+
+interface Props {
+  title: string
+  count?: number
+  items?: string[]
+  theme?: 'light' | 'dark'
+}
+
+// withDefaults — дефолтные значения для TypeScript props
+const props = withDefaults(defineProps<Props>(), {
+  count: 0,
+  items: () => [],      // массивы и объекты — всегда фабрика!
+  theme: 'light'
+})
+
+// Теперь props.count — всегда number (не number | undefined)
+console.log(props.count)  // 0
+console.log(props.theme)  // 'light'
+</script>
+```
+
+---
+
+### defineEmits — типизированные события 📤
+
+```vue
+<script setup lang="ts">
+// Способ 1: TypeScript callable syntax (Vue 3.3+) — рекомендуется
+const emit = defineEmits<{
+  click: []                        // без аргументов
+  change: [value: string]          // один аргумент
+  update: [id: number, data: User] // несколько аргументов
+  'item-selected': [item: Item]    // kebab-case событие
+}>()
+
+// Способ 2: Array syntax
+const emit = defineEmits(['click', 'change', 'update'])
+
+// Способ 3: Object syntax с валидацией
+const emit = defineEmits({
+  click: null,                    // без валидации
+  change: (value: string) => {    // с валидацией
+    return value.length > 0
+  }
+})
+
+// Использование
+const handleClick = () => {
+  emit('click')
+  emit('change', 'новое значение')
+  emit('update', 42, { name: 'Яша' })
+}
+</script>
+```
+
+---
+
+### defineExpose — публичный API компонента 🔓
+
+По умолчанию компоненты с `<script setup>` **закрыты** — родитель не может получить доступ к их данным через ref. `defineExpose` открывает нужное:
+
+```vue
+<!-- Child.vue -->
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const inputRef = ref<HTMLInputElement | null>(null)
+const value = ref('')
+const count = ref(0)
+
+// Открываем только публичный API
+defineExpose({
+  focus() { inputRef.value?.focus() },
+  reset() { value.value = ''; count.value = 0 },
+  getValue() { return value.value }
+})
+// count и inputRef остаются приватными!
+</script>
+```
+
+```vue
+<!-- Parent.vue -->
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import Child from './Child.vue'
+
+// Тип InstanceType позволяет получить тип expose
+const childRef = ref<InstanceType<typeof Child> | null>(null)
+
+onMounted(() => {
+  childRef.value?.focus()   // ✅ доступно
+  childRef.value?.reset()   // ✅ доступно
+  // childRef.value?.count  // ❌ TypeScript ошибка!
+})
+</script>
+
+<template>
+  <Child ref="childRef" />
+</template>
+```
+
+---
+
+### defineComponent — для Options API + TypeScript 🔧
+
+```typescript
+// Когда нужны явные типы с Options API
+import { defineComponent, PropType } from 'vue'
+
+interface User {
+  id: number
+  name: string
+}
+
+export default defineComponent({
+  name: 'UserList',
+
+  props: {
+    users: {
+      type: Array as PropType<User[]>,
+      required: true
+    }
+  },
+
+  emits: {
+    select(user: User) { return user.id > 0 }
+  },
+
+  setup(props, { emit }) {
+    const selectUser = (user: User) => emit('select', user)
+    return { selectUser }
+  }
+})
+```
+
+---
+
+### Логика по фиче — composables 🪝
+
+Composition API раскрывается полностью, когда ты выносишь логику в composables:
+
+```typescript
+// composables/useCounter.ts
+import { ref, computed } from 'vue'
+
+export function useCounter(initialValue = 0) {
+  const count = ref(initialValue)
+  const doubled = computed(() => count.value * 2)
+  const isNegative = computed(() => count.value < 0)
+
+  const increment = () => count.value++
+  const decrement = () => count.value--
+  const reset = () => count.value = initialValue
+
+  return {
+    count,
+    doubled,
+    isNegative,
+    increment,
+    decrement,
+    reset
+  }
+}
+
+// Использование в компоненте
+import { useCounter } from '@/composables/useCounter'
+
+const { count, doubled, increment } = useCounter(10)
+// count.value = 10, doubled.value = 20
+```
+
+```typescript
+// composables/useFetch.ts — универсальный хук для HTTP запросов
+import { ref, computed } from 'vue'
+
+export function useFetch<T>(url: string) {
+  const data = ref<T | null>(null)
+  const error = ref<Error | null>(null)
+  const loading = ref(false)
+
+  const fetch = async () => {
+    loading.value = true
+    error.value = null
+    try {
+      const response = await globalThis.fetch(url)
+      if (!response.ok) throw new Error(response.statusText)
+      data.value = await response.json()
+    } catch (e) {
+      error.value = e as Error
+    } finally {
+      loading.value = false
+    }
+  }
+
+  const isEmpty = computed(() => !data.value)
+
+  // Автоматически загружаем при монтировании
+  fetch()
+
+  return { data, error, loading, isEmpty, refresh: fetch }
+}
+
+// Использование
+const { data: users, loading, error } = useFetch<User[]>('/api/users')
+```
+
+---
+
+### Реактивность в setup — важные правила ⚠️
+
+```typescript
+// ✅ Правильно — ref и reactive реактивны
+const count = ref(0)
+const user = reactive({ name: 'Яша', age: 25 })
+
+// ❌ Деструктуризация ломает реактивность reactive!
+const { name, age } = user  // name и age — обычные примитивы, не реактивны!
+
+// ✅ toRefs сохраняет реактивность
+import { toRefs } from 'vue'
+const { name, age } = toRefs(user)  // name.value и age.value — реактивны
+
+// ✅ props тоже нельзя деструктурировать напрямую
+const props = defineProps<{ title: string }>()
+const { title } = props  // ❌ не реактивно!
+const { title } = toRefs(props)  // ✅ реактивно
+```
+
+---
+
+### Порядок выполнения setup() 📋
+
+```typescript
+setup() {
+  // 1️⃣ Реактивные данные
+  const count = ref(0)
+
+  // 2️⃣ Вычисляемые свойства (зависят от данных)
+  const doubled = computed(() => count.value * 2)
+
+  // 3️⃣ Функции и методы
+  const increment = () => count.value++
+
+  // 4️⃣ Watchers
+  watch(count, (newVal) => console.log(newVal))
+
+  // 5️⃣ Lifecycle hooks
+  onMounted(() => console.log('Компонент монтирован'))
+  onUnmounted(() => console.log('Компонент удалён'))
+
+  // 6️⃣ Return (если не <script setup>)
+  return { count, doubled, increment }
+}
+```
+
+---
+
+### Composition API vs Options API — когда что? 📊
+
+| Критерий | Options API | Composition API |
+|---------|-------------|-----------------|
+| **Обучение** | Легче для новичков | Требует понимания реактивности |
+| **Переиспользование** | Mixins (конфликты, неявность) | Composables (чисто, явно) |
+| **TypeScript** | Нужны хелперы | Из коробки |
+| **Большие компоненты** | Логика разбросана | Логика по фичам |
+| **Маленькие компоненты** | Отлично | Тоже отлично |
+| **Рекомендация Vue** | Legacy, но поддерживается | ✅ Рекомендуется |
+
+---
+
+### Резюме 🎯
+
+Composition API — это:
+- **`<script setup>`** — синтаксис без boilerplate
+- **`defineProps<T>()`** — типизированные props
+- **`defineEmits<T>()`** — типизированные события
+- **`defineExpose()`** — контроль публичного API
+- **Composables** — переиспользуемые куски логики
+
+Следующий урок — Options API (для полноты картины)! 📋
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from "react";
+
+// Симуляция Composition API vs Options API
+const optionsApiCode = \`export default {
+  name: 'UserDashboard',
+  data() {
+    return {
+      // 🟦 User данные
+      user: null,
+      userLoading: false,
+      // 🟥 Cart данные (перемешаны!)
+      cart: [],
+      cartLoading: false,
+    }
+  },
+  computed: {
+    // 🟦 User вычисления
+    userFullName() {
+      return this.user?.name
+    },
+    // 🟥 Cart вычисления
+    cartTotal() {
+      return this.cart.reduce((s, i) => s + i.price, 0)
+    }
+  },
+  methods: {
+    // 🟦 User методы
+    async fetchUser() {
+      this.userLoading = true
+      this.user = await api.getUser()
+      this.userLoading = false
+    },
+    // 🟥 Cart методы (далеко от cart data!)
+    addToCart(item) { this.cart.push(item) },
+    removeFromCart(id) {
+      this.cart = this.cart.filter(i => i.id !== id)
+    }
+  },
+  mounted() {
+    // 🟦 User lifecycle (ещё дальше!)
+    this.fetchUser()
+  }
+}\`;
+
+const compositionApiCode = \`// 🟦 useUser.ts — ВСЯ user логика ВМЕСТЕ
+export function useUser() {
+  const user = ref(null)
+  const loading = ref(false)
+  const fullName = computed(() => user.value?.name)
+
+  const fetchUser = async () => {
+    loading.value = true
+    user.value = await api.getUser()
+    loading.value = false
+  }
+
+  onMounted(fetchUser)
+
+  return { user, loading, fullName, fetchUser }
+}
+
+// 🟥 useCart.ts — ВСЯ cart логика ВМЕСТЕ
+export function useCart() {
+  const cart = ref([])
+  const total = computed(
+    () => cart.value.reduce((s, i) => s + i.price, 0)
+  )
+  const addToCart = (item) => cart.value.push(item)
+  const removeFromCart = (id) => {
+    cart.value = cart.value.filter(i => i.id !== id)
+  }
+  return { cart, total, addToCart, removeFromCart }
+}
+
+// Компонент — только комбинирует composables!
+<script setup>
+const { user, loading: userLoading, fullName } = useUser()
+const { cart, total, addToCart } = useCart()
+</\${"script"}>\`;
+
+const definePropsCode = \`<script setup lang="ts">
+// Generic тип (рекомендуется)
+const props = withDefaults(
+  defineProps<{
+    title: string
+    count?: number
+    items?: string[]
+    theme?: 'light' | 'dark'
+  }>(),
+  {
+    count: 0,
+    items: () => [],
+    theme: 'light'
+  }
+)
+
+// Типы автоматически выведены!
+props.title  // string
+props.count  // number (не undefined!)
+props.theme  // 'light' | 'dark'
+</\${"script"}>\`;
+
+const defineEmitsCode = \`<script setup lang="ts">
+const emit = defineEmits<{
+  click: []
+  change: [value: string]
+  update: [id: number, user: User]
+}>()
+
+// TypeScript знает аргументы!
+emit('click')             // ✅
+emit('change', 'hello')   // ✅
+emit('change')            // ❌ TypeScript ошибка!
+emit('unknown')           // ❌ TypeScript ошибка!
+</\${"script"}>\`;
+
+const examples = [
+  { id: "compare", label: "Options vs Composition", icon: "⚔️" },
+  { id: "props", label: "defineProps", icon: "📥" },
+  { id: "emits", label: "defineEmits", icon: "📤" },
+];
+
+export default function CompositionAPIDemo() {
+  const [activeExample, setActiveExample] = useState("compare");
+  const [activeTab, setActiveTab] = useState("options");
+
+  // Симуляция счётчика (как в Composition API)
+  const [count, setCount] = useState(0);
+  const doubled = count * 2;
+  const isNegative = count < 0;
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: "20px",
+      fontFamily: "system-ui, sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ textAlign: "center", marginBottom: "20px" }}>
+        <span style={{ fontSize: "40px" }}>🧩</span>
+        <h2 style={{ margin: "8px 0 4px", color: "#42b883" }}>Composition API</h2>
+        <p style={{ color: "#64748b", margin: 0, fontSize: "13px" }}>
+          Интерактивное сравнение с Options API
+        </p>
+      </div>
+
+      {/* Пример useCounter в действии */}
+      <div style={{
+        background: "#1e293b", borderRadius: "12px", padding: "16px",
+        border: "1px solid #334155", marginBottom: "16px"
+      }}>
+        <div style={{ fontSize: "13px", color: "#42b883", fontWeight: "bold", marginBottom: "12px" }}>
+          🪝 useCounter() — composable в действии
+        </div>
+        <div style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "12px" }}>
+          <button
+            onClick={() => setCount(c => c - 1)}
+            style={{
+              width: "36px", height: "36px", borderRadius: "8px",
+              border: "none", cursor: "pointer",
+              background: "#ef4444", color: "white", fontSize: "18px"
+            }}
+          >−</button>
+          <div style={{
+            flex: 1, textAlign: "center", padding: "8px",
+            background: "#0f172a", borderRadius: "8px",
+            border: "1px solid #334155"
+          }}>
+            <div style={{ fontSize: "24px", fontWeight: "bold", color: isNegative ? "#ef4444" : "#42b883" }}>
+              {count}
+            </div>
+            <div style={{ fontSize: "11px", color: "#64748b" }}>count.value</div>
+          </div>
+          <button
+            onClick={() => setCount(c => c + 1)}
+            style={{
+              width: "36px", height: "36px", borderRadius: "8px",
+              border: "none", cursor: "pointer",
+              background: "#42b883", color: "#0f172a", fontSize: "18px"
+            }}
+          >+</button>
+          <button
+            onClick={() => setCount(0)}
+            style={{
+              padding: "8px 12px", borderRadius: "8px",
+              border: "none", cursor: "pointer",
+              background: "#334155", color: "#94a3b8", fontSize: "12px"
+            }}
+          >reset</button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+          <div style={{
+            background: "#0f172a", borderRadius: "6px", padding: "8px",
+            border: "1px solid #334155", textAlign: "center"
+          }}>
+            <div style={{ fontSize: "18px", fontWeight: "bold", color: "#a78bfa" }}>{doubled}</div>
+            <div style={{ fontSize: "11px", color: "#64748b" }}>doubled.value</div>
+          </div>
+          <div style={{
+            background: "#0f172a", borderRadius: "6px", padding: "8px",
+            border: "1px solid #334155", textAlign: "center"
+          }}>
+            <div style={{ fontSize: "18px", fontWeight: "bold", color: isNegative ? "#ef4444" : "#42b883" }}>
+              {isNegative ? "да" : "нет"}
+            </div>
+            <div style={{ fontSize: "11px", color: "#64748b" }}>isNegative.value</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Code examples */}
+      <div style={{ display: "flex", gap: "4px", marginBottom: "12px" }}>
+        {examples.map(e => (
+          <button
+            key={e.id}
+            onClick={() => setActiveExample(e.id)}
+            style={{
+              padding: "6px 12px", borderRadius: "6px", border: "none",
+              cursor: "pointer", fontSize: "11px", fontWeight: "bold",
+              background: activeExample === e.id ? "#42b883" : "#1e293b",
+              color: activeExample === e.id ? "#0f172a" : "#94a3b8"
+            }}
+          >{e.icon} {e.label}</button>
+        ))}
+      </div>
+
+      {activeExample === "compare" && (
+        <div>
+          <div style={{ display: "flex", gap: "4px", marginBottom: "8px" }}>
+            {[["options", "Options API ❌"], ["composition", "Composition API ✅"]].map(([val, label]) => (
+              <button
+                key={val}
+                onClick={() => setActiveTab(val)}
+                style={{
+                  padding: "5px 10px", borderRadius: "6px", border: "none",
+                  cursor: "pointer", fontSize: "11px",
+                  background: activeTab === val ? (val === "options" ? "#ef4444" : "#42b883") : "#1e293b",
+                  color: activeTab === val ? (val === "options" ? "white" : "#0f172a") : "#94a3b8"
+                }}
+              >{label}</button>
+            ))}
+          </div>
+          <div style={{
+            background: "#0f172a", borderRadius: "10px", padding: "14px",
+            border: "1px solid #1e293b", maxHeight: "300px", overflow: "auto"
+          }}>
+            <pre style={{ margin: 0, fontSize: "11px", color: "#e2e8f0", lineHeight: 1.7 }}>
+              {activeTab === "options" ? optionsApiCode : compositionApiCode}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {activeExample === "props" && (
+        <div style={{
+          background: "#0f172a", borderRadius: "10px", padding: "14px",
+          border: "1px solid #1e293b"
+        }}>
+          <pre style={{ margin: 0, fontSize: "11px", color: "#e2e8f0", lineHeight: 1.7 }}>
+            {definePropsCode}
+          </pre>
+        </div>
+      )}
+
+      {activeExample === "emits" && (
+        <div style={{
+          background: "#0f172a", borderRadius: "10px", padding: "14px",
+          border: "1px solid #1e293b"
+        }}>
+          <pre style={{ margin: 0, fontSize: "11px", color: "#e2e8f0", lineHeight: 1.7 }}>
+            {defineEmitsCode}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

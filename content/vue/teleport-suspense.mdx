@@ -1,0 +1,580 @@
+## 🌀 Урок 20 — Teleport и Suspense в Vue 3
+
+`<Teleport>` и `<Suspense>` — два мощных встроенных компонента Vue 3, которые решают задачи, с которыми раньше приходилось бороться вручную. `Teleport` телепортирует DOM-узлы за пределы компонентного дерева, а `Suspense` элегантно управляет асинхронными зависимостями. Разберём оба вдоль и поперёк! 🚀
+
+---
+
+## 🧩 Что такое Teleport?
+
+Представь: ты делаешь модальное окно внутри глубоко вложенного компонента. Но модалка должна быть прикреплена к `<body>`, чтобы `z-index` работал корректно и она не обрезалась родительским `overflow: hidden`. Раньше это требовало хаков — порталы через `document.body.appendChild`. Vue 3 решает это нативно.
+
+```vue
+<template>
+  <button @click="open = true">Открыть модалку</button>
+
+  <Teleport to="body">
+    <div v-if="open" class="modal-overlay">
+      <div class="modal">
+        <h2>Я рендерюсь прямо в body!</h2>
+        <button @click="open = false">Закрыть</button>
+      </div>
+    </div>
+  </Teleport>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+const open = ref(false)
+</script>
+```
+
+Компонент логически остаётся внутри родителя, но DOM-узел физически перемещается в `<body>`. Это ключевое отличие — **логическое дерево** и **DOM-дерево** разделяются.
+
+---
+
+## 🎯 Атрибут `to` в Teleport
+
+`to` принимает CSS-селектор или DOM-элемент:
+
+```vue
+<!-- Телепорт в body -->
+<Teleport to="body">...</Teleport>
+
+<!-- Телепорт в элемент с id -->
+<Teleport to="#modal-container">...</Teleport>
+
+<!-- Телепорт в DOM-элемент динамически -->
+<Teleport :to="targetElement">...</Teleport>
+```
+
+Телепорт в `#modal-container` требует, чтобы этот элемент существовал в DOM до монтирования компонента. Обычно его добавляют в `index.html`:
+
+```html
+<!-- index.html -->
+<div id="app"></div>
+<div id="modal-container"></div>
+<div id="toast-container"></div>
+```
+
+---
+
+## 🔧 Отключение Teleport
+
+Иногда нужно условно отключить телепорт — например, при серверном рендеринге или для тестов. Используй `:disabled`:
+
+```vue
+<Teleport to="body" :disabled="isMobile">
+  <MobileMenu />
+</Teleport>
+```
+
+Когда `disabled: true`, содержимое рендерится на месте без телепортации. Это удобно для адаптивного поведения.
+
+---
+
+## 📬 Уведомления (Toast) через Teleport
+
+Классический паттерн — тост-уведомления. Они должны быть поверх всего контента и в фиксированной позиции:
+
+```vue
+<!-- ToastContainer.vue -->
+<template>
+  <Teleport to="#toast-container">
+    <TransitionGroup name="toast" tag="div" class="toasts">
+      <div
+        v-for="toast in toasts"
+        :key="toast.id"
+        class="toast"
+        :class="toast.type"
+      >
+        {{ toast.message }}
+      </div>
+    </TransitionGroup>
+  </Teleport>
+</template>
+
+<script setup>
+import { useToastStore } from '@/stores/toast'
+import { storeToRefs } from 'pinia'
+
+const toastStore = useToastStore()
+const { toasts } = storeToRefs(toastStore)
+</script>
+```
+
+---
+
+## ⏳ Что такое Suspense?
+
+`<Suspense>` — экспериментальный (но стабильный в Vue 3.x) компонент для управления асинхронными зависимостями. Он показывает **fallback-контент** пока дочерние компоненты загружаются.
+
+Без Suspense приходилось вручную отслеживать состояние загрузки в каждом компоненте:
+
+```vue
+<!-- Старый подход 😢 -->
+<template>
+  <div v-if="loading">Загружаем...</div>
+  <UserProfile v-else :user="user" />
+</template>
+
+<script setup>
+import { ref, onMounted } from 'vue'
+const loading = ref(true)
+const user = ref(null)
+
+onMounted(async () => {
+  user.value = await fetchUser()
+  loading.value = false
+})
+</script>
+```
+
+С Suspense это выглядит так:
+
+```vue
+<!-- Новый подход с Suspense 🎉 -->
+<template>
+  <Suspense>
+    <template #default>
+      <UserProfile />
+    </template>
+    <template #fallback>
+      <LoadingSpinner />
+    </template>
+  </Suspense>
+</template>
+```
+
+---
+
+## 🔩 Async Setup компонентов
+
+Для работы с `Suspense` компонент должен иметь **асинхронный setup**:
+
+```vue
+<!-- UserProfile.vue -->
+<template>
+  <div>
+    <h1>{{ user.name }}</h1>
+    <p>{{ user.email }}</p>
+    <PostList :posts="posts" />
+  </div>
+</template>
+
+<script setup>
+// Просто await в setup — и Suspense всё поймёт!
+const user = await fetchUser()
+const posts = await fetchUserPosts(user.id)
+</script>
+```
+
+Vue автоматически обнаруживает `await` в `setup()` и сообщает родительскому `Suspense` о том, что компонент в процессе загрузки.
+
+---
+
+## 🪺 Вложенные Suspense
+
+`Suspense` можно вкладывать друг в друга для более гранулярного управления загрузкой:
+
+```vue
+<template>
+  <Suspense>
+    <template #default>
+      <!-- Внешний слой: главные данные -->
+      <MainLayout>
+        <Suspense>
+          <template #default>
+            <!-- Внутренний слой: вторичные данные -->
+            <RecommendationPanel />
+          </template>
+          <template #fallback>
+            <SkeletonPanel />
+          </template>
+        </Suspense>
+      </MainLayout>
+    </template>
+    <template #fallback>
+      <PageSkeleton />
+    </template>
+  </Suspense>
+</template>
+```
+
+Внутренний `Suspense` не блокирует внешний. Главный контент появится раньше, а рекомендации — когда загрузятся.
+
+---
+
+## ❌ Обработка ошибок: onErrorCaptured
+
+`Suspense` сам по себе не ловит ошибки — для этого используй `onErrorCaptured` в родительском компоненте:
+
+```vue
+<!-- ErrorBoundary.vue -->
+<script setup>
+import { ref, onErrorCaptured } from 'vue'
+
+const error = ref(null)
+
+onErrorCaptured((err) => {
+  error.value = err
+  return false // предотвращаем дальнейшее распространение
+})
+</script>
+
+<template>
+  <div v-if="error" class="error-boundary">
+    <h2>Что-то пошло не так 😔</h2>
+    <p>{{ error.message }}</p>
+    <button @click="error = null">Попробовать снова</button>
+  </div>
+  <slot v-else />
+</template>
+```
+
+Используй `ErrorBoundary` вместе с `Suspense`:
+
+```vue
+<template>
+  <ErrorBoundary>
+    <Suspense>
+      <template #default>
+        <AsyncDashboard />
+      </template>
+      <template #fallback>
+        <DashboardSkeleton />
+      </template>
+    </Suspense>
+  </ErrorBoundary>
+</template>
+```
+
+---
+
+## 🔄 События Suspense: pending, resolve, fallback
+
+`Suspense` испускает три события:
+
+```vue
+<Suspense
+  @pending="onPending"
+  @resolve="onResolve"
+  @fallback="onFallback"
+>
+  <template #default>
+    <AsyncComponent />
+  </template>
+  <template #fallback>
+    <Spinner />
+  </template>
+</Suspense>
+
+<script setup>
+function onPending() {
+  console.log('Начало загрузки...')
+}
+
+function onResolve() {
+  console.log('Загрузка завершена!')
+  analytics.track('content_loaded')
+}
+
+function onFallback() {
+  console.log('Показываем fallback')
+}
+</script>
+```
+
+---
+
+## 🎭 Teleport + Suspense вместе
+
+Мощная комбинация — асинхронные модальные окна:
+
+```vue
+<template>
+  <Teleport to="body">
+    <Suspense v-if="showModal">
+      <template #default>
+        <AsyncModal @close="showModal = false" />
+      </template>
+      <template #fallback>
+        <div class="modal-skeleton">
+          <div class="skeleton-line" />
+          <div class="skeleton-line" />
+        </div>
+      </template>
+    </Suspense>
+  </Teleport>
+</template>
+
+<script setup>
+import { ref, defineAsyncComponent } from 'vue'
+const showModal = ref(false)
+const AsyncModal = defineAsyncComponent(() =>
+  import('./HeavyModal.vue')
+)
+</script>
+```
+
+---
+
+## 💡 Практические советы
+
+**Всегда оборачивай Suspense в ErrorBoundary** — асинхронные компоненты могут падать.
+
+**Используй `timeout` через defineAsyncComponent** для контроля UX:
+
+```vue
+<script setup>
+import { defineAsyncComponent } from 'vue'
+
+const AsyncChart = defineAsyncComponent({
+  loader: () => import('./Chart.vue'),
+  loadingComponent: ChartSkeleton,
+  errorComponent: ChartError,
+  delay: 200,    // задержка перед показом loading
+  timeout: 5000  // ошибка, если не загрузился за 5 сек
+})
+</script>
+```
+
+**Teleport и SSR**: На сервере `<Teleport>` отключён по умолчанию, но работает при гидратации.
+
+---
+
+## 🧪 Тестирование Teleport и Suspense
+
+```javascript
+import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
+
+test('Modal телепортируется в body', async () => {
+  const wrapper = mount(MyComponent, {
+    attachTo: document.body
+  })
+
+  await wrapper.find('button').trigger('click')
+  await nextTick()
+
+  // Телепортированный контент находится в body, не в wrapper
+  expect(document.body.querySelector('.modal')).toBeTruthy()
+})
+
+test('Suspense показывает fallback', async () => {
+  const wrapper = mount(SuspenseWrapper)
+  // Сразу виден fallback
+  expect(wrapper.text()).toContain('Загружаем...')
+
+  await flushPromises()
+  // После загрузки виден контент
+  expect(wrapper.text()).toContain('Данные загружены')
+})
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect } from "react";
+
+const VUE_GREEN = "#42b883";
+const VUE_DARK = "#35495e";
+
+function Modal({ onClose }: { onClose: () => void }) {
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      zIndex: 9999
+    }}>
+      <div style={{
+        background: "#fff", borderRadius: 12, padding: "2rem",
+        minWidth: 320, boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+        border: "2px solid " + VUE_GREEN
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <span style={{ fontSize: 24 }}>🌀</span>
+          <h3 style={{ margin: 0, color: VUE_DARK }}>Teleport Modal</h3>
+        </div>
+        <p style={{ color: "#555", marginBottom: 16 }}>
+          Этот элемент логически внутри кнопки, но DOM-узел — в <code style={{ background: "#f0faf6", padding: "2px 6px", borderRadius: 4, color: VUE_GREEN }}>&lt;body&gt;</code>!
+        </p>
+        <div style={{ background: "#f0faf6", borderRadius: 8, padding: "0.75rem", marginBottom: 16, fontSize: 13 }}>
+          <strong style={{ color: VUE_GREEN }}>&#60;Teleport to="body"&#62;</strong>
+          <div style={{ color: "#666", marginTop: 4 }}>z-index работает корректно, overflow не обрезает</div>
+        </div>
+        <button onClick={onClose} style={{
+          background: VUE_GREEN, color: "#fff", border: "none",
+          borderRadius: 8, padding: "8px 20px", cursor: "pointer", fontWeight: 600
+        }}>Закрыть ✕</button>
+      </div>
+    </div>
+  );
+}
+
+function SuspenseDemo() {
+  const [stage, setStage] = useState<"idle"|"loading"|"done"|"error">("idle");
+  const [progress, setProgress] = useState(0);
+
+  const simulate = (withError = false) => {
+    setStage("loading");
+    setProgress(0);
+    let p = 0;
+    const iv = setInterval(() => {
+      p += Math.random() * 25;
+      setProgress(Math.min(p, 95));
+      if (p >= 95) {
+        clearInterval(iv);
+        setTimeout(() => {
+          setProgress(100);
+          setStage(withError ? "error" : "done");
+        }, 300);
+      }
+    }, 200);
+  };
+
+  return (
+    <div style={{ background: "#f8fffe", border: "1px solid #e0f5ec", borderRadius: 10, padding: "1rem" }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <button onClick={() => simulate(false)} disabled={stage === "loading"} style={{
+          background: stage === "loading" ? "#ccc" : VUE_GREEN, color: "#fff",
+          border: "none", borderRadius: 7, padding: "7px 14px", cursor: stage === "loading" ? "not-allowed" : "pointer",
+          fontWeight: 600, fontSize: 13
+        }}>⏳ Симулировать загрузку</button>
+        <button onClick={() => simulate(true)} disabled={stage === "loading"} style={{
+          background: stage === "loading" ? "#ccc" : "#e74c3c", color: "#fff",
+          border: "none", borderRadius: 7, padding: "7px 14px", cursor: stage === "loading" ? "not-allowed" : "pointer",
+          fontWeight: 600, fontSize: 13
+        }}>💥 Симулировать ошибку</button>
+        {stage !== "idle" && <button onClick={() => { setStage("idle"); setProgress(0); }} style={{
+          background: "#fff", color: VUE_DARK, border: "1px solid " + VUE_DARK,
+          borderRadius: 7, padding: "7px 14px", cursor: "pointer", fontSize: 13
+        }}>↩ Сброс</button>}
+      </div>
+      {stage === "idle" && (
+        <div style={{ textAlign: "center", padding: "1.5rem", color: "#aaa" }}>
+          <div style={{ fontSize: 40 }}>⏸</div>
+          <div>Нажми кнопку для симуляции</div>
+        </div>
+      )}
+      {stage === "loading" && (
+        <div style={{ padding: "1rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <div style={{
+              width: 20, height: 20, border: "3px solid " + VUE_GREEN,
+              borderTopColor: "transparent", borderRadius: "50%",
+              animation: "spin 0.7s linear infinite"
+            }} />
+            <span style={{ color: VUE_DARK, fontWeight: 600 }}>&#60;Suspense fallback&#62; — загружаем...</span>
+          </div>
+          <div style={{ background: "#e8f5e9", borderRadius: 6, overflow: "hidden", height: 8 }}>
+            <div style={{
+              width: progress + "%", height: "100%",
+              background: VUE_GREEN, transition: "width 0.2s ease"
+            }} />
+          </div>
+          <div style={{ fontSize: 12, color: "#888", marginTop: 4 }}>{Math.round(progress)}%</div>
+        </div>
+      )}
+      {stage === "done" && (
+        <div style={{ background: "#e8f5e9", borderRadius: 8, padding: "1rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: 24 }}>✅</span>
+            <span style={{ color: VUE_GREEN, fontWeight: 700 }}>resolve событие — контент загружен!</span>
+          </div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {["Имя: Александр Иванов", "Email: alex@example.com", "Роль: Разработчик"].map(item => (
+              <div key={item} style={{ background: "#fff", borderRadius: 6, padding: "8px 12px", fontSize: 13, color: "#333" }}>
+                {item}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {stage === "error" && (
+        <div style={{ background: "#fdecea", borderRadius: 8, padding: "1rem", border: "1px solid #f5c6cb" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: 24 }}>❌</span>
+            <span style={{ color: "#c0392b", fontWeight: 700 }}>onErrorCaptured сработал!</span>
+          </div>
+          <code style={{ fontSize: 12, color: "#c0392b", background: "#fff", padding: "4px 8px", borderRadius: 4, display: "block" }}>
+            Error: Failed to fetch user data (500)
+          </code>
+          <div style={{ fontSize: 12, color: "#888", marginTop: 8 }}>ErrorBoundary поймал ошибку и показывает фоллбэк</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [modalOpen, setModalOpen] = useState(false);
+  const [toasts, setToasts] = useState<{id:number,msg:string}[]>([]);
+  const [toastId, setToastId] = useState(0);
+
+  const addToast = () => {
+    const id = toastId + 1;
+    setToastId(id);
+    setToasts(prev => [...prev, { id, msg: "Уведомление #" + id + " через Teleport!" }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+  };
+
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", background: "#f5f7fa", minHeight: "100vh", padding: "1.5rem" }}>
+      <style>{"@keyframes spin { to { transform: rotate(360deg); } }"}</style>
+
+      <div style={{ maxWidth: 580, margin: "0 auto" }}>
+        <div style={{ background: VUE_DARK, color: "#fff", borderRadius: 12, padding: "1.25rem 1.5rem", marginBottom: "1.5rem" }}>
+          <h2 style={{ margin: 0, fontSize: 20 }}>🌀 Teleport + ⏳ Suspense</h2>
+          <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 14 }}>Урок 20 — интерактивная демонстрация</p>
+        </div>
+
+        <section style={{ background: "#fff", borderRadius: 12, padding: "1.25rem", marginBottom: "1rem", boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+          <h3 style={{ margin: "0 0 12px", color: VUE_DARK, display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ background: VUE_GREEN, color: "#fff", borderRadius: 6, padding: "2px 8px", fontSize: 12 }}>Teleport</span>
+            Модальное окно
+          </h3>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => setModalOpen(true)} style={{
+              background: VUE_GREEN, color: "#fff", border: "none", borderRadius: 8,
+              padding: "9px 18px", cursor: "pointer", fontWeight: 600
+            }}>🖼 Открыть модалку</button>
+            <button onClick={addToast} style={{
+              background: "#fff", color: VUE_DARK, border: "1px solid " + VUE_DARK,
+              borderRadius: 8, padding: "9px 18px", cursor: "pointer", fontWeight: 600
+            }}>🔔 Toast уведомление</button>
+          </div>
+          <p style={{ margin: "10px 0 0", fontSize: 13, color: "#888" }}>
+            Оба элемента телепортируются за пределы компонентного дерева
+          </p>
+        </section>
+
+        <section style={{ background: "#fff", borderRadius: 12, padding: "1.25rem", boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+          <h3 style={{ margin: "0 0 12px", color: VUE_DARK, display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ background: VUE_GREEN, color: "#fff", borderRadius: 6, padding: "2px 8px", fontSize: 12 }}>Suspense</span>
+            Асинхронный компонент
+          </h3>
+          <SuspenseDemo />
+        </section>
+      </div>
+
+      {modalOpen && <Modal onClose={() => setModalOpen(false)} />}
+
+      <div style={{ position: "fixed", top: 20, right: 20, display: "flex", flexDirection: "column", gap: 8, zIndex: 99999 }}>
+        {toasts.map(t => (
+          <div key={t.id} style={{
+            background: VUE_GREEN, color: "#fff", borderRadius: 8,
+            padding: "10px 16px", boxShadow: "0 4px 12px rgba(0,0,0,0.2)",
+            fontSize: 14, fontWeight: 500
+          }}>
+            🔔 {t.msg}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

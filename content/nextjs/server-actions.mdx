@@ -1,0 +1,835 @@
+## ⚡ Server Actions: мутации без API
+
+Server Actions — одна из самых крутых фич App Router! Представь: ты пишешь обычную async-функцию с `'use server'`, а Next.js автоматически создаёт для неё API-эндпоинт, подключает её к форме и обрабатывает всё — без тебя! Как будто React и сервер наконец-то пожали друг другу руки 🤝
+
+---
+
+### 🎯 Базовый синтаксис: 'use server'
+
+Директива `'use server'` говорит Next.js: "эта функция выполняется только на сервере". Можно поставить её вверху файла или прямо внутри функции:
+
+```typescript
+// app/actions.ts — отдельный файл для actions
+'use server'; // директива в начале файла = все функции — Server Actions
+
+import { db } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
+
+export async function createPost(title: string, content: string) {
+  const post = await db.post.create({
+    data: { title, content, authorId: getCurrentUserId() },
+  });
+
+  // Обновляем кэш страницы
+  revalidatePath('/blog');
+  revalidatePath(`/blog/${post.slug}`);
+
+  return post;
+}
+
+export async function deletePost(id: number) {
+  await db.post.delete({ where: { id } });
+  revalidatePath('/blog');
+}
+```
+
+Или инлайн в компоненте:
+
+```typescript
+// app/blog/new/page.tsx — Server Component
+export default function NewPostPage() {
+  // Инлайн Server Action
+  async function createPost(formData: FormData) {
+    'use server'; // директива внутри функции
+
+    const title = formData.get('title') as string;
+    const content = formData.get('content') as string;
+
+    await db.post.create({ data: { title, content } });
+    revalidatePath('/blog');
+    redirect('/blog');
+  }
+
+  return (
+    <form action={createPost}>
+      <input name="title" placeholder="Заголовок" />
+      <textarea name="content" placeholder="Содержание" />
+      <button type="submit">Опубликовать</button>
+    </form>
+  );
+}
+```
+
+---
+
+### 📋 Form Actions: нативная работа с формами
+
+Server Actions прекрасно работают с HTML-формами через атрибут `action`. Это даже работает без JavaScript — Progressive Enhancement в действии! 🌟
+
+```typescript
+// app/actions/todo.ts
+'use server';
+
+import { z } from 'zod';
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+
+const TodoSchema = z.object({
+  title: z.string().min(1, 'Заголовок обязателен').max(100),
+  description: z.string().max(500).optional(),
+  priority: z.enum(['low', 'medium', 'high']),
+});
+
+// Возвращаем состояние для useFormState
+export type FormState = {
+  success?: boolean;
+  error?: string;
+  fieldErrors?: Record<string, string[]>;
+};
+
+export async function createTodo(
+  prevState: FormState,
+  formData: FormData
+): Promise<FormState> {
+  const raw = {
+    title: formData.get('title'),
+    description: formData.get('description'),
+    priority: formData.get('priority'),
+  };
+
+  const result = TodoSchema.safeParse(raw);
+
+  if (!result.success) {
+    return {
+      error: 'Ошибка валидации',
+      fieldErrors: result.error.flatten().fieldErrors,
+    };
+  }
+
+  try {
+    await db.todo.create({ data: result.data });
+    revalidatePath('/todos');
+    return { success: true };
+  } catch (error) {
+    return { error: 'Не удалось создать задачу' };
+  }
+}
+```
+
+---
+
+### 🔄 useFormState: состояние формы
+
+`useFormState` (в React 19: `useActionState`) позволяет получать ответ от Server Action прямо в компоненте:
+
+```typescript
+// app/todos/new/page.tsx
+'use client';
+
+import { useFormState, useFormStatus } from 'react-dom';
+import { createTodo, type FormState } from '@/app/actions/todo';
+
+const initialState: FormState = {};
+
+// Компонент кнопки знает о статусе отправки формы
+function SubmitButton() {
+  const { pending } = useFormStatus();
+
+  return (
+    <button
+      type="submit"
+      disabled={pending}
+      className={pending ? 'opacity-50 cursor-not-allowed' : ''}
+    >
+      {pending ? '⏳ Создание...' : '✅ Создать задачу'}
+    </button>
+  );
+}
+
+export default function NewTodoForm() {
+  const [state, formAction] = useFormState(createTodo, initialState);
+
+  return (
+    <form action={formAction} className="space-y-4">
+      {state.error && (
+        <div className="bg-red-100 text-red-700 p-3 rounded">
+          ❌ {state.error}
+        </div>
+      )}
+
+      {state.success && (
+        <div className="bg-green-100 text-green-700 p-3 rounded">
+          ✅ Задача создана!
+        </div>
+      )}
+
+      <div>
+        <input
+          name="title"
+          placeholder="Что нужно сделать?"
+          className="w-full border rounded p-2"
+        />
+        {state.fieldErrors?.title && (
+          <p className="text-red-500 text-sm mt-1">
+            {state.fieldErrors.title[0]}
+          </p>
+        )}
+      </div>
+
+      <select name="priority" defaultValue="medium">
+        <option value="low">🟢 Низкий</option>
+        <option value="medium">🟡 Средний</option>
+        <option value="high">🔴 Высокий</option>
+      </select>
+
+      <SubmitButton />
+    </form>
+  );
+}
+```
+
+---
+
+### 🚀 useFormStatus: индикатор загрузки
+
+`useFormStatus` — хук, доступный только внутри компонента-потомка формы. Он знает, в каком состоянии находится ближайшая родительская форма:
+
+```typescript
+// components/ui/SubmitButton.tsx
+'use client';
+
+import { useFormStatus } from 'react-dom';
+
+interface SubmitButtonProps {
+  children: React.ReactNode;
+  loadingText?: string;
+}
+
+export function SubmitButton({ children, loadingText = 'Загрузка...' }: SubmitButtonProps) {
+  const { pending, data, method, action } = useFormStatus();
+
+  // data — FormData текущей отправки
+  // method — 'get' или 'post'
+  // action — ссылка на функцию action
+
+  return (
+    <button
+      type="submit"
+      disabled={pending}
+      aria-busy={pending}
+      className={`
+        px-4 py-2 rounded font-medium transition-all
+        ${pending
+          ? 'bg-gray-400 cursor-not-allowed'
+          : 'bg-blue-600 hover:bg-blue-700 text-white'
+        }
+      `}
+    >
+      {pending ? (
+        <span className="flex items-center gap-2">
+          <span className="animate-spin">⏳</span>
+          {loadingText}
+        </span>
+      ) : children}
+    </button>
+  );
+}
+```
+
+---
+
+### 🎭 Оптимистичные обновления: useOptimistic
+
+`useOptimistic` позволяет немедленно обновить UI, не дожидаясь ответа сервера. Как предсказывать будущее, но для интерфейсов 🔮
+
+```typescript
+// app/todos/TodoList.tsx
+'use client';
+
+import { useOptimistic, useTransition } from 'react';
+import { toggleTodo, deleteTodo } from '@/app/actions/todo';
+
+interface Todo {
+  id: number;
+  title: string;
+  completed: boolean;
+}
+
+interface Props {
+  initialTodos: Todo[];
+}
+
+export function TodoList({ initialTodos }: Props) {
+  const [isPending, startTransition] = useTransition();
+
+  // useOptimistic: локальное состояние + функция-редьюсер
+  const [optimisticTodos, addOptimisticUpdate] = useOptimistic(
+    initialTodos,
+    (state: Todo[], action: { type: 'toggle' | 'delete'; id: number }) => {
+      if (action.type === 'toggle') {
+        return state.map(todo =>
+          todo.id === action.id
+            ? { ...todo, completed: !todo.completed }
+            : todo
+        );
+      }
+      if (action.type === 'delete') {
+        return state.filter(todo => todo.id !== action.id);
+      }
+      return state;
+    }
+  );
+
+  const handleToggle = (id: number) => {
+    startTransition(async () => {
+      // Мгновенно обновляем UI
+      addOptimisticUpdate({ type: 'toggle', id });
+      // Отправляем на сервер (может занять время)
+      await toggleTodo(id);
+    });
+  };
+
+  const handleDelete = (id: number) => {
+    startTransition(async () => {
+      addOptimisticUpdate({ type: 'delete', id });
+      await deleteTodo(id);
+    });
+  };
+
+  return (
+    <ul className="space-y-2">
+      {optimisticTodos.map(todo => (
+        <li
+          key={todo.id}
+          className={`flex items-center gap-3 p-3 rounded ${
+            todo.completed ? 'opacity-60' : ''
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={todo.completed}
+            onChange={() => handleToggle(todo.id)}
+          />
+          <span className={todo.completed ? 'line-through' : ''}>
+            {todo.title}
+          </span>
+          <button onClick={() => handleDelete(todo.id)}>🗑️</button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+---
+
+### 🔄 Revalidation: обновление кэша
+
+После мутации нужно обновить данные на странице. Для этого есть два основных метода:
+
+```typescript
+'use server';
+
+import { revalidatePath, revalidateTag } from 'next/cache';
+import { redirect } from 'next/navigation';
+
+export async function updateProduct(id: number, data: FormData) {
+  const name = data.get('name') as string;
+  const price = parseFloat(data.get('price') as string);
+
+  await db.product.update({
+    where: { id },
+    data: { name, price },
+  });
+
+  // Инвалидация по пути — перерендерит страницу
+  revalidatePath('/products');              // список
+  revalidatePath(`/products/${id}`);       // деталь
+  revalidatePath('/admin/products');        // админка
+
+  // Инвалидация по тегу — если данные тегированы в fetch
+  revalidateTag('products');
+  revalidateTag(`product-${id}`);
+
+  // Редирект после мутации (выбрасывает исключение внутри!)
+  redirect('/products');
+}
+
+// В fetch можно пометить данные тегами:
+async function getProduct(id: number) {
+  const data = await fetch(`/api/products/${id}`, {
+    next: { tags: [`product-${id}`, 'products'] }
+  });
+  return data.json();
+}
+```
+
+---
+
+### 🔐 Безопасность Server Actions
+
+Server Actions выполняются на сервере, но вызываются из клиента — значит, нужна защита! ⚠️
+
+```typescript
+'use server';
+
+import { auth } from '@/lib/auth';
+import { headers } from 'next/headers';
+
+// ❌ Плохо: доверяем данным без проверки
+export async function badDeletePost(id: number) {
+  await db.post.delete({ where: { id } }); // Любой может удалить любой пост!
+}
+
+// ✅ Хорошо: проверяем аутентификацию и авторизацию
+export async function deletePost(id: number) {
+  // 1. Проверяем аутентификацию
+  const session = await auth();
+  if (!session?.user) {
+    throw new Error('Не авторизован');
+  }
+
+  // 2. Получаем пост и проверяем владельца
+  const post = await db.post.findUnique({ where: { id } });
+
+  if (!post) {
+    throw new Error('Пост не найден');
+  }
+
+  // 3. Проверяем авторизацию
+  if (post.authorId !== session.user.id && session.user.role !== 'admin') {
+    throw new Error('Нет прав на удаление');
+  }
+
+  await db.post.delete({ where: { id } });
+  revalidatePath('/blog');
+}
+
+// CSRF защита — Next.js добавляет автоматически для форм!
+// Но для программных вызовов (fetch) нужно использовать
+// заголовок 'Next-Action' который Next.js проверяет сам.
+
+// Валидация ВСЕГДА на сервере (клиентская — только UX)
+export async function createUser(formData: FormData) {
+  const headersList = await headers();
+  const origin = headersList.get('origin');
+
+  // Проверяем origin
+  if (origin !== process.env.NEXT_PUBLIC_APP_URL) {
+    throw new Error('Invalid origin');
+  }
+
+  // Валидируем все данные серверной стороной
+  const schema = z.object({
+    email: z.string().email(),
+    name: z.string().min(2).max(50),
+  });
+
+  const result = schema.safeParse({
+    email: formData.get('email'),
+    name: formData.get('name'),
+  });
+
+  if (!result.success) {
+    return { error: result.error.flatten() };
+  }
+
+  // Теперь безопасно работаем с данными
+  await db.user.create({ data: result.data });
+}
+```
+
+---
+
+### 🎯 Вызов Server Actions из обработчиков событий
+
+Server Actions можно вызывать не только из форм, но и из обычных обработчиков:
+
+```typescript
+// app/components/LikeButton.tsx
+'use client';
+
+import { likePost } from '@/app/actions/posts';
+import { useState, useTransition } from 'react';
+
+export function LikeButton({ postId, initialLikes }: {
+  postId: number;
+  initialLikes: number;
+}) {
+  const [likes, setLikes] = useState(initialLikes);
+  const [liked, setLiked] = useState(false);
+  const [isPending, startTransition] = useTransition();
+
+  const handleLike = () => {
+    if (liked) return;
+
+    // Оптимистичное обновление
+    setLikes(prev => prev + 1);
+    setLiked(true);
+
+    startTransition(async () => {
+      try {
+        const result = await likePost(postId);
+        // Синхронизируем с реальным значением от сервера
+        setLikes(result.totalLikes);
+      } catch (error) {
+        // Откат при ошибке
+        setLikes(prev => prev - 1);
+        setLiked(false);
+      }
+    });
+  };
+
+  return (
+    <button
+      onClick={handleLike}
+      disabled={liked || isPending}
+      className={`flex items-center gap-2 px-4 py-2 rounded-full transition-all ${
+        liked ? 'bg-red-100 text-red-600' : 'bg-gray-100 hover:bg-red-50'
+      }`}
+    >
+      {liked ? '❤️' : '🤍'} {likes}
+    </button>
+  );
+}
+```
+
+---
+
+### 🔗 Связь с redirect и notFound
+
+```typescript
+'use server';
+
+import { redirect, notFound, permanentRedirect } from 'next/navigation';
+
+export async function createAndRedirect(formData: FormData) {
+  const title = formData.get('title') as string;
+
+  if (!title) {
+    return { error: 'Заголовок обязателен' };
+  }
+
+  const post = await db.post.create({
+    data: { title, slug: slugify(title) },
+  });
+
+  // redirect выбрасывает исключение NEXT_REDIRECT — не оборачивай в try-catch!
+  redirect(`/blog/${post.slug}`);
+}
+
+export async function getPostOrNotFound(slug: string) {
+  const post = await db.post.findUnique({ where: { slug } });
+
+  if (!post) {
+    // notFound() выбрасывает исключение NEXT_NOT_FOUND
+    notFound(); // показывает ближайший not-found.tsx
+  }
+
+  return post;
+}
+
+export async function handleOldUrl(oldSlug: string) {
+  const newSlug = await db.redirects.findFirst({
+    where: { from: oldSlug },
+  });
+
+  if (newSlug) {
+    permanentRedirect(`/blog/${newSlug.to}`); // 308 Permanent Redirect
+  }
+}
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState, useTransition } from 'react';
+
+interface Todo {
+  id: number;
+  title: string;
+  priority: 'low' | 'medium' | 'high';
+  completed: boolean;
+}
+
+type FormState = { success?: boolean; error?: string; fieldError?: string };
+
+const priorityColors: Record<string, string> = {
+  low: '#4ade80',
+  medium: '#fbbf24',
+  high: '#f87171',
+};
+
+const priorityLabels: Record<string, string> = {
+  low: '🟢 Низкий',
+  medium: '🟡 Средний',
+  high: '🔴 Высокий',
+};
+
+let nextId = 4;
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+export default function App() {
+  const [todos, setTodos] = useState<Todo[]>([
+    { id: 1, title: 'Изучить Server Actions', priority: 'high', completed: true },
+    { id: 2, title: 'Написать тесты', priority: 'medium', completed: false },
+    { id: 3, title: 'Задеплоить на Vercel', priority: 'low', completed: false },
+  ]);
+
+  const [formState, setFormState] = useState<FormState>({});
+  const [title, setTitle] = useState('');
+  const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
+  const [isPending, startTransition] = useTransition();
+  const [optimisticTodos, setOptimisticTodos] = useState<Todo[]>([]);
+  const [activeSection, setActiveSection] = useState<'form' | 'list' | 'code'>('form');
+
+  const allTodos = [...todos, ...optimisticTodos];
+
+  // Симуляция Server Action: createTodo
+  const createTodo = async () => {
+    if (!title.trim()) {
+      setFormState({ error: 'Заголовок обязателен', fieldError: 'title' });
+      return;
+    }
+
+    const optimisticTodo: Todo = {
+      id: Date.now(),
+      title: title.trim(),
+      priority,
+      completed: false,
+    };
+
+    // Оптимистичное обновление
+    setOptimisticTodos(prev => [...prev, optimisticTodo]);
+    const savedTitle = title.trim();
+    setTitle('');
+    setFormState({});
+
+    startTransition(async () => {
+      await delay(800); // Симуляция сетевого запроса
+
+      const newTodo: Todo = { id: nextId++, title: savedTitle, priority, completed: false };
+      setTodos(prev => [...prev, newTodo]);
+      setOptimisticTodos(prev => prev.filter(t => t.id !== optimisticTodo.id));
+      setFormState({ success: true });
+      setTimeout(() => setFormState({}), 2000);
+    });
+  };
+
+  // Симуляция: toggleTodo
+  const toggleTodo = (id: number) => {
+    startTransition(async () => {
+      // Оптимистичный toggle
+      setTodos(prev => prev.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
+      await delay(300);
+    });
+  };
+
+  // Симуляция: deleteTodo
+  const deleteTodo = (id: number) => {
+    startTransition(async () => {
+      setTodos(prev => prev.filter(t => t.id !== id));
+      await delay(200);
+    });
+  };
+
+  const codeExample = \`// app/actions/todo.ts
+'use server';
+
+import { revalidatePath } from 'next/cache';
+
+export type FormState = {
+  success?: boolean;
+  error?: string;
+};
+
+export async function createTodo(
+  prevState: FormState,
+  formData: FormData
+): Promise<FormState> {
+  const title = formData.get('title') as string;
+  const priority = formData.get('priority');
+
+  if (!title) return { error: 'Заголовок обязателен' };
+
+  await db.todo.create({ data: { title, priority } });
+  revalidatePath('/todos');
+
+  return { success: true };
+}\`;
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ background: '#020617', borderBottom: '1px solid #1e293b', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ color: '#171717', background: 'white', borderRadius: 4, padding: '2px 8px', fontWeight: 900, fontSize: 13 }}>N</span>
+        <span style={{ fontWeight: 700 }}>Server Actions Demo</span>
+        <span style={{ color: '#64748b', fontSize: 12 }}>useFormState + useOptimistic</span>
+        {isPending && <span style={{ marginLeft: 'auto', color: '#fbbf24', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>⏳ Server Action pending...</span>}
+      </div>
+
+      <div style={{ display: 'flex', borderBottom: '1px solid #1e293b' }}>
+        {(['form', 'list', 'code'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveSection(tab)}
+            style={{
+              padding: '10px 20px', border: 'none', cursor: 'pointer', fontSize: 13,
+              background: activeSection === tab ? '#1e293b' : 'transparent',
+              color: activeSection === tab ? '#e2e8f0' : '#64748b',
+              borderBottom: activeSection === tab ? '2px solid #4ade80' : '2px solid transparent',
+            }}
+          >
+            {tab === 'form' ? '📋 Форма' : tab === 'list' ? \`✅ Задачи (\${allTodos.length})\` : '📄 Код'}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding: 16 }}>
+        {activeSection === 'form' && (
+          <div style={{ maxWidth: 480 }}>
+            <div style={{ background: '#1e293b', borderRadius: 8, padding: 16, marginBottom: 12 }}>
+              <div style={{ color: '#4ade80', fontSize: 12, marginBottom: 12, fontWeight: 700 }}>
+                Server Action: createTodo(prevState, formData)
+              </div>
+
+              {formState.success && (
+                <div style={{ background: '#052e16', border: '1px solid #4ade80', borderRadius: 6, padding: 10, marginBottom: 12, color: '#4ade80', fontSize: 13 }}>
+                  ✅ Задача успешно создана! (revalidatePath вызван)
+                </div>
+              )}
+
+              {formState.error && (
+                <div style={{ background: '#450a0a', border: '1px solid #f87171', borderRadius: 6, padding: 10, marginBottom: 12, color: '#f87171', fontSize: 13 }}>
+                  ❌ {formState.error}
+                </div>
+              )}
+
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ display: 'block', color: '#94a3b8', fontSize: 12, marginBottom: 4 }}>
+                  Название задачи (name="title")
+                </label>
+                <input
+                  name="title"
+                  value={title}
+                  onChange={e => setTitle(e.target.value)}
+                  placeholder="Что нужно сделать?"
+                  style={{
+                    width: '100%', background: '#0f172a', border: \`1px solid \${formState.fieldError === 'title' ? '#f87171' : '#334155'}\`,
+                    borderRadius: 6, padding: '8px 12px', color: '#e2e8f0', fontSize: 13, boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: 'block', color: '#94a3b8', fontSize: 12, marginBottom: 4 }}>
+                  Приоритет (name="priority")
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {(['low', 'medium', 'high'] as const).map(p => (
+                    <button
+                      key={p}
+                      onClick={() => setPriority(p)}
+                      style={{
+                        flex: 1, padding: '7px 0', border: \`1px solid \${priority === p ? priorityColors[p] : '#334155'}\`,
+                        borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                        background: priority === p ? \`\${priorityColors[p]}22\` : '#0f172a',
+                        color: priority === p ? priorityColors[p] : '#64748b',
+                      }}
+                    >
+                      {priorityLabels[p]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                onClick={createTodo}
+                disabled={isPending}
+                style={{
+                  width: '100%', padding: '10px 0', background: isPending ? '#1e293b' : '#166534',
+                  color: isPending ? '#64748b' : '#4ade80', border: \`1px solid \${isPending ? '#334155' : '#4ade80'}\`,
+                  borderRadius: 6, cursor: isPending ? 'not-allowed' : 'pointer', fontSize: 14, fontWeight: 700,
+                }}
+              >
+                {isPending ? '⏳ useFormStatus: pending = true...' : '⚡ Создать задачу (Server Action)'}
+              </button>
+            </div>
+
+            <div style={{ background: '#0f172a', borderRadius: 6, padding: 12, border: '1px solid #1e293b' }}>
+              <div style={{ color: '#64748b', fontSize: 11, lineHeight: 1.8 }}>
+                💡 <span style={{ color: '#94a3b8' }}>Как это работает:</span><br />
+                1. <span style={{ color: '#fbbf24' }}>form action={"{createTodo}"}</span> — action как функция<br />
+                2. <span style={{ color: '#4ade80' }}>useFormState</span> — состояние ответа от сервера<br />
+                3. <span style={{ color: '#60a5fa' }}>useFormStatus</span> — знает о pending форме<br />
+                4. <span style={{ color: '#c084fc' }}>useOptimistic</span> — мгновенный UI update<br />
+                5. <span style={{ color: '#f87171' }}>revalidatePath</span> — инвалидация кэша
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeSection === 'list' && (
+          <div>
+            <div style={{ color: '#64748b', fontSize: 12, marginBottom: 12 }}>
+              Оптимистичные задачи отображаются сразу (до ответа сервера):
+            </div>
+            {allTodos.length === 0 && (
+              <div style={{ textAlign: 'center', color: '#64748b', padding: '30px 0' }}>Список пуст. Добавьте задачи!</div>
+            )}
+            {allTodos.map(todo => {
+              const isOptimistic = optimisticTodos.some(t => t.id === todo.id);
+              return (
+                <div
+                  key={todo.id}
+                  style={{
+                    background: '#1e293b', borderRadius: 8, padding: 12, marginBottom: 8,
+                    border: \`1px solid \${isOptimistic ? '#fbbf2444' : '#334155'}\`,
+                    opacity: isOptimistic ? 0.7 : 1,
+                    display: 'flex', alignItems: 'center', gap: 10,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={todo.completed}
+                    onChange={() => !isOptimistic && toggleTodo(todo.id)}
+                    style={{ width: 16, height: 16, cursor: 'pointer', accentColor: '#4ade80' }}
+                  />
+                  <span style={{
+                    flex: 1, color: todo.completed ? '#64748b' : '#e2e8f0',
+                    textDecoration: todo.completed ? 'line-through' : 'none', fontSize: 14,
+                  }}>
+                    {todo.title}
+                  </span>
+                  <span style={{ color: priorityColors[todo.priority], fontSize: 11, background: '#0f172a', padding: '2px 8px', borderRadius: 4 }}>
+                    {priorityLabels[todo.priority]}
+                  </span>
+                  {isOptimistic ? (
+                    <span style={{ color: '#fbbf24', fontSize: 10 }}>⏳ optimistic</span>
+                  ) : (
+                    <button
+                      onClick={() => deleteTodo(todo.id)}
+                      style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 14, padding: '0 4px' }}
+                    >🗑️</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {activeSection === 'code' && (
+          <div>
+            <pre style={{ background: '#1e293b', borderRadius: 8, padding: 16, fontSize: 11, color: '#94a3b8', overflow: 'auto', lineHeight: 1.8, margin: 0 }}>
+              {codeExample}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

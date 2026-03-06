@@ -1,0 +1,826 @@
+## 🌐 Урок 26: Server-Side Rendering во Vue 3
+
+Server-Side Rendering (SSR) — это техника, при которой HTML-страница генерируется **на сервере** перед отправкой в браузер. Вместо того чтобы пользователь видел пустую страницу, пока грузится JavaScript, он сразу получает готовый HTML с контентом. Vue 3 поддерживает SSR из коробки через `@vue/server-renderer`. 🚀
+
+---
+
+### 🤔 Зачем нужен SSR?
+
+**Проблема CSR (Client-Side Rendering):**
+```
+Браузер → GET /         → Сервер: пустой HTML + JS бандл
+Браузер → загружает JS → 2-5 секунд белый экран
+Браузер → JS выполнен  → рендер компонентов
+Браузер → показывает контент (поздно!)
+```
+
+**Решение с SSR:**
+```
+Браузер → GET /         → Сервер: готовый HTML с контентом
+Браузер → показывает HTML сразу (быстро!)
+Браузер → загружает JS → гидратация (интерактивность)
+```
+
+Преимущества SSR:
+- ⚡ **Быстрый First Contentful Paint (FCP)**
+- 🔍 **SEO** — поисковики видят контент
+- 📱 **Медленные сети** — HTML приходит до JS
+- 🌐 **Социальные сети** — метатеги в HTML
+
+---
+
+### 🆚 Nuxt vs Ручной SSR
+
+**Nuxt 3** — полноценный фреймворк поверх Vue 3 с SSR, файловым роутингом, и авто-оптимизациями. **Ручной SSR** — когда нужен полный контроль.
+
+```
+Nuxt 3:
+✅ Файловый роутинг
+✅ Авто-SSR/SSG/CSR
+✅ Модули (image, auth, i18n...)
+✅ Nitro сервер
+❌ Меньше контроля
+❌ Сложнее кастомизировать
+
+Ручной SSR:
+✅ Полный контроль
+✅ Кастомный сервер (Express, Fastify, Hapi)
+✅ Интеграция с любым бэкендом
+❌ Больше кода
+❌ Нужно самому настроить всё
+```
+
+---
+
+### 📦 Установка `@vue/server-renderer`
+
+```bash
+npm install @vue/server-renderer
+npm install express
+```
+
+---
+
+### 🏗️ Базовая структура ручного SSR
+
+```
+src/
+  App.vue          ← корневой компонент
+  main.ts          ← клиентский entrypoint (hydration)
+  entry-server.ts  ← серверный entrypoint (SSR)
+  entry-client.ts  ← клиентский entrypoint
+server.ts          ← Express-сервер
+index.html         ← HTML-шаблон
+vite.config.ts     ← конфигурация Vite
+```
+
+---
+
+### 📄 `entry-server.ts` — серверный рендеринг
+
+```typescript
+// src/entry-server.ts
+import { createSSRApp } from 'vue';
+import { renderToString } from '@vue/server-renderer';
+import App from './App.vue';
+
+export async function render(url: string) {
+  const app = createSSRApp(App);
+
+  // Настроить роутер для SSR
+  const router = createRouter({ history: createMemoryHistory() });
+  app.use(router);
+
+  // Дождаться навигации
+  await router.push(url);
+  await router.isReady();
+
+  // Рендер в HTML-строку
+  const html = await renderToString(app);
+
+  return { html };
+}
+```
+
+---
+
+### 📄 `entry-client.ts` — гидратация на клиенте
+
+```typescript
+// src/entry-client.ts
+import { createSSRApp } from 'vue';
+import App from './App.vue';
+
+// createSSRApp вместо createApp — включает режим гидратации!
+const app = createSSRApp(App);
+
+const router = createRouter({ history: createWebHistory() });
+app.use(router);
+
+// Дождаться роутера перед монтированием
+router.isReady().then(() => {
+  // mount() запустит гидратацию, а не свежий рендер
+  app.mount('#app');
+});
+```
+
+---
+
+### 🖥️ Express-сервер
+
+```typescript
+// server.ts
+import express from 'express';
+import { createServer as createViteServer } from 'vite';
+import { readFileSync } from 'fs';
+import path from 'path';
+
+async function createServer() {
+  const app = express();
+
+  // Vite dev-сервер как middleware (только в dev)
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: 'custom',
+  });
+  app.use(vite.middlewares);
+
+  app.use('*', async (req, res, next) => {
+    const url = req.originalUrl;
+
+    try {
+      // Читаем HTML-шаблон
+      let template = readFileSync(path.resolve('index.html'), 'utf-8');
+
+      // Vite применяет трансформации к HTML
+      template = await vite.transformIndexHtml(url, template);
+
+      // Загружаем серверный entrypoint
+      const { render } = await vite.ssrLoadModule('/src/entry-server.ts');
+
+      // Рендерим компонент
+      const { html: appHtml } = await render(url);
+
+      // Вставляем в шаблон
+      const finalHtml = template.replace('<!--ssr-outlet-->', appHtml);
+
+      res.status(200).set({ 'Content-Type': 'text/html' }).end(finalHtml);
+    } catch (e) {
+      vite.ssrFixStacktrace(e as Error);
+      next(e);
+    }
+  });
+
+  app.listen(5173, () => {
+    console.log('http://localhost:5173');
+  });
+}
+
+createServer();
+```
+
+```html
+<!-- index.html -->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Vue SSR App</title>
+    <script type="module" src="/src/entry-client.ts"></script>
+  </head>
+  <body>
+    <div id="app"><!--ssr-outlet--></div>
+  </body>
+</html>
+```
+
+---
+
+### 💧 Гидратация (Hydration)
+
+Гидратация — процесс, при котором Vue «оживляет» статичный SSR-HTML, добавляя к нему интерактивность.
+
+```typescript
+// createSSRApp автоматически включает гидратацию
+const app = createSSRApp(App);
+app.mount('#app'); // Vue НЕ создаёт новый DOM — он использует существующий SSR HTML
+```
+
+**Как это работает:**
+1. Сервер рендерит HTML и добавляет `data-v-app` атрибуты
+2. Клиент получает HTML и сразу показывает его (быстро!)
+3. JS загружается и запускается
+4. `createSSRApp` + `mount` проходит по DOM и привязывает события
+5. Приложение становится интерактивным
+
+**Проблемы гидратации (Hydration Mismatch):**
+```vue
+<template>
+  <!-- ❌ Разный HTML на сервере и клиенте! -->
+  <div>{{ new Date().toString() }}</div>
+
+  <!-- ❌ Math.random() разный каждый раз -->
+  <div>ID: {{ Math.random() }}</div>
+
+  <!-- ✅ Показываем время только на клиенте -->
+  <ClientOnly>
+    <div>{{ new Date().toString() }}</div>
+  </ClientOnly>
+</template>
+```
+
+---
+
+### 🔧 `ssrRenderComponent` — ручной рендер компонента
+
+```typescript
+import { createSSRApp, defineComponent, h } from 'vue';
+import { renderToString, ssrRenderComponent } from '@vue/server-renderer';
+
+// Для продвинутых случаев — рендер одного компонента
+const MyButton = defineComponent({
+  props: ['label'],
+  setup(props) {
+    return () => h('button', { class: 'btn' }, props.label);
+  },
+});
+
+// ssrRenderComponent используется внутри рендер-функций при SSR
+// Обычно ты не вызываешь это напрямую — компилятор шаблонов делает это за тебя
+```
+
+---
+
+### 🎯 `useSSRContext` — данные из серверного контекста
+
+```typescript
+// src/composables/useServerData.ts
+import { useSSRContext } from 'vue';
+
+export function useServerData() {
+  // useSSRContext() возвращает объект только на сервере, undefined на клиенте
+  const ssrContext = useSSRContext();
+
+  // Записываем данные в контекст (для передачи из сервера в клиент)
+  if (ssrContext) {
+    ssrContext.teleports = ssrContext.teleports ?? {};
+    ssrContext.modules = ssrContext.modules ?? new Set();
+  }
+
+  return ssrContext;
+}
+```
+
+```typescript
+// В серверном entrypoint — передать контекст в renderToString
+export async function render(url: string) {
+  const app = createSSRApp(App);
+
+  // Создаём контекст SSR
+  const ssrContext: { teleports?: Record<string, string>; modules?: Set<string> } = {};
+
+  // Передаём контекст при рендере
+  const html = await renderToString(app, ssrContext);
+
+  // Получаем список использованных модулей (для prefetch links)
+  const modules = ssrContext.modules;
+
+  return { html, modules };
+}
+```
+
+---
+
+### ⚡ Vite SSR Plugin
+
+```typescript
+// vite.config.ts
+import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
+
+export default defineConfig({
+  plugins: [vue()],
+  build: {
+    // Отдельные билды для клиента и сервера
+  },
+});
+```
+
+```bash
+# Сборка для SSR
+# Клиентский бандл
+vite build --outDir dist/client
+
+# Серверный бандл
+vite build --ssr src/entry-server.ts --outDir dist/server
+```
+
+```json
+// package.json — скрипты для SSR
+{
+  "scripts": {
+    "dev": "node server.ts",
+    "build:client": "vite build --outDir dist/client",
+    "build:server": "vite build --ssr src/entry-server.ts --outDir dist/server",
+    "build": "npm run build:client && npm run build:server",
+    "preview": "NODE_ENV=production node server-prod.ts"
+  }
+}
+```
+
+---
+
+### 🌊 Streaming SSR
+
+Streaming позволяет отправлять HTML **по частям** — пользователь видит начало страницы ещё до того, как сервер дорендерил конец.
+
+```typescript
+import { renderToNodeStream, renderToWebStream } from '@vue/server-renderer';
+
+// Node.js streams (Express)
+app.use('*', async (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+
+  // Пишем начало HTML
+  res.write('<!doctype html><html><head>...</head><body><div id="app">');
+
+  const app = createSSRApp(App);
+  const stream = renderToNodeStream(app);
+
+  stream.pipe(res, { end: false });
+
+  stream.on('end', () => {
+    res.write('</div></body></html>');
+    res.end();
+  });
+});
+
+// Web Streams API (Cloudflare Workers, Deno, Bun)
+export default {
+  async fetch(request: Request) {
+    const app = createSSRApp(App);
+    const stream = renderToWebStream(app);
+
+    return new Response(stream, {
+      headers: { 'Content-Type': 'text/html' },
+    });
+  },
+};
+```
+
+---
+
+### 📊 SSR с Pinia (управление состоянием)
+
+```typescript
+// src/entry-server.ts
+import { createPinia } from 'pinia';
+
+export async function render(url: string) {
+  const app = createSSRApp(App);
+  const pinia = createPinia();
+  app.use(pinia);
+
+  // Заполняем store данными
+  const store = useUserStore(pinia);
+  await store.fetchUser();
+
+  const html = await renderToString(app);
+
+  // Сериализуем состояние для передачи клиенту
+  const state = JSON.stringify(pinia.state.value);
+
+  return { html, state };
+}
+```
+
+```typescript
+// В HTML-шаблон добавляем состояние
+const finalHtml = template
+  .replace('<!--ssr-outlet-->', appHtml)
+  .replace('<!--pinia-state-->', `<script>window.__PINIA_STATE__=${state}</script>`);
+```
+
+```typescript
+// src/entry-client.ts — восстанавливаем состояние
+const pinia = createPinia();
+app.use(pinia);
+
+// Гидратируем состояние Pinia из окна
+if (window.__PINIA_STATE__) {
+  pinia.state.value = window.__PINIA_STATE__;
+}
+```
+
+---
+
+### 💡 Нюансы SSR в Vue 3
+
+**1. Нет доступа к браузерным API на сервере:**
+```typescript
+// ❌ Упадёт на сервере!
+const width = window.innerWidth;
+
+// ✅ Проверяем окружение
+const width = typeof window !== 'undefined' ? window.innerWidth : 1024;
+
+// ✅ Или используем onMounted
+onMounted(() => {
+  // Этот код выполняется только в браузере
+  const width = window.innerWidth;
+});
+```
+
+**2. Компонент `<ClientOnly>` (Nuxt) / условный рендер:**
+```vue
+<template>
+  <!-- Нуждается в браузере — рендерим только на клиенте -->
+  <ClientOnly>
+    <DatePicker v-model="date" />
+  </ClientOnly>
+
+  <!-- Или через composable -->
+  <div v-if="isClient">
+    <InteractiveChart />
+  </div>
+</template>
+
+<script setup lang="ts">
+const isClient = ref(false);
+onMounted(() => { isClient.value = true; });
+</script>
+```
+
+**3. Асинхронные данные:**
+```vue
+<!-- В Nuxt 3 — useFetch автоматически работает с SSR -->
+<script setup lang="ts">
+const { data: posts } = await useFetch('/api/posts');
+</script>
+```
+
+---
+
+### 🚀 Nuxt 3: SSR без боли
+
+```bash
+npx nuxi@latest init my-app
+cd my-app && npm install && npm run dev
+```
+
+```typescript
+// nuxt.config.ts
+export default defineNuxtConfig({
+  // SSR по умолчанию включён
+  ssr: true,
+
+  // Или гибридный рендеринг — разные стратегии для разных роутов
+  routeRules: {
+    '/': { prerender: true },          // Статичный HTML
+    '/blog/**': { swr: 3600 },         // Stale-While-Revalidate
+    '/dashboard/**': { ssr: false },   // CSR для авторизованных
+    '/admin/**': { ssr: false },       // CSR
+  },
+});
+```
+
+---
+
+### 📊 Итог: какой режим выбрать?
+
+| Режим | Когда использовать |
+|-------|-------------------|
+| **CSR** | Dashboard, SPA без SEO требований |
+| **SSR** | Блог, новости, SEO важен |
+| **SSG** | Документация, лендинги |
+| **ISR/SWR** | Контент обновляется редко |
+| **Streaming SSR** | Большие страницы, медленные API |
+
+SSR в Vue 3 — мощный инструмент для SEO и производительности. Начни с Nuxt 3 — он берёт на себя всю сложность. Ручной SSR нужен только если тебе нужна глубокая интеграция с существующим Node.js сервером. 🎯
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from "react";
+
+const GREEN = "#42b883";
+const DARK = "#35495e";
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const BORDER = "#2d3f55";
+
+type Phase =
+  | "idle"
+  | "request"
+  | "server-render"
+  | "send-html"
+  | "parse-html"
+  | "show-content"
+  | "load-js"
+  | "hydrate"
+  | "interactive";
+
+type Mode = "csr" | "ssr" | "streaming";
+
+interface PhaseInfo {
+  id: Phase;
+  label: string;
+  icon: string;
+  color: string;
+  duration: number;
+  serverSide?: boolean;
+}
+
+const SSR_PHASES: PhaseInfo[] = [
+  { id: "request", label: "GET / (запрос)", icon: "→", color: "#60a5fa", duration: 300 },
+  { id: "server-render", label: "renderToString(App)", icon: "⚙", color: "#f59e0b", duration: 800, serverSide: true },
+  { id: "send-html", label: "Отправка HTML", icon: "📤", color: GREEN, duration: 200, serverSide: true },
+  { id: "parse-html", label: "Парсинг HTML браузером", icon: "🔍", color: "#a78bfa", duration: 300 },
+  { id: "show-content", label: "Показ контента ✨", icon: "👁", color: GREEN, duration: 200 },
+  { id: "load-js", label: "Загрузка JS", icon: "📦", color: "#f59e0b", duration: 600 },
+  { id: "hydrate", label: "Гидратация", icon: "💧", color: "#60a5fa", duration: 500 },
+  { id: "interactive", label: "Интерактивно! 🎉", icon: "✓", color: GREEN, duration: 0 },
+];
+
+const CSR_PHASES: PhaseInfo[] = [
+  { id: "request", label: "GET / (запрос)", icon: "→", color: "#60a5fa", duration: 300 },
+  { id: "send-html", label: "Пустой HTML + <script>", icon: "📤", color: "#475569", duration: 200, serverSide: true },
+  { id: "parse-html", label: "Парсинг HTML", icon: "🔍", color: "#a78bfa", duration: 200 },
+  { id: "load-js", label: "Загрузка JS бандла", icon: "📦", color: "#f59e0b", duration: 1200 },
+  { id: "server-render", label: "Рендер на клиенте", icon: "⚙", color: "#ef4444", duration: 600 },
+  { id: "show-content", label: "Показ контента", icon: "👁", color: GREEN, duration: 100 },
+  { id: "interactive", label: "Интерактивно! 🎉", icon: "✓", color: GREEN, duration: 0 },
+];
+
+function sleep(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
+
+export default function App() {
+  const [mode, setMode] = useState<Mode>("ssr");
+  const [phases, setPhases] = useState<PhaseInfo[]>([]);
+  const [activePhase, setActivePhase] = useState<Phase | null>(null);
+  const [completedPhases, setCompletedPhases] = useState<Phase[]>([]);
+  const [running, setRunning] = useState(false);
+  const [fcp, setFcp] = useState<number | null>(null);
+  const [tti, setTti] = useState<number | null>(null);
+  const [streamChunks, setStreamChunks] = useState<string[]>([]);
+  const runningRef = useRef(false);
+
+  useEffect(() => {
+    setPhases(mode === "csr" ? CSR_PHASES : SSR_PHASES);
+    setActivePhase(null);
+    setCompletedPhases([]);
+    setFcp(null);
+    setTti(null);
+    setStreamChunks([]);
+  }, [mode]);
+
+  const runSimulation = async () => {
+    if (running) return;
+    setRunning(true);
+    runningRef.current = true;
+    setActivePhase(null);
+    setCompletedPhases([]);
+    setFcp(null);
+    setTti(null);
+    setStreamChunks([]);
+
+    const phasesToRun = mode === "csr" ? CSR_PHASES : SSR_PHASES;
+    let elapsed = 0;
+
+    if (mode === "streaming") {
+      const chunks = ["<header>...</header>", "<nav>...</nav>", "<main>", "  <h1>Заголовок</h1>", "  <p>Параграф 1</p>", "  <p>Параграф 2</p>", "  <footer>...</footer>", "</main>"];
+      for (const chunk of chunks) {
+        await sleep(300);
+        setStreamChunks(prev => [...prev, chunk]);
+      }
+      setRunning(false);
+      return;
+    }
+
+    for (const phase of phasesToRun) {
+      if (!runningRef.current) break;
+      setActivePhase(phase.id);
+      await sleep(phase.duration || 100);
+      elapsed += phase.duration;
+      setCompletedPhases(prev => [...prev, phase.id]);
+
+      if (phase.id === "show-content") setFcp(elapsed);
+      if (phase.id === "interactive") setTti(elapsed);
+    }
+
+    setActivePhase(null);
+    setRunning(false);
+  };
+
+  const reset = () => {
+    runningRef.current = false;
+    setRunning(false);
+    setActivePhase(null);
+    setCompletedPhases([]);
+    setFcp(null);
+    setTti(null);
+    setStreamChunks([]);
+  };
+
+  const currentPhases = mode === "csr" ? CSR_PHASES : mode === "ssr" ? SSR_PHASES : [];
+
+  const getPhaseStatus = (phase: PhaseInfo) => {
+    if (completedPhases.includes(phase.id)) return "done";
+    if (activePhase === phase.id) return "active";
+    return "pending";
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "1rem", fontFamily: "monospace", fontSize: "0.78rem", color: "#e2e8f0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
+        <div style={{ background: DARK, borderRadius: "8px", padding: "0.4rem 0.75rem", color: GREEN, fontWeight: 700, fontSize: "0.85rem" }}>
+          🌐 Vue SSR
+        </div>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: "flex", gap: "0.4rem" }}>
+          {(["csr", "ssr", "streaming"] as Mode[]).map(m => (
+            <button key={m} onClick={() => { reset(); setMode(m); }} style={{
+              padding: "0.25rem 0.6rem", borderRadius: "4px", border: "none",
+              background: mode === m ? GREEN : BORDER, color: mode === m ? DARK : "#94a3b8",
+              cursor: "pointer", fontWeight: mode === m ? 700 : 400, fontSize: "0.7rem",
+            }}>
+              {m.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+        {/* Left: Pipeline */}
+        <div>
+          <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.5rem" }}>
+            {mode === "streaming" ? "STREAMING SSR PIPELINE" : mode === "ssr" ? "SSR PIPELINE" : "CSR PIPELINE"}
+          </div>
+
+          {mode === "streaming" ? (
+            <div style={{ background: CARD, borderRadius: "6px", padding: "0.75rem", border: \`1px solid \${BORDER}\` }}>
+              <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.5rem" }}>Чанки HTML (потоком):</div>
+              {streamChunks.length === 0 && (
+                <div style={{ color: "#475569", fontStyle: "italic" }}>Нажми «Запустить»...</div>
+              )}
+              {streamChunks.map((chunk, i) => (
+                <div key={i} style={{
+                  color: GREEN, padding: "0.15rem 0", borderBottom: \`1px solid \${BORDER}\`,
+                  animation: "fadeIn 0.3s ease",
+                }}>
+                  {chunk}
+                </div>
+              ))}
+              {streamChunks.length > 0 && streamChunks.length < 8 && (
+                <div style={{ color: "#475569" }}>▋</div>
+              )}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+              {/* Server label */}
+              <div style={{ color: "#f59e0b", fontSize: "0.65rem", marginTop: "0.2rem" }}>── СЕРВЕР ──</div>
+              {currentPhases.filter(p => p.serverSide).map(phase => {
+                const status = getPhaseStatus(phase);
+                return (
+                  <div key={phase.id} style={{
+                    background: CARD, borderRadius: "6px", padding: "0.45rem 0.6rem",
+                    border: \`1px solid \${status === "active" ? phase.color : status === "done" ? phase.color + "44" : BORDER}\`,
+                    display: "flex", alignItems: "center", gap: "0.5rem", transition: "all 0.2s",
+                    opacity: status === "pending" ? 0.5 : 1,
+                  }}>
+                    <span style={{ color: phase.color, fontSize: "0.8rem" }}>{phase.icon}</span>
+                    <span style={{ color: status === "done" ? phase.color : status === "active" ? "#e2e8f0" : "#64748b" }}>
+                      {phase.label}
+                    </span>
+                    {status === "active" && (
+                      <span style={{ marginLeft: "auto", color: phase.color, fontSize: "0.65rem" }}>running...</span>
+                    )}
+                    {status === "done" && (
+                      <span style={{ marginLeft: "auto", color: GREEN, fontSize: "0.65rem" }}>✓</span>
+                    )}
+                  </div>
+                );
+              })}
+              <div style={{ color: "#60a5fa", fontSize: "0.65rem", marginTop: "0.2rem" }}>── БРАУЗЕР ──</div>
+              {currentPhases.filter(p => !p.serverSide).map(phase => {
+                const status = getPhaseStatus(phase);
+                return (
+                  <div key={phase.id} style={{
+                    background: CARD, borderRadius: "6px", padding: "0.45rem 0.6rem",
+                    border: \`1px solid \${status === "active" ? phase.color : status === "done" ? phase.color + "44" : BORDER}\`,
+                    display: "flex", alignItems: "center", gap: "0.5rem", transition: "all 0.2s",
+                    opacity: status === "pending" ? 0.5 : 1,
+                  }}>
+                    <span style={{ color: phase.color, fontSize: "0.8rem" }}>{phase.icon}</span>
+                    <span style={{ color: status === "done" ? phase.color : status === "active" ? "#e2e8f0" : "#64748b" }}>
+                      {phase.label}
+                    </span>
+                    {status === "active" && (
+                      <span style={{ marginLeft: "auto", color: phase.color, fontSize: "0.65rem" }}>running...</span>
+                    )}
+                    {status === "done" && (
+                      <span style={{ marginLeft: "auto", color: GREEN, fontSize: "0.65rem" }}>✓</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Right: Metrics + Browser preview */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          {/* Metrics */}
+          <div>
+            <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.5rem" }}>МЕТРИКИ</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.4rem" }}>
+              <div style={{ background: CARD, borderRadius: "6px", padding: "0.5rem", border: \`1px solid \${BORDER}\` }}>
+                <div style={{ color: "#94a3b8", fontSize: "0.65rem" }}>FCP</div>
+                <div style={{ color: fcp ? GREEN : "#475569", fontWeight: 700, fontSize: "1rem" }}>
+                  {fcp ? \`\${fcp}ms\` : "—"}
+                </div>
+                <div style={{ color: "#475569", fontSize: "0.6rem" }}>First Contentful Paint</div>
+              </div>
+              <div style={{ background: CARD, borderRadius: "6px", padding: "0.5rem", border: \`1px solid \${BORDER}\` }}>
+                <div style={{ color: "#94a3b8", fontSize: "0.65rem" }}>TTI</div>
+                <div style={{ color: tti ? "#60a5fa" : "#475569", fontWeight: 700, fontSize: "1rem" }}>
+                  {tti ? \`\${tti}ms\` : "—"}
+                </div>
+                <div style={{ color: "#475569", fontSize: "0.6rem" }}>Time To Interactive</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Browser window */}
+          <div>
+            <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.5rem" }}>БРАУЗЕР</div>
+            <div style={{ background: CARD, borderRadius: "6px", border: \`1px solid \${BORDER}\`, overflow: "hidden" }}>
+              <div style={{ background: BORDER, padding: "0.3rem 0.5rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <div style={{ display: "flex", gap: "0.25rem" }}>
+                  {["#ef4444", "#f59e0b", "#22c55e"].map(c => (
+                    <div key={c} style={{ width: "8px", height: "8px", borderRadius: "50%", background: c }} />
+                  ))}
+                </div>
+                <div style={{ background: "#0f172a", borderRadius: "3px", padding: "0.1rem 0.5rem", color: "#64748b", fontSize: "0.65rem", flex: 1 }}>
+                  localhost:5173
+                </div>
+              </div>
+              <div style={{ padding: "0.75rem", minHeight: "120px" }}>
+                {completedPhases.includes("show-content") ? (
+                  <div>
+                    <div style={{ color: GREEN, fontWeight: 700, marginBottom: "0.4rem" }}>🏠 Главная страница</div>
+                    <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.3rem" }}>Добро пожаловать в Vue SSR App!</div>
+                    <div style={{ display: "flex", gap: "0.4rem" }}>
+                      <div style={{ background: completedPhases.includes("interactive") ? GREEN : BORDER, color: completedPhases.includes("interactive") ? DARK : "#475569", padding: "0.2rem 0.5rem", borderRadius: "4px", fontSize: "0.65rem" }}>
+                        {completedPhases.includes("interactive") ? "✓ Кнопка работает" : "⟳ Загрузка..."}
+                      </div>
+                    </div>
+                    {completedPhases.includes("hydrate") && !completedPhases.includes("interactive") && (
+                      <div style={{ color: "#60a5fa", fontSize: "0.65rem", marginTop: "0.3rem" }}>💧 Гидратация...</div>
+                    )}
+                  </div>
+                ) : activePhase ? (
+                  <div style={{ color: "#475569", fontStyle: "italic" }}>
+                    {mode === "csr" && !completedPhases.includes("show-content")
+                      ? "⬜ Белый экран (JS грузится...)"
+                      : "⟳ Загрузка..."}
+                  </div>
+                ) : (
+                  <div style={{ color: "#475569", fontStyle: "italic" }}>Нажми «Запустить»...</div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Mode description */}
+          <div style={{ background: CARD, borderRadius: "6px", padding: "0.6rem", border: \`1px solid \${BORDER}\`, fontSize: "0.7rem" }}>
+            {mode === "ssr" && <><span style={{ color: GREEN }}>SSR:</span><span style={{ color: "#94a3b8" }}> Сервер рендерит HTML → быстрый FCP → гидратация</span></>}
+            {mode === "csr" && <><span style={{ color: "#ef4444" }}>CSR:</span><span style={{ color: "#94a3b8" }}> Пустой HTML → загрузка JS → рендер клиентом → медленный FCP</span></>}
+            {mode === "streaming" && <><span style={{ color: "#f59e0b" }}>Streaming:</span><span style={{ color: "#94a3b8" }}> HTML отправляется частями — пользователь видит контент ещё быстрее</span></>}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+        <button onClick={runSimulation} disabled={running} style={{
+          padding: "0.5rem 1.25rem", borderRadius: "6px", border: "none",
+          background: running ? BORDER : GREEN, color: running ? "#64748b" : DARK,
+          cursor: running ? "not-allowed" : "pointer", fontWeight: 700, fontSize: "0.78rem",
+        }}>
+          {running ? "⟳ Выполняется..." : "▶ Запустить"}
+        </button>
+        <button onClick={reset} disabled={running} style={{
+          padding: "0.5rem 1rem", borderRadius: "6px", border: \`1px solid \${BORDER}\`,
+          background: "transparent", color: "#94a3b8", cursor: running ? "not-allowed" : "pointer", fontSize: "0.78rem",
+        }}>
+          ↺ Сбросить
+        </button>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

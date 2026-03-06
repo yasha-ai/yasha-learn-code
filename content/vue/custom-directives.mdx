@@ -1,0 +1,576 @@
+## 🎨 Урок 21 — Пользовательские директивы в Vue 3
+
+Встроенные директивы Vue (`v-if`, `v-for`, `v-model`) — это лишь вершина айсберга. Vue 3 позволяет создавать **собственные директивы**, которые дают прямой доступ к DOM-элементу. Это мощный инструмент для анимаций, аналитики, интеграции с внешними библиотеками и многого другого.
+
+---
+
+## 🤔 Когда использовать директивы
+
+Директивы нужны, когда требуется **прямая манипуляция DOM**, которую неудобно делать через обычную реактивность. Несколько примеров:
+
+- Автофокус при монтировании (`v-focus`)
+- Отслеживание кликов вне элемента (`v-click-outside`)
+- Ленивая загрузка изображений (`v-lazy`)
+- Маски ввода (`v-mask`)
+- Ripple-эффект (`v-ripple`)
+- Tooltip при наведении (`v-tooltip`)
+
+```vue
+<!-- Без директивы — нужны ref и onMounted -->
+<script setup>
+import { ref, onMounted } from 'vue'
+const input = ref(null)
+onMounted(() => input.value?.focus())
+</script>
+<template>
+  <input ref="input" />
+</template>
+
+<!-- С директивой — элегантно! -->
+<template>
+  <input v-focus />
+</template>
+```
+
+---
+
+## 🔧 Создание простой директивы vFocus
+
+Самый простой способ — определить директиву объектом с хуками:
+
+```javascript
+// directives/focus.js
+export const vFocus = {
+  mounted(el) {
+    el.focus()
+  }
+}
+```
+
+Использование в компоненте:
+
+```vue
+<script setup>
+import { vFocus } from './directives/focus'
+</script>
+
+<template>
+  <input v-focus placeholder="Я получу фокус автоматически" />
+</template>
+```
+
+В `<script setup>` директивы, начинающиеся с `v`, распознаются автоматически — не нужна регистрация через `directives: {}`.
+
+---
+
+## 🔁 Хуки жизненного цикла директивы
+
+Директива может реагировать на все этапы жизни элемента:
+
+```javascript
+const myDirective = {
+  // Вызывается до привязки атрибутов элемента
+  // и до монтирования дочерних элементов
+  created(el, binding, vnode) {
+    console.log('created: элемент создан, но не в DOM')
+  },
+
+  // Вызывается перед вставкой элемента в DOM
+  beforeMount(el, binding, vnode) {
+    console.log('beforeMount: скоро в DOM')
+  },
+
+  // Вызывается после вставки элемента в DOM
+  mounted(el, binding, vnode) {
+    console.log('mounted: элемент в DOM, можно работать с ним')
+    el.style.border = '2px solid #42b883'
+  },
+
+  // Вызывается перед обновлением компонента
+  beforeUpdate(el, binding, vnode, prevVnode) {
+    console.log('beforeUpdate: значение изменится с', binding.oldValue, 'на', binding.value)
+  },
+
+  // Вызывается после обновления компонента
+  updated(el, binding, vnode, prevVnode) {
+    console.log('updated: новое значение =', binding.value)
+  },
+
+  // Вызывается перед размонтированием компонента
+  beforeUnmount(el, binding, vnode) {
+    console.log('beforeUnmount: скоро удалим')
+  },
+
+  // Вызывается после размонтирования
+  unmounted(el, binding, vnode) {
+    console.log('unmounted: почистили ресурсы')
+  }
+}
+```
+
+---
+
+## 📦 Параметр binding
+
+Объект `binding` содержит всю информацию о директиве:
+
+```vue
+<div v-my-directive:color.bold.italic="'#42b883'">...</div>
+```
+
+```javascript
+const myDirective = {
+  mounted(el, binding) {
+    console.log(binding.value)    // '#42b883' — значение директивы
+    console.log(binding.oldValue) // undefined (только в updated)
+    console.log(binding.arg)      // 'color' — аргумент после :
+    console.log(binding.modifiers) // { bold: true, italic: true }
+    console.log(binding.instance) // экземпляр компонента (ctx)
+    console.log(binding.dir)      // сам объект директивы
+  }
+}
+```
+
+---
+
+## 🎨 Директива v-color с аргументом
+
+Пример директивы, которая устанавливает цвет:
+
+```javascript
+// directives/color.js
+export const vColor = {
+  mounted(el, binding) {
+    applyColor(el, binding)
+  },
+  updated(el, binding) {
+    applyColor(el, binding)
+  }
+}
+
+function applyColor(el, binding) {
+  const { value, arg, modifiers } = binding
+
+  if (arg === 'background') {
+    el.style.backgroundColor = value
+  } else {
+    el.style.color = value
+  }
+
+  if (modifiers.bold) {
+    el.style.fontWeight = 'bold'
+  }
+
+  if (modifiers.underline) {
+    el.style.textDecoration = 'underline'
+  }
+}
+```
+
+```vue
+<template>
+  <!-- Цвет текста зелёный, жирный -->
+  <p v-color.bold="'#42b883'">Vue зелёный</p>
+
+  <!-- Фоновый цвет тёмный -->
+  <p v-color:background="'#35495e'">Тёмный фон</p>
+</template>
+```
+
+---
+
+## 🖱 Директива v-click-outside
+
+Очень востребованная директива — закрытие дропдаунов по клику вне:
+
+```javascript
+// directives/clickOutside.js
+export const vClickOutside = {
+  mounted(el, binding) {
+    el._clickOutsideHandler = (event) => {
+      // Если клик внутри элемента — игнорируем
+      if (el.contains(event.target)) return
+
+      // Вызываем переданный коллбэк
+      binding.value(event)
+    }
+
+    document.addEventListener('click', el._clickOutsideHandler)
+  },
+
+  unmounted(el) {
+    // Важно: чистим слушатель при размонтировании!
+    document.removeEventListener('click', el._clickOutsideHandler)
+    delete el._clickOutsideHandler
+  }
+}
+```
+
+```vue
+<template>
+  <div
+    class="dropdown"
+    v-click-outside="closeDropdown"
+  >
+    <button @click="open = !open">Меню</button>
+    <ul v-if="open">
+      <li>Пункт 1</li>
+      <li>Пункт 2</li>
+    </ul>
+  </div>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { vClickOutside } from './directives/clickOutside'
+
+const open = ref(false)
+const closeDropdown = () => { open.value = false }
+</script>
+```
+
+---
+
+## 🌍 Глобальная регистрация директивы
+
+Директивы можно регистрировать глобально через `app.directive()`:
+
+```javascript
+// main.js
+import { createApp } from 'vue'
+import App from './App.vue'
+import { vFocus } from './directives/focus'
+import { vClickOutside } from './directives/clickOutside'
+import { vLazy } from './directives/lazy'
+
+const app = createApp(App)
+
+app.directive('focus', vFocus)
+app.directive('click-outside', vClickOutside)
+app.directive('lazy', vLazy)
+
+app.mount('#app')
+```
+
+После этого `v-focus`, `v-click-outside` и `v-lazy` доступны во всех компонентах без импорта.
+
+---
+
+## 📌 Локальная регистрация (Options API)
+
+В Options API директивы регистрируются в опции `directives`:
+
+```vue
+<script>
+export default {
+  directives: {
+    focus: {
+      mounted(el) { el.focus() }
+    },
+    color: vColorDirective
+  }
+}
+</script>
+```
+
+---
+
+## 💫 Директива v-animate (число)
+
+```javascript
+// directives/animate.js
+export const vAnimate = {
+  mounted(el, binding) {
+    const { value, modifiers } = binding
+    const duration = typeof value === 'number' ? value : 300
+
+    el.style.transition = "all " + duration + "ms ease"
+
+    if (modifiers.fade) {
+      el.style.opacity = '0'
+      requestAnimationFrame(() => {
+        el.style.opacity = '1'
+      })
+    }
+
+    if (modifiers.slide) {
+      el.style.transform = 'translateY(-20px)'
+      el.style.opacity = '0'
+      requestAnimationFrame(() => {
+        el.style.transform = 'translateY(0)'
+        el.style.opacity = '1'
+      })
+    }
+  }
+}
+```
+
+```vue
+<template>
+  <!-- Плавное появление за 500мс -->
+  <div v-animate.fade="500">Я появляюсь плавно</div>
+
+  <!-- Слайд + fade за 300мс (по умолчанию) -->
+  <div v-animate.slide.fade>Я выезжаю снизу</div>
+</template>
+```
+
+---
+
+## 🔢 Директива v-debounce для полей ввода
+
+```javascript
+// directives/debounce.js
+export const vDebounce = {
+  mounted(el, binding) {
+    const delay = binding.value || 300
+    let timer
+
+    el._debouncedHandler = () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        el.dispatchEvent(new Event('debounced-input'))
+      }, delay)
+    }
+
+    el.addEventListener('input', el._debouncedHandler)
+  },
+
+  unmounted(el) {
+    el.removeEventListener('input', el._debouncedHandler)
+    delete el._debouncedHandler
+  }
+}
+```
+
+```vue
+<template>
+  <input
+    v-debounce="500"
+    @debounced-input="onSearch"
+    placeholder="Поиск (с задержкой 500мс)"
+  />
+</template>
+```
+
+---
+
+## 🧪 Тестирование директив
+
+```javascript
+import { mount } from '@vue/test-utils'
+import { vFocus } from './directives/focus'
+
+test('vFocus фокусирует элемент при монтировании', () => {
+  const wrapper = mount({
+    template: '<input v-focus />',
+    directives: { focus: vFocus }
+  })
+
+  expect(wrapper.element.querySelector('input')).toBe(document.activeElement)
+})
+
+test('vClickOutside вызывает коллбэк по клику снаружи', async () => {
+  const handler = vi.fn()
+  const wrapper = mount({
+    template: '<div v-click-outside="handler"><span>Внутри</span></div>',
+    directives: { 'click-outside': vClickOutside },
+    setup: () => ({ handler })
+  }, { attachTo: document.body })
+
+  document.dispatchEvent(new MouseEvent('click'))
+  expect(handler).toHaveBeenCalled()
+})
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from "react";
+
+const VUE_GREEN = "#42b883";
+const VUE_DARK = "#35495e";
+
+const HOOKS = [
+  { name: "created", color: "#9b59b6", desc: "Элемент создан, атрибуты не привязаны" },
+  { name: "beforeMount", color: "#3498db", desc: "Готов к вставке в DOM" },
+  { name: "mounted", color: VUE_GREEN, desc: "В DOM, можно работать с элементом" },
+  { name: "beforeUpdate", color: "#e67e22", desc: "Значение изменится" },
+  { name: "updated", color: "#f39c12", desc: "Значение обновлено" },
+  { name: "beforeUnmount", color: "#e74c3c", desc: "Скоро удалим из DOM" },
+  { name: "unmounted", color: "#c0392b", desc: "Удалён, чистим ресурсы" },
+];
+
+function LifecycleVisualizer() {
+  const [active, setActive] = useState<string[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
+  const [phase, setPhase] = useState<"mount"|"update"|"unmount"|"idle">("idle");
+
+  const runPhase = (p: "mount" | "update" | "unmount") => {
+    setIsRunning(true);
+    setPhase(p);
+    setActive([]);
+
+    let hooks: string[] = [];
+    if (p === "mount") hooks = ["created", "beforeMount", "mounted"];
+    if (p === "update") hooks = ["beforeUpdate", "updated"];
+    if (p === "unmount") hooks = ["beforeUnmount", "unmounted"];
+
+    hooks.forEach((h, i) => {
+      setTimeout(() => {
+        setActive(prev => [...prev, h]);
+        if (i === hooks.length - 1) {
+          setTimeout(() => setIsRunning(false), 500);
+        }
+      }, i * 600);
+    });
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {(["mount","update","unmount"] as const).map(p => (
+          <button key={p} onClick={() => runPhase(p)} disabled={isRunning} style={{
+            background: isRunning ? "#ccc" : p === "mount" ? VUE_GREEN : p === "update" ? "#e67e22" : "#e74c3c",
+            color: "#fff", border: "none", borderRadius: 7,
+            padding: "8px 14px", cursor: isRunning ? "not-allowed" : "pointer",
+            fontWeight: 600, fontSize: 13, textTransform: "capitalize"
+          }}>
+            {p === "mount" ? "🟢 Монтирование" : p === "update" ? "🟡 Обновление" : "🔴 Размонтирование"}
+          </button>
+        ))}
+      </div>
+      <div style={{ display: "grid", gap: 6 }}>
+        {HOOKS.map(hook => {
+          const isActive = active.includes(hook.name);
+          return (
+            <div key={hook.name} style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "8px 12px", borderRadius: 8, transition: "all 0.3s",
+              background: isActive ? hook.color + "18" : "#f8f8f8",
+              border: "1px solid " + (isActive ? hook.color : "#e8e8e8"),
+              transform: isActive ? "translateX(6px)" : "translateX(0)"
+            }}>
+              <div style={{
+                width: 10, height: 10, borderRadius: "50%",
+                background: isActive ? hook.color : "#ddd",
+                transition: "background 0.3s",
+                boxShadow: isActive ? "0 0 8px " + hook.color : "none"
+              }} />
+              <code style={{ fontSize: 13, fontWeight: 600, color: isActive ? hook.color : "#888", minWidth: 120 }}>
+                {hook.name}
+              </code>
+              <span style={{ fontSize: 12, color: isActive ? "#333" : "#aaa" }}>{hook.desc}</span>
+              {isActive && <span style={{ marginLeft: "auto", fontSize: 16 }}>✓</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DirectiveBuilder() {
+  const [value, setValue] = useState("#42b883");
+  const [arg, setArg] = useState("color");
+  const [mods, setMods] = useState({ bold: false, underline: false, italic: false });
+
+  const toggle = (m: keyof typeof mods) => setMods(prev => ({ ...prev, [m]: !prev[m] }));
+
+  const preview: React.CSSProperties = {
+    color: arg === "color" ? value : undefined,
+    backgroundColor: arg === "background" ? value : undefined,
+    fontWeight: mods.bold ? "bold" : "normal",
+    textDecoration: mods.underline ? "underline" : "none",
+    fontStyle: mods.italic ? "italic" : "normal",
+    padding: "10px 14px", borderRadius: 8, fontSize: 16,
+    border: "2px dashed " + VUE_GREEN, display: "inline-block",
+    transition: "all 0.2s"
+  };
+
+  const directive = "v-color" + (arg !== "color" ? ":" + arg : "") +
+    (Object.values(mods).some(Boolean) ? "." + Object.entries(mods).filter(([,v])=>v).map(([k])=>k).join(".") : "") +
+    '="' + "'" + value + "'" + '"';
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+        <div>
+          <label style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 4 }}>Аргумент (arg)</label>
+          <select value={arg} onChange={e => setArg(e.target.value)} style={{
+            width: "100%", padding: "7px 10px", borderRadius: 7,
+            border: "1px solid #ddd", fontSize: 13
+          }}>
+            <option value="color">color (цвет текста)</option>
+            <option value="background">background (фон)</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 4 }}>Значение (value)</label>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input type="color" value={value} onChange={e => setValue(e.target.value)} style={{ height: 36, width: 44, padding: 2, borderRadius: 6, border: "1px solid #ddd", cursor: "pointer" }} />
+            <input value={value} onChange={e => setValue(e.target.value)} style={{ flex: 1, padding: "7px 10px", borderRadius: 7, border: "1px solid #ddd", fontSize: 13 }} />
+          </div>
+        </div>
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={{ fontSize: 12, color: "#666", display: "block", marginBottom: 6 }}>Модификаторы</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          {(Object.keys(mods) as (keyof typeof mods)[]).map(m => (
+            <button key={m} onClick={() => toggle(m)} style={{
+              background: mods[m] ? VUE_GREEN : "#f0f0f0",
+              color: mods[m] ? "#fff" : "#555",
+              border: "none", borderRadius: 6,
+              padding: "6px 12px", cursor: "pointer", fontSize: 13, fontWeight: 600
+            }}>.{m}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ background: "#f8fffe", borderRadius: 8, padding: "10px 14px", marginBottom: 14 }}>
+        <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>Сгенерированная директива:</div>
+        <code style={{ color: VUE_GREEN, fontSize: 13 }}>{directive}</code>
+      </div>
+      <div style={{ textAlign: "center", padding: "1rem" }}>
+        <span style={preview}>Текст с директивой v-color</span>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [tab, setTab] = useState<"lifecycle"|"builder">("lifecycle");
+
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", background: "#f5f7fa", minHeight: "100vh", padding: "1.5rem" }}>
+      <div style={{ maxWidth: 600, margin: "0 auto" }}>
+        <div style={{ background: VUE_DARK, color: "#fff", borderRadius: 12, padding: "1.25rem 1.5rem", marginBottom: "1.5rem" }}>
+          <h2 style={{ margin: 0, fontSize: 20 }}>🎨 Пользовательские директивы</h2>
+          <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 14 }}>Урок 21 — хуки жизненного цикла и параметры</p>
+        </div>
+
+        <div style={{ display: "flex", gap: 6, marginBottom: "1rem" }}>
+          {(["lifecycle","builder"] as const).map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{
+              background: tab === t ? VUE_GREEN : "#fff",
+              color: tab === t ? "#fff" : VUE_DARK,
+              border: "1px solid " + (tab === t ? VUE_GREEN : "#ddd"),
+              borderRadius: 8, padding: "8px 16px", cursor: "pointer",
+              fontWeight: 600, fontSize: 13
+            }}>
+              {t === "lifecycle" ? "🔁 Жизненный цикл" : "🎨 Конструктор директивы"}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: "#fff", borderRadius: 12, padding: "1.25rem", boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+          {tab === "lifecycle" ? <LifecycleVisualizer /> : <DirectiveBuilder />}
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,622 @@
+## 🧪 Тестирование Nuxt 3
+
+Тестирование — неотъемлемая часть надёжного приложения. `@nuxt/test-utils` предоставляет специальные утилиты для тестирования компонентов, composables и серверных маршрутов в контексте Nuxt.
+
+---
+
+## 🚀 Установка
+
+```bash
+npm install -D @nuxt/test-utils vitest @vue/test-utils happy-dom playwright
+```
+
+```typescript
+// vitest.config.ts
+import { defineVitestConfig } from '@nuxt/test-utils/config'
+
+export default defineVitestConfig({
+  test: {
+    environment: 'nuxt',
+    environmentOptions: {
+      nuxt: {
+        rootDir: fileURLToPath(new URL('./', import.meta.url)),
+        domEnvironment: 'happy-dom'
+      }
+    }
+  }
+})
+```
+
+```json
+// package.json
+{
+  "scripts": {
+    "test": "vitest",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "test:coverage": "vitest run --coverage"
+  }
+}
+```
+
+---
+
+## 🔧 mountSuspended
+
+`mountSuspended` — аналог `mount` из Vue Test Utils, но с поддержкой `async setup` и Nuxt-контекста:
+
+```typescript
+// tests/components/MyButton.test.ts
+import { describe, it, expect } from 'vitest'
+import { mountSuspended } from '@nuxt/test-utils/runtime'
+import MyButton from '~/components/MyButton.vue'
+
+describe('MyButton', () => {
+  it('renders correctly', async () => {
+    const wrapper = await mountSuspended(MyButton, {
+      props: { label: 'Нажми меня' }
+    })
+    expect(wrapper.text()).toBe('Нажми меня')
+  })
+
+  it('emits click event', async () => {
+    const wrapper = await mountSuspended(MyButton, {
+      props: { label: 'Кнопка' }
+    })
+    await wrapper.trigger('click')
+    expect(wrapper.emitted('click')).toBeTruthy()
+  })
+
+  it('applies disabled state', async () => {
+    const wrapper = await mountSuspended(MyButton, {
+      props: { label: 'Кнопка', disabled: true }
+    })
+    expect(wrapper.attributes('disabled')).toBeDefined()
+  })
+})
+```
+
+---
+
+## 📄 renderSuspended
+
+`renderSuspended` — рендеринг в строку HTML для snapshot-тестов:
+
+```typescript
+// tests/components/ArticleCard.test.ts
+import { describe, it, expect } from 'vitest'
+import { renderSuspended } from '@nuxt/test-utils/runtime'
+import ArticleCard from '~/components/ArticleCard.vue'
+
+const mockArticle = {
+  title: 'Тестовая статья',
+  description: 'Описание статьи',
+  date: '2024-01-15',
+  author: 'Александр'
+}
+
+describe('ArticleCard', () => {
+  it('renders article data', async () => {
+    const html = await renderSuspended(ArticleCard, {
+      props: { article: mockArticle }
+    })
+    expect(html).toContain('Тестовая статья')
+    expect(html).toContain('Александр')
+  })
+
+  it('matches snapshot', async () => {
+    const html = await renderSuspended(ArticleCard, {
+      props: { article: mockArticle }
+    })
+    expect(html).toMatchSnapshot()
+  })
+})
+```
+
+---
+
+## 🪝 Тестирование composables
+
+```typescript
+// composables/useCounter.ts
+export function useCounter(initial = 0) {
+  const count = ref(initial)
+  const increment = () => count.value++
+  const decrement = () => count.value--
+  const reset = () => count.value = initial
+  return { count, increment, decrement, reset }
+}
+```
+
+```typescript
+// tests/composables/useCounter.test.ts
+import { describe, it, expect } from 'vitest'
+import { useCounter } from '~/composables/useCounter'
+
+describe('useCounter', () => {
+  it('starts at 0 by default', () => {
+    const { count } = useCounter()
+    expect(count.value).toBe(0)
+  })
+
+  it('increments correctly', () => {
+    const { count, increment } = useCounter()
+    increment()
+    increment()
+    expect(count.value).toBe(2)
+  })
+
+  it('decrements correctly', () => {
+    const { count, decrement } = useCounter(5)
+    decrement()
+    expect(count.value).toBe(4)
+  })
+
+  it('resets to initial value', () => {
+    const { count, increment, reset } = useCounter(10)
+    increment()
+    increment()
+    reset()
+    expect(count.value).toBe(10)
+  })
+})
+```
+
+---
+
+## 🌐 Тестирование composables с Nuxt-зависимостями
+
+```typescript
+// composables/useUser.ts
+export function useUser() {
+  const user = useState<User | null>('user', () => null)
+
+  async function fetchUser(id: string) {
+    user.value = await $fetch(`/api/users/${id}`)
+  }
+
+  return { user, fetchUser }
+}
+```
+
+```typescript
+// tests/composables/useUser.test.ts
+import { describe, it, expect, vi } from 'vitest'
+import { mockNuxtImport } from '@nuxt/test-utils/runtime'
+import { useUser } from '~/composables/useUser'
+
+const mockFetch = vi.fn()
+mockNuxtImport('$fetch', () => mockFetch)
+
+describe('useUser', () => {
+  it('fetches user data', async () => {
+    const mockUser = { id: '1', name: 'Александр', email: 'alex@test.com' }
+    mockFetch.mockResolvedValue(mockUser)
+
+    const { user, fetchUser } = useUser()
+    await fetchUser('1')
+
+    expect(user.value).toEqual(mockUser)
+    expect(mockFetch).toHaveBeenCalledWith('/api/users/1')
+  })
+})
+```
+
+---
+
+## 🔌 Тестирование серверных маршрутов
+
+```typescript
+// server/api/users/[id].get.ts
+export default defineEventHandler(async (event) => {
+  const id = getRouterParam(event, 'id')
+
+  if (!id || isNaN(Number(id))) {
+    throw createError({ statusCode: 400, message: 'Некорректный ID' })
+  }
+
+  return { id, name: 'Тестовый пользователь', email: 'test@example.com' }
+})
+```
+
+```typescript
+// tests/server/api/users.test.ts
+import { describe, it, expect } from 'vitest'
+import { setup, $fetch } from '@nuxt/test-utils/e2e'
+
+describe('users API', async () => {
+  // Запуск Nuxt сервера для тестов
+  await setup({
+    rootDir: fileURLToPath(new URL('../..', import.meta.url)),
+    server: true
+  })
+
+  it('returns user data', async () => {
+    const user = await $fetch('/api/users/1')
+    expect(user).toMatchObject({
+      id: '1',
+      name: expect.any(String)
+    })
+  })
+
+  it('returns 400 for invalid id', async () => {
+    await expect($fetch('/api/users/abc')).rejects.toMatchObject({
+      statusCode: 400
+    })
+  })
+
+  it('returns 404 for missing user', async () => {
+    await expect($fetch('/api/users/99999')).rejects.toMatchObject({
+      statusCode: 404
+    })
+  })
+})
+```
+
+---
+
+## 🎭 E2E тестирование с Playwright
+
+```typescript
+// playwright.config.ts
+import { defineConfig, devices } from '@playwright/test'
+
+export default defineConfig({
+  testDir: './e2e',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  use: {
+    baseURL: 'http://localhost:3000',
+    trace: 'on-first-retry'
+  },
+  webServer: {
+    command: 'npm run dev',
+    url: 'http://localhost:3000',
+    reuseExistingServer: !process.env.CI
+  },
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'Mobile Safari', use: { ...devices['iPhone 12'] } }
+  ]
+})
+```
+
+```typescript
+// e2e/auth.spec.ts
+import { test, expect } from '@playwright/test'
+
+test.describe('Аутентификация', () => {
+  test('показывает форму входа', async ({ page }) => {
+    await page.goto('/login')
+    await expect(page.getByRole('heading', { name: /войти/i })).toBeVisible()
+    await expect(page.getByPlaceholder('Email')).toBeVisible()
+    await expect(page.getByPlaceholder('Пароль')).toBeVisible()
+  })
+
+  test('успешный вход', async ({ page }) => {
+    await page.goto('/login')
+    await page.fill('[name="email"]', 'test@example.com')
+    await page.fill('[name="password"]', 'password123')
+    await page.click('button[type="submit"]')
+    await expect(page).toHaveURL('/dashboard')
+  })
+
+  test('ошибка при неверных данных', async ({ page }) => {
+    await page.goto('/login')
+    await page.fill('[name="email"]', 'wrong@example.com')
+    await page.fill('[name="password"]', 'wrongpassword')
+    await page.click('button[type="submit"]')
+    await expect(page.getByText(/неверный/i)).toBeVisible()
+  })
+})
+```
+
+---
+
+## 🗂️ Структура тестов
+
+```
+tests/
+├── unit/
+│   ├── components/
+│   │   ├── Button.test.ts
+│   │   └── Modal.test.ts
+│   ├── composables/
+│   │   ├── useCounter.test.ts
+│   │   └── useUser.test.ts
+│   └── utils/
+│       └── format.test.ts
+├── integration/
+│   └── server/
+│       └── api/
+│           └── users.test.ts
+└── e2e/
+    ├── auth.spec.ts
+    ├── dashboard.spec.ts
+    └── navigation.spec.ts
+```
+
+---
+
+## 📊 Покрытие кода
+
+```typescript
+// vitest.config.ts
+export default defineVitestConfig({
+  test: {
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json', 'html'],
+      exclude: ['node_modules', '.nuxt', 'dist'],
+      thresholds: {
+        lines: 80,
+        functions: 80,
+        branches: 70,
+        statements: 80
+      }
+    }
+  }
+})
+```
+
+---
+
+<Playground
+  template="react"
+  files={{
+    '/App.tsx': `import { useState, useEffect } from 'react'
+
+const TEST_SUITES = [
+  {
+    name: 'components/Button.test.ts',
+    type: 'unit',
+    tests: [
+      { name: 'renders label correctly', status: 'pending' },
+      { name: 'emits click event', status: 'pending' },
+      { name: 'disabled state', status: 'pending' }
+    ]
+  },
+  {
+    name: 'composables/useCounter.test.ts',
+    type: 'unit',
+    tests: [
+      { name: 'starts at 0 by default', status: 'pending' },
+      { name: 'increments correctly', status: 'pending' },
+      { name: 'resets to initial value', status: 'pending' },
+      { name: 'decrements correctly', status: 'pending' }
+    ]
+  },
+  {
+    name: 'server/api/users.test.ts',
+    type: 'integration',
+    tests: [
+      { name: 'returns user data', status: 'pending' },
+      { name: 'returns 400 for invalid id', status: 'pending' },
+      { name: 'returns 404 for missing user', status: 'pending' }
+    ]
+  },
+  {
+    name: 'e2e/auth.spec.ts',
+    type: 'e2e',
+    tests: [
+      { name: 'shows login form', status: 'pending' },
+      { name: 'successful login', status: 'pending' },
+      { name: 'error on wrong credentials', status: 'pending' }
+    ]
+  }
+]
+
+const TYPE_CONFIG = {
+  unit: { color: '#00dc82', label: 'Unit', icon: '🔬' },
+  integration: { color: '#60a5fa', label: 'Integration', icon: '🔗' },
+  e2e: { color: '#f59e0b', label: 'E2E', icon: '🎭' }
+}
+
+export default function App() {
+  const [suites, setSuites] = useState(TEST_SUITES.map(s => ({
+    ...s,
+    tests: s.tests.map(t => ({ ...t }))
+  })))
+  const [running, setRunning] = useState(false)
+  const [runningIdx, setRunningIdx] = useState(null)
+  const [activeFilter, setActiveFilter] = useState('all')
+
+  const runTests = async () => {
+    setRunning(true)
+    const reset = TEST_SUITES.map(s => ({
+      ...s,
+      tests: s.tests.map(t => ({ ...t, status: 'pending' }))
+    }))
+    setSuites(reset)
+
+    for (let si = 0; si < reset.length; si++) {
+      setRunningIdx(si)
+      const suite = reset[si]
+      for (let ti = 0; ti < suite.tests.length; ti++) {
+        await new Promise(r => setTimeout(r, 180 + Math.random() * 220))
+        const pass = Math.random() > 0.12
+        setSuites(prev => prev.map((s, i) =>
+          i === si ? {
+            ...s,
+            tests: s.tests.map((t, j) =>
+              j === ti ? { ...t, status: pass ? 'pass' : 'fail' } : t
+            )
+          } : s
+        ))
+      }
+    }
+    setRunningIdx(null)
+    setRunning(false)
+  }
+
+  const allTests = suites.flatMap(s => s.tests)
+  const passed = allTests.filter(t => t.status === 'pass').length
+  const failed = allTests.filter(t => t.status === 'fail').length
+  const total = allTests.length
+  const coverage = total > 0 ? Math.round((passed / total) * 100) : 0
+
+  const filtered = activeFilter === 'all' ? suites :
+    suites.filter(s => s.type === activeFilter)
+
+  return (
+    <div style={{
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '24px',
+      fontFamily: 'system-ui, sans-serif',
+      color: '#e2e8f0'
+    }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>🧪</div>
+          <h1 style={{ color: '#00dc82', fontSize: 24, fontWeight: 700, margin: 0 }}>
+            Test Runner
+          </h1>
+          <p style={{ color: '#94a3b8', marginTop: 6, fontSize: 14 }}>
+            @nuxt/test-utils + Vitest + Playwright
+          </p>
+        </div>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(4, 1fr)',
+          gap: 10,
+          marginBottom: 16
+        }}>
+          {[
+            { label: 'Всего', value: total, color: '#94a3b8' },
+            { label: 'Прошло', value: passed, color: '#00dc82' },
+            { label: 'Упало', value: failed, color: '#ef4444' },
+            { label: 'Покрытие', value: \`\${coverage}%\`, color: coverage > 80 ? '#00dc82' : coverage > 60 ? '#f59e0b' : '#ef4444' }
+          ].map(stat => (
+            <div key={stat.label} style={{
+              background: '#1a1a2e',
+              borderRadius: 10,
+              padding: 14,
+              border: '1px solid #1e293b',
+              textAlign: 'center'
+            }}>
+              <div style={{ fontSize: 22, fontWeight: 700, color: stat.color }}>{stat.value}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>{stat.label}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['all', 'unit', 'integration', 'e2e'].map(f => (
+              <button key={f} onClick={() => setActiveFilter(f)} style={{
+                padding: '6px 14px', borderRadius: 16,
+                border: '1px solid',
+                borderColor: activeFilter === f ? '#00dc82' : '#334155',
+                background: activeFilter === f ? 'rgba(0,220,130,0.1)' : 'transparent',
+                color: activeFilter === f ? '#00dc82' : '#94a3b8',
+                cursor: 'pointer', fontSize: 12
+              }}>
+                {f === 'all' ? 'Все' : TYPE_CONFIG[f]?.label || f}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={runTests}
+            disabled={running}
+            style={{
+              padding: '8px 20px', borderRadius: 10,
+              border: 'none',
+              background: running ? '#334155' : '#00dc82',
+              color: running ? '#64748b' : '#0f172a',
+              cursor: running ? 'wait' : 'pointer',
+              fontSize: 13, fontWeight: 700
+            }}
+          >
+            {running ? '⏳ Выполняется...' : '▶ Запустить тесты'}
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {filtered.map((suite, si) => {
+            const cfg = TYPE_CONFIG[suite.type]
+            const suitePassed = suite.tests.filter(t => t.status === 'pass').length
+            const suiteFailed = suite.tests.filter(t => t.status === 'fail').length
+            const isRunning = runningIdx !== null && suites.indexOf(suites.find(s => s.name === suite.name)) === runningIdx
+            return (
+              <div key={suite.name} style={{
+                background: '#1a1a2e',
+                borderRadius: 10,
+                padding: 14,
+                border: '1px solid',
+                borderColor: isRunning ? cfg.color : suiteFailed > 0 ? '#ef444440' : suitePassed === suite.tests.length && suitePassed > 0 ? '#00dc8240' : '#1e293b',
+                transition: 'all 0.3s'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 16 }}>{cfg.icon}</span>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#e2e8f0' }}>{suite.name}</span>
+                    {isRunning && <span style={{ fontSize: 11, color: cfg.color, animation: 'pulse 1s infinite' }}>● запуск</span>}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, fontSize: 12 }}>
+                    {suitePassed > 0 && <span style={{ color: '#00dc82' }}>✓{suitePassed}</span>}
+                    {suiteFailed > 0 && <span style={{ color: '#ef4444' }}>✗{suiteFailed}</span>}
+                    <span style={{
+                      padding: '2px 8px', borderRadius: 8,
+                      fontSize: 10, color: cfg.color,
+                      background: cfg.color + '22'
+                    }}>{cfg.label}</span>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {suite.tests.map((test, ti) => (
+                    <div key={ti} style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '5px 8px', borderRadius: 6,
+                      background: '#0f172a',
+                      fontSize: 12
+                    }}>
+                      <span style={{
+                        width: 14, height: 14,
+                        borderRadius: '50%',
+                        background: test.status === 'pass' ? '#00dc82' :
+                          test.status === 'fail' ? '#ef4444' :
+                          '#334155',
+                        display: 'inline-block',
+                        flexShrink: 0,
+                        fontSize: 8,
+                        lineHeight: '14px',
+                        textAlign: 'center',
+                        color: 'white'
+                      }}>
+                        {test.status === 'pass' ? '✓' : test.status === 'fail' ? '✗' : ''}
+                      </span>
+                      <span style={{
+                        color: test.status === 'pass' ? '#94a3b8' :
+                          test.status === 'fail' ? '#fca5a5' :
+                          '#475569'
+                      }}>{test.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+`
+  }}
+/>
+
+---
+
+## 🚀 Итоги
+
+`@nuxt/test-utils` предоставляет полный инструментарий:
+
+- **`mountSuspended`** — тестирование компонентов с async setup
+- **`renderSuspended`** — snapshot-тесты и HTML проверки
+- **`mockNuxtImport`** — мокирование Nuxt composables
+- **`$fetch`** — тестирование server routes через HTTP
+- **Playwright** — E2E тесты браузера с авто-запуском сервера

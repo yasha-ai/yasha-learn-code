@@ -1,0 +1,852 @@
+## 🎮 Svelte Actions
+
+Action — это **функция, которая получает DOM-узел** и делает с ним что угодно. Это как хук жизненного цикла, привязанный к конкретному элементу. Хочешь tooltip? Drag and drop? Lazy loading? Actions — твой инструмент 🔧
+
+---
+
+## Зачем Actions?
+
+```
+Проблема без actions:
+- Логика работы с DOM размазана по onMount/onDestroy
+- Нельзя переиспользовать между компонентами
+- Нужно хранить ref на элемент вручную
+
+Решение с actions:
+✅ Логика инкапсулирована в одной функции
+✅ Переиспользуется директивой use:
+✅ Автоматическая очистка (destroy)
+✅ Реакция на изменение параметров (update)
+```
+
+---
+
+## Анатомия Action
+
+```typescript
+import type { Action } from 'svelte/action'
+
+// Типизированный action
+// Action<ElementType, ParametersType, EventsType>
+const myAction: Action<HTMLElement, { color: string }> = (node, params) => {
+  // node — DOM элемент, к которому применяется action
+  // params — начальные параметры
+
+  // Инициализация
+  node.style.color = params?.color ?? 'red'
+
+  return {
+    // Вызывается при изменении параметров
+    update(newParams) {
+      node.style.color = newParams.color
+    },
+
+    // Вызывается при удалении элемента из DOM
+    destroy() {
+      // Очищаем: удаляем обработчики, таймеры, subscription'ы
+    }
+  }
+}
+```
+
+```svelte
+<!-- Использование -->
+<script>
+  import { myAction } from './actions'
+  let color = 'blue'
+</script>
+
+<!-- Без параметров -->
+<div use:myAction>...</div>
+
+<!-- С параметрами -->
+<div use:myAction={{ color }}>...</div>
+```
+
+---
+
+## Action: clickOutside
+
+Классика! Закрывать модальные окна при клике за пределами:
+
+```typescript
+// actions/clickOutside.ts
+import type { Action } from 'svelte/action'
+
+interface ClickOutsideAttributes {
+  'on:clickoutside': (event: CustomEvent) => void
+}
+
+export const clickOutside: Action<HTMLElement, undefined, ClickOutsideAttributes> = (node) => {
+  function handleClick(event: MouseEvent) {
+    if (node && !node.contains(event.target as Node)) {
+      node.dispatchEvent(new CustomEvent('clickoutside'))
+    }
+  }
+
+  document.addEventListener('click', handleClick, true) // capture phase!
+
+  return {
+    destroy() {
+      document.removeEventListener('click', handleClick, true)
+    }
+  }
+}
+```
+
+```svelte
+<script>
+  import { clickOutside } from './actions/clickOutside'
+  let dropdownOpen = false
+</script>
+
+<div use:clickOutside on:clickoutside={() => dropdownOpen = false}>
+  <button on:click={() => dropdownOpen = !dropdownOpen}>
+    Меню ▼
+  </button>
+
+  {#if dropdownOpen}
+    <ul class="dropdown">
+      <li>Профиль</li>
+      <li>Настройки</li>
+      <li>Выйти</li>
+    </ul>
+  {/if}
+</div>
+```
+
+---
+
+## Action: longPress
+
+```typescript
+// actions/longPress.ts
+import type { Action } from 'svelte/action'
+
+interface LongPressOptions {
+  duration?: number
+}
+
+interface LongPressAttributes {
+  'on:longpress': (event: CustomEvent<{ duration: number }>) => void
+}
+
+export const longPress: Action<HTMLElement, LongPressOptions, LongPressAttributes> = (
+  node,
+  options = {}
+) => {
+  let { duration = 500 } = options
+  let timer: ReturnType<typeof setTimeout>
+  let startTime: number
+
+  function handleMouseDown() {
+    startTime = Date.now()
+    timer = setTimeout(() => {
+      node.dispatchEvent(
+        new CustomEvent('longpress', {
+          detail: { duration: Date.now() - startTime }
+        })
+      )
+    }, duration)
+  }
+
+  function handleMouseUp() {
+    clearTimeout(timer)
+  }
+
+  node.addEventListener('mousedown', handleMouseDown)
+  node.addEventListener('mouseup', handleMouseUp)
+  node.addEventListener('touchstart', handleMouseDown)
+  node.addEventListener('touchend', handleMouseUp)
+
+  return {
+    update(newOptions) {
+      duration = newOptions.duration ?? 500
+    },
+    destroy() {
+      clearTimeout(timer)
+      node.removeEventListener('mousedown', handleMouseDown)
+      node.removeEventListener('mouseup', handleMouseUp)
+      node.removeEventListener('touchstart', handleMouseDown)
+      node.removeEventListener('touchend', handleMouseUp)
+    }
+  }
+}
+```
+
+```svelte
+<script>
+  import { longPress } from './actions/longPress'
+
+  function handleLongPress(event: CustomEvent<{ duration: number }>) {
+    alert(`Зажато на ${event.detail.duration}мс!`)
+  }
+</script>
+
+<button
+  use:longPress={{ duration: 800 }}
+  on:longpress={handleLongPress}
+>
+  Зажми меня! 🤌
+</button>
+```
+
+---
+
+## Action: tooltip
+
+```typescript
+// actions/tooltip.ts
+import type { Action } from 'svelte/action'
+
+interface TooltipOptions {
+  text: string
+  position?: 'top' | 'bottom' | 'left' | 'right'
+  delay?: number
+}
+
+export const tooltip: Action<HTMLElement, TooltipOptions> = (node, options) => {
+  let tooltipEl: HTMLDivElement | null = null
+  let timer: ReturnType<typeof setTimeout>
+
+  function createTooltip() {
+    tooltipEl = document.createElement('div')
+    tooltipEl.className = 'svelte-tooltip'
+    tooltipEl.textContent = options.text
+
+    // Позиционирование
+    const rect = node.getBoundingClientRect()
+    const position = options.position ?? 'top'
+
+    Object.assign(tooltipEl.style, {
+      position: 'fixed',
+      background: '#1e293b',
+      color: '#e2e8f0',
+      padding: '4px 8px',
+      borderRadius: '4px',
+      fontSize: '12px',
+      pointerEvents: 'none',
+      zIndex: '9999',
+      top: position === 'top'
+        ? `${rect.top - 30}px`
+        : `${rect.bottom + 8}px`,
+      left: `${rect.left + rect.width / 2}px`,
+      transform: 'translateX(-50%)',
+    })
+
+    document.body.appendChild(tooltipEl)
+  }
+
+  function handleMouseEnter() {
+    timer = setTimeout(createTooltip, options.delay ?? 300)
+  }
+
+  function handleMouseLeave() {
+    clearTimeout(timer)
+    tooltipEl?.remove()
+    tooltipEl = null
+  }
+
+  node.addEventListener('mouseenter', handleMouseEnter)
+  node.addEventListener('mouseleave', handleMouseLeave)
+
+  return {
+    update(newOptions) {
+      options = newOptions
+      if (tooltipEl) tooltipEl.textContent = newOptions.text
+    },
+    destroy() {
+      clearTimeout(timer)
+      tooltipEl?.remove()
+      node.removeEventListener('mouseenter', handleMouseEnter)
+      node.removeEventListener('mouseleave', handleMouseLeave)
+    }
+  }
+}
+```
+
+```svelte
+<button use:tooltip={{ text: 'Удалить навсегда! ⚠️', position: 'top' }}>
+  🗑️ Удалить
+</button>
+
+<button use:tooltip={{ text: 'Сохранить в облако', delay: 100 }}>
+  💾 Сохранить
+</button>
+```
+
+---
+
+## Action: autofocus
+
+```typescript
+// actions/autofocus.ts
+import type { Action } from 'svelte/action'
+
+export const autofocus: Action<HTMLElement> = (node) => {
+  // Ждём следующего тика (элемент должен быть видимым)
+  const frame = requestAnimationFrame(() => {
+    if (node instanceof HTMLElement) {
+      node.focus()
+    }
+  })
+
+  return {
+    destroy() {
+      cancelAnimationFrame(frame)
+    }
+  }
+}
+```
+
+```svelte
+{#if showModal}
+  <div class="modal">
+    <!-- Автоматически получает фокус при появлении! -->
+    <input use:autofocus placeholder="Введи что-нибудь" />
+  </div>
+{/if}
+```
+
+---
+
+## Action: lazyLoad (Intersection Observer)
+
+```typescript
+// actions/lazyLoad.ts
+import type { Action } from 'svelte/action'
+
+interface LazyLoadOptions {
+  src: string
+  placeholder?: string
+  threshold?: number
+}
+
+export const lazyLoad: Action<HTMLImageElement, LazyLoadOptions> = (
+  node,
+  options
+) => {
+  const { placeholder = '/placeholder.jpg', threshold = 0.1 } = options
+
+  // Пока не видим — показываем placeholder
+  node.src = placeholder
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          node.src = options.src
+          node.onload = () => node.classList.add('loaded')
+          observer.unobserve(node)
+        }
+      })
+    },
+    { threshold }
+  )
+
+  observer.observe(node)
+
+  return {
+    update(newOptions) {
+      options = newOptions
+    },
+    destroy() {
+      observer.unobserve(node)
+    }
+  }
+}
+```
+
+```svelte
+{#each photos as photo}
+  <img
+    use:lazyLoad={{ src: photo.url, placeholder: photo.thumbnail }}
+    alt={photo.title}
+    class="photo"
+  />
+{/each}
+```
+
+---
+
+## Action: draggable
+
+```typescript
+// actions/draggable.ts
+import type { Action } from 'svelte/action'
+
+interface DraggableOptions {
+  axis?: 'x' | 'y' | 'both'
+  bounds?: HTMLElement | 'parent' | 'window'
+}
+
+interface DraggableAttributes {
+  'on:dragstart': (e: CustomEvent<{x: number; y: number}>) => void
+  'on:drag': (e: CustomEvent<{x: number; y: number}>) => void
+  'on:dragend': (e: CustomEvent<{x: number; y: number}>) => void
+}
+
+export const draggable: Action<HTMLElement, DraggableOptions, DraggableAttributes> = (
+  node,
+  options = {}
+) => {
+  let startX: number, startY: number
+  let initialLeft: number, initialTop: number
+  let isDragging = false
+
+  node.style.position = 'absolute'
+  node.style.cursor = 'grab'
+
+  function onMouseDown(event: MouseEvent) {
+    isDragging = true
+    startX = event.clientX
+    startY = event.clientY
+    initialLeft = node.offsetLeft
+    initialTop = node.offsetTop
+    node.style.cursor = 'grabbing'
+
+    node.dispatchEvent(new CustomEvent('dragstart', {
+      detail: { x: initialLeft, y: initialTop }
+    }))
+
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }
+
+  function onMouseMove(event: MouseEvent) {
+    if (!isDragging) return
+
+    const deltaX = event.clientX - startX
+    const deltaY = event.clientY - startY
+    const { axis = 'both' } = options
+
+    const newLeft = axis !== 'y' ? initialLeft + deltaX : initialLeft
+    const newTop  = axis !== 'x' ? initialTop  + deltaY : initialTop
+
+    node.style.left = `${newLeft}px`
+    node.style.top  = `${newTop}px`
+
+    node.dispatchEvent(new CustomEvent('drag', {
+      detail: { x: newLeft, y: newTop }
+    }))
+  }
+
+  function onMouseUp() {
+    isDragging = false
+    node.style.cursor = 'grab'
+
+    node.dispatchEvent(new CustomEvent('dragend', {
+      detail: {
+        x: node.offsetLeft,
+        y: node.offsetTop,
+      }
+    }))
+
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+  }
+
+  node.addEventListener('mousedown', onMouseDown)
+
+  return {
+    update(newOptions) {
+      options = newOptions
+    },
+    destroy() {
+      node.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+  }
+}
+```
+
+---
+
+## Actions с параметрами — реактивность
+
+```svelte
+<script>
+  import { tooltip } from './actions/tooltip'
+  import { longPress } from './actions/longPress'
+
+  let tooltipText = 'Начальный текст'
+  let longPressDuration = 500
+
+  // Параметры реактивны! При изменении переменных
+  // вызывается action.update()
+</script>
+
+<input bind:value={tooltipText} />
+<button use:tooltip={{ text: tooltipText }}>Наведи мышь</button>
+
+<input type="range" min={200} max={2000} bind:value={longPressDuration} />
+<button use:longPress={{ duration: longPressDuration }}>
+  Зажми ({longPressDuration}мс)
+</button>
+```
+
+---
+
+## Actions vs Event Directives
+
+```
+Когда использовать use: (action):
+✅ Логика работы с DOM (фокус, позиция, размер)
+✅ Сторонние библиотеки (chart.js, maps)
+✅ Intersection/Resize Observer
+✅ Drag and drop
+✅ Tooltip, popover, dropdown
+✅ Keyboard shortcuts
+✅ Переиспользуемая DOM-логика
+
+Когда использовать on: (event directive):
+✅ Простые обработчики событий
+✅ Встроенные DOM события (click, input, keydown)
+✅ Одноразовая логика в компоненте
+
+Когда НЕ нужен action:
+❌ Только изменить стиль → используй class:name или style:
+❌ Простое условие → используй {#if}
+❌ Реактивное значение → используй $:
+```
+
+---
+
+## Сторонние библиотеки через Actions
+
+```typescript
+// actions/chart.ts — интеграция Chart.js
+import type { Action } from 'svelte/action'
+import type { Chart, ChartData } from 'chart.js'
+
+export const chart: Action<HTMLCanvasElement, ChartData> = (node, data) => {
+  let chartInstance: Chart | null = null
+
+  import('chart.js').then(({ Chart, registerables }) => {
+    Chart.register(...registerables)
+    chartInstance = new Chart(node, {
+      type: 'bar',
+      data,
+      options: {
+        responsive: true,
+        animation: { duration: 500 }
+      }
+    })
+  })
+
+  return {
+    update(newData) {
+      if (chartInstance) {
+        chartInstance.data = newData
+        chartInstance.update()
+      }
+    },
+    destroy() {
+      chartInstance?.destroy()
+    }
+  }
+}
+```
+
+```svelte
+<script>
+  import { chart } from './actions/chart'
+
+  $: chartData = {
+    labels: months,
+    datasets: [{ label: 'Продажи', data: sales }]
+  }
+</script>
+
+<canvas use:chart={chartData}></canvas>
+```
+
+---
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, useCallback, CSSProperties } from 'react';
+
+const BG = '#0f172a';
+const SVELTE = '#ff3e00';
+const YELLOW = '#ffba00';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+
+type Demo = 'clickOutside' | 'longPress' | 'tooltip' | 'draggable' | 'lazyLoad';
+
+// Симуляция use:clickOutside
+function useClickOutside(ref: React.RefObject<HTMLElement>, handler: () => void) {
+  useEffect(() => {
+    const listener = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) handler();
+    };
+    document.addEventListener('click', listener, true);
+    return () => document.removeEventListener('click', listener, true);
+  }, [handler]);
+}
+
+// Симуляция use:longPress
+function useLongPress(callback: () => void, duration = 500) {
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const onDown = useCallback(() => { timerRef.current = setTimeout(callback, duration); }, [callback, duration]);
+  const onUp   = useCallback(() => { clearTimeout(timerRef.current); }, []);
+  return { onMouseDown: onDown, onMouseUp: onUp, onTouchStart: onDown, onTouchEnd: onUp };
+}
+
+// Симуляция use:tooltip
+function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div style={{position: 'relative' as const, display: 'inline-block'}}
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+      {children}
+      {show && (
+        <div style={{
+          position: 'absolute' as const, bottom: '110%', left: '50%', transform: 'translateX(-50%)',
+          background: '#1e293b', color: TEXT, padding: '4px 10px', borderRadius: '4px',
+          fontSize: '0.75rem', whiteSpace: 'nowrap' as const, border: '1px solid ' + BORDER,
+          zIndex: 999, pointerEvents: 'none' as const,
+        }}>
+          {text}
+          <div style={{position: 'absolute' as const, top: '100%', left: '50%', transform: 'translateX(-50%)', borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderTop: '4px solid #1e293b'}} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('clickOutside');
+
+  // clickOutside
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  useClickOutside(dropdownRef, () => setDropdownOpen(false));
+
+  // longPress
+  const [longPressCount, setLongPressCount] = useState(0);
+  const [lpDuration, setLpDuration] = useState(600);
+  const [lpActive, setLpActive] = useState(false);
+  const [lpProgress, setLpProgress] = useState(0);
+  const lpTimer = useRef<ReturnType<typeof setTimeout>>();
+  const lpInterval = useRef<ReturnType<typeof setInterval>>();
+
+  const startLP = () => {
+    setLpActive(true);
+    setLpProgress(0);
+    const start = Date.now();
+    lpInterval.current = setInterval(() => {
+      setLpProgress(Math.min(((Date.now() - start) / lpDuration) * 100, 100));
+    }, 50);
+    lpTimer.current = setTimeout(() => {
+      setLongPressCount(c => c + 1);
+      setLpActive(false);
+      setLpProgress(0);
+      clearInterval(lpInterval.current);
+    }, lpDuration);
+  };
+  const endLP = () => {
+    clearTimeout(lpTimer.current);
+    clearInterval(lpInterval.current);
+    setLpActive(false);
+    setLpProgress(0);
+  };
+
+  // draggable
+  const [pos, setPos] = useState({x: 60, y: 30});
+  const [dragging, setDragging] = useState(false);
+  const dragStart = useRef({mx: 0, my: 0, bx: 0, by: 0});
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const onDragMouseDown = (e: React.MouseEvent) => {
+    setDragging(true);
+    dragStart.current = {mx: e.clientX, my: e.clientY, bx: pos.x, by: pos.y};
+  };
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: MouseEvent) => {
+      const dx = e.clientX - dragStart.current.mx;
+      const dy = e.clientY - dragStart.current.my;
+      setPos({x: Math.max(0, dragStart.current.bx + dx), y: Math.max(0, dragStart.current.by + dy)});
+    };
+    const onUp = () => setDragging(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, [dragging]);
+
+  // lazy load
+  const [loaded, setLoaded] = useState<Record<number,boolean>>({});
+  const imgRefs = useRef<(HTMLDivElement|null)[]>([]);
+  const images = [1,2,3,4,5,6].map(i => ({id:i, src: 'https://picsum.photos/seed/' + (i*13) + '/200/120', label: 'Фото ' + i}));
+  useEffect(() => {
+    const obs = new IntersectionObserver(entries => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          const id = Number((e.target as HTMLElement).dataset.id);
+          setTimeout(() => setLoaded(prev => ({...prev, [id]: true})), 300 + Math.random() * 500);
+        }
+      });
+    }, {threshold: 0.1});
+    imgRefs.current.forEach(el => el && obs.observe(el));
+    return () => obs.disconnect();
+  }, []);
+
+  const tabs: {key: Demo; icon: string; label: string}[] = [
+    {key: 'clickOutside', icon: '🖱️', label: 'clickOutside'},
+    {key: 'longPress',    icon: '👆', label: 'longPress'},
+    {key: 'tooltip',      icon: '💬', label: 'tooltip'},
+    {key: 'draggable',    icon: '✋', label: 'draggable'},
+    {key: 'lazyLoad',     icon: '🖼️', label: 'lazyLoad'},
+  ];
+
+  const btnBase: CSSProperties = {padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: 700, fontFamily: 'monospace'};
+
+  return (
+    <div style={{background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: TEXT}}>
+      <h2 style={{color: SVELTE, marginBottom: '0.25rem', fontSize: '1.2rem'}}>🎮 Svelte Actions</h2>
+      <p style={{color: MUTED, fontSize: '0.78rem', marginBottom: '1.25rem'}}>
+        Интерактивное демо use: директивы — переиспользуемая DOM-логика
+      </p>
+      <div style={{display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '1.25rem'}}>
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setDemo(t.key)} style={{
+            padding: '0.4rem 0.8rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+            background: demo === t.key ? SVELTE : CARD,
+            color: demo === t.key ? '#0f172a' : '#94a3b8',
+            fontWeight: demo === t.key ? 700 : 400, fontSize: '0.78rem',
+          }}>
+            {t.icon} {t.label}
+          </button>
+        ))}
+      </div>
+      <div style={{background: CARD, border: '1px solid ' + BORDER, borderRadius: '10px', padding: '1.25rem'}}>
+
+        {demo === 'clickOutside' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>{'// use:clickOutside on:clickoutside={() => open = false}'}</div>
+            <div ref={dropdownRef} style={{position: 'relative' as const, display: 'inline-block'}}>
+              <button onClick={() => setDropdownOpen(o => !o)} style={{...btnBase, background: SVELTE, color: '#0f172a'}}>
+                Меню {dropdownOpen ? '▲' : '▼'}
+              </button>
+              {dropdownOpen && (
+                <div style={{position: 'absolute' as const, top: '110%', left: 0, background: '#0a0f1e', border: '1px solid ' + BORDER, borderRadius: '8px', padding: '0.5rem', minWidth: '160px', zIndex: 10}}>
+                  {['👤 Профиль', '⚙️ Настройки', '🚪 Выйти'].map(item => (
+                    <div key={item} onClick={() => setDropdownOpen(false)} style={{padding: '0.5rem 0.75rem', cursor: 'pointer', borderRadius: '4px', fontSize: '0.85rem', color: TEXT}}
+                      onMouseEnter={e => (e.currentTarget.style.background = BORDER)}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <p style={{color: MUTED, fontSize: '0.78rem', marginTop: '1rem'}}>
+              💡 Кликни ВНЕ кнопки/меню — dropdown закроется
+            </p>
+          </div>
+        )}
+
+        {demo === 'longPress' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>{'// use:longPress={{ duration: ' + lpDuration + ' }} on:longpress={handler}'}</div>
+            <div style={{marginBottom: '1rem'}}>
+              <label style={{color: MUTED, fontSize: '0.78rem'}}>Длительность: {lpDuration}мс</label>
+              <input type="range" min={300} max={2000} value={lpDuration} onChange={e => setLpDuration(Number(e.target.value))} style={{width: '100%', accentColor: SVELTE, display: 'block', marginTop: '0.3rem'}} />
+            </div>
+            <div style={{display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem'}}>
+              <button
+                onMouseDown={startLP} onMouseUp={endLP} onMouseLeave={endLP}
+                style={{...btnBase, background: lpActive ? YELLOW : SVELTE, color: '#0f172a', fontSize: '1rem', padding: '0.75rem 1.5rem', userSelect: 'none' as const, transition: 'background 0.2s'}}>
+                {lpActive ? '⏳ Держи...' : '👆 Зажми меня!'}
+              </button>
+              <div style={{color: TEXT}}>
+                Срабатываний: <span style={{color: SVELTE, fontWeight: 900, fontSize: '1.2rem'}}>{longPressCount}</span>
+              </div>
+            </div>
+            <div style={{background: '#0a0f1e', borderRadius: '6px', overflow: 'hidden', height: '8px'}}>
+              <div style={{height: '100%', width: lpProgress + '%', background: lpActive ? SVELTE : BORDER, transition: lpActive ? 'none' : 'width 0.2s'}} />
+            </div>
+          </div>
+        )}
+
+        {demo === 'tooltip' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>{'// use:tooltip={{ text: "...", position: "top" }}'}</div>
+            <div style={{display: 'flex', gap: '0.75rem', flexWrap: 'wrap' as const}}>
+              {[
+                {text: 'Удалить навсегда! ⚠️', label: '🗑️ Удалить', color: '#ef4444'},
+                {text: 'Сохранить в облако ☁️', label: '💾 Сохранить', color: '#34d399'},
+                {text: 'Поделиться с друзьями', label: '📤 Поделиться', color: '#60a5fa'},
+                {text: 'Настройки профиля ⚙️', label: '👤 Профиль', color: YELLOW},
+              ].map(item => (
+                <Tooltip key={item.label} text={item.text}>
+                  <button style={{...btnBase, background: item.color + '22', color: item.color, border: '1px solid ' + item.color + '44', fontSize: '0.82rem'}}>
+                    {item.label}
+                  </button>
+                </Tooltip>
+              ))}
+            </div>
+            <p style={{color: MUTED, fontSize: '0.78rem', marginTop: '1rem'}}>💡 Наведи на кнопки для tooltip</p>
+          </div>
+        )}
+
+        {demo === 'draggable' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '0.75rem'}}>{'// use:draggable on:drag={({ detail: {x,y} }) => ...}'}</div>
+            <div ref={containerRef} style={{position: 'relative' as const, height: '200px', background: '#0a0f1e', borderRadius: '8px', overflow: 'hidden', border: '1px dashed ' + BORDER}}>
+              <div
+                onMouseDown={onDragMouseDown}
+                style={{
+                  position: 'absolute' as const, left: pos.x, top: pos.y,
+                  width: '80px', height: '60px', background: SVELTE,
+                  borderRadius: '8px', cursor: dragging ? 'grabbing' : 'grab',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center' as const,
+                  userSelect: 'none' as const, fontWeight: 700, color: '#0f172a',
+                  boxShadow: dragging ? '0 8px 24px #ff3e0066' : '0 2px 8px #ff3e0033',
+                  transition: dragging ? 'none' : 'box-shadow 0.2s',
+                  fontSize: '0.75rem', textAlign: 'center' as const,
+                }}>
+                ✋<br/>Тяни!
+              </div>
+              <div style={{position: 'absolute' as const, bottom: '0.5rem', right: '0.75rem', color: MUTED, fontSize: '0.7rem'}}>
+                x:{Math.round(pos.x)}, y:{Math.round(pos.y)}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {demo === 'lazyLoad' && (
+          <div>
+            <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '0.75rem'}}>{'// use:lazyLoad={{ src: photo.url }} — загружается при появлении в viewport'}</div>
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.5rem', maxHeight: '220px', overflowY: 'auto' as const}}>
+              {images.map((img, idx) => (
+                <div key={img.id} ref={el => { imgRefs.current[idx] = el; }} data-id={img.id}
+                  style={{height: '80px', borderRadius: '6px', overflow: 'hidden', background: '#0a0f1e', border: '1px solid ' + BORDER, position: 'relative' as const, display: 'flex', alignItems: 'center', justifyContent: 'center' as const}}>
+                  {loaded[img.id] ? (
+                    <img src={img.src} alt={img.label} style={{width: '100%', height: '100%', objectFit: 'cover' as const}} />
+                  ) : (
+                    <div style={{color: MUTED, fontSize: '0.7rem', textAlign: 'center' as const}}>
+                      <div style={{fontSize: '1.2rem', marginBottom: '0.25rem'}}>🖼️</div>
+                      <div>Загрузка...</div>
+                    </div>
+                  )}
+                  <div style={{position: 'absolute' as const, top: '2px', left: '4px', fontSize: '0.6rem', color: loaded[img.id] ? '#34d399' : YELLOW}}>
+                    {loaded[img.id] ? '✓' : '…'}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p style={{color: MUTED, fontSize: '0.75rem', marginTop: '0.75rem'}}>
+              💡 Scroll down — изображения загружаются лениво через IntersectionObserver
+            </p>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,733 @@
+## 🔐 Аутентификация с NextAuth.js (Auth.js v5)
+
+Аутентификация — это проверка "кто ты?". Реализовывать её вручную сложно и опасно. NextAuth.js (теперь Auth.js v5) берёт эту сложность на себя: OAuth провайдеры, JWT сессии, защита роутов — всё из коробки! Как надёжный охранник 💂 для твоего приложения.
+
+---
+
+### 📦 Установка и базовая конфигурация
+
+```bash
+npm install next-auth@beta
+# Генерируем секретный ключ
+npx auth secret
+```
+
+```typescript
+// auth.ts — главный конфиг (в корне проекта)
+import NextAuth from 'next-auth';
+import GitHub from 'next-auth/providers/github';
+import Google from 'next-auth/providers/google';
+import Credentials from 'next-auth/providers/credentials';
+import { PrismaAdapter } from '@auth/prisma-adapter';
+import { db } from '@/lib/db';
+import bcrypt from 'bcryptjs';
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  adapter: PrismaAdapter(db),  // сохраняем сессии в БД
+
+  providers: [
+    // OAuth провайдеры
+    GitHub({
+      clientId: process.env.GITHUB_CLIENT_ID,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET,
+    }),
+
+    Google({
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    }),
+
+    // Логин через логин/пароль
+    Credentials({
+      credentials: {
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Пароль', type: 'password' },
+      },
+      async authorize(credentials) {
+        if (!credentials?.email || !credentials?.password) return null;
+
+        const user = await db.user.findUnique({
+          where: { email: credentials.email as string },
+        });
+
+        if (!user?.hashedPassword) return null;
+
+        const isValid = await bcrypt.compare(
+          credentials.password as string,
+          user.hashedPassword
+        );
+
+        if (!isValid) return null;
+
+        return { id: user.id, name: user.name, email: user.email };
+      },
+    }),
+  ],
+
+  session: {
+    strategy: 'jwt', // 'jwt' или 'database'
+    maxAge: 30 * 24 * 60 * 60, // 30 дней
+  },
+
+  pages: {
+    signIn: '/login',          // кастомная страница логина
+    signOut: '/goodbye',       // кастомная страница выхода
+    error: '/auth/error',      // страница ошибок
+    newUser: '/welcome',       // перенаправление новых пользователей
+  },
+});
+```
+
+---
+
+### 🌐 Route Handler для Auth
+
+```typescript
+// app/api/auth/[...nextauth]/route.ts
+import { handlers } from '@/auth';
+
+// Auth.js обрабатывает GET и POST сам
+export const { GET, POST } = handlers;
+```
+
+---
+
+### 📋 Callbacks: настройка токенов и сессий
+
+```typescript
+// auth.ts — расширенная конфигурация
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  // ...
+
+  callbacks: {
+    // jwt — вызывается при создании/обновлении токена
+    async jwt({ token, user, account, profile }) {
+      // При первом входе (user существует)
+      if (user) {
+        token.id = user.id;
+        token.role = user.role ?? 'user';
+      }
+
+      // При OAuth входе — сохраняем провайдера
+      if (account) {
+        token.provider = account.provider;
+        token.accessToken = account.access_token;
+      }
+
+      return token;
+    },
+
+    // session — вызывается при запросе сессии
+    async session({ session, token }) {
+      // Переносим данные из токена в объект сессии
+      if (session.user) {
+        session.user.id = token.id as string;
+        session.user.role = token.role as string;
+        session.user.provider = token.provider as string;
+      }
+      return session;
+    },
+
+    // signIn — позволяет/запрещает вход
+    async signIn({ user, account, profile }) {
+      // Разрешаем только корпоративные email
+      if (account?.provider === 'google') {
+        return profile?.email?.endsWith('@company.com') ?? false;
+      }
+      // Проверяем что email верифицирован
+      if (!user.email) return false;
+
+      return true; // разрешаем вход
+    },
+
+    // redirect — куда перенаправить после входа/выхода
+    async redirect({ url, baseUrl }) {
+      if (url.startsWith('/')) return `${baseUrl}${url}`;
+      if (new URL(url).origin === baseUrl) return url;
+      return baseUrl;
+    },
+  },
+});
+```
+
+---
+
+### 🏷️ TypeScript: расширяем типы
+
+```typescript
+// types/next-auth.d.ts
+import type { DefaultSession } from 'next-auth';
+
+declare module 'next-auth' {
+  interface Session {
+    user: {
+      id: string;
+      role: 'user' | 'admin' | 'moderator';
+      provider: string;
+    } & DefaultSession['user'];
+  }
+
+  interface User {
+    role?: 'user' | 'admin' | 'moderator';
+  }
+}
+
+declare module 'next-auth/jwt' {
+  interface JWT {
+    id: string;
+    role: string;
+    provider: string;
+    accessToken?: string;
+  }
+}
+```
+
+---
+
+### 🛡️ Защита роутов в Middleware
+
+```typescript
+// middleware.ts
+import { auth } from '@/auth';
+import { NextResponse } from 'next/server';
+
+export default auth((request) => {
+  const { auth: session, nextUrl } = request;
+  const isLoggedIn = !!session?.user;
+  const { pathname } = nextUrl;
+
+  // Защищённые маршруты
+  const isProtectedRoute = pathname.startsWith('/dashboard')
+    || pathname.startsWith('/profile')
+    || pathname.startsWith('/settings');
+
+  // Только для авторизованных
+  const isAdminRoute = pathname.startsWith('/admin');
+
+  if (isAdminRoute) {
+    if (!isLoggedIn) {
+      return NextResponse.redirect(new URL('/login', request.url));
+    }
+    if (session?.user?.role !== 'admin') {
+      return NextResponse.redirect(new URL('/403', request.url));
+    }
+  }
+
+  if (isProtectedRoute && !isLoggedIn) {
+    const loginUrl = new URL('/login', request.url);
+    loginUrl.searchParams.set('callbackUrl', pathname);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // Уже залогинен, но открывает /login — редиректим
+  if (pathname === '/login' && isLoggedIn) {
+    return NextResponse.redirect(new URL('/dashboard', request.url));
+  }
+
+  return NextResponse.next();
+});
+
+export const config = {
+  matcher: ['/((?!api/auth|_next/static|_next/image|favicon.ico).*)'],
+};
+```
+
+---
+
+### 🖥️ Чтение сессии в Server Components
+
+```typescript
+// app/dashboard/page.tsx — Server Component
+import { auth } from '@/auth';
+import { redirect } from 'next/navigation';
+
+export default async function DashboardPage() {
+  // auth() — это Server-Side функция
+  const session = await auth();
+
+  // Если нет сессии — редирект
+  if (!session?.user) {
+    redirect('/login');
+  }
+
+  // Используем данные пользователя
+  const user = session.user;
+
+  return (
+    <div>
+      <h1>Привет, {user.name}!</h1>
+      <p>Email: {user.email}</p>
+      <p>Роль: {user.role}</p>
+      <img src={user.image ?? '/default-avatar.png'} alt="Аватар" />
+    </div>
+  );
+}
+```
+
+---
+
+### 💻 Клиентская сессия: useSession
+
+```typescript
+// app/components/UserMenu.tsx
+'use client';
+
+import { useSession, signIn, signOut } from 'next-auth/react';
+import Image from 'next/image';
+
+export function UserMenu() {
+  const { data: session, status } = useSession();
+
+  if (status === 'loading') {
+    return <div className="animate-pulse w-8 h-8 rounded-full bg-gray-300" />;
+  }
+
+  if (status === 'unauthenticated' || !session) {
+    return (
+      <div className="flex gap-2">
+        <button
+          onClick={() => signIn('github')}
+          className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white rounded-lg"
+        >
+          <GitHubIcon /> Войти через GitHub
+        </button>
+        <button
+          onClick={() => signIn('google')}
+          className="flex items-center gap-2 px-4 py-2 border rounded-lg"
+        >
+          <GoogleIcon /> Войти через Google
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <Image
+        src={session.user?.image ?? '/default-avatar.png'}
+        alt={session.user?.name ?? 'User'}
+        width={32}
+        height={32}
+        className="rounded-full"
+      />
+      <div>
+        <p className="font-medium text-sm">{session.user?.name}</p>
+        <p className="text-xs text-gray-500">{session.user?.role}</p>
+      </div>
+      <button
+        onClick={() => signOut({ callbackUrl: '/' })}
+        className="text-sm text-red-500 hover:underline"
+      >
+        Выйти
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+### 🔒 SessionProvider: оборачиваем приложение
+
+```typescript
+// app/providers.tsx
+'use client';
+
+import { SessionProvider } from 'next-auth/react';
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  return (
+    <SessionProvider>
+      {children}
+    </SessionProvider>
+  );
+}
+
+// app/layout.tsx
+import { Providers } from './providers';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="ru">
+      <body>
+        <Providers>
+          {children}
+        </Providers>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### 🗄️ Prisma Schema для Auth.js
+
+```prisma
+// prisma/schema.prisma
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  role          String    @default("user")
+  hashedPassword String?
+  accounts      Account[]
+  sessions      Session[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  @@unique([identifier, token])
+}
+```
+
+---
+
+### ⚖️ JWT vs Database Sessions
+
+| Критерий | JWT | Database |
+|----------|-----|----------|
+| Хранение | В куке (stateless) | В БД |
+| Скорость | Быстро (нет запроса к БД) | Медленнее (запрос к БД) |
+| Инвалидация | Сложно (нужен blacklist) | Легко (удаляем запись) |
+| Масштабирование | Горизонтально без проблем | Нужна общая БД |
+| Данные сессии | Ограничены размером куки (~4KB) | Любые данные |
+
+**Вывод:** JWT для простых приложений, Database для критичных (нужно мгновенно выходить из сессии).
+
+---
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState } from 'react';
+
+type SessionStatus = 'authenticated' | 'unauthenticated' | 'loading';
+type Provider = 'github' | 'google' | 'credentials';
+type Role = 'user' | 'admin' | 'moderator';
+
+interface MockSession {
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    image: string;
+    role: Role;
+    provider: Provider;
+  };
+}
+
+const MOCK_USERS: Record<string, { password: string; role: Role }> = {
+  'admin@example.com': { password: 'admin123', role: 'admin' },
+  'user@example.com': { password: 'user123', role: 'user' },
+  'mod@example.com': { password: 'mod123', role: 'moderator' },
+};
+
+const OAUTH_USERS: Record<Provider, Partial<MockSession['user']>> = {
+  github: { name: 'Яша GitHub', email: 'yasha@github.com', image: '🐙', role: 'user' },
+  google: { name: 'Яша Google', email: 'yasha@gmail.com', image: '🔵', role: 'user' },
+  credentials: { name: '', email: '', image: '🔑', role: 'user' },
+};
+
+const ROUTES = [
+  { path: '/', label: '🏠 Главная', protected: false, adminOnly: false },
+  { path: '/blog', label: '📝 Блог', protected: false, adminOnly: false },
+  { path: '/dashboard', label: '📊 Dashboard', protected: true, adminOnly: false },
+  { path: '/profile', label: '👤 Профиль', protected: true, adminOnly: false },
+  { path: '/admin', label: '⚙️ Admin Panel', protected: true, adminOnly: true },
+];
+
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+export default function App() {
+  const [status, setStatus] = useState<SessionStatus>('unauthenticated');
+  const [session, setSession] = useState<MockSession | null>(null);
+  const [currentPath, setCurrentPath] = useState('/');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [authLogs, setAuthLogs] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<'app' | 'logs'>('app');
+
+  const addLog = (msg: string) => {
+    setAuthLogs(prev => [\`[${new Date().toLocaleTimeString('ru')}] \${msg}\`, ...prev].slice(0, 12));
+  };
+
+  const signInOAuth = async (provider: 'github' | 'google') => {
+    setStatus('loading');
+    addLog(\`signIn("\${provider}") вызван\`);
+    await delay(800);
+
+    const userData = OAUTH_USERS[provider];
+    setSession({
+      user: {
+        id: Math.random().toString(36).slice(2),
+        name: userData.name!,
+        email: userData.email!,
+        image: userData.image!,
+        role: 'user',
+        provider,
+      }
+    });
+    setStatus('authenticated');
+    addLog(\`✅ JWT создан: { id, name, email, role: "user", provider: "\${provider}" }\`);
+    addLog(\`callbacks.session() вызван → session.user.id = token.id\`);
+  };
+
+  const signInCredentials = async () => {
+    setLoginError('');
+    const userData = MOCK_USERS[email];
+    if (!userData || userData.password !== password) {
+      setLoginError('Неверный email или пароль');
+      addLog(\`❌ authorize() → null (неверные credentials)\`);
+      return;
+    }
+
+    setStatus('loading');
+    addLog(\`authorize() → user найден, bcrypt.compare() = true\`);
+    await delay(600);
+
+    setSession({
+      user: {
+        id: Math.random().toString(36).slice(2),
+        name: email.split('@')[0],
+        email,
+        image: '🔑',
+        role: userData.role,
+        provider: 'credentials',
+      }
+    });
+    setStatus('authenticated');
+    addLog(\`✅ JWT создан: { role: "\${userData.role}" }\`);
+    setEmail('');
+    setPassword('');
+  };
+
+  const signOut = async () => {
+    setStatus('loading');
+    addLog('signOut() вызван');
+    await delay(400);
+    setSession(null);
+    setStatus('unauthenticated');
+    setCurrentPath('/');
+    addLog('✅ Сессия удалена, редирект → /');
+  };
+
+  const navigate = (path: string, label: string, isProtected: boolean, adminOnly: boolean) => {
+    if (isProtected && status !== 'authenticated') {
+      addLog(\`Middleware: \${path} защищён → redirect('/login?callbackUrl=\${path}')\`);
+      return;
+    }
+    if (adminOnly && session?.user.role !== 'admin') {
+      addLog(\`Middleware: \${path} только для admin → redirect('/403')\`);
+      return;
+    }
+    setCurrentPath(path);
+    addLog(\`✅ Middleware: доступ к \${path} разрешён (role: \${session?.user.role || 'guest'})\`);
+  };
+
+  const roleColors: Record<Role, string> = { user: '#4ade80', admin: '#f87171', moderator: '#fbbf24' };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ background: '#020617', borderBottom: '1px solid #1e293b', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ color: '#171717', background: 'white', borderRadius: 4, padding: '2px 8px', fontWeight: 900, fontSize: 13 }}>N</span>
+        <span style={{ fontWeight: 700 }}>NextAuth.js v5 Demo</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ color: status === 'authenticated' ? '#4ade80' : status === 'loading' ? '#fbbf24' : '#f87171', fontSize: 11 }}>
+            ● {status}
+          </span>
+          {session && (
+            <span style={{ background: roleColors[session.user.role], color: '#000', padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700 }}>
+              {session.user.role}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', borderBottom: '1px solid #1e293b' }}>
+        {(['app', 'logs'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            style={{
+              padding: '10px 20px', border: 'none', cursor: 'pointer', fontSize: 13,
+              background: activeTab === tab ? '#1e293b' : 'transparent',
+              color: activeTab === tab ? '#e2e8f0' : '#64748b',
+              borderBottom: activeTab === tab ? '2px solid #4ade80' : '2px solid transparent',
+            }}
+          >
+            {tab === 'app' ? '🔐 Приложение' : \`📋 Auth Logs (\${authLogs.length})\`}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding: 16 }}>
+        {activeTab === 'app' ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div>
+              {status !== 'authenticated' ? (
+                <div style={{ background: '#1e293b', borderRadius: 8, padding: 16 }}>
+                  <div style={{ color: '#94a3b8', fontWeight: 700, marginBottom: 14, fontSize: 14 }}>
+                    Вход в систему
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+                    {(['github', 'google'] as const).map(provider => (
+                      <button
+                        key={provider}
+                        onClick={() => signInOAuth(provider)}
+                        disabled={status === 'loading'}
+                        style={{
+                          padding: '10px 16px', border: '1px solid #334155', borderRadius: 8,
+                          cursor: 'pointer', background: '#0f172a', color: '#e2e8f0', fontSize: 13,
+                          display: 'flex', alignItems: 'center', gap: 8,
+                        }}
+                      >
+                        {provider === 'github' ? '🐙' : '🔵'} Войти через {provider.charAt(0).toUpperCase() + provider.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div style={{ borderTop: '1px solid #334155', paddingTop: 14 }}>
+                    <div style={{ color: '#64748b', fontSize: 11, marginBottom: 10 }}>
+                      Credentials: admin@example.com / admin123
+                    </div>
+                    <input
+                      value={email} onChange={e => setEmail(e.target.value)} placeholder="email"
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: 4, padding: '7px 10px', color: '#e2e8f0', fontSize: 12, marginBottom: 6, boxSizing: 'border-box' }}
+                    />
+                    <input
+                      type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="пароль"
+                      style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: 4, padding: '7px 10px', color: '#e2e8f0', fontSize: 12, marginBottom: 8, boxSizing: 'border-box' }}
+                    />
+                    {loginError && <div style={{ color: '#f87171', fontSize: 11, marginBottom: 6 }}>❌ {loginError}</div>}
+                    <button
+                      onClick={signInCredentials}
+                      style={{ width: '100%', padding: '9px 0', background: '#1d4ed8', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
+                    >
+                      Войти
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ background: '#1e293b', borderRadius: 8, padding: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+                    <div style={{ width: 40, height: 40, background: '#334155', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>
+                      {session?.user.image}
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 700 }}>{session?.user.name}</div>
+                      <div style={{ color: '#64748b', fontSize: 12 }}>{session?.user.email}</div>
+                      <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>via {session?.user.provider}</div>
+                    </div>
+                    <span style={{ marginLeft: 'auto', background: roleColors[session!.user.role], color: '#000', padding: '3px 10px', borderRadius: 4, fontSize: 11, fontWeight: 700 }}>
+                      {session?.user.role}
+                    </span>
+                  </div>
+
+                  <div style={{ background: '#0f172a', borderRadius: 6, padding: 10, marginBottom: 12, fontSize: 10, color: '#64748b', lineHeight: 1.8 }}>
+                    // session.user:<br/>
+                    id: "{session?.user.id.slice(0, 8)}..."<br/>
+                    role: "{session?.user.role}"<br/>
+                    provider: "{session?.user.provider}"
+                  </div>
+
+                  <button
+                    onClick={signOut}
+                    style={{ width: '100%', padding: '8px 0', background: '#450a0a', color: '#f87171', border: '1px solid #f87171', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
+                  >
+                    signOut() — Выйти
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <div style={{ color: '#64748b', fontSize: 11, marginBottom: 8 }}>🛡️ Middleware защита роутов:</div>
+              {ROUTES.map(route => {
+                const canAccess = !route.protected || status === 'authenticated';
+                const canAccessAdmin = !route.adminOnly || session?.user.role === 'admin';
+                const accessible = canAccess && canAccessAdmin;
+
+                return (
+                  <div
+                    key={route.path}
+                    onClick={() => navigate(route.path, route.label, route.protected, route.adminOnly)}
+                    style={{
+                      background: currentPath === route.path ? '#1e3a5f' : '#1e293b',
+                      borderRadius: 6, padding: 10, marginBottom: 6, cursor: 'pointer',
+                      border: \`1px solid \${currentPath === route.path ? '#60a5fa' : '#334155'}\`,
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    }}
+                  >
+                    <span style={{ fontSize: 13 }}>{route.label}</span>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      {route.protected && <span style={{ fontSize: 10, color: '#fbbf24' }}>🔒</span>}
+                      {route.adminOnly && <span style={{ fontSize: 10, color: '#f87171' }}>👑</span>}
+                      <span style={{ fontSize: 11, color: accessible ? '#4ade80' : '#f87171' }}>
+                        {accessible ? '✅' : '🚫'}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <div style={{ marginTop: 10, background: '#1e293b', borderRadius: 6, padding: 10, fontSize: 11, color: '#64748b', lineHeight: 1.8 }}>
+                Текущий путь: <span style={{ color: '#60a5fa' }}>{currentPath}</span><br/>
+                🔒 = защищённый маршрут<br/>
+                👑 = только для admin
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div>
+            {authLogs.length === 0 ? (
+              <div style={{ textAlign: 'center', color: '#64748b', padding: '30px 0' }}>Попробуй войти или нажать маршрут</div>
+            ) : (
+              authLogs.map((log, i) => (
+                <div key={i} style={{ background: '#1e293b', borderRadius: 4, padding: '8px 12px', marginBottom: 4, fontSize: 11, color: log.includes('❌') ? '#f87171' : log.includes('✅') ? '#4ade80' : '#94a3b8', borderLeft: \`3px solid \${log.includes('❌') ? '#f87171' : log.includes('✅') ? '#4ade80' : '#334155'}\` }}>
+                  {log}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>
