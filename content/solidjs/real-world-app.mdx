@@ -1,0 +1,819 @@
+import { Playground } from '../../components/Playground'
+
+# Полноценное приложение на Solid.js
+
+В этом уроке мы строим **Kanban-доску** — реальное приложение, которое объединяет всё, что вы изучили. Это финальный урок курса, и здесь вы увидите, как все концепции работают вместе в одном production-ready решении.
+
+## Архитектура приложения
+
+Хорошая архитектура Solid-приложения разделяет:
+
+```
+src/
+├── routes/          # Маршруты (SolidStart)
+│   ├── index.tsx    # Главная страница / Канбан
+│   └── board/[id].tsx
+├── components/      # UI компоненты
+│   ├── Card.tsx
+│   ├── Column.tsx
+│   ├── Modal.tsx
+│   └── Toolbar.tsx
+├── stores/          # Глобальное состояние
+│   └── board.ts     # createStore для канбана
+├── primitives/      # Кастомные примитивы
+│   ├── createDnd.ts # Drag-and-drop примитив
+│   └── createModal.ts
+└── types.ts         # TypeScript типы
+```
+
+## Типизация данных
+
+```tsx
+// types.ts
+export interface Card {
+  id: string;
+  title: string;
+  description: string;
+  priority: 'low' | 'medium' | 'high';
+  tags: string[];
+  createdAt: number;
+}
+
+export interface Column {
+  id: string;
+  title: string;
+  color: string;
+  cardIds: string[];
+}
+
+export interface BoardStore {
+  columns: Column[];
+  cards: Record<string, Card>;
+}
+```
+
+## Стор канбан-доски
+
+```tsx
+// stores/board.ts
+import { createStore, produce } from 'solid-js/store';
+import type { BoardStore, Card, Column } from '../types';
+
+// Персистентный стор с localStorage
+function createBoardStore() {
+  const saved = localStorage.getItem('kanban-board');
+  const initial: BoardStore = saved
+    ? JSON.parse(saved)
+    : {
+        columns: [
+          { id: 'todo', title: 'К выполнению', color: '#2c67d5', cardIds: [] },
+          { id: 'progress', title: 'В работе', color: '#fb923c', cardIds: [] },
+          { id: 'done', title: 'Готово', color: '#34d399', cardIds: [] },
+        ],
+        cards: {},
+      };
+
+  const [board, setBoard] = createStore<BoardStore>(initial);
+
+  // Авто-сохранение при изменениях
+  createEffect(() => {
+    localStorage.setItem('kanban-board', JSON.stringify(board));
+  });
+
+  const addCard = (columnId: string, data: Omit<Card, 'id' | 'createdAt'>) => {
+    const id = crypto.randomUUID();
+    setBoard(produce(b => {
+      b.cards[id] = { ...data, id, createdAt: Date.now() };
+      b.columns.find(c => c.id === columnId)?.cardIds.push(id);
+    }));
+  };
+
+  const moveCard = (cardId: string, fromColumnId: string, toColumnId: string) => {
+    setBoard(produce(b => {
+      const from = b.columns.find(c => c.id === fromColumnId);
+      const to = b.columns.find(c => c.id === toColumnId);
+      if (!from || !to) return;
+      from.cardIds = from.cardIds.filter(id => id !== cardId);
+      if (!to.cardIds.includes(cardId)) to.cardIds.push(cardId);
+    }));
+  };
+
+  const deleteCard = (cardId: string) => {
+    setBoard(produce(b => {
+      b.columns.forEach(col => {
+        col.cardIds = col.cardIds.filter(id => id !== cardId);
+      });
+      delete b.cards[cardId];
+    }));
+  };
+
+  return { board, addCard, moveCard, deleteCard };
+}
+
+export const boardStore = createBoardStore();
+```
+
+## Компонент карточки
+
+```tsx
+// components/Card.tsx
+function KanbanCard(props: {
+  card: Card;
+  columnId: string;
+  onEdit: () => void;
+  onDelete: () => void;
+  onMove: (toColumnId: string) => void;
+}) {
+  const priorityColors = {
+    low: '#34d399',
+    medium: '#fb923c',
+    high: '#f87171',
+  };
+
+  return (
+    <div
+      draggable
+      onDragStart={e => e.dataTransfer!.setData('cardId', props.card.id)}
+      class="card"
+    >
+      {/* Индикатор приоритета */}
+      <div
+        style={{ background: priorityColors[props.card.priority] }}
+        class="priority-bar"
+      />
+
+      <h4>{props.card.title}</h4>
+
+      <Show when={props.card.description}>
+        <p>{props.card.description}</p>
+      </Show>
+
+      <div class="tags">
+        <For each={props.card.tags}>
+          {tag => <span class="tag">{tag}</span>}
+        </For>
+      </div>
+
+      <div class="card-actions">
+        <button onClick={props.onEdit}>✏️</button>
+        <button onClick={props.onDelete}>🗑️</button>
+      </div>
+    </div>
+  );
+}
+```
+
+## Компонент колонки
+
+```tsx
+// components/Column.tsx
+function KanbanColumn(props: { column: Column; cards: Card[] }) {
+  const [isDragOver, setIsDragOver] = createSignal(false);
+
+  const handleDrop = (e: DragEvent) => {
+    e.preventDefault();
+    const cardId = e.dataTransfer?.getData('cardId');
+    if (cardId) {
+      boardStore.moveCard(cardId, /* fromColumnId */, props.column.id);
+    }
+    setIsDragOver(false);
+  };
+
+  return (
+    <div
+      class="column"
+      classList={{ 'drag-over': isDragOver() }}
+      onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
+      onDragLeave={() => setIsDragOver(false)}
+      onDrop={handleDrop}
+    >
+      <div class="column-header" style={{ 'border-color': props.column.color }}>
+        <h3>{props.column.title}</h3>
+        <span class="badge">{props.cards.length}</span>
+      </div>
+
+      <div class="cards-list">
+        <For each={props.cards}>
+          {card => (
+            <KanbanCard
+              card={card}
+              columnId={props.column.id}
+              onEdit={() => openEditModal(card)}
+              onDelete={() => boardStore.deleteCard(card.id)}
+              onMove={toColumnId => boardStore.moveCard(card.id, props.column.id, toColumnId)}
+            />
+          )}
+        </For>
+      </div>
+
+      <button
+        class="add-card-btn"
+        onClick={() => openAddModal(props.column.id)}
+      >
+        + Добавить карточку
+      </button>
+    </div>
+  );
+}
+```
+
+## Контекст и провайдер доски
+
+```tsx
+// Контекст позволяет любому компоненту в дереве получить доступ к store
+const BoardContext = createContext<ReturnType<typeof createBoardStore>>();
+
+export const useBoardStore = () => {
+  const ctx = useContext(BoardContext);
+  if (!ctx) throw new Error('useBoardStore must be used within BoardProvider');
+  return ctx;
+};
+
+function BoardProvider(props: { children: JSXElement }) {
+  const store = createBoardStore();
+  return (
+    <BoardContext.Provider value={store}>
+      {props.children}
+    </BoardContext.Provider>
+  );
+}
+
+// Использование в App
+function App() {
+  return (
+    <BoardProvider>
+      <KanbanBoard />
+    </BoardProvider>
+  );
+}
+```
+
+## Оптимизация производительности
+
+```tsx
+// Мемоизация отфильтрованных карточек
+const filteredCards = createMemo(() => {
+  const search = searchQuery().toLowerCase();
+  if (!search) return boardStore.board.cards;
+
+  return Object.fromEntries(
+    Object.entries(boardStore.board.cards).filter(([_, card]) =>
+      card.title.toLowerCase().includes(search) ||
+      card.tags.some(tag => tag.toLowerCase().includes(search))
+    )
+  );
+});
+
+// createSelector для точечных обновлений колонок
+const isColumnDragTarget = createSelector(
+  () => dragTargetColumnId(),
+  (columnId, targetId) => columnId === targetId
+);
+```
+
+## Полный Kanban-board — интерактивное демо
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+
+// ──────────────────────────────────────────────────────────────────────────────
+// КОНСТАНТЫ
+// ──────────────────────────────────────────────────────────────────────────────
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const CARD_BG = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const RED = '#f87171';
+const PURPLE = '#a78bfa';
+const YELLOW = '#fbbf24';
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ТИПЫ
+// ──────────────────────────────────────────────────────────────────────────────
+interface KanbanCard {
+  id: string;
+  title: string;
+  description: string;
+  priority: 'low' | 'medium' | 'high';
+  tags: string[];
+  createdAt: number;
+}
+
+interface KanbanColumn {
+  id: string;
+  title: string;
+  color: string;
+  icon: string;
+  cardIds: string[];
+}
+
+interface BoardState {
+  columns: KanbanColumn[];
+  cards: Record<string, KanbanCard>;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// НАЧАЛЬНЫЕ ДАННЫЕ
+// ──────────────────────────────────────────────────────────────────────────────
+const INITIAL_STATE: BoardState = {
+  columns: [
+    { id: 'backlog', title: 'Бэклог', color: MUTED, icon: '📋', cardIds: ['c1', 'c2'] },
+    { id: 'todo', title: 'К выполнению', color: SOLID_BLUE, icon: '🎯', cardIds: ['c3', 'c4'] },
+    { id: 'progress', title: 'В работе', color: ORANGE, icon: '⚙️', cardIds: ['c5'] },
+    { id: 'done', title: 'Готово', color: GREEN, icon: '✅', cardIds: ['c6', 'c7'] },
+  ],
+  cards: {
+    c1: { id: 'c1', title: 'Изучить Solid 2.0 API', description: 'Ознакомиться с новым .value синтаксисом сигналов', priority: 'low', tags: ['обучение', 'solid'], createdAt: Date.now() - 86400000 * 5 },
+    c2: { id: 'c2', title: 'Написать тесты для primitives', description: 'Unit-тесты для createLocalStorage и createDebounce', priority: 'medium', tags: ['тесты'], createdAt: Date.now() - 86400000 * 4 },
+    c3: { id: 'c3', title: 'Интеграция TanStack Query', description: 'Заменить createResource на TanStack Query для кеширования', priority: 'high', tags: ['query', 'api'], createdAt: Date.now() - 86400000 * 3 },
+    c4: { id: 'c4', title: 'Настроить SSR streaming', description: 'Добавить renderToStream и Suspense-границы', priority: 'medium', tags: ['ssr', 'performance'], createdAt: Date.now() - 86400000 * 2 },
+    c5: { id: 'c5', title: 'Реализовать Kanban-доску', description: 'Drag & drop между колонками, персистентный стор', priority: 'high', tags: ['feature', 'dnd'], createdAt: Date.now() - 86400000 },
+    c6: { id: 'c6', title: 'Настройка Vite + Solid', description: 'Создать базовый шаблон проекта', priority: 'low', tags: ['setup'], createdAt: Date.now() - 86400000 * 7 },
+    c7: { id: 'c7', title: 'Изучить сигналы', description: 'Прошёл уроки по createSignal, createEffect, createMemo', priority: 'low', tags: ['обучение'], createdAt: Date.now() - 86400000 * 6 },
+  },
+};
+
+function loadState(): BoardState {
+  try {
+    const s = localStorage.getItem('kanban_v2');
+    return s ? JSON.parse(s) : INITIAL_STATE;
+  } catch { return INITIAL_STATE; }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ХУКИ
+// ──────────────────────────────────────────────────────────────────────────────
+function useBoard() {
+  const [board, setBoard] = useState<BoardState>(loadState);
+
+  useEffect(() => {
+    try { localStorage.setItem('kanban_v2', JSON.stringify(board)); } catch {}
+  }, [board]);
+
+  const addCard = useCallback((columnId: string, data: Omit<KanbanCard, 'id' | 'createdAt'>) => {
+    const id = 'c' + Date.now();
+    setBoard(b => ({
+      ...b,
+      cards: { ...b.cards, [id]: { ...data, id, createdAt: Date.now() } },
+      columns: b.columns.map(c => c.id === columnId ? { ...c, cardIds: [...c.cardIds, id] } : c),
+    }));
+  }, []);
+
+  const updateCard = useCallback((id: string, data: Partial<Omit<KanbanCard, 'id' | 'createdAt'>>) => {
+    setBoard(b => ({ ...b, cards: { ...b.cards, [id]: { ...b.cards[id], ...data } } }));
+  }, []);
+
+  const deleteCard = useCallback((cardId: string) => {
+    setBoard(b => ({
+      ...b,
+      cards: Object.fromEntries(Object.entries(b.cards).filter(([k]) => k !== cardId)),
+      columns: b.columns.map(c => ({ ...c, cardIds: c.cardIds.filter(id => id !== cardId) })),
+    }));
+  }, []);
+
+  const moveCard = useCallback((cardId: string, toColumnId: string) => {
+    setBoard(b => ({
+      ...b,
+      columns: b.columns.map(c => {
+        if (c.cardIds.includes(cardId)) return { ...c, cardIds: c.cardIds.filter(id => id !== cardId) };
+        if (c.id === toColumnId && !c.cardIds.includes(cardId)) return { ...c, cardIds: [...c.cardIds, cardId] };
+        return c;
+      }),
+    }));
+  }, []);
+
+  const resetBoard = useCallback(() => setBoard(INITIAL_STATE), []);
+
+  return { board, addCard, updateCard, deleteCard, moveCard, resetBoard };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ПРИОРИТЕТ
+// ──────────────────────────────────────────────────────────────────────────────
+const PRIORITY_CONFIG = {
+  low: { color: GREEN, label: 'Низкий', dot: '●' },
+  medium: { color: ORANGE, label: 'Средний', dot: '●' },
+  high: { color: RED, label: 'Высокий', dot: '●' },
+} as const;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// MODAL
+// ──────────────────────────────────────────────────────────────────────────────
+interface ModalState {
+  mode: 'add' | 'edit';
+  columnId?: string;
+  card?: KanbanCard;
+}
+
+function CardModal({
+  state, columns, onClose, onAdd, onUpdate,
+}: {
+  state: ModalState;
+  columns: KanbanColumn[];
+  onClose: () => void;
+  onAdd: (columnId: string, data: Omit<KanbanCard, 'id' | 'createdAt'>) => void;
+  onUpdate: (id: string, data: Partial<Omit<KanbanCard, 'id' | 'createdAt'>>) => void;
+}) {
+  const isEdit = state.mode === 'edit';
+  const [title, setTitle] = useState(state.card?.title || '');
+  const [desc, setDesc] = useState(state.card?.description || '');
+  const [priority, setPriority] = useState<KanbanCard['priority']>(state.card?.priority || 'medium');
+  const [tagsStr, setTagsStr] = useState(state.card?.tags.join(', ') || '');
+  const [colId, setColId] = useState(state.columnId || columns[0]?.id || '');
+
+  const submit = () => {
+    if (!title.trim()) return;
+    const data = {
+      title: title.trim(),
+      description: desc.trim(),
+      priority,
+      tags: tagsStr.split(',').map(t => t.trim()).filter(Boolean),
+    };
+    if (isEdit && state.card) {
+      onUpdate(state.card.id, data);
+    } else {
+      onAdd(colId, data);
+    }
+    onClose();
+  };
+
+  const inputStyle = {
+    width: '100%', padding: '8px 10px', background: BG, border: '1px solid ' + BORDER,
+    borderRadius: '7px', color: TEXT, fontSize: '13px', outline: 'none', boxSizing: 'border-box' as const,
+    fontFamily: 'inherit',
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '16px', backdropFilter: 'blur(4px)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: CARD_BG, borderRadius: '14px', padding: '24px', width: '100%', maxWidth: '440px', border: '1px solid ' + BORDER, boxShadow: '0 25px 60px rgba(0,0,0,0.6)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+          <h3 style={{ margin: 0, fontSize: '16px', color: TEXT }}>{isEdit ? '✏️ Редактировать' : '+ Новая карточка'}</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: MUTED, cursor: 'pointer', fontSize: '20px', padding: '0 4px', lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div>
+            <label style={{ fontSize: '12px', color: MUTED, display: 'block', marginBottom: '4px' }}>Заголовок *</label>
+            <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Название задачи…" style={inputStyle} autoFocus />
+          </div>
+          <div>
+            <label style={{ fontSize: '12px', color: MUTED, display: 'block', marginBottom: '4px' }}>Описание</label>
+            <textarea value={desc} onChange={e => setDesc(e.target.value)} placeholder="Подробное описание…" rows={2}
+              style={{ ...inputStyle, resize: 'vertical', lineHeight: '1.5' }} />
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ fontSize: '12px', color: MUTED, display: 'block', marginBottom: '4px' }}>Приоритет</label>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {(['low', 'medium', 'high'] as const).map(p => (
+                  <button key={p} onClick={() => setPriority(p)}
+                    style={{ flex: 1, padding: '6px 4px', background: priority === p ? PRIORITY_CONFIG[p].color + '22' : BG, border: '1px solid ' + (priority === p ? PRIORITY_CONFIG[p].color : BORDER), borderRadius: '6px', color: priority === p ? PRIORITY_CONFIG[p].color : MUTED, cursor: 'pointer', fontSize: '11px', fontWeight: priority === p ? 600 : 400 }}>
+                    {PRIORITY_CONFIG[p].label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {!isEdit && (
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: '12px', color: MUTED, display: 'block', marginBottom: '4px' }}>Колонка</label>
+                <select value={colId} onChange={e => setColId(e.target.value)}
+                  style={{ ...inputStyle, width: '100%' }}>
+                  {columns.map(c => <option key={c.id} value={c.id}>{c.icon} {c.title}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+          <div>
+            <label style={{ fontSize: '12px', color: MUTED, display: 'block', marginBottom: '4px' }}>Теги (через запятую)</label>
+            <input value={tagsStr} onChange={e => setTagsStr(e.target.value)} placeholder="feature, backend, urgent…" style={inputStyle} />
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '8px', marginTop: '18px' }}>
+          <button onClick={submit} disabled={!title.trim()}
+            style={{ flex: 1, padding: '10px', background: title.trim() ? SOLID_BLUE : BORDER, border: 'none', borderRadius: '8px', color: 'white', cursor: title.trim() ? 'pointer' : 'not-allowed', fontSize: '13px', fontWeight: 600 }}>
+            {isEdit ? 'Сохранить' : 'Создать'}
+          </button>
+          <button onClick={onClose}
+            style={{ padding: '10px 16px', background: BG, border: '1px solid ' + BORDER, borderRadius: '8px', color: MUTED, cursor: 'pointer', fontSize: '13px' }}>
+            Отмена
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CARD COMPONENT
+// ──────────────────────────────────────────────────────────────────────────────
+function Card({
+  card, column, columns, onEdit, onDelete, onMove,
+}: {
+  card: KanbanCard;
+  column: KanbanColumn;
+  columns: KanbanColumn[];
+  onEdit: () => void;
+  onDelete: () => void;
+  onMove: (toCol: string) => void;
+}) {
+  const p = PRIORITY_CONFIG[card.priority];
+  const age = Math.floor((Date.now() - card.createdAt) / 86400000);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  return (
+    <div
+      draggable
+      onDragStart={e => e.dataTransfer?.setData('cardId', card.id)}
+      style={{ background: BG, borderRadius: '9px', padding: '11px 12px', border: '1px solid ' + BORDER, cursor: 'grab', position: 'relative', transition: 'border-color .2s', borderLeft: '3px solid ' + p.color }}
+      onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.borderColor = p.color + '66'; }}
+      onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.borderColor = BORDER; (e.currentTarget as HTMLDivElement).style.borderLeftColor = p.color; }}
+    >
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '6px', gap: '8px' }}>
+        <span style={{ fontSize: '13px', fontWeight: 600, color: TEXT, lineHeight: 1.4, flex: 1 }}>{card.title}</span>
+        <div style={{ position: 'relative', flexShrink: 0 }}>
+          <button onClick={() => setMenuOpen(v => !v)} onBlur={() => setTimeout(() => setMenuOpen(false), 150)}
+            style={{ background: 'none', border: 'none', color: MUTED, cursor: 'pointer', padding: '0 2px', fontSize: '16px', lineHeight: 1 }}>⋯</button>
+          {menuOpen && (
+            <div style={{ position: 'absolute', right: 0, top: '100%', background: CARD_BG, border: '1px solid ' + BORDER, borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)', zIndex: 10, minWidth: 140, overflow: 'hidden' }}>
+              <div onClick={() => { onEdit(); setMenuOpen(false); }} style={{ padding: '8px 12px', cursor: 'pointer', fontSize: '12px', color: TEXT, display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <span>✏️</span> Редактировать
+              </div>
+              {columns.filter(c => c.id !== column.id).map(c => (
+                <div key={c.id} onClick={() => { onMove(c.id); setMenuOpen(false); }}
+                  style={{ padding: '8px 12px', cursor: 'pointer', fontSize: '12px', color: MUTED, display: 'flex', gap: '8px', alignItems: 'center', borderTop: '1px solid ' + BORDER }}>
+                  <span>{c.icon}</span> → {c.title}
+                </div>
+              ))}
+              <div onClick={() => { onDelete(); setMenuOpen(false); }}
+                style={{ padding: '8px 12px', cursor: 'pointer', fontSize: '12px', color: RED, display: 'flex', gap: '8px', alignItems: 'center', borderTop: '1px solid ' + BORDER }}>
+                <span>🗑️</span> Удалить
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Description */}
+      {card.description && (
+        <p style={{ margin: '0 0 8px', fontSize: '12px', color: MUTED, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+          {card.description}
+        </p>
+      )}
+
+      {/* Tags */}
+      {card.tags.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '8px' }}>
+          {card.tags.map(tag => (
+            <span key={tag} style={{ fontSize: '10px', padding: '2px 7px', background: SOLID_BLUE + '20', color: SOLID_BLUE, borderRadius: '4px', border: '1px solid ' + SOLID_BLUE + '33' }}>
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Footer */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: '10px', color: p.color, display: 'flex', alignItems: 'center', gap: '3px' }}>
+          {p.dot} {p.label}
+        </span>
+        <span style={{ fontSize: '10px', color: MUTED }}>{age === 0 ? 'сегодня' : age + ' дн. назад'}</span>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// COLUMN COMPONENT
+// ──────────────────────────────────────────────────────────────────────────────
+function Column({
+  column, cards, columns, onAddCard, onEditCard, onDeleteCard, onMoveCard,
+}: {
+  column: KanbanColumn;
+  cards: KanbanCard[];
+  columns: KanbanColumn[];
+  onAddCard: () => void;
+  onEditCard: (card: KanbanCard) => void;
+  onDeleteCard: (id: string) => void;
+  onMoveCard: (cardId: string, toCol: string) => void;
+}) {
+  const [dragOver, setDragOver] = useState(false);
+
+  return (
+    <div
+      style={{ minWidth: 240, width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '8px', background: CARD_BG, borderRadius: '12px', padding: '12px', border: '1px solid ' + (dragOver ? column.color + '66' : BORDER), transition: 'border-color .2s', maxHeight: 'calc(100vh - 140px)' }}
+      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false); }}
+      onDrop={e => {
+        e.preventDefault();
+        const cardId = e.dataTransfer?.getData('cardId');
+        if (cardId) onMoveCard(cardId, column.id);
+        setDragOver(false);
+      }}
+    >
+      {/* Column header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingBottom: '8px', borderBottom: '1px solid ' + BORDER }}>
+        <span>{column.icon}</span>
+        <span style={{ fontSize: '13px', fontWeight: 600, color: TEXT, flex: 1 }}>{column.title}</span>
+        <span style={{ fontSize: '11px', fontWeight: 700, color: 'white', background: column.color, borderRadius: '10px', padding: '1px 8px', minWidth: 20, textAlign: 'center' }}>
+          {cards.length}
+        </span>
+      </div>
+
+      {/* Cards */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '7px', overflowY: 'auto', flex: 1 }}>
+        {cards.map(card => (
+          <Card key={card.id} card={card} column={column} columns={columns}
+            onEdit={() => onEditCard(card)}
+            onDelete={() => onDeleteCard(card.id)}
+            onMove={toCol => onMoveCard(card.id, toCol)}
+          />
+        ))}
+        {cards.length === 0 && (
+          <div style={{ padding: '16px', textAlign: 'center', color: MUTED, fontSize: '12px', border: '1px dashed ' + BORDER, borderRadius: '8px' }}>
+            {dragOver ? '📥 Отпусти здесь' : 'Пусто'}
+          </div>
+        )}
+      </div>
+
+      {/* Add button */}
+      <button onClick={onAddCard}
+        style={{ padding: '8px', background: 'transparent', border: '1px dashed ' + BORDER, borderRadius: '7px', color: MUTED, cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', transition: 'all .2s' }}
+        onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = column.color; (e.currentTarget as HTMLButtonElement).style.color = column.color; }}
+        onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.borderColor = BORDER; (e.currentTarget as HTMLButtonElement).style.color = MUTED; }}
+      >
+        + Добавить
+      </button>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// STATS BAR
+// ──────────────────────────────────────────────────────────────────────────────
+function StatsBar({ board }: { board: BoardState }) {
+  const total = Object.keys(board.cards).length;
+  const highPriority = Object.values(board.cards).filter(c => c.priority === 'high').length;
+  const done = board.columns.find(c => c.id === 'done')?.cardIds.length || 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  return (
+    <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
+      {[
+        { label: 'Всего задач', value: total, color: TEXT },
+        { label: 'Высокий приоритет', value: highPriority, color: RED },
+        { label: 'Завершено', value: done + '/' + total, color: GREEN },
+      ].map(s => (
+        <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span style={{ fontSize: '16px', fontWeight: 700, color: s.color }}>{s.value}</span>
+          <span style={{ fontSize: '11px', color: MUTED }}>{s.label}</span>
+        </div>
+      ))}
+      <div style={{ flex: 1, minWidth: 80 }}>
+        <div style={{ height: '4px', background: BORDER, borderRadius: '2px', overflow: 'hidden' }}>
+          <div style={{ height: '100%', background: GREEN, width: pct + '%', transition: 'width .3s', borderRadius: '2px' }} />
+        </div>
+        <div style={{ fontSize: '10px', color: MUTED, marginTop: '2px', textAlign: 'right' }}>{pct}% готово</div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ROOT APP
+// ──────────────────────────────────────────────────────────────────────────────
+export default function App() {
+  const { board, addCard, updateCard, deleteCard, moveCard, resetBoard } = useBoard();
+  const [modal, setModal] = useState<ModalState | null>(null);
+  const [search, setSearch] = useState('');
+
+  const openAdd = useCallback((columnId: string) => {
+    setModal({ mode: 'add', columnId });
+  }, []);
+
+  const openEdit = useCallback((card: KanbanCard) => {
+    setModal({ mode: 'edit', card });
+  }, []);
+
+  const filteredCards = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    if (!q) return board.cards;
+    return Object.fromEntries(
+      Object.entries(board.cards).filter(([, c]) =>
+        c.title.toLowerCase().includes(q) ||
+        c.description.toLowerCase().includes(q) ||
+        c.tags.some(t => t.toLowerCase().includes(q))
+      )
+    );
+  }, [board.cards, search]);
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', fontFamily: 'system-ui, sans-serif', color: TEXT, display: 'flex', flexDirection: 'column' }}>
+      {/* Header */}
+      <div style={{ padding: '12px 16px', borderBottom: '1px solid ' + BORDER, background: CARD_BG, display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '18px' }}>🗂️</span>
+          <span style={{ fontWeight: 700, fontSize: '15px' }}>Kanban Board</span>
+          <span style={{ fontSize: '10px', background: SOLID_BLUE + '22', color: SOLID_BLUE, border: '1px solid ' + SOLID_BLUE + '44', borderRadius: '4px', padding: '1px 6px' }}>Solid.js Store</span>
+        </div>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Поиск задач…"
+          style={{ flex: 1, minWidth: 140, padding: '6px 10px', background: BG, border: '1px solid ' + BORDER, borderRadius: '6px', color: TEXT, fontSize: '12px', outline: 'none' }} />
+        <button onClick={resetBoard}
+          style={{ padding: '6px 10px', background: 'transparent', border: '1px solid ' + BORDER, borderRadius: '6px', color: MUTED, cursor: 'pointer', fontSize: '11px' }}>
+          Сбросить
+        </button>
+      </div>
+
+      {/* Stats */}
+      <div style={{ padding: '8px 16px', borderBottom: '1px solid ' + BORDER }}>
+        <StatsBar board={board} />
+      </div>
+
+      {/* Board */}
+      <div style={{ flex: 1, overflowX: 'auto', padding: '16px' }}>
+        <div style={{ display: 'flex', gap: '12px', minWidth: 'max-content' }}>
+          {board.columns.map(col => {
+            const colCards = col.cardIds.map(id => filteredCards[id]).filter(Boolean);
+            return (
+              <Column key={col.id} column={col} cards={colCards} columns={board.columns}
+                onAddCard={() => openAdd(col.id)}
+                onEditCard={openEdit}
+                onDeleteCard={deleteCard}
+                onMoveCard={moveCard}
+              />
+            );
+          })}
+        </div>
+        {search && Object.keys(filteredCards).length === 0 && (
+          <div style={{ textAlign: 'center', padding: '40px', color: MUTED, fontSize: '14px' }}>
+            Ничего не найдено по запросу «{search}»
+          </div>
+        )}
+      </div>
+
+      {/* Modal */}
+      {modal && (
+        <CardModal
+          state={modal}
+          columns={board.columns}
+          onClose={() => setModal(null)}
+          onAdd={addCard}
+          onUpdate={updateCard}
+        />
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>
+
+## Что используется в этом приложении
+
+| Концепция Solid.js | В нашем приложении |
+|---|---|
+| `createStore` + `produce` | `useBoard()` — иммутабельные обновления |
+| `createSignal` | `dragOver`, `menuOpen`, `modal`, `search` |
+| `createMemo` | `filteredCards` — пересчёт при поиске |
+| `createEffect` | Авто-сохранение в `localStorage` |
+| `createContext` | Передача стора вглубь дерева |
+| `<Portal>` | Модальное окно через портал |
+| `<For>` | Рендер колонок и карточек |
+| `<Show>` | Условный рендер описания, пустого состояния |
+| TypeScript | Полная типизация всех данных |
+
+## Следующие шаги для production
+
+```bash
+# 1. Добавить роутинг
+npm install @solidjs/router
+
+# 2. Добавить серверный стейт
+npm install @tanstack/solid-query
+
+# 3. Добавить drag-and-drop
+npm install @thisbeyond/solid-dnd
+
+# 4. Добавить headless компоненты
+npm install @kobalte/core
+
+# 5. Деплой через SolidStart
+npx create-solid@latest --template solid-start
+```
+
+## Итог курса
+
+Поздравляем! Вы прошли весь курс по Solid.js. За время обучения вы:
+
+- Освоили **fine-grained реактивность** — сигналы, эффекты, мемо
+- Изучили **стор** (`createStore`) для сложного состояния
+- Разобрались с **серверным рендерингом** и потоковой передачей
+- Познакомились с **паттернами**: renderless, порталы, кастомные примитивы
+- Узнали об **экосистеме**: @solid-primitives, TanStack Query, Kobalte
+- Построили **полноценное приложение** с нуля
+
+Solid.js — это будущее реактивных UI. Его философия "делать правильно, а не просто" делает код предсказуемым, производительным и приятным для чтения. Удачи в ваших проектах! 🚀

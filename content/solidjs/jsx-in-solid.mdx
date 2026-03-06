@@ -1,0 +1,540 @@
+import { Playground } from '../../components/Playground'
+
+## JSX в Solid.js: компиляция без Virtual DOM 🔧
+
+Привет! 👋 Яша здесь. Сегодня разберём **самую важную техническую особенность Solid.js** — как JSX компилируется в реальные DOM-операции. Если ты приходишь из React, тебя ждёт сюрприз: синтаксис похожий, но под капотом — совершенно другое!
+
+---
+
+## 🔄 JSX: синтаксический сахар для двух разных систем
+
+JSX — это не стандартный JavaScript. Это синтаксический сахар, который компилятор превращает в вызовы функций. Но в **React** и **Solid** эти вызовы принципиально разные.
+
+### React: JSX → `React.createElement()`
+
+```tsx
+// React JSX:
+const element = <div class="box">{count}</div>;
+
+// Компилируется в:
+const element = React.createElement('div', { className: 'box' }, count);
+// Результат: JavaScript-объект (виртуальный DOM-узел)
+// { type: 'div', props: { className: 'box', children: count } }
+```
+
+React создаёт **объекты** — виртуальный DOM. Эти объекты потом сравниваются с предыдущей версией, и из разницы вычисляются изменения реального DOM.
+
+### Solid: JSX → прямые DOM-инструкции
+
+```tsx
+// Solid JSX:
+const element = <div class="box">{count()}</div>;
+
+// Компилируется примерно в:
+const _tmpl$ = /*#__PURE__*/ template('<div class="box"> </div>');
+
+function MyComponent() {
+  const _el = _tmpl$.cloneNode(true);
+  const _el$text = _el.firstChild;
+
+  // Реактивная подписка: обновляет ТОЛЬКО этот текстовый узел
+  createEffect(() => {
+    _el$text.data = count();
+  });
+
+  return _el;
+}
+```
+
+Solid создаёт **настоящие DOM-элементы** и устанавливает **точечные реактивные подписки**. Нет объектов, нет сравнения, нет виртуального дерева.
+
+---
+
+## 🎯 Ключевые отличия JSX в Solid
+
+### 1. `class` вместо `className`
+
+```tsx
+// ❌ React (нужен className из-за зарезервированного слова)
+<div className="container">
+
+// ✅ Solid (использует нативный HTML-атрибут)
+<div class="container">
+```
+
+Solid работает напрямую с DOM, поэтому использует атрибуты как в HTML.
+
+### 2. `for` вместо `htmlFor` в `<label>`
+
+```tsx
+// ❌ React
+<label htmlFor="email">Email</label>
+<input id="email" />
+
+// ✅ Solid
+<label for="email">Email</label>
+<input id="email" />
+```
+
+### 3. Обработчики событий — `onClick`, не `onClick={handler}`
+
+```tsx
+// React и Solid: синтаксис одинаковый
+<button onClick={() => setCount(c => c + 1)}>+</button>
+
+// Но под капотом Solid делает:
+button.addEventListener('click', () => setCount(c => c + 1));
+// А не через синтетические события React!
+```
+
+### 4. Реактивные значения — функции, не значения
+
+Это самое важное различие в JSX:
+
+```tsx
+// React: count — это значение
+const [count, setCount] = useState(0);
+return <p>{count}</p>; // просто вставляем значение
+
+// Solid: count — это ФУНКЦИЯ (геттер сигнала)
+const [count, setCount] = createSignal(0);
+return <p>{count()}</p>; // вызываем как функцию!
+```
+
+**Почему это важно:** когда Solid компилирует `{count()}`, он знает, что нужно создать реактивную подписку. Если ты забудешь скобки и напишешь `{count}`, Solid подставит функцию как строку — это баг!
+
+```tsx
+// ❌ Забыл скобки — в DOM будет "() => ..."
+<p>{count}</p>
+
+// ✅ Правильно — DOM обновляется при изменении сигнала
+<p>{count()}</p>
+```
+
+---
+
+## 📋 Компонент `<Show>` вместо тернарного оператора
+
+В React условный рендеринг делается через обычные JS-выражения:
+
+```tsx
+// React: тернарный оператор
+return <div>{isLoading ? <Spinner /> : <Content />}</div>;
+
+// React: &&
+return <div>{isLoggedIn && <Dashboard />}</div>;
+```
+
+В Solid это работает, но **рекомендуется** использовать встроенный компонент `<Show>`:
+
+```tsx
+import { Show } from 'solid-js';
+
+// Solid: компонент Show
+function App() {
+  const [isLoggedIn, setIsLoggedIn] = createSignal(false);
+
+  return (
+    <div>
+      <Show when={isLoggedIn()} fallback={<LoginForm />}>
+        <Dashboard />
+      </Show>
+    </div>
+  );
+}
+```
+
+**Почему `<Show>` лучше?** Solid компилирует `<Show>` в оптимальный код, который не пересоздаёт DOM-узлы при повторном появлении. Тернарный оператор тоже работает, но `<Show>` семантически точнее.
+
+---
+
+## 📋 Компонент `<For>` вместо `.map()`
+
+```tsx
+import { For } from 'solid-js';
+
+// React: .map() с key
+function List({ items }) {
+  return (
+    <ul>
+      {items.map(item => (
+        <li key={item.id}>{item.name}</li>
+      ))}
+    </ul>
+  );
+}
+
+// Solid: компонент For (без key!)
+function List({ items }) {
+  return (
+    <ul>
+      <For each={items()}>
+        {(item) => <li>{item.name}</li>}
+      </For>
+    </ul>
+  );
+}
+```
+
+Ключевые отличия:
+- **Нет `key` проп!** Solid отслеживает элементы по значению/ссылке автоматически
+- `each` принимает реактивный массив (из сигнала)
+- Callback-функция получает сам элемент и геттер индекса
+
+```tsx
+// Доступ к индексу в For:
+<For each={items()}>
+  {(item, index) => (
+    <li>{index() + 1}. {item.name}</li>
+    // index — это функция! index(), не просто index
+  )}
+</For>
+```
+
+---
+
+## 🔀 `splitProps` — разделение пропсов
+
+В Solid пропсы — это реактивный объект. Нельзя деструктурировать их напрямую (теряется реактивность):
+
+```tsx
+// ❌ Деструктуризация теряет реактивность!
+function Button({ onClick, class: cls, children, disabled }) {
+  // Если снаружи изменится disabled — здесь ничего не обновится
+}
+
+// ✅ Используй splitProps
+import { splitProps } from 'solid-js';
+
+function Button(props) {
+  // Разделяем: наши пропсы + пропсы для нативного элемента
+  const [local, others] = splitProps(props, ['class', 'children']);
+
+  return (
+    <button
+      class={'btn ' + (local.class || '')}
+      {...others}  // передаём onClick, disabled и т.д.
+    >
+      {local.children}
+    </button>
+  );
+}
+```
+
+`splitProps` создаёт реактивные прокси — изменения во внешних пропсах автоматически отражаются внутри компонента.
+
+---
+
+## 🧩 Spread-пропсы
+
+Передача всех атрибутов через spread:
+
+```tsx
+// Solid поддерживает spread-пропсы
+function Input(props) {
+  return <input {...props} />;
+}
+
+// Использование
+<Input type="email" value={email()} onInput={e => setEmail(e.target.value)} />
+```
+
+Но при spread нужно соблюдать осторожность: если есть пропсы, которые ты хочешь «поглотить» (не передавать в DOM), используй `splitProps` перед spread.
+
+---
+
+## 🛠️ JSX-специфичные атрибуты Solid
+
+```tsx
+// ref — получение ссылки на DOM-элемент
+let inputRef: HTMLInputElement;
+<input ref={inputRef} />;
+// После монтирования inputRef === реальный DOM-элемент
+
+// classList — удобный способ управления классами
+<div classList={{
+  'active': isActive(),
+  'disabled': isDisabled(),
+  'highlighted': isSelected(),
+}} />;
+
+// style как объект (как в React)
+<div style={{
+  color: 'red',
+  'font-size': '16px',  // CSS-свойства в kebab-case как строки
+}} />;
+
+// innerHTML и innerText (осторожно! XSS-уязвимость)
+<div innerHTML={trustedHtml()} />;
+
+// on:event — стандартные DOM-события
+<div on:click={handler} />;  // эквивалент addEventListener
+
+// on:event с опциями (capture, once, passive)
+<div on:click={[handler, { once: true }]} />;
+```
+
+---
+
+## 🎮 Playground: визуализатор компиляции JSX
+
+Посмотри, во что компилируется один и тот же JSX в React и Solid:
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const PURPLE = '#a78bfa';
+
+interface Example {
+  label: string;
+  jsx: string;
+  react: string;
+  solid: string;
+  note: string;
+}
+
+const EXAMPLES: Example[] = [
+  {
+    label: 'Простой элемент',
+    jsx: '<div class="box">Hello</div>',
+    react: \`// React: создаёт JS-объект (Virtual DOM)
+React.createElement(
+  'div',
+  { className: 'box' },
+  'Hello'
+)
+// Результат: { type: 'div',
+//   props: { className: 'box', children: 'Hello' } }\`,
+    solid: \`// Solid: создаёт РЕАЛЬНЫЙ DOM-элемент
+const _tmpl$ = template('<div class="box">Hello</div>');
+
+// При вызове компонента:
+const _el = _tmpl$.cloneNode(true);
+return _el;
+// Результат: настоящий HTMLDivElement!\`,
+    note: 'Solid использует шаблон (template) для клонирования, что быстрее создания с нуля.',
+  },
+  {
+    label: 'Реактивное значение',
+    jsx: '<p>{count()}</p>',
+    react: \`// React: значение вставляется при каждом рендере
+React.createElement('p', null, count)
+// Весь компонент ре-рендерится при setState!
+// count здесь — просто число, не функция\`,
+    solid: \`// Solid: точечная подписка на сигнал
+const _tmpl$ = template('<p> </p>');
+const _el = _tmpl$.cloneNode(true);
+const _text = _el.firstChild;
+
+// Создаётся ОДИН РАЗ — реактивная подписка:
+createEffect(() => {
+  _text.data = count(); // обновляет только этот textNode!
+});
+return _el;\`,
+    note: 'При изменении count() обновляется только один текстовый узел. Компонент не ре-запускается.',
+  },
+  {
+    label: 'Обработчик события',
+    jsx: '<button onClick={handler}>Click</button>',
+    react: \`// React: синтетические события через делегирование
+React.createElement('button', {
+  onClick: handler
+}, 'Click')
+
+// React вешает ОДИН listener на document
+// и маршрутизирует события через виртуальное дерево\`,
+    solid: \`// Solid: нативный addEventListener
+const _tmpl$ = template('<button>Click</button>');
+const _el = _tmpl$.cloneNode(true);
+
+// Прямой addEventListener на элемент:
+_el.addEventListener('click', handler);
+
+return _el;
+// Никаких синтетических событий!\`,
+    note: 'Solid вешает нативные события напрямую. Это быстрее и совместимо со всеми браузерными API.',
+  },
+  {
+    label: 'Условный рендеринг',
+    jsx: '<Show when={ok()}><Child /></Show>',
+    react: \`// React: тернарный оператор (пересоздаёт при каждом рендере)
+React.createElement(
+  React.Fragment,
+  null,
+  ok ? React.createElement(Child, null) : null
+)
+// Child уничтожается и пересоздаётся при ok → false → true\`,
+    solid: \`// Solid: Show — умное условие с мемоизацией
+// Solid отслеживает ok() как реактивную зависимость
+// Child монтируется/демонтируется только при изменении ok()
+// Если ok() не меняется — Child вообще не трогается
+
+memo(
+  () => ok(),
+  (val) => val ? mountChild() : unmountChild()
+);\`,
+    note: 'Show эффективно управляет жизненным циклом дочерних компонентов через мемоизацию.',
+  },
+  {
+    label: 'Список (For)',
+    jsx: '<For each={items()}>{(i) => <li>{i.name}</li>}</For>',
+    react: \`// React: .map() — пересоздаёт весь список при любом изменении
+items.map(item =>
+  React.createElement('li', { key: item.id }, item.name)
+)
+// Нужен key для reconciliation
+// При изменении одного элемента — весь map пересчитывается\`,
+    solid: \`// Solid: For — мелкозернистые обновления без key
+// Каждый элемент списка получает свою реактивную область
+// При изменении items[2] — обновляется только 3-й <li>
+
+createMemo(mapArray(
+  () => items(),
+  (item) => <li>{item.name}</li>
+));
+// Нет key! Solid отслеживает элементы по ссылке/значению\`,
+    note: 'For в Solid не требует key и обновляет только изменившиеся элементы — это намного эффективнее.',
+  },
+];
+
+function CodeBlock({ code, color }: { code: string; color: string }) {
+  return (
+    <pre style={{
+      background: '#0d1117', border: '1px solid ' + color + '44',
+      borderRadius: '8px', padding: '12px', fontSize: '0.72rem',
+      lineHeight: 1.6, overflowX: 'auto', color: '#c9d1d9',
+      margin: 0, flex: 1, minHeight: '160px',
+    }}>
+      <code>{code}</code>
+    </pre>
+  );
+}
+
+export default function App() {
+  const [selected, setSelected] = useState(0);
+  const ex = EXAMPLES[selected];
+
+  return (
+    <div style={{ background: BG, color: TEXT, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui, sans-serif' }}>
+      <h1 style={{ color: SOLID_LIGHT, marginTop: 0, fontSize: '1.2rem', marginBottom: '4px' }}>
+        🔧 Визуализатор компиляции JSX
+      </h1>
+      <p style={{ color: MUTED, fontSize: '0.8rem', margin: '0 0 14px' }}>
+        Выбери пример и сравни скомпилированный код React vs Solid
+      </p>
+
+      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '14px' }}>
+        {EXAMPLES.map((e, i) => (
+          <button key={e.label} onClick={() => setSelected(i)} style={{
+            background: selected === i ? SOLID_BLUE : CARD,
+            color: TEXT, border: '1px solid ' + (selected === i ? SOLID_BLUE : BORDER),
+            padding: '5px 12px', borderRadius: '6px', cursor: 'pointer',
+            fontSize: '0.78rem', fontWeight: selected === i ? 700 : 400,
+          }}>
+            {e.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ background: CARD, border: '1px solid ' + BORDER, borderRadius: '10px', padding: '12px', marginBottom: '12px' }}>
+        <div style={{ color: MUTED, fontSize: '0.7rem', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '1px' }}>JSX-исходник</div>
+        <pre style={{ background: '#0d1117', borderRadius: '6px', padding: '10px', fontSize: '0.85rem', color: '#79c0ff', margin: 0 }}>
+          <code>{ex.jsx}</code>
+        </pre>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '12px' }}>
+        <div>
+          <div style={{ color: '#61dafb', fontWeight: 700, fontSize: '0.8rem', marginBottom: '6px' }}>⚛️ React: скомпилированный код</div>
+          <CodeBlock code={ex.react} color="#61dafb" />
+        </div>
+        <div>
+          <div style={{ color: SOLID_LIGHT, fontWeight: 700, fontSize: '0.8rem', marginBottom: '6px' }}>⚡ Solid: скомпилированный код</div>
+          <CodeBlock code={ex.solid} color={SOLID_BLUE} />
+        </div>
+      </div>
+
+      <div style={{ background: SOLID_BLUE + '15', border: '1px solid ' + SOLID_BLUE + '44', borderRadius: '8px', padding: '10px 14px' }}>
+        <span style={{ color: SOLID_BLUE, fontWeight: 700, marginRight: '6px' }}>💡</span>
+        <span style={{ color: TEXT, fontSize: '0.82rem', lineHeight: 1.5 }}>{ex.note}</span>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## ⚠️ Частые ошибки с JSX в Solid
+
+### Забытые скобки у геттера сигнала
+
+```tsx
+// ❌ count без скобок — в JSX вставится сама функция
+const [count, setCount] = createSignal(0);
+return <p>{count}</p>;   // покажет "() => ..." или пустоту
+
+// ✅ count() — вызов геттера
+return <p>{count()}</p>; // покажет актуальное значение
+```
+
+### Деструктуризация пропсов
+
+```tsx
+// ❌ Деструктуризация разрушает реактивность
+function Button({ label, onClick, disabled }) {
+  // disabled здесь — это snapshot, не реактивный
+  return <button disabled={disabled}>{label}</button>;
+}
+
+// ✅ Обращайся через props.xxx
+function Button(props) {
+  return <button disabled={props.disabled}>{props.label}</button>;
+}
+
+// ✅ Или используй splitProps
+function Button(props) {
+  const [local, rest] = splitProps(props, ['label']);
+  return <button {...rest}>{local.label}</button>;
+}
+```
+
+### `className` вместо `class`
+
+```tsx
+// ❌ className работает, но это не идиоматично
+<div className="box">
+
+// ✅ Используй class
+<div class="box">
+```
+
+---
+
+## 🏁 Итоги урока
+
+Ты понял, как JSX работает в Solid.js под капотом!
+
+**Главные отличия от React JSX:**
+
+✅ Компилируется в прямые DOM-операции, не в `React.createElement`
+
+✅ Нет Virtual DOM — реальные элементы с реактивными подписками
+
+✅ `class` вместо `className`, `for` вместо `htmlFor`
+
+✅ Реактивные значения в JSX — всегда функции: `{count()}`, не `{count}`
+
+✅ Для списков используй `<For>` (без `key`), для условий — `<Show>`
+
+✅ Для пропсов — `splitProps`, не деструктуризация
+
+**Следующий шаг:** погружаемся в сигналы — главный реактивный примитив Solid.js! ⚡

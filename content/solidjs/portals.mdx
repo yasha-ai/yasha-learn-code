@@ -1,0 +1,517 @@
+import { Playground } from '../../components/Playground'
+
+# Порталы в Solid.js
+
+Компонент `<Portal>` позволяет рендерить JSX **за пределами текущего дерева компонентов** — например, прямо в `document.body`. Это критически важно для модальных окон, тостов, тултипов и выпадающих меню, которые должны визуально "вырываться" из родительского контейнера.
+
+## Проблема без порталов
+
+Без порталов компонент рендерится внутри своего родителя. Если родитель имеет `overflow: hidden` или `z-index`-контекст, модальное окно или тултип будет обрезан:
+
+```tsx
+// ❌ Проблема: модалка рендерится внутри .card
+function Card() {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <div style="position: relative; overflow: hidden;">
+      <button onClick={() => setOpen(true)}>Открыть</button>
+      {/* Модалка будет обрезана! */}
+      <Show when={open()}>
+        <div style="position: fixed; inset: 0;">...</div>
+      </Show>
+    </div>
+  );
+}
+```
+
+## Синтаксис Portal в Solid.js
+
+```tsx
+import { Portal } from 'solid-js/web';
+
+function Modal(props: { open: boolean; onClose: () => void }) {
+  return (
+    <Show when={props.open}>
+      {/* Всё внутри Portal рендерится в document.body */}
+      <Portal>
+        <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.5);"
+          onClick={props.onClose}>
+          <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"
+            onClick={e => e.stopPropagation()}>
+            <slot />
+          </div>
+        </div>
+      </Portal>
+    </Show>
+  );
+}
+```
+
+## Кастомный mount point
+
+По умолчанию Portal рендерит содержимое в `document.body`, но можно указать другой элемент:
+
+```tsx
+// Рендерим в конкретный элемент
+<Portal mount={document.getElementById('toast-container')!}>
+  <Toast message="Успешно сохранено!" />
+</Portal>
+
+// Или в кастомный ref
+function App() {
+  let toastRoot!: HTMLDivElement;
+  return (
+    <>
+      <div ref={toastRoot} id="toast-root" />
+      <Portal mount={toastRoot}>
+        <Toast />
+      </Portal>
+    </>
+  );
+}
+```
+
+## useShadow — изоляция стилей
+
+Portal поддерживает Shadow DOM для полной изоляции стилей:
+
+```tsx
+<Portal useShadow={true}>
+  {/* Стили снаружи не проникнут сюда */}
+  <div>Изолированный контент</div>
+</Portal>
+```
+
+## Полный пример: модальное окно
+
+```tsx
+import { createSignal, Show } from 'solid-js';
+import { Portal } from 'solid-js/web';
+
+interface ModalProps {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  children: JSXElement;
+}
+
+function Modal(props: ModalProps) {
+  // Блокируем прокрутку страницы пока модалка открыта
+  createEffect(() => {
+    if (props.open) {
+      document.body.style.overflow = 'hidden';
+      onCleanup(() => { document.body.style.overflow = ''; });
+    }
+  });
+
+  // Закрытие по Escape
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') props.onClose();
+  };
+  createEffect(() => {
+    if (props.open) {
+      document.addEventListener('keydown', handleKeyDown);
+      onCleanup(() => document.removeEventListener('keydown', handleKeyDown));
+    }
+  });
+
+  return (
+    <Show when={props.open}>
+      <Portal>
+        <div
+          style={{
+            position: 'fixed', inset: 0,
+            background: 'rgba(0, 0, 0, 0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            'z-index': 1000,
+          }}
+          onClick={props.onClose}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="modal-title"
+            style={{ background: 'white', borderRadius: '12px', padding: '24px', minWidth: '320px' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <h2 id="modal-title">{props.title}</h2>
+            {props.children}
+            <button onClick={props.onClose}>Закрыть</button>
+          </div>
+        </div>
+      </Portal>
+    </Show>
+  );
+}
+```
+
+## Toast-уведомления через Portal
+
+```tsx
+interface Toast {
+  id: number;
+  message: string;
+  type: 'success' | 'error' | 'info';
+}
+
+function createToastStore() {
+  const [toasts, setToasts] = createSignal<Toast[]>([]);
+  let nextId = 0;
+
+  const add = (message: string, type: Toast['type'] = 'info') => {
+    const id = nextId++;
+    setToasts(t => [...t, { id, message, type }]);
+    setTimeout(() => remove(id), 3000);
+  };
+
+  const remove = (id: number) => {
+    setToasts(t => t.filter(toast => toast.id !== id));
+  };
+
+  return { toasts, add, remove };
+}
+
+const toastStore = createToastStore();
+
+function ToastContainer() {
+  return (
+    <Portal mount={document.body}>
+      <div style={{ position: 'fixed', top: '16px', right: '16px', 'z-index': 9999 }}>
+        <For each={toastStore.toasts()}>
+          {toast => (
+            <div onClick={() => toastStore.remove(toast.id)}>
+              {toast.message}
+            </div>
+          )}
+        </For>
+      </div>
+    </Portal>
+  );
+}
+```
+
+## Tooltip с позиционированием
+
+```tsx
+function Tooltip(props: { text: string; children: JSXElement }) {
+  const [visible, setVisible] = createSignal(false);
+  const [pos, setPos] = createSignal({ x: 0, y: 0 });
+  let triggerRef!: HTMLSpanElement;
+
+  const show = () => {
+    const rect = triggerRef.getBoundingClientRect();
+    setPos({ x: rect.left + rect.width / 2, y: rect.top - 8 });
+    setVisible(true);
+  };
+
+  return (
+    <>
+      <span ref={triggerRef} onMouseEnter={show} onMouseLeave={() => setVisible(false)}>
+        {props.children}
+      </span>
+      <Show when={visible()}>
+        <Portal>
+          <div style={{
+            position: 'fixed',
+            left: `${pos().x}px`,
+            top: `${pos().y}px`,
+            transform: 'translate(-50%, -100%)',
+            background: '#1e293b',
+            color: 'white',
+            padding: '4px 8px',
+            borderRadius: '4px',
+            fontSize: '12px',
+            'z-index': 9999,
+            'pointer-events': 'none',
+          }}>
+            {props.text}
+          </div>
+        </Portal>
+      </Show>
+    </>
+  );
+}
+```
+
+## SSR-ограничения
+
+При Server-Side Rendering порталы требуют особого внимания:
+
+```tsx
+// ❌ document.body недоступен на сервере
+<Portal mount={document.body}>...</Portal>
+
+// ✅ Используй isServer из 'solid-js/web'
+import { isServer } from 'solid-js/web';
+
+function SafePortal(props: { children: JSXElement }) {
+  if (isServer) return props.children; // на сервере — рендерим inline
+
+  return <Portal>{props.children}</Portal>;
+}
+```
+
+## Интерактивный пример
+
+Полная система: модальное окно + тосты + тултипы через порталы:
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState, useEffect, useCallback, useRef, ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const RED = '#f87171';
+
+// ════════════════════════════════════════════════════════════════
+// MODAL PORTAL
+// ════════════════════════════════════════════════════════════════
+function Modal({ open, onClose, title, children }: {
+  open: boolean; onClose: () => void; title: string; children: ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+  return createPortal(
+    <div
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(4px)' }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ background: CARD, borderRadius: '14px', padding: '24px', minWidth: '320px', maxWidth: '480px', width: '90%', border: '1px solid ' + BORDER, boxShadow: '0 25px 50px rgba(0,0,0,0.5)' }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <h3 style={{ margin: 0, fontSize: '16px', color: TEXT }}>{title}</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: MUTED, cursor: 'pointer', fontSize: '20px', lineHeight: 1, padding: '0 4px' }}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// TOAST PORTAL
+// ════════════════════════════════════════════════════════════════
+interface ToastItem { id: number; message: string; type: 'success' | 'error' | 'info'; }
+
+function ToastContainer({ toasts, onRemove }: { toasts: ToastItem[]; onRemove: (id: number) => void }) {
+  if (toasts.length === 0) return null;
+  const colors = { success: GREEN, error: RED, info: SOLID_BLUE };
+  const icons = { success: '✓', error: '✕', info: 'ℹ' };
+  return createPortal(
+    <div style={{ position: 'fixed', top: '16px', right: '16px', zIndex: 2000, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      {toasts.map(t => (
+        <div key={t.id} onClick={() => onRemove(t.id)}
+          style={{ background: CARD, border: '1px solid ' + colors[t.type] + '66', borderRadius: '10px', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', minWidth: '260px', boxShadow: '0 4px 20px rgba(0,0,0,0.4)', animation: 'slideIn .2s ease' }}>
+          <span style={{ width: 22, height: 22, borderRadius: '50%', background: colors[t.type] + '22', border: '1px solid ' + colors[t.type], display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', color: colors[t.type], flexShrink: 0, fontWeight: 700 }}>
+            {icons[t.type]}
+          </span>
+          <span style={{ fontSize: '13px', color: TEXT, flex: 1 }}>{t.message}</span>
+          <span style={{ color: MUTED, fontSize: '16px' }}>×</span>
+        </div>
+      ))}
+    </div>,
+    document.body
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// TOOLTIP PORTAL
+// ════════════════════════════════════════════════════════════════
+function Tooltip({ text, children }: { text: string; children: ReactNode }) {
+  const [visible, setVisible] = useState(false);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const ref = useRef<HTMLSpanElement>(null);
+
+  const show = () => {
+    if (ref.current) {
+      const r = ref.current.getBoundingClientRect();
+      setPos({ x: r.left + r.width / 2, y: r.top - 6 });
+    }
+    setVisible(true);
+  };
+
+  return (
+    <>
+      <span ref={ref} onMouseEnter={show} onMouseLeave={() => setVisible(false)}
+        style={{ borderBottom: '1px dashed ' + MUTED, cursor: 'help' }}>
+        {children}
+      </span>
+      {visible && createPortal(
+        <div style={{ position: 'fixed', left: pos.x, top: pos.y, transform: 'translate(-50%, -100%)', background: '#1e293b', color: TEXT, padding: '6px 10px', borderRadius: '6px', fontSize: '12px', zIndex: 3000, pointerEvents: 'none', border: '1px solid ' + BORDER, boxShadow: '0 4px 12px rgba(0,0,0,0.4)', whiteSpace: 'nowrap', marginBottom: '6px' }}>
+          {text}
+          <div style={{ position: 'absolute', bottom: -5, left: '50%', transform: 'translateX(-50%)', width: 8, height: 8, background: '#1e293b', border: '1px solid ' + BORDER, borderTop: 'none', borderLeft: 'none', rotate: '45deg' }} />
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// ROOT APP
+// ════════════════════════════════════════════════════════════════
+export default function App() {
+  const [modalOpen, setModalOpen] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const nextId = useRef(0);
+
+  const addToast = useCallback((message: string, type: ToastItem['type']) => {
+    const id = nextId.current++;
+    setToasts(t => [...t, { id, message, type }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3000);
+  }, []);
+
+  const removeToast = useCallback((id: number) => {
+    setToasts(t => t.filter(x => x.id !== id));
+  }, []);
+
+  const portalBadge = (label: string) => (
+    <span style={{ fontSize: '10px', background: SOLID_BLUE + '22', color: SOLID_BLUE, border: '1px solid ' + SOLID_BLUE + '44', borderRadius: '4px', padding: '1px 6px', fontFamily: 'monospace' }}>portal → body</span>
+  );
+
+  return (
+    <>
+      <style>{'\n        @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }\n      '}</style>
+      <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+        <div style={{ maxWidth: 640, margin: '0 auto' }}>
+          <h1 style={{ margin: '0 0 4px', fontSize: '20px' }}>Portal System</h1>
+          <p style={{ margin: '0 0 24px', color: MUTED, fontSize: '13px' }}>Модальные окна, тосты и тултипы рендерятся в document.body через порталы</p>
+
+          {/* Section 1: Modals */}
+          <div style={{ background: CARD, borderRadius: '12px', padding: '20px', border: '1px solid ' + BORDER, marginBottom: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
+              <span style={{ fontSize: '16px' }}>🪟</span>
+              <span style={{ fontWeight: 600, fontSize: '14px' }}>Модальные окна</span>
+              {portalBadge('')}
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button onClick={() => setModalOpen(true)}
+                style={{ padding: '8px 16px', background: SOLID_BLUE, border: 'none', borderRadius: '8px', color: 'white', cursor: 'pointer', fontSize: '13px' }}>
+                Открыть Modal
+              </button>
+              <button onClick={() => setConfirmOpen(true)}
+                style={{ padding: '8px 16px', background: ORANGE + '22', border: '1px solid ' + ORANGE + '44', borderRadius: '8px', color: ORANGE, cursor: 'pointer', fontSize: '13px' }}>
+                Открыть Confirm
+              </button>
+            </div>
+          </div>
+
+          {/* Section 2: Toasts */}
+          <div style={{ background: CARD, borderRadius: '12px', padding: '20px', border: '1px solid ' + BORDER, marginBottom: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
+              <span style={{ fontSize: '16px' }}>🔔</span>
+              <span style={{ fontWeight: 600, fontSize: '14px' }}>Toast-уведомления</span>
+              {portalBadge('')}
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {(['success', 'error', 'info'] as const).map(type => {
+                const msgs = { success: 'Данные сохранены!', error: 'Ошибка соединения', info: 'Доступно обновление' };
+                const colors = { success: GREEN, error: RED, info: SOLID_BLUE };
+                return (
+                  <button key={type} onClick={() => addToast(msgs[type], type)}
+                    style={{ padding: '7px 14px', background: colors[type] + '15', border: '1px solid ' + colors[type] + '44', borderRadius: '8px', color: colors[type], cursor: 'pointer', fontSize: '13px' }}>
+                    {type}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Section 3: Tooltips */}
+          <div style={{ background: CARD, borderRadius: '12px', padding: '20px', border: '1px solid ' + BORDER }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
+              <span style={{ fontSize: '16px' }}>💬</span>
+              <span style={{ fontWeight: 600, fontSize: '14px' }}>Тултипы</span>
+              {portalBadge('')}
+            </div>
+            <p style={{ margin: 0, color: MUTED, fontSize: '13px', lineHeight: 1.8 }}>
+              Наведи на{' '}
+              <Tooltip text="Portal рендерит в document.body">подчёркнутый текст</Tooltip>
+              {' '}чтобы увидеть{' '}
+              <Tooltip text="z-index: 9999, position: fixed">тултип из портала</Tooltip>
+              {'. '}Тултипы всегда поверх всего благодаря{' '}
+              <Tooltip text="position: fixed + z-index не зависят от родительского контекста наложения">position: fixed</Tooltip>.
+            </p>
+          </div>
+
+          {/* Architecture note */}
+          <div style={{ marginTop: '16px', padding: '12px 14px', background: BG, borderRadius: '8px', border: '1px solid ' + BORDER, fontSize: '12px', color: MUTED, lineHeight: 1.7 }}>
+            <strong style={{ color: TEXT }}>Архитектура: </strong>
+            Все три компонента рендерятся через <code style={{ color: GREEN }}>createPortal(content, document.body)</code>.
+            В Solid.js это — <code style={{ color: SOLID_BLUE }}>&lt;Portal&gt;</code> компонент из <code>'solid-js/web'</code>.
+          </div>
+        </div>
+      </div>
+
+      {/* Info Modal */}
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="О порталах в Solid.js">
+        <p style={{ color: MUTED, fontSize: '13px', lineHeight: 1.7, margin: '0 0 16px' }}>
+          Этот диалог рендерится в <code style={{ color: GREEN }}>document.body</code>, а не внутри родительского div.
+          В DOM-дереве он находится в самом конце страницы.
+        </p>
+        <div style={{ padding: '10px 12px', background: BG, borderRadius: '8px', fontFamily: 'monospace', fontSize: '11px', color: GREEN, marginBottom: '16px' }}>
+          {'<Portal>\n  <div role="dialog">...</div>\n</Portal>'}
+        </div>
+        <button onClick={() => { setModalOpen(false); addToast('Модалка закрыта!', 'success'); }}
+          style={{ padding: '9px 18px', background: SOLID_BLUE, border: 'none', borderRadius: '8px', color: 'white', cursor: 'pointer', fontSize: '13px', width: '100%' }}>
+          Понятно!
+        </button>
+      </Modal>
+
+      {/* Confirm Modal */}
+      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Подтвердить действие">
+        <p style={{ color: MUTED, fontSize: '13px', lineHeight: 1.7, margin: '0 0 16px' }}>
+          Вы уверены, что хотите удалить этот элемент? Это действие нельзя отменить.
+        </p>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button onClick={() => { setConfirmOpen(false); addToast('Элемент удалён', 'error'); }}
+            style={{ flex: 1, padding: '9px', background: RED + '22', border: '1px solid ' + RED + '44', borderRadius: '8px', color: RED, cursor: 'pointer', fontSize: '13px' }}>
+            Удалить
+          </button>
+          <button onClick={() => setConfirmOpen(false)}
+            style={{ flex: 1, padding: '9px', background: CARD, border: '1px solid ' + BORDER, borderRadius: '8px', color: MUTED, cursor: 'pointer', fontSize: '13px' }}>
+            Отмена
+          </button>
+        </div>
+      </Modal>
+
+      {/* Toast container */}
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
+    </>
+  );
+}
+`
+  }}
+/>
+
+## Когда использовать Portal
+
+| Сценарий | Нужен Portal? |
+|---|---|
+| Модальное окно | ✅ Всегда |
+| Toast-уведомления | ✅ Всегда |
+| Dropdown/Select | ✅ При `overflow: hidden` у родителя |
+| Tooltip | ✅ Для корректного `z-index` |
+| Контент внутри карточки | ❌ Не нужен |
+
+## Итог
+
+`<Portal>` в Solid.js — это тонкий слой над `document.body.appendChild()`. Он встроен в `solid-js/web`, не требует дополнительных зависимостей и решает главную проблему UI-компонентов: рендеринг контента **независимо от CSS-контекста** родителя. Главное помнить об SSR-ограничениях и не обращаться к `document` без проверки на сервере.

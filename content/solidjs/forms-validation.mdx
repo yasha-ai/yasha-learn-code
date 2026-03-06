@@ -1,0 +1,605 @@
+## 📝 Формы и валидация в Solid.js
+
+Яша, работа с формами — одна из самых частых задач. В Solid есть несколько подходов: управляемые и неуправляемые формы, `createStore` для сложного состояния, библиотека `@modular-forms/solid` и серверные action. Разберём всё от простого к сложному! 🎯
+
+---
+
+## 🔄 Управляемые формы (Controlled)
+
+```tsx
+import { createSignal } from 'solid-js';
+
+function ControlledForm() {
+  const [name, setName] = createSignal('');
+  const [email, setEmail] = createSignal('');
+
+  const handleSubmit = (e: SubmitEvent) => {
+    e.preventDefault();
+    console.log({ name: name(), email: email() });
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        value={name()}
+        onInput={(e) => setName(e.target.value)}
+        placeholder="Имя"
+      />
+      <input
+        type="email"
+        value={email()}
+        onInput={(e) => setEmail(e.target.value)}
+        placeholder="Email"
+      />
+      <button type="submit">Отправить</button>
+    </form>
+  );
+}
+```
+
+> ⚠️ **Важно:** В Solid используй `onInput` (не `onChange`!) для управляемых инпутов. `onChange` срабатывает только при потере фокуса.
+
+---
+
+## 📦 Неуправляемые формы (Uncontrolled)
+
+```tsx
+function UncontrolledForm() {
+  let formRef: HTMLFormElement;
+
+  const handleSubmit = (e: SubmitEvent) => {
+    e.preventDefault();
+    const data = new FormData(formRef);
+    console.log({
+      name: data.get('name'),
+      email: data.get('email'),
+      role: data.get('role'),
+    });
+  };
+
+  return (
+    <form ref={formRef!} onSubmit={handleSubmit}>
+      <input name="name" placeholder="Имя" />
+      <input name="email" type="email" placeholder="Email" />
+      <select name="role">
+        <option value="user">Пользователь</option>
+        <option value="admin">Администратор</option>
+      </select>
+      <button type="submit">Отправить</button>
+    </form>
+  );
+}
+```
+
+> 💡 Неуправляемые формы проще и быстрее — нет лишних сигналов. Отлично для простых форм без валидации в реальном времени.
+
+---
+
+## 🏗️ createStore для сложных форм
+
+```tsx
+import { createStore } from 'solid-js/store';
+
+interface FormState {
+  values: {
+    username: string;
+    email: string;
+    password: string;
+    confirmPassword: string;
+  };
+  errors: {
+    username?: string;
+    email?: string;
+    password?: string;
+    confirmPassword?: string;
+  };
+  touched: {
+    username?: boolean;
+    email?: boolean;
+    password?: boolean;
+    confirmPassword?: boolean;
+  };
+  isSubmitting: boolean;
+}
+
+function RegistrationForm() {
+  const [form, setForm] = createStore<FormState>({
+    values: { username: '', email: '', password: '', confirmPassword: '' },
+    errors: {},
+    touched: {},
+    isSubmitting: false,
+  });
+
+  const validate = (field: string, value: string) => {
+    if (field === 'username') {
+      if (!value) return 'Имя обязательно';
+      if (value.length < 3) return 'Минимум 3 символа';
+      if (!/^[a-z0-9_]+$/.test(value)) return 'Только a-z, 0-9, _';
+    }
+    if (field === 'email') {
+      if (!value) return 'Email обязателен';
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return 'Неверный формат';
+    }
+    if (field === 'password') {
+      if (!value) return 'Пароль обязателен';
+      if (value.length < 8) return 'Минимум 8 символов';
+    }
+    return undefined;
+  };
+
+  const handleInput = (field: keyof FormState['values']) => (e: InputEvent) => {
+    const value = (e.target as HTMLInputElement).value;
+    setForm('values', field, value);
+    // Валидация при вводе (если поле уже тронуто)
+    if (form.touched[field]) {
+      setForm('errors', field, validate(field, value));
+    }
+  };
+
+  const handleBlur = (field: keyof FormState['values']) => () => {
+    setForm('touched', field, true);
+    setForm('errors', field, validate(field, form.values[field]));
+  };
+
+  const handleSubmit = async (e: SubmitEvent) => {
+    e.preventDefault();
+    // Валидируем все поля
+    const errors = {};
+    for (const [field, value] of Object.entries(form.values)) {
+      const error = validate(field, value);
+      if (error) errors[field] = error;
+    }
+    if (Object.keys(errors).length > 0) {
+      setForm('errors', errors);
+      return;
+    }
+    setForm('isSubmitting', true);
+    await submitForm(form.values);
+    setForm('isSubmitting', false);
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      {/* Инпуты с валидацией */}
+      <For each={['username', 'email', 'password'] as const}>
+        {(field) => (
+          <div>
+            <input
+              value={form.values[field]}
+              onInput={handleInput(field)}
+              onBlur={handleBlur(field)}
+            />
+            <Show when={form.errors[field]}>
+              <span class="error">{form.errors[field]}</span>
+            </Show>
+          </div>
+        )}
+      </For>
+    </form>
+  );
+}
+```
+
+---
+
+## 📚 @modular-forms/solid
+
+```tsx
+import { createForm, required, email, minLength } from '@modular-forms/solid';
+
+type LoginForm = {
+  email: string;
+  password: string;
+  remember: boolean;
+};
+
+function LoginForm() {
+  const [loginForm, { Form, Field }] = createForm<LoginForm>();
+
+  const handleSubmit = (values: LoginForm) => {
+    console.log(values);
+  };
+
+  return (
+    <Form onSubmit={handleSubmit}>
+      <Field
+        name="email"
+        validate={[required('Email обязателен'), email('Неверный email')]}
+      >
+        {(field, props) => (
+          <div>
+            <input {...props} type="email" />
+            {field.error && <span>{field.error}</span>}
+          </div>
+        )}
+      </Field>
+
+      <Field
+        name="password"
+        validate={[required('Пароль обязателен'), minLength(8, 'Минимум 8 символов')]}
+      >
+        {(field, props) => (
+          <div>
+            <input {...props} type="password" />
+            {field.error && <span>{field.error}</span>}
+          </div>
+        )}
+      </Field>
+
+      <button type="submit" disabled={loginForm.submitting}>
+        {loginForm.submitting ? 'Вход...' : 'Войти'}
+      </button>
+    </Form>
+  );
+}
+```
+
+---
+
+## ⚡ Server Actions с формами (SolidStart)
+
+```tsx
+// SolidStart: форма, работающая без JavaScript!
+import { action, redirect } from '@solidjs/router';
+
+const signUp = action(async (formData: FormData) => {
+  'use server';
+  const email = formData.get('email') as string;
+  const password = formData.get('password') as string;
+
+  // Валидация на сервере
+  if (!email || !email.includes('@')) {
+    return { error: 'Неверный email' };
+  }
+
+  // Создаём пользователя
+  await db.createUser({ email, password: await hash(password) });
+
+  // Редирект после успеха
+  throw redirect('/dashboard');
+});
+
+function SignUpForm() {
+  const [result, submit] = useAction(signUp);
+
+  return (
+    <form action={signUp} method="post">
+      <input name="email" type="email" required />
+      <input name="password" type="password" minlength="8" />
+      <Show when={result()?.error}>
+        <p class="error">{result()?.error}</p>
+      </Show>
+      <button type="submit">Зарегистрироваться</button>
+    </form>
+  );
+}
+```
+
+---
+
+## 🎮 Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useCallback, CSSProperties } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const RED = '#f87171';
+
+interface FieldState {
+  value: string;
+  error: string | null;
+  touched: boolean;
+}
+
+interface FormState {
+  username: FieldState;
+  email: FieldState;
+  password: FieldState;
+}
+
+const INITIAL: FormState = {
+  username: { value: '', error: null, touched: false },
+  email: { value: '', error: null, touched: false },
+  password: { value: '', error: null, touched: false },
+};
+
+// Правила валидации
+function validateUsername(v: string): string | null {
+  if (!v) return 'Имя пользователя обязательно';
+  if (v.length < 3) return \`Минимум 3 символа (сейчас: \${v.length})\`;
+  if (v.length > 20) return 'Максимум 20 символов';
+  if (!/^[a-z0-9_]+$/.test(v)) return 'Только строчные буквы, цифры и _';
+  return null;
+}
+function validateEmail(v: string): string | null {
+  if (!v) return 'Email обязателен';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return 'Неверный формат email';
+  return null;
+}
+function validatePassword(v: string): string | null {
+  if (!v) return 'Пароль обязателен';
+  if (v.length < 8) return \`Минимум 8 символов (сейчас: \${v.length})\`;
+  if (!/[A-Z]/.test(v)) return 'Нужна хотя бы одна заглавная буква';
+  if (!/[0-9]/.test(v)) return 'Нужна хотя бы одна цифра';
+  return null;
+}
+
+const validators: Record<keyof FormState, (v: string) => string | null> = {
+  username: validateUsername,
+  email: validateEmail,
+  password: validatePassword,
+};
+
+type SubmitState = 'idle' | 'loading' | 'success' | 'error';
+
+// Индикатор силы пароля
+function PasswordStrength({ password }: { password: string }) {
+  const checks = [
+    { label: '8+ символов', ok: password.length >= 8 },
+    { label: 'Заглавная буква', ok: /[A-Z]/.test(password) },
+    { label: 'Цифра', ok: /[0-9]/.test(password) },
+    { label: 'Спецсимвол', ok: /[!@#$%^&*]/.test(password) },
+  ];
+  const strength = checks.filter(c => c.ok).length;
+  const strengthColors = ['', RED, ORANGE, '#facc15', GREEN];
+  const strengthLabels = ['', 'Слабый', 'Средний', 'Хороший', 'Сильный'];
+
+  if (!password) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+        {[1,2,3,4].map(i => (
+          <div key={i} style={{
+            flex: 1, height: 4, borderRadius: 2,
+            background: i <= strength ? strengthColors[strength] : BORDER,
+            transition: 'background 0.3s',
+          }} />
+        ))}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {checks.map(c => (
+          <span key={c.label} style={{
+            fontSize: 11, padding: '2px 8px', borderRadius: 10,
+            background: c.ok ? GREEN + '22' : CARD,
+            color: c.ok ? GREEN : MUTED,
+            border: \`1px solid \${c.ok ? GREEN + '44' : BORDER}\`,
+          }}>
+            {c.ok ? '✓' : '○'} {c.label}
+          </span>
+        ))}
+      </div>
+      {strength > 0 && (
+        <div style={{ fontSize: 12, color: strengthColors[strength], marginTop: 4 }}>
+          {strengthLabels[strength]}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Компонент поля
+function FormField({ field, state, onChange, onBlur, type = 'text', label, placeholder }: any) {
+  const showError = state.touched && state.error;
+  const showSuccess = state.touched && !state.error && state.value;
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <label style={{ display: 'block', fontSize: 13, color: TEXT, marginBottom: 6, fontWeight: 600 }}>
+        {label}
+        <span style={{ color: RED, marginLeft: 4 }}>*</span>
+      </label>
+      <div style={{ position: 'relative' }}>
+        <input
+          type={type}
+          value={state.value}
+          onChange={onChange}
+          onBlur={onBlur}
+          placeholder={placeholder}
+          style={{
+            width: '100%', padding: '10px 36px 10px 14px',
+            background: CARD,
+            border: \`2px solid \${showError ? RED : showSuccess ? GREEN : state.touched ? SOLID_BLUE : BORDER}\`,
+            borderRadius: 8, color: TEXT, fontSize: 14, outline: 'none',
+            transition: 'border-color 0.2s', boxSizing: 'border-box',
+          }}
+        />
+        <span style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 16 }}>
+          {showError ? '❌' : showSuccess ? '✅' : ''}
+        </span>
+      </div>
+      {showError && (
+        <div style={{ marginTop: 6, fontSize: 12, color: RED, display: 'flex', alignItems: 'center', gap: 4 }}>
+          ⚠️ {state.error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [form, setForm] = useState<FormState>(INITIAL);
+  const [submitState, setSubmitState] = useState<SubmitState>('idle');
+  const [submitCount, setSubmitCount] = useState(0);
+
+  const updateField = (field: keyof FormState, value: string) => {
+    const error = form[field].touched ? validators[field](value) : null;
+    setForm(f => ({ ...f, [field]: { ...f[field], value, error } }));
+  };
+
+  const touchField = (field: keyof FormState) => {
+    const error = validators[field](form[field].value);
+    setForm(f => ({ ...f, [field]: { ...f[field], touched: true, error } }));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    // Тронуть все поля и показать ошибки
+    const newForm = { ...form };
+    let hasErrors = false;
+    for (const key of Object.keys(form) as (keyof FormState)[]) {
+      const error = validators[key](form[key].value);
+      newForm[key] = { ...form[key], touched: true, error };
+      if (error) hasErrors = true;
+    }
+    setForm(newForm);
+    if (hasErrors) return;
+
+    setSubmitState('loading');
+    setSubmitCount(c => c + 1);
+    await new Promise(r => setTimeout(r, 1500));
+    setSubmitState('success');
+    setTimeout(() => setSubmitState('idle'), 3000);
+  };
+
+  const isValid = Object.keys(form).every(k => !validators[k as keyof FormState](form[k as keyof FormState].value));
+  const filledCount = Object.values(form).filter(f => f.value.length > 0).length;
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 420, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 22 }}>Формы в Solid.js</h2>
+        <p style={{ color: MUTED, fontSize: 13, margin: '0 0 24px' }}>
+          createStore + real-time валидация
+        </p>
+
+        {submitState === 'success' ? (
+          <div style={{ padding: 32, background: GREEN + '11', border: \`1px solid \${GREEN}\`, borderRadius: 12, textAlign: 'center' }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
+            <h3 style={{ color: GREEN, margin: '0 0 8px' }}>Успешно!</h3>
+            <p style={{ color: MUTED, margin: '0 0 20px', fontSize: 14 }}>
+              Данные отправлены: @{form.username.value}
+            </p>
+            <button onClick={() => { setForm(INITIAL); setSubmitState('idle'); }} style={{
+              padding: '10px 20px', background: SOLID_BLUE, color: TEXT,
+              border: 'none', borderRadius: 8, cursor: 'pointer',
+            }}>← Снова</button>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} style={{ background: CARD, borderRadius: 12, padding: 24, border: \`1px solid \${BORDER}\` }}>
+            {/* Progress bar */}
+            <div style={{ marginBottom: 24 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: MUTED, marginBottom: 6 }}>
+                <span>Прогресс заполнения</span>
+                <span style={{ color: SOLID_LIGHT }}>{filledCount}/3 полей</span>
+              </div>
+              <div style={{ height: 4, background: BORDER, borderRadius: 2, overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%', borderRadius: 2,
+                  background: \`linear-gradient(90deg, \${SOLID_BLUE}, \${GREEN})\`,
+                  width: \`\${(filledCount / 3) * 100}%\`,
+                  transition: 'width 0.3s',
+                }} />
+              </div>
+            </div>
+
+            <FormField
+              field="username"
+              state={form.username}
+              onChange={(e: any) => updateField('username', e.target.value)}
+              onBlur={() => touchField('username')}
+              label="Имя пользователя"
+              placeholder="только a-z, 0-9, _"
+            />
+            <FormField
+              field="email"
+              state={form.email}
+              type="email"
+              onChange={(e: any) => updateField('email', e.target.value)}
+              onBlur={() => touchField('email')}
+              label="Email"
+              placeholder="user@example.com"
+            />
+            <FormField
+              field="password"
+              state={form.password}
+              type="password"
+              onChange={(e: any) => updateField('password', e.target.value)}
+              onBlur={() => touchField('password')}
+              label="Пароль"
+              placeholder="Минимум 8 символов"
+            />
+            {form.password.value && <PasswordStrength password={form.password.value} />}
+
+            <button
+              type="submit"
+              disabled={submitState === 'loading'}
+              style={{
+                width: '100%', marginTop: 24, padding: '12px',
+                background: isValid ? SOLID_BLUE : CARD,
+                color: isValid ? TEXT : MUTED,
+                border: \`2px solid \${isValid ? SOLID_BLUE : BORDER}\`,
+                borderRadius: 8, cursor: submitState === 'loading' ? 'not-allowed' : 'pointer',
+                fontSize: 15, fontWeight: 700, transition: 'all 0.2s',
+              }}
+            >
+              {submitState === 'loading' ? '⏳ Отправка...' : isValid ? '✅ Отправить' : '⬆️ Заполни форму'}
+            </button>
+
+            {submitCount > 0 && (
+              <div style={{ marginTop: 10, fontSize: 12, color: MUTED, textAlign: 'center' }}>
+                Попыток отправки: {submitCount}
+              </div>
+            )}
+          </form>
+        )}
+
+        <div style={{ marginTop: 16, padding: '12px 16px', background: CARD, borderRadius: 8, border: \`1px solid \${BORDER}\` }}>
+          <p style={{ color: MUTED, fontSize: 12, margin: 0 }}>
+            💡 <strong style={{ color: TEXT }}>Solid паттерн:</strong> createStore для состояния формы,
+            onInput (не onChange!) для управляемых полей, onBlur для активации валидации.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## 🚨 Частые ошибки
+
+```tsx
+// ❌ ОШИБКА: onChange вместо onInput
+<input onChange={(e) => setName(e.target.value)} />
+// Срабатывает только при потере фокуса!
+
+// ✅ ПРАВИЛЬНО
+<input onInput={(e) => setName(e.target.value)} />
+
+// ❌ ОШИБКА: мутация store напрямую
+const [form, setForm] = createStore({ name: '' });
+form.name = 'Яша'; // Не реактивно!
+
+// ✅ ПРАВИЛЬНО
+setForm('name', 'Яша'); // или setForm({ name: 'Яша' })
+
+// ❌ ОШИБКА: валидация при каждом нажатии (плохой UX)
+<input onInput={(e) => {
+  setValue(e.target.value);
+  setError(validate(e.target.value)); // Ошибка мелькает при вводе
+}} />
+
+// ✅ ПРАВИЛЬНО: валидация после blur, обновление после изменения
+<input
+  onInput={(e) => setValue(e.target.value)}
+  onBlur={() => setError(validate(value()))}
+/>
+```
+
+---
+
+## 🎯 Итоги
+
+- **Управляемые формы** → `onInput` + `value={signal()}`
+- **Неуправляемые формы** → `ref` + `new FormData(form)`
+- **`createStore`** — идеально для сложного состояния формы (values + errors + touched)
+- **`@modular-forms/solid`** — библиотека для сложных форм с валидацией
+- **Server Actions** → `action()` + `"use server"` для форм без JS (progressive enhancement)
+- Всегда используй **`onInput`**, а не `onChange` для управляемых полей!

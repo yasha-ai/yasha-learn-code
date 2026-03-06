@@ -1,0 +1,716 @@
+## 🔷 TypeScript в Solid.js
+
+Привет! 👋 Solid.js и TypeScript — это идеальная пара. Solid написан на TypeScript, и все его API имеют отличные типы "из коробки". Никаких `@types/solid-js` — всё уже включено!
+
+Думай о TypeScript в Solid как о страховой сетке: пока ты жонглируешь сигналами и стористами, TypeScript ловит тебя, когда ты пытаешься прочитать сигнал как число, хотя там строка.
+
+---
+
+## 📦 Типизация сигналов: `Signal<T>`, `Accessor<T>`, `Setter<T>`
+
+Это три кита типизации сигналов в Solid:
+
+```tsx
+import { createSignal, Signal, Accessor, Setter } from 'solid-js';
+
+// createSignal возвращает кортеж [Accessor<T>, Setter<T>]
+const [count, setCount] = createSignal<number>(0);
+//     ^Accessor<number>  ^Setter<number>
+
+// Accessor<T> — это функция () => T
+// Setter<T> — это функция (value: T | ((prev: T) => T)) => T
+
+// Можно явно типизировать через Signal<T>
+const mySignal: Signal<string> = createSignal('hello');
+const [value, setValue] = mySignal;
+
+// Accessor и Setter можно использовать в пропсах
+interface CounterProps {
+  count: Accessor<number>;
+  onIncrement: () => void;
+}
+
+// Дженерики в createSignal — тип выводится из начального значения
+const [name, setName] = createSignal('Яша'); // Signal<string> автоматически
+const [user, setUser] = createSignal<User | null>(null); // явный тип для nullable
+```
+
+### Зачем разделять `Accessor` и `Setter`?
+
+```tsx
+// Можно передавать только право чтения (Accessor)
+function ReadOnlyCounter({ count }: { count: Accessor<number> }) {
+  return <div>Счётчик: {count()}</div>;
+}
+
+// Или только право записи (Setter)
+function IncrementButton({ setCount }: { setCount: Setter<number> }) {
+  return <button onClick={() => setCount(n => n + 1)}>+</button>;
+}
+
+// Это мощный паттерн для инкапсуляции!
+function App() {
+  const [count, setCount] = createSignal(0);
+  return (
+    <>
+      <ReadOnlyCounter count={count} />
+      <IncrementButton setCount={setCount} />
+    </>
+  );
+}
+```
+
+---
+
+## 🧠 Типизация createMemo и createEffect
+
+```tsx
+import { createMemo, createEffect, Accessor } from 'solid-js';
+
+// createMemo возвращает Accessor<T>
+const doubled: Accessor<number> = createMemo(() => count() * 2);
+
+// С явным типом (если нужно переопределить вывод)
+const formatted = createMemo<string>(() => `Значение: ${count()}`);
+
+// createEffect не возвращает значение, типизировать нечего
+createEffect(() => {
+  console.log('Счётчик изменился:', count());
+  // TypeScript знает тип count() — number
+});
+
+// createEffect с дженерик (для предыдущего значения)
+createEffect<number | undefined>((prev) => {
+  const current = count();
+  if (prev !== undefined) {
+    console.log(`Изменение: ${prev} → ${current}`);
+  }
+  return current;
+});
+```
+
+---
+
+## 🏗️ Типизация пропсов: `Component<Props>` и `ParentProps`
+
+```tsx
+import { Component, ParentProps, FlowProps, JSX } from 'solid-js';
+
+// Базовый компонент с пропсами
+interface ButtonProps {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  variant?: 'primary' | 'secondary' | 'danger';
+}
+
+// Component<Props> — стандартный тип для Solid-компонента
+const Button: Component<ButtonProps> = (props) => {
+  return (
+    <button
+      onClick={props.onClick}
+      disabled={props.disabled}
+    >
+      {props.label}
+    </button>
+  );
+};
+
+// ParentProps — для компонентов с children
+// Эквивалент: Props & { children?: JSX.Element }
+const Card: Component<ParentProps<{ title: string }>> = (props) => {
+  return (
+    <div class="card">
+      <h3>{props.title}</h3>
+      <div>{props.children}</div>
+    </div>
+  );
+};
+
+// FlowProps — для контрольных компонентов (if/for/switch)
+// FlowProps<P, C> = P & { children: C | C[] }
+const ConditionalWrapper: Component<FlowProps<{ when: boolean }>> = (props) => {
+  return props.when ? <>{props.children}</> : null;
+};
+
+// JSX.Element vs JSX.JSXElement
+// JSX.Element — более широкий тип (включает null, undefined, etc.)
+// JSX.JSXElement — только реальные JSX-элементы
+function renderContent(show: boolean): JSX.Element {
+  return show ? <div>Контент</div> : null; // null допустим с JSX.Element
+}
+```
+
+---
+
+## 🗂️ Типизация createStore
+
+```tsx
+import { createStore, SetStoreFunction, Store } from 'solid-js/store';
+
+interface TodoItem {
+  id: number;
+  text: string;
+  completed: boolean;
+}
+
+interface AppStore {
+  todos: TodoItem[];
+  filter: 'all' | 'active' | 'completed';
+  loading: boolean;
+}
+
+// createStore возвращает [Store<T>, SetStoreFunction<T>]
+const [store, setStore] = createStore<AppStore>({
+  todos: [],
+  filter: 'all',
+  loading: false,
+});
+
+// Store<T> — это readonly deep proxy
+// SetStoreFunction<T> — функция для обновления
+
+// TypeScript проверяет пути обновления!
+setStore('filter', 'completed'); // ✅
+setStore('todos', 0, 'completed', true); // ✅ — deep path typing
+// setStore('unknownField', true); // ❌ TypeScript ошибка
+
+// Типизация функции обновления
+function updateTodo(id: number, changes: Partial<TodoItem>) {
+  setStore('todos', (todo) => todo.id === id, changes);
+}
+```
+
+---
+
+## 🌐 Типизация Context API
+
+```tsx
+import { createContext, useContext, Context } from 'solid-js';
+
+interface ThemeContextValue {
+  theme: Accessor<'light' | 'dark'>;
+  toggleTheme: () => void;
+}
+
+// createContext с типом — TypeScript знает что внутри
+const ThemeContext = createContext<ThemeContextValue>();
+// ThemeContext: Context<ThemeContextValue | undefined>
+
+// Или с начальным значением (тогда undefined исключается)
+const [theme, setTheme] = createSignal<'light' | 'dark'>('dark');
+const ThemeContextWithDefault = createContext<ThemeContextValue>({
+  theme,
+  toggleTheme: () => setTheme(t => t === 'light' ? 'dark' : 'light'),
+});
+
+// Custom hook для типобезопасного использования контекста
+function useTheme(): ThemeContextValue {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error('useTheme: нет ThemeContext!');
+  return ctx;
+}
+
+// В компоненте — TypeScript знает точный тип
+function ThemeToggle() {
+  const { theme, toggleTheme } = useTheme();
+  return (
+    <button onClick={toggleTheme}>
+      Тема: {theme()}
+    </button>
+  );
+}
+```
+
+---
+
+## 🧬 Дженерик-компоненты
+
+```tsx
+import { Component, For } from 'solid-js';
+
+// Дженерик-компонент для списка
+function List<T>(props: {
+  items: T[];
+  renderItem: (item: T, index: number) => JSX.Element;
+  keyExtractor: (item: T) => string | number;
+}) {
+  return (
+    <ul>
+      <For each={props.items}>
+        {(item, index) => (
+          <li key={props.keyExtractor(item)}>
+            {props.renderItem(item, index())}
+          </li>
+        )}
+      </For>
+    </ul>
+  );
+}
+
+// Использование — TypeScript выведет тип T автоматически
+<List
+  items={[{ id: 1, name: 'Яша' }]}
+  renderItem={(user) => <span>{user.name}</span>}  // TypeScript знает тип user!
+  keyExtractor={(user) => user.id}
+/>
+
+// Дженерик-компонент для Select
+interface SelectProps<T> {
+  options: { value: T; label: string }[];
+  value: Accessor<T>;
+  onChange: (value: T) => void;
+}
+
+function Select<T extends string | number>(props: SelectProps<T>) {
+  return (
+    <select
+      value={String(props.value())}
+      onChange={(e) => props.onChange(e.target.value as T)}
+    >
+      <For each={props.options}>
+        {(opt) => <option value={String(opt.value)}>{opt.label}</option>}
+      </For>
+    </select>
+  );
+}
+```
+
+---
+
+## ⚠️ Типичные ловушки
+
+```tsx
+// ❌ Ошибка: читаешь сигнал без вызова
+const [count, setCount] = createSignal(0);
+// const x = count + 1; // TypeScript: нельзя складывать функцию с числом!
+const x = count() + 1; // ✅
+
+// ❌ Ошибка: деструктуризация пропсов
+function Bad({ name, onClick }: { name: string; onClick: () => void }) {
+  // Solid не отслеживает деструктурированные пропсы!
+  // name теряет реактивность
+  return <button onClick={onClick}>{name}</button>;
+}
+
+// ✅ Правильно: используй props напрямую
+function Good(props: { name: string; onClick: () => void }) {
+  return <button onClick={props.onClick}>{props.name}</button>;
+}
+
+// ❌ Ошибка: неверное использование JSX.Element для узких типов
+// Используй JSX.Element для nullable, JSX.JSXElement для non-nullable
+
+// ✅ Правильно: явная типизация ресурсов
+import { createResource, Resource } from 'solid-js';
+
+interface User { id: number; name: string; }
+
+const [user, { refetch }]: [Resource<User>, { refetch: () => void }] =
+  createResource(async () => {
+    const res = await fetch('/api/user');
+    return res.json() as Promise<User>;
+  });
+```
+
+---
+
+## 🎯 Playground: TypeScript в Solid — интерактивная демонстрация
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useCallback, useRef } from "react";
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+// ===== Симуляция типов Solid.js =====
+// В реальном Solid:
+// type Accessor<T> = () => T
+// type Setter<T> = (value: T | ((prev: T) => T)) => T
+// type Signal<T> = [Accessor<T>, Setter<T>]
+
+type Tab = 'signals' | 'props' | 'store' | 'context' | 'generics';
+
+const tabs: { id: Tab; label: string; icon: string }[] = [
+  { id: 'signals', label: 'Signals', icon: '⚡' },
+  { id: 'props', label: 'Props', icon: '🧩' },
+  { id: 'store', label: 'Store', icon: '🗂️' },
+  { id: 'context', label: 'Context', icon: '🌐' },
+  { id: 'generics', label: 'Generics', icon: '🧬' },
+];
+
+// ===== Типизация сигналов =====
+function SignalsDemo() {
+  const [count, setCount] = useState(0);
+  const [name, setName] = useState('Яша');
+  const [user, setUser] = useState<{ id: number; name: string } | null>(null);
+  const [log, setLog] = useState<string[]>([]);
+
+  const addLog = (msg: string) => setLog(prev => [...prev.slice(-5), msg]);
+
+  const doubled = count * 2; // В Solid: createMemo(() => count() * 2)
+  const greeting = \`Привет, \${name}!\`; // createMemo(() => \`Привет, \${name()}!\`)
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: CARD, borderRadius: '8px', padding: '14px', marginBottom: '12px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, marginBottom: '10px', fontSize: '12px' }}>
+          // Типы Solid.js:
+        </div>
+        <div style={{ color: '#94a3b8', lineHeight: '1.8' }}>
+          <span style={{ color: SOLID_BLUE }}>Accessor</span>{'<number>'} = () =&gt; number<br/>
+          <span style={{ color: SOLID_BLUE }}>Setter</span>{'<number>'} = (v) =&gt; void<br/>
+          <span style={{ color: SOLID_BLUE }}>Signal</span>{'<number>'} = [Accessor, Setter]
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '12px' }}>
+        <div style={{ background: CARD, borderRadius: '8px', padding: '12px', border: \`1px solid \${BORDER}\` }}>
+          <div style={{ color: GREEN, fontSize: '11px', marginBottom: '8px' }}>count: Accessor&lt;number&gt;</div>
+          <div style={{ fontSize: '24px', color: TEXT, textAlign: 'center', marginBottom: '8px' }}>{count}</div>
+          <div style={{ color: MUTED, fontSize: '11px', marginBottom: '6px' }}>doubled = {doubled}</div>
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button onClick={() => { setCount(n => n - 1); addLog(\`setCount(n => \${count - 1})\`); }}
+              style={{ flex: 1, background: BG, color: TEXT, border: \`1px solid \${BORDER}\`, borderRadius: '6px', padding: '4px', cursor: 'pointer' }}>−</button>
+            <button onClick={() => { setCount(n => n + 1); addLog(\`setCount(n => \${count + 1})\`); }}
+              style={{ flex: 1, background: SOLID_BLUE, color: '#fff', border: 'none', borderRadius: '6px', padding: '4px', cursor: 'pointer' }}>+</button>
+          </div>
+        </div>
+
+        <div style={{ background: CARD, borderRadius: '8px', padding: '12px', border: \`1px solid \${BORDER}\` }}>
+          <div style={{ color: GREEN, fontSize: '11px', marginBottom: '8px' }}>name: Accessor&lt;string&gt;</div>
+          <input
+            value={name}
+            onChange={e => { setName(e.target.value); addLog(\`setName("\${e.target.value}")\`); }}
+            style={{ width: '100%', background: BG, color: TEXT, border: \`1px solid \${BORDER}\`, borderRadius: '6px', padding: '6px', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '12px' }}
+          />
+          <div style={{ color: MUTED, fontSize: '11px', marginTop: '6px' }}>{greeting}</div>
+          <button
+            onClick={() => {
+              setUser(user ? null : { id: 1, name });
+              addLog(user ? 'setUser(null)' : \`setUser({ id: 1, name: "\${name}" })\`);
+            }}
+            style={{ marginTop: '6px', width: '100%', background: user ? ORANGE + '33' : BG, color: user ? ORANGE : MUTED, border: \`1px solid \${user ? ORANGE : BORDER}\`, borderRadius: '6px', padding: '4px', cursor: 'pointer', fontSize: '11px' }}
+          >
+            {user ? \`User: \${user.name} ✓\` : 'User: null'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ background: BG, borderRadius: '6px', padding: '8px', fontSize: '11px', color: MUTED, maxHeight: '80px', overflow: 'auto' }}>
+        {log.length === 0 ? '// Лог вызовов Setter...' : log.map((l, i) => <div key={i}>→ {l}</div>)}
+      </div>
+    </div>
+  );
+}
+
+// ===== Типизация пропсов =====
+function PropsDemo() {
+  const [variant, setVariant] = useState<'primary' | 'secondary' | 'danger'>('primary');
+  const [showCard, setShowCard] = useState(true);
+  const [destructure, setDestructure] = useState(false);
+
+  const variantColors = { primary: SOLID_BLUE, secondary: MUTED, danger: '#ef4444' };
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: CARD, borderRadius: '8px', padding: '14px', marginBottom: '12px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, marginBottom: '8px', fontSize: '12px' }}>// Типы пропсов:</div>
+        <div style={{ color: '#94a3b8', lineHeight: '1.8', fontSize: '12px' }}>
+          <span style={{ color: GREEN }}>Component</span>{'<Props>'} — базовый компонент<br/>
+          <span style={{ color: GREEN }}>ParentProps</span>{'<P>'} — компонент с children<br/>
+          <span style={{ color: GREEN }}>FlowProps</span>{'<P, C>'} — контрольный компонент
+        </div>
+      </div>
+
+      <div style={{ marginBottom: '10px' }}>
+        <div style={{ color: MUTED, fontSize: '11px', marginBottom: '6px' }}>variant prop:</div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          {(['primary', 'secondary', 'danger'] as const).map(v => (
+            <button key={v} onClick={() => setVariant(v)}
+              style={{ flex: 1, background: variant === v ? variantColors[v] : BG, color: variant === v ? '#fff' : MUTED, border: \`1px solid \${variant === v ? variantColors[v] : BORDER}\`, borderRadius: '6px', padding: '5px', cursor: 'pointer', fontSize: '11px' }}>
+              {v}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ background: CARD, borderRadius: '8px', padding: '12px', marginBottom: '10px', border: \`1px solid \${variantColors[variant]}44\` }}>
+        <div style={{ color: variantColors[variant], fontSize: '12px', marginBottom: '6px' }}>Button variant="{variant}"</div>
+        <button style={{ background: variantColors[variant], color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 16px', cursor: 'pointer' }}>
+          Кнопка
+        </button>
+      </div>
+
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+          <span style={{ color: SOLID_LIGHT, fontSize: '12px' }}>ParentProps — Card с children</span>
+          <button onClick={() => setShowCard(!showCard)}
+            style={{ background: BG, color: MUTED, border: \`1px solid \${BORDER}\`, borderRadius: '4px', padding: '3px 8px', cursor: 'pointer', fontSize: '11px' }}>
+            {showCard ? 'Скрыть' : 'Показать'}
+          </button>
+        </div>
+        {showCard && (
+          <div style={{ background: BG, borderRadius: '6px', padding: '10px', border: \`1px solid \${BORDER}\` }}>
+            <div style={{ color: SOLID_BLUE, fontSize: '12px', marginBottom: '4px' }}>📋 Заголовок карточки</div>
+            <div style={{ color: MUTED, fontSize: '11px' }}>children — любой JSX.Element</div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginTop: '10px', padding: '8px', background: '#ef444422', borderRadius: '6px', border: '1px solid #ef444444' }}>
+        <div style={{ color: '#ef4444', fontSize: '11px', marginBottom: '4px' }}>⚠️ Деструктуризация пропсов в Solid:</div>
+        <button onClick={() => setDestructure(!destructure)}
+          style={{ background: destructure ? '#ef444433' : BG, color: destructure ? '#ef4444' : MUTED, border: \`1px solid \${destructure ? '#ef4444' : BORDER}\`, borderRadius: '4px', padding: '3px 8px', cursor: 'pointer', fontSize: '11px' }}>
+          {destructure ? '❌ const { name } = props — теряет реактивность!' : '✅ props.name — реактивно'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ===== Типизация Store =====
+function StoreDemo() {
+  type Filter = 'all' | 'active' | 'completed';
+  const [todos, setTodos] = useState([
+    { id: 1, text: 'Изучить TypeScript', completed: true },
+    { id: 2, text: 'Освоить Solid.js', completed: false },
+    { id: 3, text: 'Написать типы', completed: false },
+  ]);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [newText, setNewText] = useState('');
+  const [highlight, setHighlight] = useState<string | null>(null);
+
+  const filtered = todos.filter(t =>
+    filter === 'all' ? true : filter === 'active' ? !t.completed : t.completed
+  );
+
+  const toggle = (id: number) => {
+    setTodos(prev => prev.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
+    setHighlight(\`setStore('todos', t => t.id === \${id}, 'completed', true)\`);
+    setTimeout(() => setHighlight(null), 2000);
+  };
+
+  const add = () => {
+    if (!newText.trim()) return;
+    setTodos(prev => [...prev, { id: Date.now(), text: newText, completed: false }]);
+    setNewText('');
+    setHighlight(\`setStore('todos', todos.length, { id, text: "\${newText}" })\`);
+    setTimeout(() => setHighlight(null), 2000);
+  };
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', marginBottom: '10px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, fontSize: '11px', marginBottom: '6px' }}>
+          SetStoreFunction&lt;T&gt; — deep path typing
+        </div>
+        <div style={{ color: '#94a3b8', fontSize: '11px', lineHeight: '1.8' }}>
+          setStore('todos', 0, 'completed', true) ✅<br/>
+          setStore('filter', 'completed') ✅<br/>
+          <span style={{ color: '#ef4444' }}>setStore('unknown', 1) ❌ TypeScript Error</span>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+        {(['all', 'active', 'completed'] as Filter[]).map(f => (
+          <button key={f} onClick={() => setFilter(f)}
+            style={{ flex: 1, background: filter === f ? SOLID_BLUE : BG, color: filter === f ? '#fff' : MUTED, border: \`1px solid \${filter === f ? SOLID_BLUE : BORDER}\`, borderRadius: '6px', padding: '4px', cursor: 'pointer', fontSize: '11px' }}>
+            {f}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ marginBottom: '8px', display: 'flex', gap: '6px' }}>
+        <input value={newText} onChange={e => setNewText(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && add()}
+          placeholder="Новый todo..."
+          style={{ flex: 1, background: BG, color: TEXT, border: \`1px solid \${BORDER}\`, borderRadius: '6px', padding: '6px', fontFamily: 'monospace', fontSize: '12px' }} />
+        <button onClick={add} style={{ background: SOLID_BLUE, color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px' }}>+</button>
+      </div>
+
+      <div style={{ maxHeight: '120px', overflow: 'auto' }}>
+        {filtered.map(todo => (
+          <div key={todo.id} onClick={() => toggle(todo.id)}
+            style={{ padding: '6px 8px', background: CARD, borderRadius: '6px', marginBottom: '4px', cursor: 'pointer', border: \`1px solid \${BORDER}\`, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ color: todo.completed ? GREEN : MUTED, fontSize: '14px' }}>{todo.completed ? '✓' : '○'}</span>
+            <span style={{ color: todo.completed ? MUTED : TEXT, textDecoration: todo.completed ? 'line-through' : 'none', fontSize: '12px' }}>{todo.text}</span>
+          </div>
+        ))}
+      </div>
+
+      {highlight && (
+        <div style={{ marginTop: '8px', padding: '6px', background: SOLID_BLUE + '22', borderRadius: '6px', border: \`1px solid \${SOLID_BLUE}44\`, color: SOLID_LIGHT, fontSize: '11px' }}>
+          → {highlight}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===== Context =====
+function ContextDemo() {
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [lang, setLang] = useState<'ru' | 'en'>('ru');
+  const [error, setError] = useState(false);
+
+  const ctx = { theme, lang };
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', marginBottom: '10px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, fontSize: '11px', marginBottom: '6px' }}>createContext&lt;T&gt;(defaultValue?)</div>
+        <div style={{ color: '#94a3b8', fontSize: '11px', lineHeight: '1.8' }}>
+          Context{'<T | undefined>'} — без default<br/>
+          Context{'<T>'} — с default value<br/>
+          useContext() → custom hook с проверкой
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+        <button onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+          style={{ flex: 1, background: theme === 'dark' ? CARD : '#f1f5f9', color: theme === 'dark' ? TEXT : '#1e293b', border: \`1px solid \${BORDER}\`, borderRadius: '6px', padding: '6px', cursor: 'pointer', fontSize: '12px' }}>
+          Тема: {theme}
+        </button>
+        <button onClick={() => setLang(l => l === 'ru' ? 'en' : 'ru')}
+          style={{ flex: 1, background: CARD, color: TEXT, border: \`1px solid \${BORDER}\`, borderRadius: '6px', padding: '6px', cursor: 'pointer', fontSize: '12px' }}>
+          Язык: {lang}
+        </button>
+      </div>
+
+      <div style={{ background: theme === 'dark' ? BG : '#f8fafc', borderRadius: '8px', padding: '12px', border: \`1px solid \${BORDER}\`, marginBottom: '10px' }}>
+        <div style={{ color: MUTED, fontSize: '11px', marginBottom: '4px' }}>// Глубокий дочерний компонент</div>
+        <div style={{ color: SOLID_BLUE, fontSize: '12px' }}>const ctx = useTheme();</div>
+        <div style={{ color: TEXT, fontSize: '12px' }}>ctx.theme = "{ctx.theme}"</div>
+        <div style={{ color: TEXT, fontSize: '12px' }}>ctx.lang = "{ctx.lang}"</div>
+      </div>
+
+      <button onClick={() => setError(!error)}
+        style={{ width: '100%', background: error ? '#ef444433' : BG, color: error ? '#ef4444' : MUTED, border: \`1px solid \${error ? '#ef4444' : BORDER}\`, borderRadius: '6px', padding: '6px', cursor: 'pointer', fontSize: '11px' }}>
+        {error ? '❌ useTheme() вне Provider → throw Error!' : '✅ useTheme() в Provider → всё ок'}
+      </button>
+      {error && (
+        <div style={{ marginTop: '6px', padding: '6px', background: '#ef444422', borderRadius: '6px', border: '1px solid #ef444444', color: '#ef4444', fontSize: '11px' }}>
+          Error: useTheme: нет ThemeContext! Оберни в {'<ThemeProvider>'}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===== Generics =====
+function GenericsDemo() {
+  const [selected, setSelected] = useState<string>('react');
+  const [numSelected, setNumSelected] = useState<number>(42);
+
+  const frameworks = [
+    { value: 'react', label: 'React' },
+    { value: 'solid', label: 'Solid.js' },
+    { value: 'vue', label: 'Vue' },
+    { value: 'svelte', label: 'Svelte' },
+  ];
+
+  const scores = [
+    { value: 10, label: '10 очков' },
+    { value: 42, label: '42 очка' },
+    { value: 100, label: '100 очков' },
+  ];
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', marginBottom: '10px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, fontSize: '11px', marginBottom: '4px' }}>function Select&lt;T extends string | number&gt;(props)</div>
+        <div style={{ color: MUTED, fontSize: '11px' }}>TypeScript выводит T из options[].value</div>
+      </div>
+
+      <div style={{ marginBottom: '10px' }}>
+        <div style={{ color: MUTED, fontSize: '11px', marginBottom: '4px' }}>Select&lt;string&gt; — фреймворки:</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+          {frameworks.map(f => (
+            <button key={f.value} onClick={() => setSelected(f.value)}
+              style={{ background: selected === f.value ? SOLID_BLUE : BG, color: selected === f.value ? '#fff' : MUTED, border: \`1px solid \${selected === f.value ? SOLID_BLUE : BORDER}\`, borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px' }}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ color: GREEN, fontSize: '11px', marginTop: '4px' }}>value: string = "{selected}"</div>
+      </div>
+
+      <div>
+        <div style={{ color: MUTED, fontSize: '11px', marginBottom: '4px' }}>Select&lt;number&gt; — очки:</div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          {scores.map(s => (
+            <button key={s.value} onClick={() => setNumSelected(s.value)}
+              style={{ flex: 1, background: numSelected === s.value ? ORANGE + '33' : BG, color: numSelected === s.value ? ORANGE : MUTED, border: \`1px solid \${numSelected === s.value ? ORANGE : BORDER}\`, borderRadius: '6px', padding: '4px', cursor: 'pointer', fontSize: '11px' }}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ color: GREEN, fontSize: '11px', marginTop: '4px' }}>value: number = {numSelected}</div>
+      </div>
+
+      <div style={{ marginTop: '10px', padding: '8px', background: SOLID_BLUE + '11', borderRadius: '6px', border: \`1px solid \${SOLID_BLUE}33\`, color: SOLID_LIGHT, fontSize: '11px' }}>
+        💡 Дженерик-компонент работает для любого T — TypeScript проверяет совместимость типов автоматически!
+      </div>
+    </div>
+  );
+}
+
+// ===== Главный компонент =====
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>('signals');
+
+  return (
+    <div style={{ background: BG, color: TEXT, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ maxWidth: '520px', margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold', color: SOLID_BLUE }}>
+            🔷 TypeScript + Solid.js
+          </div>
+          <div style={{ color: MUTED, fontSize: '12px', marginTop: '4px' }}>
+            Типизация API Solid.js
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: '4px', marginBottom: '16px', background: CARD, padding: '4px', borderRadius: '10px', overflowX: 'auto' }}>
+          {tabs.map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+              style={{ flex: 1, background: activeTab === tab.id ? SOLID_BLUE : 'transparent', color: activeTab === tab.id ? '#fff' : MUTED, border: 'none', borderRadius: '8px', padding: '6px 4px', cursor: 'pointer', fontSize: '11px', whiteSpace: 'nowrap' }}>
+              {tab.icon} {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: CARD, borderRadius: '12px', padding: '16px', border: \`1px solid \${BORDER}\` }}>
+          {activeTab === 'signals' && <SignalsDemo />}
+          {activeTab === 'props' && <PropsDemo />}
+          {activeTab === 'store' && <StoreDemo />}
+          {activeTab === 'context' && <ContextDemo />}
+          {activeTab === 'generics' && <GenericsDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## 📋 Краткая шпаргалка по типам
+
+| API Solid | Тип возврата | Описание |
+|---|---|---|
+| `createSignal<T>()` | `[Accessor<T>, Setter<T>]` | Реактивное значение |
+| `createMemo<T>()` | `Accessor<T>` | Вычисляемое значение |
+| `createStore<T>()` | `[Store<T>, SetStoreFunction<T>]` | Глубокое состояние |
+| `createContext<T>()` | `Context<T>` | Контекст |
+| `useContext<T>()` | `T \| undefined` | Чтение контекста |
+| `Component<P>` | — | Тип компонента |
+| `ParentProps<P>` | — | Пропсы с children |
+| `FlowProps<P, C>` | — | Пропсы для control flow |

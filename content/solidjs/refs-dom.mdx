@@ -1,0 +1,599 @@
+## 🔗 Refs и работа с DOM в Solid.js
+
+Яша, в React ты привык к `useRef` — создаёшь объект `{ current: null }`, вешаешь на JSX, и React заполняет `.current` после монтирования. В Solid.js всё проще и честнее: **`ref` — это просто присваивание переменной**. Никаких обёрток, никаких `.current`. Давай разберёмся! 🎯
+
+---
+
+## 🏗️ Базовый синтаксис ref
+
+В Solid `ref` работает как обычная переменная — компилятор JSX превращает `ref={el}` в присваивание `el = element` при монтировании.
+
+```tsx
+import { onMount } from 'solid-js';
+
+function App() {
+  let inputEl: HTMLInputElement; // просто переменная, не ref-объект!
+
+  onMount(() => {
+    inputEl.focus(); // уже доступен
+    console.log(inputEl.tagName); // "INPUT"
+  });
+
+  return <input ref={inputEl!} placeholder="Автофокус" />;
+}
+```
+
+> ⚠️ **Важно:** `inputEl` будет `undefined` до монтирования. TypeScript об этом предупредит — поэтому `ref={inputEl!}` с `!`. Используй `onMount` или `createEffect` для работы с ним.
+
+---
+
+## ⚡ ref со сигналом (signal as ref)
+
+Это мощная фича Solid — можно передать **setter сигнала** как `ref`. Элемент будет записан прямо в сигнал:
+
+```tsx
+import { createSignal, createEffect } from 'solid-js';
+
+function MeasuredBox() {
+  const [el, setEl] = createSignal<HTMLDivElement | null>(null);
+  const [size, setSize] = createSignal({ width: 0, height: 0 });
+
+  // Реактивно реагируем на появление элемента
+  createEffect(() => {
+    const element = el();
+    if (element) {
+      const rect = element.getBoundingClientRect();
+      setSize({ width: rect.width, height: rect.height });
+    }
+  });
+
+  return (
+    <div>
+      {/* setter сигнала — прямо в ref! */}
+      <div ref={setEl} style={{ padding: '20px', background: '#1e293b' }}>
+        Измеряемый блок
+      </div>
+      <p>Размер: {size().width}×{size().height}px</p>
+    </div>
+  );
+}
+```
+
+Это работает потому что Solid под капотом вызывает `ref(element)` — а `setEl` как раз функция-сеттер!
+
+---
+
+## 🔄 Callback ref
+
+Помимо переменной и сигнала, можно использовать **функцию-колбэк** — она вызовется сразу при монтировании:
+
+```tsx
+function App() {
+  function setupCanvas(canvas: HTMLCanvasElement) {
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#2c67d5';
+    ctx.fillRect(10, 10, 100, 100);
+    ctx.strokeStyle = '#34d399';
+    ctx.strokeRect(20, 20, 80, 80);
+  }
+
+  return (
+    <canvas
+      ref={setupCanvas}
+      width={200}
+      height={150}
+    />
+  );
+}
+```
+
+> 💡 Колбэк получает DOM-элемент как первый аргумент. Отлично подходит для инициализации canvas, интеграции с D3.js, Three.js и другими библиотеками.
+
+---
+
+## 👶 Refs дочерних компонентов
+
+Чтобы получить ref из дочернего компонента, используй `props.ref` + `ref={props.ref}`:
+
+```tsx
+import { JSX } from 'solid-js';
+
+interface FancyInputProps {
+  ref?: HTMLInputElement | ((el: HTMLInputElement) => void);
+  placeholder?: string;
+}
+
+function FancyInput(props: FancyInputProps) {
+  return (
+    <input
+      ref={props.ref}  // пробрасываем ref вниз
+      class="fancy-input"
+      placeholder={props.placeholder}
+    />
+  );
+}
+
+function Parent() {
+  let inputRef: HTMLInputElement;
+
+  return (
+    <div>
+      <FancyInput
+        ref={inputRef!}
+        placeholder="Фокус из родителя"
+      />
+      <button onClick={() => inputRef.focus()}>
+        Фокус!
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+## 🎭 Интеграция со сторонними библиотеками
+
+Один из главных кейсов для `ref` — подключение DOM-библиотек. Вот пример с Chart.js:
+
+```tsx
+import { onMount, onCleanup } from 'solid-js';
+
+function ChartComponent() {
+  let canvasRef: HTMLCanvasElement;
+  let chartInstance: any;
+
+  onMount(() => {
+    // Импортируем Chart.js только на клиенте
+    import('chart.js/auto').then(({ Chart }) => {
+      chartInstance = new Chart(canvasRef, {
+        type: 'line',
+        data: {
+          labels: ['Янв', 'Фев', 'Мар', 'Апр', 'Май'],
+          datasets: [{
+            label: 'Продажи',
+            data: [12, 19, 3, 5, 2],
+            borderColor: '#2c67d5',
+          }]
+        }
+      });
+    });
+  });
+
+  onCleanup(() => {
+    chartInstance?.destroy(); // очищаем при размонтировании
+  });
+
+  return <canvas ref={canvasRef!} />;
+}
+```
+
+---
+
+## 🚨 Частые ошибки
+
+```tsx
+// ❌ ОШИБКА: обращение к ref вне onMount
+function Bad() {
+  let el: HTMLDivElement;
+  console.log(el!.offsetHeight); // ошибка! el ещё undefined
+
+  return <div ref={el!}>Текст</div>;
+}
+
+// ✅ ПРАВИЛЬНО: внутри onMount
+function Good() {
+  let el: HTMLDivElement;
+
+  onMount(() => {
+    console.log(el.offsetHeight); // теперь доступен
+  });
+
+  return <div ref={el!}>Текст</div>;
+}
+
+// ❌ ОШИБКА: React-стиль с useRef (не нужен в Solid!)
+function AlsoWrong() {
+  const ref = { current: null }; // лишняя обёртка!
+  return <div ref={ref}>...</div>; // ref.current не будет заполнен!
+}
+```
+
+---
+
+## 🔀 createEffect vs onMount для работы с ref
+
+```tsx
+function App() {
+  let el: HTMLElement;
+  const [visible, setVisible] = createSignal(true);
+
+  // onMount — один раз при монтировании
+  onMount(() => {
+    el.style.opacity = '1';
+  });
+
+  // createEffect — реактивно, при изменении зависимостей
+  createEffect(() => {
+    if (visible()) {
+      el.classList.add('active');
+    } else {
+      el.classList.remove('active');
+    }
+  });
+
+  return (
+    <div>
+      <div ref={el!} class="box">Содержимое</div>
+      <button onClick={() => setVisible(v => !v)}>
+        Переключить
+      </button>
+    </div>
+  );
+}
+```
+
+> ⚡ `onMount` — это просто `createEffect` с отложенным запуском (после рендера). Используй `onMount` для инициализации, `createEffect` — для реактивных изменений DOM.
+
+---
+
+## 🎮 Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, CSSProperties } from 'react';
+
+// Цветовая схема
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+type Demo = 'focus' | 'measure' | 'canvas' | 'animate';
+
+// ---- Demo 1: Focus Input ----
+function FocusDemo() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [focused, setFocused] = useState(false);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        {/* В Solid: let inputEl: HTMLInputElement; ref={inputEl!} */}
+        <strong style={{ color: SOLID_LIGHT }}>Solid:</strong> let inputEl: HTMLInputElement;
+      </p>
+      <input
+        ref={inputRef}
+        placeholder="Кликни 'Фокус' ниже..."
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        style={{
+          padding: '10px 14px',
+          background: CARD,
+          border: \`2px solid \${focused ? SOLID_BLUE : BORDER}\`,
+          borderRadius: 8,
+          color: TEXT,
+          fontSize: 14,
+          outline: 'none',
+          transition: 'border-color 0.2s',
+        }}
+      />
+      <button
+        onClick={() => inputRef.current?.focus()}
+        style={{
+          padding: '10px 20px',
+          background: SOLID_BLUE,
+          color: TEXT,
+          border: 'none',
+          borderRadius: 8,
+          cursor: 'pointer',
+          fontSize: 14,
+          fontWeight: 600,
+        }}
+      >
+        🎯 Фокус на инпут
+      </button>
+      <div style={{
+        padding: '10px 14px',
+        background: CARD,
+        borderRadius: 8,
+        fontSize: 12,
+        color: MUTED,
+        border: \`1px solid \${BORDER}\`,
+      }}>
+        <span style={{ color: focused ? GREEN : ORANGE }}>
+          {focused ? '✅ Инпут в фокусе' : '⭕ Инпут не в фокусе'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ---- Demo 2: Measure Element ----
+function MeasureDemo() {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 0, height: 0, top: 0 });
+  const [text, setText] = useState('Измеряемый блок — меняй текст!');
+
+  useEffect(() => {
+    if (boxRef.current) {
+      const rect = boxRef.current.getBoundingClientRect();
+      setSize({ width: Math.round(rect.width), height: Math.round(rect.height), top: Math.round(rect.top) });
+    }
+  }, [text]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>Solid:</strong> const [el, setEl] = createSignal(); ref=\{setEl\}
+      </p>
+      <div
+        ref={boxRef}
+        style={{
+          padding: '16px',
+          background: CARD,
+          border: \`2px solid \${SOLID_BLUE}\`,
+          borderRadius: 8,
+          color: TEXT,
+          fontSize: 14,
+          lineHeight: 1.5,
+          transition: 'all 0.2s',
+        }}
+      >
+        {text}
+      </div>
+      <textarea
+        value={text}
+        onChange={e => setText(e.target.value)}
+        style={{
+          padding: '10px',
+          background: CARD,
+          border: \`1px solid \${BORDER}\`,
+          borderRadius: 8,
+          color: TEXT,
+          fontSize: 13,
+          resize: 'vertical',
+          minHeight: 60,
+          outline: 'none',
+        }}
+      />
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr 1fr',
+        gap: 8,
+      }}>
+        {[
+          { label: 'Ширина', value: \`\${size.width}px\`, color: SOLID_BLUE },
+          { label: 'Высота', value: \`\${size.height}px\`, color: GREEN },
+          { label: 'Top', value: \`\${size.top}px\`, color: ORANGE },
+        ].map(item => (
+          <div key={item.label} style={{
+            padding: '8px 12px',
+            background: CARD,
+            borderRadius: 8,
+            border: \`1px solid \${item.color}44\`,
+            textAlign: 'center',
+          }}>
+            <div style={{ color: item.color, fontSize: 18, fontWeight: 700 }}>{item.value}</div>
+            <div style={{ color: MUTED, fontSize: 11 }}>{item.label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---- Demo 3: Canvas Drawing ----
+function CanvasDemo() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [drawn, setDrawn] = useState(false);
+
+  const draw = () => {
+    const canvas = canvasRef.current!;
+    const ctx = canvas.getContext('2d')!;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Фон
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Логотип Solid (треугольник)
+    ctx.beginPath();
+    ctx.moveTo(120, 20);
+    ctx.lineTo(220, 130);
+    ctx.lineTo(20, 130);
+    ctx.closePath();
+    ctx.fillStyle = SOLID_BLUE;
+    ctx.fill();
+
+    // Текст
+    ctx.fillStyle = TEXT;
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('ref={setupCanvas}', 120, 160);
+
+    // Узоры
+    for (let i = 0; i < 5; i++) {
+      ctx.beginPath();
+      ctx.arc(20 + i * 50, 190, 12, 0, Math.PI * 2);
+      ctx.fillStyle = [SOLID_BLUE, GREEN, ORANGE, SOLID_LIGHT, '#a78bfa'][i];
+      ctx.fill();
+    }
+    setDrawn(true);
+  };
+
+  const clear = () => {
+    const canvas = canvasRef.current!;
+    const ctx = canvas.getContext('2d')!;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = CARD;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    setDrawn(false);
+  };
+
+  useEffect(() => { clear(); }, []);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0 }}>
+        <strong style={{ color: SOLID_LIGHT }}>Solid:</strong> function setupCanvas(canvas) \{'{'} ctx.fillRect(...) \{'}'}
+      </p>
+      <canvas
+        ref={canvasRef}
+        width={240}
+        height={210}
+        style={{ borderRadius: 8, border: \`1px solid \${BORDER}\`, display: 'block' }}
+      />
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={draw} style={{
+          flex: 1, padding: '10px', background: SOLID_BLUE, color: TEXT,
+          border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600,
+        }}>🎨 Нарисовать</button>
+        <button onClick={clear} style={{
+          flex: 1, padding: '10px', background: CARD, color: TEXT,
+          border: \`1px solid \${BORDER}\`, borderRadius: 8, cursor: 'pointer',
+        }}>🗑️ Очистить</button>
+      </div>
+    </div>
+  );
+}
+
+// ---- Demo 4: Animate DOM ----
+function AnimateDemo() {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [animating, setAnimating] = useState(false);
+  const animRef = useRef<number>();
+  const startRef = useRef<number>();
+
+  const animate = () => {
+    if (animating) {
+      cancelAnimationFrame(animRef.current!);
+      if (boxRef.current) boxRef.current.style.transform = 'translateX(0) rotate(0deg)';
+      setAnimating(false);
+      return;
+    }
+    setAnimating(true);
+    const el = boxRef.current!;
+    let direction = 1;
+    let pos = 0;
+
+    const step = (ts: number) => {
+      if (!startRef.current) startRef.current = ts;
+      const progress = (ts - startRef.current) / 1000;
+      pos = Math.sin(progress * 2) * 80;
+      const rotation = Math.sin(progress * 3) * 15;
+      el.style.transform = \`translateX(\${pos}px) rotate(\${rotation}deg)\`;
+      animRef.current = requestAnimationFrame(step);
+    };
+    animRef.current = requestAnimationFrame(step);
+  };
+
+  useEffect(() => () => { if (animRef.current) cancelAnimationFrame(animRef.current); }, []);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center' }}>
+      <p style={{ color: MUTED, fontSize: 13, margin: 0, alignSelf: 'flex-start' }}>
+        <strong style={{ color: SOLID_LIGHT }}>Solid:</strong> ref=\{el =&gt; requestAnimationFrame(() =&gt; animate(el))\}
+      </p>
+      <div style={{ width: '100%', height: 100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div ref={boxRef} style={{
+          width: 64, height: 64,
+          background: \`linear-gradient(135deg, \${SOLID_BLUE}, \${GREEN})\`,
+          borderRadius: 12,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 28,
+          transition: animating ? 'none' : 'transform 0.3s ease',
+          boxShadow: \`0 4px 20px \${SOLID_BLUE}44\`,
+        }}>
+          ⚡
+        </div>
+      </div>
+      <button onClick={animate} style={{
+        padding: '10px 24px',
+        background: animating ? ORANGE : SOLID_BLUE,
+        color: TEXT, border: 'none', borderRadius: 8,
+        cursor: 'pointer', fontWeight: 600, fontSize: 14,
+        transition: 'background 0.2s',
+      }}>
+        {animating ? '⏹ Стоп' : '▶ Анимировать'}
+      </button>
+    </div>
+  );
+}
+
+// ---- Main App ----
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('focus');
+
+  const tabs: { id: Demo; label: string }[] = [
+    { id: 'focus', label: '🎯 Фокус' },
+    { id: 'measure', label: '📐 Размеры' },
+    { id: 'canvas', label: '🎨 Canvas' },
+    { id: 'animate', label: '⚡ Анимация' },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 480, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 22 }}>Refs и DOM в Solid.js</h2>
+        <p style={{ color: MUTED, fontSize: 13, margin: '0 0 20px' }}>React-симуляция концепций работы с ref</p>
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 20, flexWrap: 'wrap' }}>
+          {tabs.map(tab => (
+            <button key={tab.id} onClick={() => setDemo(tab.id)} style={{
+              padding: '8px 14px',
+              background: demo === tab.id ? SOLID_BLUE : CARD,
+              color: demo === tab.id ? TEXT : MUTED,
+              border: \`1px solid \${demo === tab.id ? SOLID_BLUE : BORDER}\`,
+              borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+              transition: 'all 0.15s',
+            }}>{tab.label}</button>
+          ))}
+        </div>
+
+        {/* Demo Panel */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, border: \`1px solid \${BORDER}\` }}>
+          {demo === 'focus' && <FocusDemo />}
+          {demo === 'measure' && <MeasureDemo />}
+          {demo === 'canvas' && <CanvasDemo />}
+          {demo === 'animate' && <AnimateDemo />}
+        </div>
+
+        {/* Code hint */}
+        <div style={{ marginTop: 16, padding: '12px 16px', background: CARD, borderRadius: 8, border: \`1px solid \${BORDER}\` }}>
+          <p style={{ color: MUTED, fontSize: 12, margin: 0 }}>
+            💡 <strong style={{ color: TEXT }}>В Solid.js</strong> ref — это просто переменная. Никаких .current!
+            Передай setter сигнала как ref и получишь реактивную ссылку.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## 📋 Сравнение с React
+
+| Операция | React | Solid.js |
+|----------|-------|----------|
+| Создание ref | `const ref = useRef(null)` | `let el: HTMLElement` |
+| Доступ к элементу | `ref.current` | `el` (напрямую!) |
+| Реактивный ref | Нельзя напрямую | `const [el, setEl] = createSignal()` |
+| Колбэк ref | `ref={(el) => ...}` | `ref={(el) => ...}` |
+| После монтирования | `useEffect(() => {}, [])` | `onMount(() => {})` |
+
+---
+
+## 🎯 Итоги
+
+- **`ref={el}`** — просто присваивание переменной, не объект с `.current`
+- **`ref={setSignal}`** — мощный паттерн для реактивных ссылок на DOM
+- **Колбэк `ref={(el) => ...}`** — для инициализации сторонних библиотек
+- **`onMount`** — главное место для работы с ref после монтирования
+- Чистка ресурсов — через **`onCleanup`**, всегда!

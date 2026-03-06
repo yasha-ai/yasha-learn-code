@@ -1,0 +1,575 @@
+import { Playground } from '../../components/Playground'
+
+# Сторы: createStore в Solid.js
+
+`createStore` — примитив для работы с **вложенными реактивными объектами**. В отличие от сигнала, который хранит одно значение, стор поддерживает глубокую реактивность — обновление вложенного поля не пересоздаёт весь объект.
+
+## createStore vs createSignal
+
+```tsx
+import { createSignal, createStore } from 'solid-js';
+
+// createSignal — для примитивов и плоских объектов
+const [count, setCount] = createSignal(0);
+const [user, setUser] = createSignal({ name: 'Alice', age: 25 });
+// Обновление всего объекта целиком:
+setUser(prev => ({ ...prev, age: 26 }));
+
+// createStore — для вложенных объектов
+const [state, setState] = createStore({
+  user: { name: 'Alice', age: 25 },
+  settings: { theme: 'dark', notifications: true },
+  todos: [] as Todo[],
+});
+
+// Обновление конкретного поля — остальное не трогается
+setState('user', 'age', 26);
+// Эквивалент spread: setState('user', prev => ({ ...prev, age: 26 }))
+```
+
+## Синтаксис обновления (path syntax)
+
+Solid использует **path-синтаксис** для обновления стора — строки, числа, функции:
+
+```tsx
+const [store, setStore] = createStore({
+  todos: [
+    { id: 1, text: 'Учить Solid', done: false },
+    { id: 2, text: 'Написать компонент', done: false },
+  ],
+  user: { name: 'Bob', score: 100 },
+  config: { theme: 'dark', lang: 'ru' },
+});
+
+// Простое поле
+setStore('user', 'name', 'Alice');
+
+// Вложенное поле
+setStore('config', 'theme', 'light');
+
+// По индексу массива
+setStore('todos', 0, 'done', true);
+
+// По функции-фильтру — обновить все подходящие элементы
+setStore('todos', todo => !todo.done, 'done', true);
+
+// Через функцию (как в setState React)
+setStore('user', 'score', prev => prev + 10);
+
+// Замена всего массива
+setStore('todos', [/* новый массив */]);
+```
+
+## produce — immer-стиль мутаций
+
+`produce` позволяет писать мутирующий код — под капотом он иммутабелен:
+
+```tsx
+import { createStore } from 'solid-js/store';
+import { produce } from 'solid-js/store';
+
+const [todos, setTodos] = createStore<Todo[]>([]);
+
+// Вместо path-синтаксиса — привычные мутации
+const addTodo = (text: string) => {
+  setTodos(produce(todos => {
+    todos.push({ id: Date.now(), text, done: false });
+  }));
+};
+
+const toggleTodo = (id: number) => {
+  setTodos(produce(todos => {
+    const todo = todos.find(t => t.id === id);
+    if (todo) todo.done = !todo.done;
+  }));
+};
+
+const editTodo = (id: number, text: string) => {
+  setTodos(produce(todos => {
+    const todo = todos.find(t => t.id === id);
+    if (todo) todo.text = text;
+  }));
+};
+```
+
+## reconcile — умное слияние с внешними данными
+
+`reconcile` используется когда данные приходят извне (API) и нужно минимально обновить стор:
+
+```tsx
+import { reconcile } from 'solid-js/store';
+
+const [todos, setTodos] = createStore<Todo[]>([]);
+
+// Без reconcile — заменяет весь массив, пересоздаёт все DOM-узлы
+async function fetchTodos() {
+  const data = await getTodos();
+  setTodos(data); // Плохо: все компоненты перерендерятся
+}
+
+// С reconcile — diff-алгоритм обновляет только изменившееся
+async function fetchTodos() {
+  const data = await getTodos();
+  setTodos(reconcile(data)); // Хорошо: обновляются только изменившиеся элементы
+}
+
+// reconcile по ключу
+setTodos(reconcile(newData, { key: 'id', merge: false }));
+```
+
+## Хранение массивов в сторе
+
+```tsx
+interface AppState {
+  users: User[];
+  selectedId: number | null;
+  loading: boolean;
+}
+
+const [state, setState] = createStore<AppState>({
+  users: [],
+  selectedId: null,
+  loading: false,
+});
+
+// Добавить элемент
+setState('users', users => [...users, newUser]);
+
+// Удалить элемент
+setState('users', users => users.filter(u => u.id !== id));
+
+// Обновить конкретный элемент по индексу
+const idx = state.users.findIndex(u => u.id === id);
+if (idx >= 0) setState('users', idx, 'name', 'New Name');
+
+// Обновить по условию — все элементы с полем active: false
+setState('users', u => !u.active, 'active', true);
+```
+
+## Вычисляемые значения из стора
+
+```tsx
+const [store, setStore] = createStore({
+  todos: [] as Todo[],
+  filter: 'all' as 'all' | 'active' | 'done',
+});
+
+// createMemo работает со стором так же, как с сигналами
+const filteredTodos = createMemo(() => {
+  if (store.filter === 'all') return store.todos;
+  if (store.filter === 'done') return store.todos.filter(t => t.done);
+  return store.todos.filter(t => !t.done);
+});
+
+const stats = createMemo(() => ({
+  total: store.todos.length,
+  done: store.todos.filter(t => t.done).length,
+  active: store.todos.filter(t => !t.done).length,
+}));
+```
+
+## Интерактивный пример
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useMemo } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+interface Todo {
+  id: number;
+  text: string;
+  done: boolean;
+  priority: 'low' | 'normal' | 'high';
+  tags: string[];
+}
+
+interface AppState {
+  todos: Todo[];
+  filter: 'all' | 'active' | 'done';
+  nextId: number;
+}
+
+// Simulate createStore + produce + reconcile
+function useStore<T extends object>(initial: T) {
+  const [state, setState] = useState<T>(initial);
+  const setPath = (updater: (draft: T) => T | void) => {
+    setState(prev => {
+      const draft = JSON.parse(JSON.stringify(prev)) as T;
+      const result = updater(draft);
+      return result !== undefined ? result : draft;
+    });
+  };
+  return [state, setPath] as const;
+}
+
+const INITIAL_TODOS: Todo[] = [
+  { id: 1, text: 'Изучить createStore', done: true, priority: 'high', tags: ['solid', 'state'] },
+  { id: 2, text: 'Разобраться с produce', done: false, priority: 'normal', tags: ['solid'] },
+  { id: 3, text: 'Написать TodoApp', done: false, priority: 'high', tags: ['project', 'solid'] },
+  { id: 4, text: 'Оптимизировать reconcile', done: false, priority: 'low', tags: ['perf'] },
+];
+
+const PRIORITY_COLORS = { low: MUTED, normal: SOLID_BLUE, high: ORANGE };
+const PRIORITY_LABELS = { low: 'низкий', normal: 'средний', high: 'высокий' };
+
+export default function App() {
+  const [state, setStore] = useStore<AppState>({
+    todos: INITIAL_TODOS,
+    filter: 'all',
+    nextId: 5,
+  });
+
+  const [newText, setNewText] = useState('');
+  const [newPriority, setNewPriority] = useState<'low' | 'normal' | 'high'>('normal');
+  const [newTag, setNewTag] = useState('');
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editText, setEditText] = useState('');
+  const [activeTab, setActiveTab] = useState<'todos' | 'store' | 'reconcile'>('todos');
+  const [jsonInput, setJsonInput] = useState('');
+  const [jsonError, setJsonError] = useState('');
+
+  // Мемоизированные вычисления (как createMemo)
+  const filtered = useMemo(() => {
+    if (state.filter === 'done') return state.todos.filter(t => t.done);
+    if (state.filter === 'active') return state.todos.filter(t => !t.done);
+    return state.todos;
+  }, [state.todos, state.filter]);
+
+  const stats = useMemo(() => ({
+    total: state.todos.length,
+    done: state.todos.filter(t => t.done).length,
+    active: state.todos.filter(t => !t.done).length,
+  }), [state.todos]);
+
+  const allTags = useMemo(() => {
+    const tags = new Set<string>();
+    state.todos.forEach(t => t.tags.forEach(tag => tags.add(tag)));
+    return Array.from(tags);
+  }, [state.todos]);
+
+  // Actions (simulate produce)
+  const addTodo = () => {
+    if (!newText.trim()) return;
+    setStore(draft => {
+      draft.todos.push({
+        id: draft.nextId++,
+        text: newText,
+        done: false,
+        priority: newPriority,
+        tags: newTag ? [newTag] : [],
+      });
+    });
+    setNewText('');
+    setNewTag('');
+  };
+
+  const toggleTodo = (id: number) => {
+    setStore(draft => {
+      const todo = draft.todos.find(t => t.id === id);
+      if (todo) todo.done = !todo.done;
+    });
+  };
+
+  const removeTodo = (id: number) => {
+    setStore(draft => {
+      draft.todos = draft.todos.filter(t => t.id !== id);
+    });
+  };
+
+  const saveEdit = (id: number) => {
+    setStore(draft => {
+      const todo = draft.todos.find(t => t.id === id);
+      if (todo && editText.trim()) todo.text = editText;
+    });
+    setEditingId(null);
+  };
+
+  const setPriority = (id: number, priority: 'low' | 'normal' | 'high') => {
+    setStore(draft => {
+      const todo = draft.todos.find(t => t.id === id);
+      if (todo) todo.priority = priority;
+    });
+  };
+
+  const markAllDone = () => setStore(draft => { draft.todos.forEach(t => { t.done = true; }); });
+  const clearDone = () => setStore(draft => { draft.todos = draft.todos.filter(t => !t.done); });
+
+  // Simulate reconcile
+  const applyReconcile = () => {
+    try {
+      const data = JSON.parse(jsonInput) as Todo[];
+      if (!Array.isArray(data)) { setJsonError('Ожидается массив Todo[]'); return; }
+      setStore(draft => { draft.todos = data; });
+      setJsonError('');
+      setJsonInput('');
+    } catch {
+      setJsonError('Невалидный JSON');
+    }
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 16,
+      fontFamily: "'Inter', sans-serif", color: TEXT }}>
+      <div style={{ maxWidth: 580, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 4px', fontSize: 18, textAlign: 'center' }}>
+          createStore — Solid.js
+        </h2>
+        <p style={{ color: MUTED, fontSize: 12, textAlign: 'center', margin: '0 0 14px' }}>
+          Глубокая реактивность · produce · reconcile
+        </p>
+
+        {/* Stats */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+          {[
+            { label: 'Всего', value: stats.total, color: TEXT },
+            { label: 'Активных', value: stats.active, color: SOLID_LIGHT },
+            { label: 'Готово', value: stats.done, color: GREEN },
+          ].map(s => (
+            <div key={s.label} style={{
+              flex: 1, textAlign: 'center', padding: '8px 0',
+              background: CARD, borderRadius: 8, border: \`1px solid \${BORDER}\`,
+            }}>
+              <div style={{ color: s.color, fontWeight: 700, fontSize: 20 }}>{s.value}</div>
+              <div style={{ color: MUTED, fontSize: 11 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 5, marginBottom: 14 }}>
+          {([
+            { key: 'todos', label: '📋 Задачи' },
+            { key: 'store', label: '🔍 Стор' },
+            { key: 'reconcile', label: '🔄 Reconcile' },
+          ] as const).map(t => (
+            <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
+              flex: 1, padding: '7px 0', borderRadius: 8, cursor: 'pointer', fontSize: 13,
+              border: \`1px solid \${activeTab === t.key ? SOLID_BLUE : BORDER}\`,
+              background: activeTab === t.key ? SOLID_BLUE : CARD,
+              color: activeTab === t.key ? '#fff' : MUTED, fontWeight: 600,
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {/* TODOS TAB */}
+        {activeTab === 'todos' && (
+          <div>
+            {/* Add form */}
+            <div style={{ background: CARD, borderRadius: 10, padding: 14,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                <input value={newText} onChange={e => setNewText(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addTodo()}
+                  placeholder="Новая задача..."
+                  style={{ flex: 1, padding: '7px 10px', borderRadius: 7,
+                    background: BG, border: \`1px solid \${BORDER}\`, color: TEXT, fontSize: 13 }} />
+                <button onClick={addTodo} style={{
+                  padding: '7px 16px', borderRadius: 7, border: 'none',
+                  background: SOLID_BLUE, color: '#fff', cursor: 'pointer', fontWeight: 600,
+                }}>+</button>
+              </div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <span style={{ color: MUTED, fontSize: 12 }}>Приоритет:</span>
+                {(['low', 'normal', 'high'] as const).map(p => (
+                  <button key={p} onClick={() => setNewPriority(p)} style={{
+                    padding: '3px 10px', borderRadius: 5, cursor: 'pointer', fontSize: 11,
+                    border: \`1px solid \${newPriority === p ? PRIORITY_COLORS[p] : BORDER}\`,
+                    background: newPriority === p ? PRIORITY_COLORS[p] + '22' : 'transparent',
+                    color: PRIORITY_COLORS[p],
+                  }}>{PRIORITY_LABELS[p]}</button>
+                ))}
+                <input value={newTag} onChange={e => setNewTag(e.target.value)}
+                  placeholder="тег"
+                  style={{ flex: 1, padding: '3px 8px', borderRadius: 5, fontSize: 11,
+                    background: BG, border: \`1px solid \${BORDER}\`, color: TEXT }} />
+              </div>
+            </div>
+
+            {/* Filter + actions */}
+            <div style={{ display: 'flex', gap: 5, marginBottom: 10, alignItems: 'center' }}>
+              {(['all', 'active', 'done'] as const).map(f => (
+                <button key={f} onClick={() => setStore(d => { d.filter = f; })} style={{
+                  padding: '4px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                  border: \`1px solid \${state.filter === f ? SOLID_BLUE : BORDER}\`,
+                  background: state.filter === f ? SOLID_BLUE + '22' : 'transparent',
+                  color: state.filter === f ? SOLID_LIGHT : MUTED,
+                }}>{f === 'all' ? 'Все' : f === 'active' ? 'Активные' : 'Выполненные'}</button>
+              ))}
+              <div style={{ flex: 1 }} />
+              <button onClick={markAllDone} style={{
+                padding: '4px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11,
+                border: \`1px solid \${GREEN}44\`, background: GREEN + '11', color: GREEN,
+              }}>✓ Все готово</button>
+              <button onClick={clearDone} style={{
+                padding: '4px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11,
+                border: \`1px solid \${BORDER}\`, background: 'transparent', color: MUTED,
+              }}>Очистить</button>
+            </div>
+
+            {/* Todo list */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {filtered.map(todo => (
+                <div key={todo.id} style={{
+                  padding: '9px 12px', borderRadius: 9,
+                  background: CARD, border: \`1px solid \${todo.done ? GREEN + '33' : PRIORITY_COLORS[todo.priority] + '33'}\`,
+                  transition: 'all 0.2s',
+                }}>
+                  {editingId === todo.id ? (
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <input value={editText} onChange={e => setEditText(e.target.value)}
+                        autoFocus onKeyDown={e => e.key === 'Enter' && saveEdit(todo.id)}
+                        style={{ flex: 1, padding: '5px 8px', borderRadius: 5, fontSize: 13,
+                          background: BG, border: \`1px solid \${SOLID_BLUE}\`, color: TEXT }} />
+                      <button onClick={() => saveEdit(todo.id)} style={{
+                        padding: '5px 12px', borderRadius: 5, border: 'none',
+                        background: GREEN, color: BG, cursor: 'pointer', fontWeight: 700, fontSize: 12,
+                      }}>✓</button>
+                      <button onClick={() => setEditingId(null)} style={{
+                        padding: '5px 10px', borderRadius: 5, border: 'none',
+                        background: BORDER, color: TEXT, cursor: 'pointer', fontSize: 12,
+                      }}>✗</button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <button onClick={() => toggleTodo(todo.id)} style={{
+                        width: 20, height: 20, borderRadius: 4, border: \`2px solid \${PRIORITY_COLORS[todo.priority]}\`,
+                        background: todo.done ? PRIORITY_COLORS[todo.priority] : 'transparent',
+                        cursor: 'pointer', color: BG, fontSize: 11, flexShrink: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>{todo.done ? '✓' : ''}</button>
+                      <span style={{
+                        flex: 1, fontSize: 13, color: todo.done ? MUTED : TEXT,
+                        textDecoration: todo.done ? 'line-through' : 'none',
+                      }}>{todo.text}</span>
+                      <div style={{ display: 'flex', gap: 3 }}>
+                        {todo.tags.map(tag => (
+                          <span key={tag} style={{
+                            padding: '1px 6px', borderRadius: 4, fontSize: 10,
+                            background: SOLID_BLUE + '22', color: SOLID_LIGHT,
+                          }}>{tag}</span>
+                        ))}
+                      </div>
+                      <button onClick={() => { setEditingId(todo.id); setEditText(todo.text); }} style={{
+                        padding: '2px 7px', borderRadius: 4, border: \`1px solid \${BORDER}\`,
+                        background: 'transparent', color: MUTED, cursor: 'pointer', fontSize: 11,
+                      }}>✏️</button>
+                      <button onClick={() => removeTodo(todo.id)} style={{
+                        padding: '2px 7px', borderRadius: 4, border: 'none',
+                        background: 'transparent', color: '#ef4444', cursor: 'pointer', fontSize: 13,
+                      }}>×</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {filtered.length === 0 && (
+                <div style={{ textAlign: 'center', color: MUTED, padding: 20, fontSize: 13 }}>
+                  Нет задач в этой категории
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* STORE TAB */}
+        {activeTab === 'store' && (
+          <div style={{ background: '#0d1117', borderRadius: 10, border: \`1px solid \${BORDER}\`, overflow: 'hidden' }}>
+            <div style={{ padding: '8px 14px', borderBottom: \`1px solid \${BORDER}\`, color: MUTED, fontSize: 12 }}>
+              // Текущее состояние стора (createStore snapshot)
+            </div>
+            <pre style={{
+              padding: 14, margin: 0, fontSize: 11, color: TEXT,
+              fontFamily: "'Fira Code', monospace", lineHeight: 1.6,
+              maxHeight: 400, overflowY: 'auto',
+              whiteSpace: 'pre-wrap',
+            }}>
+              {JSON.stringify({ filter: state.filter, todos: state.todos }, null, 2)}
+            </pre>
+          </div>
+        )}
+
+        {/* RECONCILE TAB */}
+        {activeTab === 'reconcile' && (
+          <div>
+            <div style={{ background: CARD, borderRadius: 10, padding: 14,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 8, fontSize: 13 }}>
+                Симуляция reconcile — загрузить данные из JSON
+              </div>
+              <div style={{ color: MUTED, fontSize: 12, marginBottom: 10 }}>
+                Вставь JSON массив задач — reconcile обновит только изменившиеся.
+              </div>
+              <textarea
+                value={jsonInput} onChange={e => { setJsonInput(e.target.value); setJsonError(''); }}
+                placeholder={\`[\n  { "id": 1, "text": "...", "done": false, "priority": "normal", "tags": [] }\n]\`}
+                rows={6}
+                style={{
+                  width: '100%', padding: '8px 10px', borderRadius: 8, fontSize: 12,
+                  background: BG, border: \`1px solid \${jsonError ? '#ef4444' : BORDER}\`,
+                  color: TEXT, fontFamily: 'monospace', resize: 'vertical',
+                  boxSizing: 'border-box',
+                }}
+              />
+              {jsonError && <div style={{ color: '#f87171', fontSize: 12, marginTop: 4 }}>{jsonError}</div>}
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button onClick={applyReconcile} style={{
+                  padding: '7px 16px', borderRadius: 8, border: 'none',
+                  background: SOLID_BLUE, color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                }}>Применить reconcile</button>
+                <button onClick={() => setJsonInput(JSON.stringify(INITIAL_TODOS, null, 2))} style={{
+                  padding: '7px 14px', borderRadius: 8, border: \`1px solid \${BORDER}\`,
+                  background: 'transparent', color: MUTED, cursor: 'pointer', fontSize: 13,
+                }}>Загрузить пример</button>
+              </div>
+            </div>
+            <div style={{ padding: 12, borderRadius: 8, background: '#1a1a2e',
+              border: \`1px solid \${SOLID_BLUE}44\`, fontSize: 12, color: MUTED }}>
+              <code style={{ color: SOLID_LIGHT, display: 'block', marginBottom: 4 }}>
+                setStore(reconcile(apiData, {'{ key: "id" }'}))
+              </code>
+              Reconcile сравнивает по ключу <code style={{ color: ORANGE }}>id</code> и обновляет только изменившиеся поля — без пересоздания DOM-узлов для неизменённых элементов.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />
+
+## Антипаттерны
+
+```tsx
+// ❌ Не мутируй стор напрямую (без produce)
+store.user.name = 'Bob'; // Не сработает!
+
+// ❌ Не деструктурируй стор — теряешь реактивность
+const { user } = store; // user больше не реактивен
+
+// ✅ Всегда читай поля через стор напрямую
+return <div>{store.user.name}</div>;
+
+// ✅ Или используй путь в setStore
+setState('user', 'name', 'Bob');
+
+// ✅ Или используй produce
+setState(produce(draft => { draft.user.name = 'Bob'; }));
+```
+
+## Итог
+
+| Операция | Синтаксис |
+|---|---|
+| Установить поле | `setState('field', value)` |
+| Вложенное поле | `setState('a', 'b', 'c', value)` |
+| По индексу массива | `setState('arr', 0, 'field', value)` |
+| По условию | `setState('arr', item => item.active, 'done', true)` |
+| Через функцию | `setState('count', n => n + 1)` |
+| Immer-стиль | `setState(produce(draft => { draft.x = 1; }))` |
+| Diff из API | `setState(reconcile(newData))` |

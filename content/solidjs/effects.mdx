@@ -1,0 +1,594 @@
+import { Playground } from '../../components/Playground'
+
+## `createEffect`: реакции на изменения 🔁
+
+Привет! 👋 Яша здесь. Мы уже знаем, как создавать сигналы и читать их значения. Теперь разберём **эффекты** — механизм, который позволяет реагировать на изменения сигналов и выполнять побочные эффекты: запросы к API, изменение заголовка страницы, аналитика, подписки.
+
+`createEffect` — это Solid-аналог `useEffect`, но с принципиально другим механизмом отслеживания зависимостей.
+
+---
+
+## 📦 Базовый синтаксис
+
+```tsx
+import { createSignal, createEffect } from 'solid-js';
+
+const [count, setCount] = createSignal(0);
+
+// Эффект запускается СРАЗУ, затем при каждом изменении зависимостей
+createEffect(() => {
+  console.log('Счётчик изменился:', count());
+  // count() вызывается внутри — Solid автоматически регистрирует зависимость
+});
+
+setCount(1); // → «Счётчик изменился: 1»
+setCount(5); // → «Счётчик изменился: 5»
+```
+
+**Ключевые отличия от `useEffect`:**
+
+| Аспект | `useEffect` (React) | `createEffect` (Solid) |
+|---|---|---|
+| Зависимости | Явный массив `[a, b, c]` | Автоматически — всё, что вызвано внутри |
+| Первый запуск | После рендера | Сразу при создании |
+| Повторный запуск | При изменении deps | При изменении любого вызванного сигнала |
+| Cleanup | Возвращаемая функция | Функция `onCleanup()` |
+| Stale closure | Проблема с deps | Не существует — геттер всегда актуален |
+
+---
+
+## 🔍 Автоматическое отслеживание зависимостей
+
+Это самая мощная особенность `createEffect`. Не нужно указывать, от чего зависит эффект — Solid определяет это сам, наблюдая, какие сигналы вызываются при выполнении:
+
+```tsx
+import { createSignal, createEffect } from 'solid-js';
+
+const [firstName, setFirstName] = createSignal('Яша');
+const [lastName, setLastName] = createSignal('Иванов');
+const [age, setAge] = createSignal(25);
+const [showAge, setShowAge] = createSignal(true);
+
+createEffect(() => {
+  // Зависимости: firstName, lastName, showAge — и УСЛОВНО age
+  let info = firstName() + ' ' + lastName();
+
+  if (showAge()) {
+    // age() вызывается только если showAge() === true!
+    info += ', ' + age() + ' лет';
+  }
+
+  document.title = info;
+});
+
+// При setFirstName('Миша') — эффект пересчитывается
+// При setAge(26) — эффект пересчитывается ТОЛЬКО если showAge() === true
+// Если showAge() === false, age() не вызывается → нет подписки на age!
+```
+
+Это называется **динамическое отслеживание зависимостей**. Зависимости могут меняться от запуска к запуску в зависимости от условий.
+
+---
+
+## 🧹 Функция очистки: `onCleanup`
+
+Для отписки от событий, отмены таймеров и других cleanup-операций используй `onCleanup`:
+
+```tsx
+import { createSignal, createEffect, onCleanup } from 'solid-js';
+
+function Timer() {
+  const [seconds, setSeconds] = createSignal(0);
+  const [running, setRunning] = createSignal(false);
+
+  createEffect(() => {
+    if (!running()) return; // не запускаем таймер, если stopped
+
+    // Запускаем интервал
+    const id = setInterval(() => {
+      setSeconds(s => s + 1);
+    }, 1000);
+
+    // onCleanup вызывается при:
+    // 1. Повторном запуске эффекта (перед следующим запуском)
+    // 2. Уничтожении компонента
+    onCleanup(() => {
+      clearInterval(id);
+      console.log('Таймер остановлен');
+    });
+  });
+
+  return (
+    <div>
+      <p>Секунды: {seconds()}</p>
+      <button onClick={() => setRunning(r => !r)}>
+        {running() ? 'Стоп' : 'Старт'}
+      </button>
+    </div>
+  );
+}
+```
+
+### Отмена `fetch`-запросов
+
+```tsx
+import { createSignal, createEffect, onCleanup } from 'solid-js';
+
+function SearchResults() {
+  const [query, setQuery] = createSignal('');
+  const [results, setResults] = createSignal([]);
+
+  createEffect(() => {
+    const q = query();
+    if (!q) return;
+
+    // AbortController для отмены предыдущего запроса
+    const controller = new AbortController();
+
+    fetch('/api/search?q=' + q, { signal: controller.signal })
+      .then(r => r.json())
+      .then(data => setResults(data))
+      .catch(err => {
+        if (err.name !== 'AbortError') console.error(err);
+      });
+
+    // При следующем запуске (новый query) — отменяем предыдущий fetch
+    onCleanup(() => controller.abort());
+  });
+
+  return (
+    <ul>
+      <For each={results()}>
+        {(item) => <li>{item.title}</li>}
+      </For>
+    </ul>
+  );
+}
+```
+
+---
+
+## 📊 Порядок выполнения эффектов
+
+Эффекты выполняются в порядке создания:
+
+```tsx
+createEffect(() => console.log('Эффект 1:', count()));
+createEffect(() => console.log('Эффект 2:', count()));
+createEffect(() => console.log('Эффект 3:', count()));
+
+setCount(5);
+// Вывод:
+// «Эффект 1: 5»
+// «Эффект 2: 5»
+// «Эффект 3: 5»
+```
+
+### Вложенные эффекты
+
+```tsx
+createEffect(() => {
+  console.log('Внешний эффект:', count());
+
+  // Внутренний эффект — создаётся при каждом запуске внешнего
+  // Это редко нужно, но возможно
+  createEffect(() => {
+    console.log('Внутренний эффект:', name());
+  });
+});
+// ⚠️ Осторожно с вложенными эффектами — легко получить утечку памяти!
+// Используй onCleanup для очистки вложенных подписок
+```
+
+---
+
+## 🔇 `untrack`: отключение отслеживания
+
+Иногда нужно прочитать сигнал внутри эффекта, **не создавая зависимость**:
+
+```tsx
+import { createSignal, createEffect, untrack } from 'solid-js';
+
+const [count, setCount] = createSignal(0);
+const [name, setName] = createSignal('Яша');
+
+createEffect(() => {
+  // count() создаёт зависимость — эффект перезапустится при изменении count
+  const currentCount = count();
+
+  // untrack: читаем name(), но НЕ создаём зависимость на него
+  const currentName = untrack(() => name());
+
+  console.log(currentCount, 'от', currentName);
+  // При setName('Миша') — эффект НЕ перезапустится
+  // При setCount(5) — перезапустится
+});
+```
+
+---
+
+## ⏰ `createEffect` vs `on`
+
+Функция `on` — помощник для явного указания источников:
+
+```tsx
+import { createEffect, on } from 'solid-js';
+
+// Эффект срабатывает ТОЛЬКО при изменении count (явно)
+createEffect(on(count, (current, prev) => {
+  console.log('count изменился:', prev, '→', current);
+}));
+
+// Несколько источников:
+createEffect(on([count, name], ([c, n]) => {
+  console.log('Изменилось:', c, n);
+}));
+
+// defer: НЕ запускать при первом рендере
+createEffect(on(count, (c) => {
+  console.log('После первого изменения:', c);
+}, { defer: true }));
+```
+
+---
+
+## 🆚 `createEffect` vs `useEffect` — углублённое сравнение
+
+### React: замкнутые значения и stale closure
+
+```tsx
+// React: классическая ловушка
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCount(count + 1); // ⚠️ count «замкнуто» на значение при создании!
+      // Всегда будет 0 + 1 = 1
+    }, 1000);
+    return () => clearInterval(id);
+  }, []); // [] — эффект запускается один раз с count=0
+
+  // Правильно: setCount(c => c + 1)
+}
+```
+
+```tsx
+// Solid: нет stale closure — count() всегда актуален
+function Counter() {
+  const [count, setCount] = createSignal(0);
+
+  createEffect(() => {
+    const id = setInterval(() => {
+      setCount(c => c + 1); // ✅ работает правильно
+    }, 1000);
+    onCleanup(() => clearInterval(id));
+  });
+  // Нет зависимостей — эффект никогда не перезапускается!
+  // onCleanup вызывается при уничтожении компонента
+}
+```
+
+### React: пустой массив зависимостей vs Solid: `onMount`
+
+```tsx
+// React: [] = запустить один раз при монтировании
+useEffect(() => {
+  fetchData();
+}, []);
+
+// Solid: для разового запуска используй onMount
+import { onMount } from 'solid-js';
+
+onMount(() => {
+  fetchData();
+});
+// onMount — это просто createEffect с defer + без реактивности
+```
+
+---
+
+## 🎮 Playground: визуализатор эффектов
+
+Интерактивный граф зависимостей: меняй сигналы и смотри, какие эффекты срабатывают:
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const PURPLE = '#a78bfa';
+
+interface FireEntry { effect: string; signals: string[]; time: string; cleanup?: boolean }
+
+function pad(n: number) { return n < 10 ? '0' + n : String(n); }
+function ts() {
+  const d = new Date();
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
+const EFFECT_COLORS: Record<string, string> = {
+  'effectTitle': '#fb923c',
+  'effectLogger': '#a78bfa',
+  'effectBadge': '#34d399',
+};
+
+export default function App() {
+  const [username, setUsername] = useState('Яша');
+  const [score, setScore] = useState(0);
+  const [online, setOnline] = useState(true);
+  const [log, setLog] = useState<FireEntry[]>([]);
+  const [flashing, setFlashing] = useState<Set<string>>(new Set());
+  const prevUsername = useRef(username);
+  const prevScore = useRef(score);
+  const prevOnline = useRef(online);
+
+  function flash(effects: string[]) {
+    setFlashing(new Set(effects));
+    setTimeout(() => setFlashing(new Set()), 800);
+  }
+
+  function fireEffect(effect: string, signals: string[], cleanup?: boolean) {
+    setLog(prev => [{ effect, signals, time: ts(), cleanup }, ...prev.slice(0, 14)]);
+  }
+
+  // Симуляция эффекта 1: зависит от username
+  useEffect(() => {
+    if (username !== prevUsername.current) {
+      fireEffect('effectTitle', ['username']);
+      flash(['effectTitle']);
+      prevUsername.current = username;
+    }
+  }, [username]);
+
+  // Симуляция эффекта 2: зависит от score
+  useEffect(() => {
+    if (score !== prevScore.current) {
+      fireEffect('effectLogger', ['score']);
+      flash(['effectLogger']);
+      prevScore.current = score;
+    }
+  }, [score]);
+
+  // Симуляция эффекта 3: зависит от username + online
+  useEffect(() => {
+    if (username !== prevUsername.current || online !== prevOnline.current) {
+      fireEffect('effectBadge', ['username', 'online']);
+      flash(['effectBadge', 'effectTitle']);
+    }
+    prevOnline.current = online;
+  }, [online]);
+
+  function changeUsername(val: string) {
+    fireEffect('effectTitle', ['username']);
+    fireEffect('effectBadge', ['username', 'online']);
+    flash(['effectTitle', 'effectBadge']);
+    setLog(prev => [
+      { effect: 'effectBadge', signals: ['username', 'online'], time: ts() },
+      { effect: 'effectTitle', signals: ['username'], time: ts() },
+      ...prev.slice(0, 12)
+    ]);
+    setUsername(val);
+  }
+
+  function changeScore(val: number) {
+    setLog(prev => [{ effect: 'effectLogger', signals: ['score'], time: ts() }, ...prev.slice(0, 13)]);
+    flash(['effectLogger']);
+    setScore(val);
+  }
+
+  function toggleOnline() {
+    setLog(prev => [{ effect: 'effectBadge', signals: ['username', 'online'], time: ts() }, ...prev.slice(0, 13)]);
+    flash(['effectBadge']);
+    setOnline(o => !o);
+  }
+
+  const signalDeps: Record<string, string[]> = {
+    username: ['effectTitle', 'effectBadge'],
+    score: ['effectLogger'],
+    online: ['effectBadge'],
+  };
+
+  return (
+    <div style={{ background: BG, color: TEXT, minHeight: '100vh', padding: '14px', fontFamily: 'system-ui, sans-serif' }}>
+      <h1 style={{ color: SOLID_LIGHT, marginTop: 0, fontSize: '1.1rem', marginBottom: '14px' }}>
+        🔁 Визуализатор эффектов: что срабатывает при изменении сигнала?
+      </h1>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+        {/* Левая панель: сигналы */}
+        <div>
+          <div style={{ color: MUTED, fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '8px' }}>Сигналы</div>
+
+          {/* Signal: username */}
+          <div style={{ background: CARD, border: '1px solid ' + SOLID_BLUE + '66', borderRadius: '10px', padding: '12px', marginBottom: '8px' }}>
+            <div style={{ color: SOLID_BLUE, fontFamily: 'monospace', fontSize: '0.75rem', marginBottom: '6px', fontWeight: 700 }}>
+              username = "{username}"
+            </div>
+            <input value={username} onChange={e => changeUsername(e.target.value)}
+              style={{ width: '100%', background: BG, color: TEXT, border: '1px solid ' + BORDER, padding: '6px', borderRadius: '6px', fontSize: '0.85rem', boxSizing: 'border-box', marginBottom: '6px' }} />
+            <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+              {['Яша', 'Миша', 'Катя'].map(n => (
+                <button key={n} onClick={() => changeUsername(n)} style={{ background: SOLID_BLUE + '33', color: SOLID_LIGHT, border: '1px solid ' + SOLID_BLUE + '55', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' }}>{n}</button>
+              ))}
+            </div>
+            <div style={{ marginTop: '6px', display: 'flex', gap: '4px' }}>
+              {signalDeps.username.map(e => (
+                <span key={e} style={{ background: EFFECT_COLORS[e] + '22', color: EFFECT_COLORS[e], fontSize: '0.65rem', padding: '2px 6px', borderRadius: '3px', border: '1px solid ' + EFFECT_COLORS[e] + '44' }}>→ {e}</span>
+              ))}
+            </div>
+          </div>
+
+          {/* Signal: score */}
+          <div style={{ background: CARD, border: '1px solid ' + ORANGE + '66', borderRadius: '10px', padding: '12px', marginBottom: '8px' }}>
+            <div style={{ color: ORANGE, fontFamily: 'monospace', fontSize: '0.75rem', marginBottom: '6px', fontWeight: 700 }}>
+              score = {score}
+            </div>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '6px' }}>
+              <button onClick={() => changeScore(score - 10)} style={{ background: CARD, color: TEXT, border: '1px solid ' + BORDER, padding: '4px 10px', borderRadius: '5px', cursor: 'pointer' }}>-10</button>
+              <span style={{ color: ORANGE, fontWeight: 900, fontSize: '1.3rem', flex: 1, textAlign: 'center' }}>{score}</span>
+              <button onClick={() => changeScore(score + 10)} style={{ background: ORANGE, color: '#000', border: 'none', padding: '4px 10px', borderRadius: '5px', cursor: 'pointer', fontWeight: 700 }}>+10</button>
+            </div>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              {signalDeps.score.map(e => (
+                <span key={e} style={{ background: EFFECT_COLORS[e] + '22', color: EFFECT_COLORS[e], fontSize: '0.65rem', padding: '2px 6px', borderRadius: '3px', border: '1px solid ' + EFFECT_COLORS[e] + '44' }}>→ {e}</span>
+              ))}
+            </div>
+          </div>
+
+          {/* Signal: online */}
+          <div style={{ background: CARD, border: '1px solid ' + GREEN + '66', borderRadius: '10px', padding: '12px' }}>
+            <div style={{ color: GREEN, fontFamily: 'monospace', fontSize: '0.75rem', marginBottom: '6px', fontWeight: 700 }}>
+              online = {String(online)}
+            </div>
+            <button onClick={toggleOnline} style={{
+              background: online ? GREEN : MUTED, color: '#000',
+              border: 'none', padding: '6px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem', marginBottom: '6px',
+            }}>
+              {online ? '🟢 Онлайн' : '🔴 Оффлайн'} — переключить
+            </button>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              {signalDeps.online.map(e => (
+                <span key={e} style={{ background: EFFECT_COLORS[e] + '22', color: EFFECT_COLORS[e], fontSize: '0.65rem', padding: '2px 6px', borderRadius: '3px', border: '1px solid ' + EFFECT_COLORS[e] + '44' }}>→ {e}</span>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Правая панель: эффекты */}
+        <div>
+          <div style={{ color: MUTED, fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '8px' }}>Эффекты (createEffect)</div>
+
+          {[
+            { id: 'effectTitle', deps: ['username'], label: 'document.title', code: 'document.title = username();' },
+            { id: 'effectLogger', deps: ['score'], label: 'Analytics logger', code: 'analytics.track("score", score());' },
+            { id: 'effectBadge', deps: ['username', 'online'], label: 'Status badge', code: 'updateBadge(username(), online());' },
+          ].map(effect => (
+            <div key={effect.id} style={{
+              background: flashing.has(effect.id) ? EFFECT_COLORS[effect.id] + '22' : CARD,
+              border: '2px solid ' + (flashing.has(effect.id) ? EFFECT_COLORS[effect.id] : BORDER),
+              borderRadius: '10px', padding: '12px', marginBottom: '8px',
+              transition: 'all 0.3s',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: flashing.has(effect.id) ? EFFECT_COLORS[effect.id] : MUTED, transition: 'background 0.3s' }} />
+                <span style={{ color: EFFECT_COLORS[effect.id], fontFamily: 'monospace', fontWeight: 700, fontSize: '0.8rem' }}>{effect.id}</span>
+                {flashing.has(effect.id) && <span style={{ color: EFFECT_COLORS[effect.id], fontSize: '0.65rem', fontWeight: 700 }}>⚡ ЗАПУЩЕН</span>}
+              </div>
+              <code style={{ display: 'block', background: BG, borderRadius: '5px', padding: '6px 8px', color: '#c9d1d9', fontSize: '0.72rem', marginBottom: '6px' }}>{effect.code}</code>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <span style={{ color: MUTED, fontSize: '0.7rem' }}>deps:</span>
+                {effect.deps.map(d => (
+                  <span key={d} style={{ background: SOLID_BLUE + '22', color: SOLID_LIGHT, fontSize: '0.65rem', padding: '2px 6px', borderRadius: '3px' }}>{d}</span>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {/* Лог */}
+          <div style={{ background: CARD, border: '1px solid ' + BORDER, borderRadius: '8px', padding: '10px', maxHeight: '160px', overflowY: 'auto' }}>
+            <div style={{ color: MUTED, fontSize: '0.7rem', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '1px' }}>Лог запусков</div>
+            {log.length === 0 ? (
+              <div style={{ color: MUTED, textAlign: 'center', padding: '10px 0', fontSize: '0.8rem' }}>Измени сигнал...</div>
+            ) : log.map((entry, i) => (
+              <div key={i} style={{ display: 'flex', gap: '6px', alignItems: 'center', fontSize: '0.72rem', marginBottom: '3px', opacity: i === 0 ? 1 : 0.6 + i * -0.05 }}>
+                <span style={{ color: MUTED, fontFamily: 'monospace' }}>{entry.time}</span>
+                <span style={{ color: EFFECT_COLORS[entry.effect], fontWeight: 700 }}>{entry.effect}</span>
+                <span style={{ color: MUTED }}>←</span>
+                {entry.signals.map(s => <span key={s} style={{ color: SOLID_LIGHT, fontSize: '0.65rem' }}>{s}</span>)}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
+
+---
+
+## ⚠️ Частые ошибки с `createEffect`
+
+### Бесконечный цикл
+
+```tsx
+const [count, setCount] = createSignal(0);
+
+// ❌ Бесконечный цикл! Читаем count() и сразу меняем count
+createEffect(() => {
+  setCount(count() + 1); // читает count → перезапускается → читает снова...
+});
+
+// ✅ Используй функциональный сеттер (не читает сигнал)
+createEffect(() => {
+  if (count() > 10) {
+    setCount(0); // сброс только при условии
+  }
+});
+```
+
+### Создание подписок без очистки
+
+```tsx
+// ❌ Утечка памяти — listener не удаляется
+createEffect(() => {
+  window.addEventListener('resize', handleResize);
+});
+
+// ✅ Всегда очищай через onCleanup
+createEffect(() => {
+  window.addEventListener('resize', handleResize);
+  onCleanup(() => window.removeEventListener('resize', handleResize));
+});
+```
+
+### Использование `async` в эффекте
+
+```tsx
+// ❌ async-функция разрывает реактивное отслеживание!
+createEffect(async () => {
+  const data = await fetch('/api/data');
+  // После await Solid уже не отслеживает зависимости
+  setResult(await data.json());
+});
+
+// ✅ Читай сигналы ДО await
+createEffect(() => {
+  const q = query(); // читаем до async-операции
+
+  fetch('/api/search?q=' + q)
+    .then(r => r.json())
+    .then(data => setResults(data));
+});
+```
+
+---
+
+## 🏁 Итоги урока
+
+`createEffect` — мощный и интуитивный инструмент для побочных эффектов.
+
+**Запомни:**
+
+✅ Эффект запускается сразу при создании, затем при изменении зависимостей
+
+✅ Зависимости отслеживаются **автоматически** — все сигналы, вызванные внутри
+
+✅ `onCleanup(() => ...)` — функция очистки, запускается перед следующим выполнением
+
+✅ Нет массива зависимостей — Solid сам определяет, от чего зависит эффект
+
+✅ Для разового запуска при монтировании используй `onMount`
+
+✅ `untrack(() => signal())` — читать сигнал без создания зависимости
+
+✅ `on(signal, handler, { defer: true })` — явные зависимости + отсрочка
+
+**Следующий шаг:** `createMemo` — кэшированные вычисления! 🧮
