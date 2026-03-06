@@ -1,0 +1,446 @@
+import { Playground } from '../../components/Playground'
+
+# Islands Architecture (Архитектура островов)
+
+**Islands Architecture** — это архитектурный паттерн для веб-приложений, предложенный Katie Sylor-Miller и популяризованный Jason Miller (создатель Preact). Astro стал первым крупным фреймворком, реализовавшим этот паттерн как основную концепцию.
+
+Идея проста и гениальна: **большинство страниц на большинстве сайтов статичны**, и только небольшие, изолированные области требуют интерактивности. Зачем загружать JavaScript для всей страницы, если можно загрузить его только там, где он действительно нужен?
+
+## Проблема: Full-Page Hydration
+
+В традиционных React/Next.js/Nuxt приложениях используется **полная гидратация**:
+
+1. Сервер рендерит HTML-страницу
+2. Браузер загружает **весь JavaScript-бандл** (часто 200KB — 1MB+)
+3. React "гидратирует" всю страницу — воссоздаёт дерево компонентов в памяти
+4. Страница становится интерактивной
+
+Проблема: **даже статичный текст** требует загрузки и выполнения JavaScript для гидратации. Это называется **"налогом на JavaScript"**.
+
+```
+Типичная страница блога — чего хотим:
+┌─────────────────────────────┐
+│   Шапка (Nav)    [статично] │  0 KB JS
+├─────────────────────────────┤
+│   Заголовок      [статично] │  0 KB JS
+│   Текст статьи   [статично] │  0 KB JS
+│   Изображения    [статично] │  0 KB JS
+├─────────────────────────────┤
+│   Форма подписки [динамично]│  ~15 KB JS
+├─────────────────────────────┤
+│   Комментарии    [динамично]│  ~30 KB JS
+├─────────────────────────────┤
+│   Футер          [статично] │  0 KB JS
+└─────────────────────────────┘
+                         ИТОГО: ~45 KB JS
+
+Реальность без Islands (Next.js по умолчанию):
+Вся страница = ~300 KB JS для гидратации
+```
+
+## Решение: Острова (Islands)
+
+С Islands Architecture только **интерактивные компоненты** получают JavaScript:
+
+```
+┌─────────────────────────────┐
+│   Шапка (Nav)    ░░░░░░░░░░ │  ← Чистый HTML
+├─────────────────────────────┤
+│   Заголовок      ░░░░░░░░░░ │  ← Чистый HTML
+│   Текст статьи   ░░░░░░░░░░ │  ← Чистый HTML
+├─────────────────────────────┤
+│ ┌─ 🏝️ ОСТРОВ ─────────────┐ │
+│ │  Форма подписки          │ │  ← ~15 KB JS
+│ └─────────────────────────┘ │
+├─────────────────────────────┤
+│ ┌─ 🏝️ ОСТРОВ ─────────────┐ │
+│ │  Комментарии             │ │  ← ~30 KB JS
+│ └─────────────────────────┘ │
+├─────────────────────────────┤
+│   Футер          ░░░░░░░░░░ │  ← Чистый HTML
+└─────────────────────────────┘
+                         ИТОГО: ~45 KB JS (только острова!)
+```
+
+**Результат**: браузер загружает только тот JavaScript, который действительно нужен.
+
+## Директивы клиентской гидратации
+
+Astro управляет гидратацией через **client-директивы**:
+
+```astro
+---
+import Counter from '../components/Counter.jsx';
+import SearchBar from '../components/SearchBar.jsx';
+import HeavyChart from '../components/HeavyChart.jsx';
+import Tooltip from '../components/Tooltip.jsx';
+import MobileMenu from '../components/MobileMenu.jsx';
+---
+
+<!-- Гидратировать сразу при загрузке страницы -->
+<SearchBar client:load />
+
+<!-- Гидратировать когда браузер не занят (idle) -->
+<!-- Отлично для некритичных компонентов -->
+<Counter client:idle />
+
+<!-- Гидратировать когда компонент виден во viewport -->
+<!-- Идеально для контента ниже fold -->
+<HeavyChart client:visible />
+
+<!-- Гидратировать при совпадении media query -->
+<MobileMenu client:media="(max-width: 640px)" />
+
+<!-- Гидратировать только на клиенте (без SSR) -->
+<SomeDynamicWidget client:only="react" />
+
+<!-- Статичный компонент — НИКАКОГО JavaScript -->
+<Tooltip />
+```
+
+### Когда использовать каждую директиву
+
+| Директива | Когда применять |
+|-----------|----------------|
+| `client:load` | Критически важная интерактивность (навигация, форма авторизации) |
+| `client:idle` | Некритичные виджеты (счётчик, лайки) |
+| `client:visible` | Контент ниже fold (комментарии, heavy charts) |
+| `client:media` | Компоненты для конкретных экранов |
+| `client:only` | Компоненты без серверного рендеринга |
+| *(без директивы)* | Полностью статичный HTML, 0 KB JS |
+
+## Острова с разными фреймворками
+
+Astro позволяет смешивать фреймворки — каждый остров может использовать свой:
+
+```astro
+---
+import ReactSearch from './SearchBar.jsx';        // React
+import VueComments from './Comments.vue';          // Vue
+import SvelteCounter from './Counter.svelte';      // Svelte
+import StaticCard from './Card.astro';             // Astro (без JS)
+---
+
+<StaticCard />                                     <!-- 0 KB JS -->
+<ReactSearch client:load />                        <!-- React JS -->
+<VueComments client:visible />                     <!-- Vue JS -->
+<SvelteCounter client:idle />                      <!-- Svelte JS -->
+```
+
+Каждый остров — это **изолированный микроприложение**, независимое от других.
+
+## Практический пример: страница блога
+
+```astro
+---
+// src/pages/blog/[slug].astro
+import { getCollection } from 'astro:content';
+import Layout from '../../layouts/BlogLayout.astro';
+import LikeButton from '../../components/LikeButton.jsx';   // React
+import Comments from '../../components/Comments.vue';       // Vue
+import Newsletter from '../../components/Newsletter.svelte'; // Svelte
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog');
+  return posts.map(post => ({ params: { slug: post.slug }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content } = await post.render();
+---
+
+<Layout title={post.data.title}>
+  <!-- Статичная часть — 0 KB JS -->
+  <h1>{post.data.title}</h1>
+  <time>{post.data.date.toLocaleDateString()}</time>
+
+  <!-- Markdown контент — 0 KB JS -->
+  <Content />
+
+  <!-- Острова — JS только здесь -->
+  <LikeButton postId={post.id} client:visible />
+  <Newsletter client:idle />
+  <Comments postSlug={post.slug} client:visible />
+</Layout>
+```
+
+## Производительность: реальные цифры
+
+Сравнение страницы блога на разных фреймворках:
+
+| Метрика | Gatsby | Next.js | Astro (Islands) |
+|---------|--------|---------|-----------------|
+| JS на клиенте | ~300 KB | ~180 KB | ~5-50 KB |
+| Time to Interactive | 4.2s | 2.8s | 0.8s |
+| Lighthouse Score | 75-85 | 80-90 | 95-100 |
+| LCP | 3.1s | 2.2s | 0.9s |
+
+## Интерактивный визуализатор островов
+
+Посмотрите как работает Islands Architecture. Переключайте компоненты между "статичным" и "островом":
+
+<Playground
+  template="react"
+  files={{
+    'App.tsx': `import { useState } from 'react';
+
+const initialSections = [
+  { id: 'nav', name: 'Навигация', zone: 'header', desc: 'Шапка сайта с навигационными ссылками', baseKB: 0, islandKB: 8, canToggle: true, isIsland: false, icon: '🧭' },
+  { id: 'hero', name: 'Hero-секция', zone: 'main', desc: 'Заголовок и описание страницы', baseKB: 0, islandKB: 12, canToggle: true, isIsland: false, icon: '🌟' },
+  { id: 'article', name: 'Текст статьи', zone: 'main', desc: 'Основной контент — всегда статичный', baseKB: 0, islandKB: 0, canToggle: false, isIsland: false, icon: '📄' },
+  { id: 'search', name: 'Поиск', zone: 'main', desc: 'Строка поиска с автодополнением', baseKB: 0, islandKB: 18, canToggle: true, isIsland: true, icon: '🔍' },
+  { id: 'counter', name: 'Счётчик лайков', zone: 'main', desc: 'Интерактивный счётчик лайков', baseKB: 0, islandKB: 6, canToggle: true, isIsland: true, icon: '❤️' },
+  { id: 'chart', name: 'График статистики', zone: 'main', desc: 'Визуализация данных', baseKB: 0, islandKB: 45, canToggle: true, isIsland: false, icon: '📊' },
+  { id: 'comments', name: 'Комментарии', zone: 'main', desc: 'Система комментариев', baseKB: 0, islandKB: 32, canToggle: true, isIsland: true, icon: '💬' },
+  { id: 'newsletter', name: 'Подписка', zone: 'main', desc: 'Форма подписки на рассылку', baseKB: 0, islandKB: 14, canToggle: true, isIsland: false, icon: '📧' },
+  { id: 'footer', name: 'Футер', zone: 'footer', desc: 'Подвал сайта со ссылками', baseKB: 0, islandKB: 0, canToggle: false, isIsland: false, icon: '📌' },
+];
+
+const directives = ['client:load', 'client:idle', 'client:visible', 'client:media'];
+
+export default function App() {
+  const [sections, setSections] = useState(initialSections);
+  const [hoveredId, setHoveredId] = useState(null);
+  const [showComparison, setShowComparison] = useState(false);
+
+  function toggle(id) {
+    setSections(prev => prev.map(s =>
+      s.id === id && s.canToggle ? { ...s, isIsland: !s.isIsland } : s
+    ));
+  }
+
+  const totalIslandKB = sections.filter(s => s.isIsland).reduce((sum, s) => sum + s.islandKB, 0);
+  const maxPossibleKB = sections.reduce((sum, s) => sum + s.islandKB, 0);
+  const traditionalKB = 280;
+  const savingPercent = Math.round((1 - totalIslandKB / traditionalKB) * 100);
+
+  const islandsCount = sections.filter(s => s.isIsland).length;
+  const staticCount = sections.filter(s => !s.isIsland).length;
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '20px', fontFamily: 'system-ui, sans-serif' }}>
+      <h2 style={{ color: '#e2e8f0', fontSize: '18px', margin: '0 0 4px', textAlign: 'center' }}>
+        🏝️ Визуализатор Islands Architecture
+      </h2>
+      <p style={{ color: '#64748b', fontSize: '12px', textAlign: 'center', margin: '0 0 16px' }}>
+        Переключайте компоненты между статичным и островом
+      </p>
+
+      <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginBottom: '16px' }}>
+        <button
+          onClick={() => setShowComparison(false)}
+          style={{
+            padding: '6px 14px', borderRadius: '16px',
+            border: '1px solid ' + (!showComparison ? '#FF5D01' : '#334155'),
+            background: !showComparison ? '#FF5D0120' : '#1e293b',
+            color: !showComparison ? '#FF5D01' : '#64748b',
+            cursor: 'pointer', fontSize: '12px', fontWeight: 600,
+          }}
+        >
+          🗺️ Страница
+        </button>
+        <button
+          onClick={() => setShowComparison(true)}
+          style={{
+            padding: '6px 14px', borderRadius: '16px',
+            border: '1px solid ' + (showComparison ? '#FF5D01' : '#334155'),
+            background: showComparison ? '#FF5D0120' : '#1e293b',
+            color: showComparison ? '#FF5D01' : '#64748b',
+            cursor: 'pointer', fontSize: '12px', fontWeight: 600,
+          }}
+        >
+          📊 Сравнение
+        </button>
+      </div>
+
+      {!showComparison && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 260px', gap: '14px', maxWidth: '760px', margin: '0 auto' }}>
+          <div>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '12px', overflow: 'hidden' }}>
+              <div style={{ background: '#FF5D0115', borderBottom: '1px solid #FF5D0130', padding: '8px 14px' }}>
+                <span style={{ color: '#FF5D01', fontSize: '11px', fontWeight: 700 }}>🌐 Страница блога</span>
+              </div>
+
+              {sections.map(section => {
+                const isHovered = hoveredId === section.id;
+                return (
+                  <div
+                    key={section.id}
+                    onMouseEnter={() => setHoveredId(section.id)}
+                    onMouseLeave={() => setHoveredId(null)}
+                    style={{
+                      padding: '10px 14px',
+                      borderBottom: '1px solid #1e293b',
+                      background: section.isIsland
+                        ? (isHovered ? '#FF5D0120' : '#FF5D0110')
+                        : (isHovered ? '#1e293b' : 'transparent'),
+                      transition: 'background 0.15s',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      cursor: section.canToggle ? 'pointer' : 'default',
+                    }}
+                    onClick={() => section.canToggle && toggle(section.id)}
+                  >
+                    <span style={{ fontSize: '16px' }}>{section.icon}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ color: section.isIsland ? '#FF5D01' : '#e2e8f0', fontSize: '13px', fontWeight: 600 }}>
+                        {section.name}
+                      </div>
+                      {section.isIsland && (
+                        <div style={{ color: '#FF5D01', fontSize: '10px', opacity: 0.7 }}>
+                          🏝️ Остров · {section.islandKB} KB JS
+                        </div>
+                      )}
+                    </div>
+                    {section.isIsland && (
+                      <div style={{ background: '#FF5D01', borderRadius: '6px', padding: '2px 8px' }}>
+                        <span style={{ color: '#fff', fontSize: '10px', fontWeight: 700 }}>🏝️ Island</span>
+                      </div>
+                    )}
+                    {!section.isIsland && (
+                      <div style={{ background: '#334155', borderRadius: '6px', padding: '2px 8px' }}>
+                        <span style={{ color: '#64748b', fontSize: '10px', fontWeight: 700 }}>HTML</span>
+                      </div>
+                    )}
+                    {section.canToggle && (
+                      <div style={{
+                        width: '32px', height: '18px', borderRadius: '9px',
+                        background: section.isIsland ? '#FF5D01' : '#334155',
+                        position: 'relative', transition: 'background 0.2s', flexShrink: 0,
+                      }}>
+                        <div style={{
+                          width: '14px', height: '14px', borderRadius: '50%',
+                          background: '#fff', position: 'absolute',
+                          top: '2px', left: section.isIsland ? '16px' : '2px',
+                          transition: 'left 0.2s',
+                        }}></div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '12px', padding: '16px' }}>
+              <div style={{ color: '#64748b', fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '12px' }}>
+                JS бандл
+              </div>
+
+              <div style={{ textAlign: 'center', marginBottom: '14px' }}>
+                <div style={{ fontSize: '32px', fontWeight: 800, color: totalIslandKB < 50 ? '#10b981' : totalIslandKB < 100 ? '#f59e0b' : '#f87171' }}>
+                  {totalIslandKB} KB
+                </div>
+                <div style={{ color: '#64748b', fontSize: '12px' }}>JavaScript отправлен в браузер</div>
+              </div>
+
+              <div style={{ background: '#0f172a', borderRadius: '8px', padding: '3px', marginBottom: '10px' }}>
+                <div style={{
+                  height: '8px', borderRadius: '6px',
+                  background: totalIslandKB < 50 ? '#10b981' : totalIslandKB < 100 ? '#f59e0b' : '#f87171',
+                  width: Math.min((totalIslandKB / 280) * 100, 100) + '%',
+                  transition: 'all 0.3s ease',
+                  minWidth: totalIslandKB > 0 ? '4px' : '0',
+                }}></div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                <div style={{ background: '#0f172a', borderRadius: '8px', padding: '10px', textAlign: 'center' }}>
+                  <div style={{ color: '#FF5D01', fontSize: '20px', fontWeight: 700 }}>{islandsCount}</div>
+                  <div style={{ color: '#64748b', fontSize: '10px' }}>Островов 🏝️</div>
+                </div>
+                <div style={{ background: '#0f172a', borderRadius: '8px', padding: '10px', textAlign: 'center' }}>
+                  <div style={{ color: '#64748b', fontSize: '20px', fontWeight: 700 }}>{staticCount}</div>
+                  <div style={{ color: '#64748b', fontSize: '10px' }}>Статичных</div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ background: '#10b98115', border: '1px solid #10b98130', borderRadius: '12px', padding: '14px' }}>
+              <div style={{ color: '#10b981', fontSize: '11px', fontWeight: 700, marginBottom: '6px' }}>
+                💚 Экономия vs традиционный
+              </div>
+              <div style={{ color: '#10b981', fontSize: '24px', fontWeight: 800 }}>
+                {savingPercent}%
+              </div>
+              <div style={{ color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
+                {traditionalKB} KB → {totalIslandKB} KB
+              </div>
+            </div>
+
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '12px', padding: '12px' }}>
+              <div style={{ color: '#64748b', fontSize: '10px', fontWeight: 700, marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Директивы
+              </div>
+              {directives.map(d => (
+                <div key={d} style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '5px' }}>
+                  <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#FF5D01', flexShrink: 0 }}></div>
+                  <code style={{ color: '#FF5D01', fontSize: '11px' }}>{d}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showComparison && (
+        <div style={{ maxWidth: '680px', margin: '0 auto' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '16px' }}>
+            {[
+              { name: 'Gatsby', kb: 300, color: '#663399', score: 72 },
+              { name: 'Next.js', kb: 180, color: '#ffffff', score: 82 },
+              { name: 'Astro', kb: totalIslandKB, color: '#FF5D01', score: Math.min(100, Math.round(95 + (50 - Math.min(50, totalIslandKB)) / 10)) },
+            ].map(fw => (
+              <div key={fw.name} style={{ background: '#1e293b', border: '1px solid ' + fw.color + '40', borderRadius: '12px', padding: '14px', textAlign: 'center' }}>
+                <div style={{ color: fw.color, fontSize: '16px', fontWeight: 700, marginBottom: '10px' }}>{fw.name}</div>
+                <div style={{ marginBottom: '10px' }}>
+                  <div style={{ color: '#64748b', fontSize: '10px', marginBottom: '3px' }}>JS бандл</div>
+                  <div style={{ fontSize: '20px', fontWeight: 800, color: fw.kb < 50 ? '#10b981' : fw.kb < 150 ? '#f59e0b' : '#f87171' }}>
+                    {fw.kb} KB
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#64748b', fontSize: '10px', marginBottom: '3px' }}>Lighthouse</div>
+                  <div style={{ fontSize: '20px', fontWeight: 800, color: fw.score >= 90 ? '#10b981' : fw.score >= 75 ? '#f59e0b' : '#f87171' }}>
+                    {fw.score}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '12px', padding: '16px' }}>
+            <div style={{ color: '#e2e8f0', fontSize: '13px', fontWeight: 600, marginBottom: '12px', textAlign: 'center' }}>
+              Размер JS бандла (меньше = лучше)
+            </div>
+            {[
+              { name: 'Gatsby', kb: 300, color: '#663399' },
+              { name: 'Next.js', kb: 180, color: '#94a3b8' },
+              { name: 'Astro (ваша конфигурация)', kb: totalIslandKB, color: '#FF5D01' },
+            ].map(fw => (
+              <div key={fw.name} style={{ marginBottom: '10px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span style={{ color: fw.color, fontSize: '12px', fontWeight: 600 }}>{fw.name}</span>
+                  <span style={{ color: '#64748b', fontSize: '12px' }}>{fw.kb} KB</span>
+                </div>
+                <div style={{ background: '#0f172a', borderRadius: '4px', padding: '2px' }}>
+                  <div style={{
+                    height: '10px', borderRadius: '3px',
+                    background: fw.color,
+                    width: Math.max((fw.kb / 300) * 100, 1) + '%',
+                    transition: 'width 0.5s ease',
+                  }}></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+`,
+  }}
+/>

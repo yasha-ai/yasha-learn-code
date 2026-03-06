@@ -1,0 +1,394 @@
+import { Playground } from '../../components/Playground'
+
+# Server-Side Rendering (SSR)
+
+По умолчанию Astro генерирует статические HTML-файлы при сборке. Но иногда нужны **живые данные**: персонализированный контент, аутентификация, формы. Для этого Astro поддерживает SSR — рендеринг страниц на сервере по запросу.
+
+Думай о разнице так: статика — это книга, напечатанная один раз; SSR — это диктор, который читает текст заново для каждого слушателя.
+
+---
+
+## Включение SSR
+
+```ts
+// astro.config.mjs
+import { defineConfig } from 'astro/config';
+import node from '@astrojs/node';
+
+export default defineConfig({
+  output: 'server',   // 'static' | 'server' | 'hybrid'
+  adapter: node({
+    mode: 'standalone',
+  }),
+});
+```
+
+Режимы:
+- `'static'` — всё статично (по умолчанию)
+- `'server'` — всё через SSR, кроме явно помеченных `export const prerender = true`
+- `'hybrid'` — всё статично, кроме явно помеченных `export const prerender = false`
+
+---
+
+## Установка адаптера
+
+```bash
+# Vercel
+npx astro add vercel
+
+# Netlify
+npx astro add netlify
+
+# Node.js
+npx astro add node
+
+# Cloudflare Workers
+npx astro add cloudflare
+```
+
+Каждый адаптер настраивает вывод проекта под конкретную платформу деплоя.
+
+---
+
+## Объект Astro.request
+
+```astro
+---
+// Доступен только в SSR-режиме (output: 'server')
+const { request, url, cookies, redirect } = Astro;
+
+// Заголовки запроса
+const userAgent = request.headers.get('user-agent');
+const lang = request.headers.get('accept-language');
+
+// URL параметры
+const page = url.searchParams.get('page') ?? '1';
+
+// IP клиента (через заголовок прокси)
+const ip = request.headers.get('x-forwarded-for');
+
+// Метод запроса
+if (request.method === 'POST') {
+  const data = await request.json();
+}
+---
+```
+
+---
+
+## Cookies и сессии
+
+```astro
+---
+import { defineMiddleware } from 'astro:middleware';
+
+// Чтение cookie
+const theme = Astro.cookies.get('theme')?.value ?? 'dark';
+const sessionToken = Astro.cookies.get('session')?.value;
+
+// Запись cookie
+Astro.cookies.set('theme', 'light', {
+  httpOnly: false,
+  secure: true,
+  sameSite: 'strict',
+  maxAge: 60 * 60 * 24 * 30, // 30 дней
+  path: '/',
+});
+
+// Удаление cookie
+Astro.cookies.delete('session', { path: '/' });
+---
+```
+
+---
+
+## Аутентификация с SSR
+
+```astro
+---
+// src/pages/dashboard.astro
+const session = Astro.cookies.get('session')?.value;
+
+if (!session) {
+  return Astro.redirect('/login?from=/dashboard', 302);
+}
+
+const user = await validateSession(session);
+if (!user) {
+  Astro.cookies.delete('session');
+  return Astro.redirect('/login', 302);
+}
+---
+
+<h1>Привет, {user.name}!</h1>
+```
+
+---
+
+## Streaming responses
+
+```astro
+---
+// Отправляем HTML частями по мере готовности
+import { renderToReadableStream } from 'react-dom/server';
+---
+
+<html>
+  <body>
+    <h1>Загружаем данные...</h1>
+    <!-- Astro автоматически стримит контент ниже -->
+    {async function* () {
+      const posts = await slowDatabase.getPosts();
+      for (const post of posts) {
+        yield <article><h2>{post.title}</h2></article>;
+      }
+    }()}
+  </body>
+</html>
+```
+
+---
+
+## Интерактивная практика
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useRef, useEffect } from "react";
+
+const BG = "#0f172a";
+const ASTRO = "#FF5D01";
+const CARD = "#1e293b";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const GREEN = "#22c55e";
+const BLUE = "#38bdf8";
+const YELLOW = "#f59e0b";
+const RED = "#f87171";
+const PURPLE = "#a78bfa";
+
+function formatTime(ms) {
+  return ms < 1000 ? \`\${ms}ms\` : \`\${(ms / 1000).toFixed(1)}s\`;
+}
+
+const ADAPTERS = [
+  { id: "vercel", name: "Vercel", icon: "▲", color: "#fff", edge: true },
+  { id: "netlify", name: "Netlify", icon: "◆", color: "#00ad9f", edge: false },
+  { id: "node", name: "Node.js", icon: "⬡", color: GREEN, edge: false },
+  { id: "cloudflare", name: "Cloudflare", icon: "☁️", color: YELLOW, edge: true },
+];
+
+function SSGPanel({ running, done, buildTime, cachedUntil }) {
+  return (
+    <div style={{ background: CARD, borderRadius: 12, padding: 20, height: "100%" }}>
+      <div style={{ fontWeight: 700, color: GREEN, fontSize: 16, marginBottom: 4 }}>🏗️ SSG — Static</div>
+      <div style={{ fontSize: 12, color: MUTED, marginBottom: 16 }}>output: 'static' — генерация при сборке</div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: MUTED, marginBottom: 8 }}>Жизненный цикл:</div>
+        {[
+          { label: "npm run build", time: 0, icon: "🔨" },
+          { label: "Запрос к API (1 раз)", time: 200, icon: "📡" },
+          { label: "HTML сгенерирован", time: 800, icon: "📄" },
+          { label: "Деплой на CDN", time: 900, icon: "🚀" },
+          { label: "Пользователь — мгновенно!", time: 920, icon: "⚡" },
+        ].map((step, i) => (
+          <div key={i} style={{
+            display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
+            opacity: done ? 1 : running && buildTime >= step.time ? 1 : 0.25,
+            transition: "opacity 0.4s",
+          }}>
+            <span style={{ fontSize: 16 }}>{step.icon}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, color: TEXT }}>{step.label}</div>
+              <div style={{ fontSize: 10, color: MUTED }}>{step.time}ms с начала билда</div>
+            </div>
+            {(done || (running && buildTime >= step.time)) && (
+              <span style={{ color: GREEN, fontSize: 14 }}>✓</span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {done && (
+        <div style={{ padding: "10px 14px", background: GREEN + "11", border: \`1px solid \${GREEN}33\`, borderRadius: 8 }}>
+          <div style={{ fontSize: 13, color: GREEN, fontWeight: 700 }}>✅ Страница закэширована</div>
+          <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>
+            Кэш истекает: <span style={{ color: YELLOW }}>{cachedUntil}</span>
+          </div>
+          <div style={{ fontSize: 12, color: MUTED }}>TTFB: <span style={{ color: GREEN, fontWeight: 700 }}>~8ms</span> (CDN edge)</div>
+          <div style={{ fontSize: 12, color: MUTED }}>Last-Modified: <span style={{ color: BLUE }}>время сборки</span></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SSRPanel({ running, done, reqTime, adapter }) {
+  const a = ADAPTERS.find(a => a.id === adapter);
+  return (
+    <div style={{ background: CARD, borderRadius: 12, padding: 20, height: "100%" }}>
+      <div style={{ fontWeight: 700, color: BLUE, fontSize: 16, marginBottom: 4 }}>⚡ SSR — Dynamic</div>
+      <div style={{ fontSize: 12, color: MUTED, marginBottom: 16 }}>output: 'server' — рендер по запросу</div>
+
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: MUTED, marginBottom: 8 }}>Жизненный цикл (каждый запрос):</div>
+        {[
+          { label: "Пользователь открыл страницу", time: 0, icon: "👤" },
+          { label: "Сервер получил запрос", time: 20, icon: "🖥️" },
+          { label: "Проверка cookies/auth", time: 50, icon: "🔐" },
+          { label: "fetch к API / DB запрос", time: 150, icon: "📡" },
+          { label: "Render HTML на сервере", time: 280, icon: "⚙️" },
+          { label: "Ответ клиенту", time: 320, icon: "📤" },
+        ].map((step, i) => (
+          <div key={i} style={{
+            display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
+            opacity: done ? 1 : running && reqTime >= step.time ? 1 : 0.25,
+            transition: "opacity 0.4s",
+          }}>
+            <span style={{ fontSize: 16 }}>{step.icon}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, color: TEXT }}>{step.label}</div>
+              <div style={{ fontSize: 10, color: MUTED }}>{step.time}ms с запроса</div>
+            </div>
+            {(done || (running && reqTime >= step.time)) && (
+              <span style={{ color: BLUE, fontSize: 14 }}>✓</span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {done && (
+        <div style={{ padding: "10px 14px", background: BLUE + "11", border: \`1px solid \${BLUE}33\`, borderRadius: 8 }}>
+          <div style={{ fontSize: 13, color: BLUE, fontWeight: 700 }}>✅ Свежий HTML сгенерирован</div>
+          <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>
+            Last-Updated: <span style={{ color: YELLOW }}>{new Date().toLocaleTimeString()}</span>
+          </div>
+          <div style={{ fontSize: 12, color: MUTED }}>TTFB: <span style={{ color: YELLOW, fontWeight: 700 }}>~320ms</span></div>
+          <div style={{ fontSize: 12, color: MUTED }}>Cache-Control: <span style={{ color: RED }}>no-store</span></div>
+          {a?.edge && <div style={{ fontSize: 12, color: PURPLE, marginTop: 2 }}>🌍 Edge runtime поддерживается</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [adapter, setAdapter] = useState("vercel");
+  const [running, setRunning] = useState(false);
+  const [done, setDone] = useState(false);
+  const [buildTime, setBuildTime] = useState(0);
+  const [reqTime, setReqTime] = useState(0);
+  const [cachedUntil] = useState(() => {
+    const d = new Date();
+    d.setHours(d.getHours() + 24);
+    return d.toLocaleString();
+  });
+  const timerRef = useRef([]);
+
+  const clearTimers = () => {
+    timerRef.current.forEach(t => clearInterval(t) || clearTimeout(t));
+    timerRef.current = [];
+  };
+
+  const simulate = () => {
+    clearTimers();
+    setDone(false);
+    setBuildTime(0);
+    setReqTime(0);
+    setRunning(true);
+
+    let bt = 0, rt = 0;
+    const tick = setInterval(() => {
+      bt = Math.min(bt + 40, 1000);
+      rt = Math.min(rt + 20, 380);
+      setBuildTime(bt);
+      setReqTime(rt);
+      if (bt >= 1000 && rt >= 380) {
+        clearInterval(tick);
+        setRunning(false);
+        setDone(true);
+      }
+    }, 40);
+    timerRef.current.push(tick);
+  };
+
+  const a = ADAPTERS.find(x => x.id === adapter);
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+        <h2 style={{ color: ASTRO, marginBottom: 4, fontSize: 22 }}>🔄 SSR vs SSG Comparison</h2>
+        <p style={{ color: MUTED, marginBottom: 20, fontSize: 14 }}>Сравнение режимов рендеринга в реальном времени</p>
+
+        {/* Adapter selector */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 16, marginBottom: 20 }}>
+          <div style={{ fontSize: 13, color: MUTED, marginBottom: 10 }}>Адаптер деплоя:</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {ADAPTERS.map(ad => (
+              <button key={ad.id} onClick={() => setAdapter(ad.id)} style={{
+                padding: "8px 14px", borderRadius: 8, border: "none", cursor: "pointer",
+                background: adapter === ad.id ? ad.color + "22" : "#334155",
+                color: adapter === ad.id ? ad.color : MUTED,
+                fontWeight: adapter === ad.id ? 700 : 400,
+                fontSize: 13, border: adapter === ad.id ? \`1px solid \${ad.color}44\` : "1px solid transparent",
+                transition: "all 0.2s",
+              }}>
+                {ad.icon} {ad.name}
+                {ad.edge && <span style={{ fontSize: 10, marginLeft: 4, color: PURPLE }}>edge</span>}
+              </button>
+            ))}
+          </div>
+          <div style={{ marginTop: 12, padding: "8px 12px", background: "#ffffff06", borderRadius: 8, fontFamily: "monospace", fontSize: 12 }}>
+            <span style={{ color: MUTED }}>npx astro add </span>
+            <span style={{ color: a?.color }}>{adapter}</span>
+          </div>
+        </div>
+
+        {/* Main panels */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 20 }}>
+          <SSGPanel running={running} done={done} buildTime={buildTime} cachedUntil={cachedUntil} />
+          <SSRPanel running={running} done={done} reqTime={reqTime} adapter={adapter} />
+        </div>
+
+        <button onClick={simulate} disabled={running} style={{
+          width: "100%", padding: "12px", background: running ? "#334155" : ASTRO,
+          border: "none", borderRadius: 10, color: "#fff", cursor: running ? "not-allowed" : "pointer",
+          fontWeight: 700, fontSize: 16, transition: "all 0.2s", marginBottom: 20,
+        }}>
+          {running ? "⏳ Симуляция..." : done ? "🔄 Запустить снова" : "▶ Симулировать оба режима"}
+        </button>
+
+        {/* Comparison table */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+          <div style={{ fontWeight: 600, color: ASTRO, marginBottom: 14 }}>📊 Сравнение характеристик</div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", padding: "6px 10px", color: MUTED, fontWeight: 600 }}>Характеристика</th>
+                <th style={{ textAlign: "center", padding: "6px 10px", color: GREEN, fontWeight: 700 }}>🏗️ SSG</th>
+                <th style={{ textAlign: "center", padding: "6px 10px", color: BLUE, fontWeight: 700 }}>⚡ SSR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                ["TTFB", "~8ms (CDN)", "~200-400ms"],
+                ["Свежесть данных", "При каждом билде", "Каждый запрос"],
+                ["Нагрузка на сервер", "Нет", "Высокая"],
+                ["Персонализация", "❌", "✅"],
+                ["Cookies/Auth", "❌", "✅"],
+                ["SEO", "✅ Отлично", "✅ Отлично"],
+                ["Стоимость хостинга", "Бесплатно (CDN)", "По запросам"],
+                ["A/B тестирование", "❌", "✅"],
+              ].map(([feature, ssg, ssr], i) => (
+                <tr key={i} style={{ background: i % 2 === 0 ? "#ffffff04" : "transparent" }}>
+                  <td style={{ padding: "8px 10px", color: MUTED }}>{feature}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "center", color: ssg.includes("✅") ? GREEN : ssg.includes("❌") ? RED : TEXT }}>{ssg}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "center", color: ssr.includes("✅") ? GREEN : ssr.includes("❌") ? RED : TEXT }}>{ssr}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
