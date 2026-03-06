@@ -1,0 +1,394 @@
+import { Playground } from '../../components/Playground'
+
+# Module Federation — микрофронтенды с Webpack 5
+
+**Module Federation** — революционная возможность Webpack 5, которая позволяет нескольким независимым приложениям (микрофронтендам) динамически загружать код друг от друга во время выполнения. Это фундаментально меняет архитектуру крупных frontend-приложений.
+
+## Проблема, которую решает Module Federation
+
+Традиционный монолит vs Микрофронтенды:
+
+```
+Монолит:                      Микрофронтенды с MF:
+┌─────────────────────────┐   ┌─────────┐  ┌──────────┐  ┌──────────┐
+│      Огромный монорепо  │   │  Shell  │  │  Header  │  │ Checkout │
+│  ┌─────┐┌──────┐┌──────┐│  │  App    │  │  MFE     │  │  MFE     │
+│  │Team1││Team2 ││Team3 ││  │         │  │          │  │          │
+│  └─────┘└──────┘└──────┘│  │ host    │  │ remote   │  │ remote   │
+└─────────────────────────┘   └────┬────┘  └────┬─────┘  └────┬─────┘
+ Один деплой для всех              └─────────────┴─────────────┘
+                                         Независимые деплои!
+```
+
+## Ключевые концепции
+
+- **Host** (Shell) — главное приложение, загружает ремоуты
+- **Remote** — приложение, экспортирующее компоненты/модули
+- **Shared** — общие зависимости (React, Redux) — загружаются один раз
+
+## Конфигурация Remote (дочернее приложение)
+
+```js
+// webpack.config.js в remote приложении (header-app)
+const { ModuleFederationPlugin } = require('webpack').container;
+
+module.exports = {
+  output: {
+    publicPath: 'http://localhost:3001/', // Важно! Абсолютный URL
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'headerApp',           // Уникальное имя remote
+      filename: 'remoteEntry.js', // Точка входа для host
+
+      // Что экспортируем
+      exposes: {
+        './Header': './src/components/Header',
+        './Navigation': './src/components/Navigation',
+        './UserMenu': './src/components/UserMenu',
+      },
+
+      // Общие зависимости
+      shared: {
+        react: { singleton: true, requiredVersion: '^18.0.0' },
+        'react-dom': { singleton: true, requiredVersion: '^18.0.0' },
+      },
+    }),
+  ],
+};
+```
+
+## Конфигурация Host (главное приложение)
+
+```js
+// webpack.config.js в host приложении (shell)
+const { ModuleFederationPlugin } = require('webpack').container;
+
+module.exports = {
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'shell',
+
+      // Откуда загружать ремоуты
+      remotes: {
+        headerApp: 'headerApp@http://localhost:3001/remoteEntry.js',
+        checkoutApp: 'checkoutApp@http://localhost:3002/remoteEntry.js',
+        productApp: 'productApp@http://localhost:3003/remoteEntry.js',
+      },
+
+      shared: {
+        react: { singleton: true, requiredVersion: '^18.0.0' },
+        'react-dom': { singleton: true, requiredVersion: '^18.0.0' },
+      },
+    }),
+  ],
+};
+```
+
+## Использование в коде Host
+
+```jsx
+import { lazy, Suspense } from 'react';
+
+// Динамический импорт из remote
+const Header = lazy(() => import('headerApp/Header'));
+const Checkout = lazy(() => import('checkoutApp/Checkout'));
+
+function App() {
+  return (
+    <div>
+      <Suspense fallback={<div>Loading header...</div>}>
+        <Header />
+      </Suspense>
+
+      <main>
+        <Suspense fallback={<div>Loading checkout...</div>}>
+          <Checkout />
+        </Suspense>
+      </main>
+    </div>
+  );
+}
+```
+
+## TypeScript поддержка
+
+```bash
+npm install --save-dev @module-federation/typescript
+```
+
+```js
+// В конфиге webpack remote:
+plugins: [
+  new FederatedTypesPlugin({
+    disableTypeCompilation: false,
+  }),
+]
+```
+
+## Динамические ремоуты
+
+Для runtime конфигурации (URL из API):
+
+```js
+// Динамическая загрузка remote
+async function loadRemoteModule(remoteUrl, scope, module) {
+  await __webpack_init_sharing__('default');
+  const container = window[scope];
+  await container.init(__webpack_share_scopes__.default);
+  const factory = await window[scope].get(module);
+  return factory();
+}
+
+// Использование:
+const { Header } = await loadRemoteModule(
+  'http://dynamic-host.com/remoteEntry.js',
+  'dynamicApp',
+  './Header'
+);
+```
+
+Ниже — интерактивная визуализация архитектуры Module Federation с host и remote приложениями.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const PURPLE = '#a78bfa';
+const PINK = '#f472b6';
+
+interface RemoteApp {
+  id: string;
+  name: string;
+  port: number;
+  color: string;
+  team: string;
+  exposes: { key: string; path: string; description: string }[];
+  deps: string[];
+}
+
+const REMOTES: RemoteApp[] = [
+  {
+    id: 'header',
+    name: 'headerApp',
+    port: 3001,
+    color: WEBPACK_COLOR,
+    team: 'Team UI',
+    exposes: [
+      { key: './Header', path: './src/Header', description: 'Главный заголовок сайта' },
+      { key: './Navigation', path: './src/Navigation', description: 'Навигационное меню' },
+      { key: './UserMenu', path: './src/UserMenu', description: 'Меню пользователя' },
+    ],
+    deps: ['react', 'react-dom'],
+  },
+  {
+    id: 'product',
+    name: 'productApp',
+    port: 3002,
+    color: SUCCESS,
+    team: 'Team Catalog',
+    exposes: [
+      { key: './ProductCard', path: './src/ProductCard', description: 'Карточка товара' },
+      { key: './ProductList', path: './src/ProductList', description: 'Список товаров' },
+      { key: './SearchBar', path: './src/SearchBar', description: 'Поиск по каталогу' },
+    ],
+    deps: ['react', 'react-dom', 'redux'],
+  },
+  {
+    id: 'checkout',
+    name: 'checkoutApp',
+    port: 3003,
+    color: ACCENT,
+    team: 'Team Commerce',
+    exposes: [
+      { key: './Cart', path: './src/Cart', description: 'Корзина покупок' },
+      { key: './Checkout', path: './src/Checkout', description: 'Форма оформления заказа' },
+      { key: './Payment', path: './src/Payment', description: 'Компонент оплаты' },
+    ],
+    deps: ['react', 'react-dom', 'stripe'],
+  },
+  {
+    id: 'auth',
+    name: 'authApp',
+    port: 3004,
+    color: PURPLE,
+    team: 'Team Platform',
+    exposes: [
+      { key: './LoginForm', path: './src/LoginForm', description: 'Форма авторизации' },
+      { key: './useAuth', path: './src/hooks/useAuth', description: 'Hook авторизации' },
+      { key: './AuthProvider', path: './src/AuthProvider', description: 'React контекст авторизации' },
+    ],
+    deps: ['react', 'react-dom', 'jwt-decode'],
+  },
+];
+
+const SHARED_DEPS = ['react', 'react-dom', 'redux', 'react-router-dom'];
+
+function generateRemoteConfig(app: RemoteApp): string {
+  return [
+    \`// webpack.config.js (\${app.name})\`,
+    'new ModuleFederationPlugin({',
+    \`  name: '\${app.name}',\`,
+    "  filename: 'remoteEntry.js',",
+    '  exposes: {',
+    ...app.exposes.map(e => \`    '\${e.key}': '\${e.path}',\`),
+    '  },',
+    '  shared: {',
+    ...app.deps.filter(d => SHARED_DEPS.includes(d)).map(d => \`    \${d}: { singleton: true },\`),
+    '  },',
+    '})',
+  ].join('\\n');
+}
+
+function generateHostConfig(remotes: RemoteApp[]): string {
+  return [
+    '// webpack.config.js (shell / host)',
+    'new ModuleFederationPlugin({',
+    "  name: 'shell',",
+    '  remotes: {',
+    ...remotes.map(r => \`    \${r.name}: '\${r.name}@http://localhost:\${r.port}/remoteEntry.js',\`),
+    '  },',
+    '  shared: {',
+    ...SHARED_DEPS.map(d => \`    \${d}: { singleton: true, eager: true },\`),
+    '  },',
+    '})',
+  ].join('\\n');
+}
+
+export default function App() {
+  const [selectedRemote, setSelectedRemote] = useState<string | null>(null);
+  const [loadedRemotes, setLoadedRemotes] = useState<Set<string>>(new Set());
+  const [loadingRemote, setLoadingRemote] = useState<string | null>(null);
+  const [viewConfig, setViewConfig] = useState<'host' | 'remote'>('host');
+
+  const remote = REMOTES.find(r => r.id === selectedRemote);
+
+  const loadRemote = (id: string) => {
+    if (loadedRemotes.has(id)) return;
+    setLoadingRemote(id);
+    setTimeout(() => {
+      setLoadedRemotes(prev => new Set([...prev, id]));
+      setLoadingRemote(null);
+    }, 800 + Math.random() * 600);
+  };
+
+  const config = selectedRemote && viewConfig === 'remote'
+    ? generateRemoteConfig(remote!)
+    : generateHostConfig(REMOTES.filter(r => loadedRemotes.has(r.id)));
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>🏗️ Module Federation Visualizer</div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Архитектура микрофронтендов с Webpack 5 Module Federation</div>
+        </div>
+
+        {/* Architecture diagram */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 24 }}>
+          <div style={{ fontSize: 12, color: MUTED, marginBottom: 16, textTransform: 'uppercase' }}>Архитектура приложения</div>
+
+          {/* Host */}
+          <div style={{ background: '#0a0f1e', borderRadius: 10, padding: '16px 20px', marginBottom: 16, border: \`2px solid \${WEBPACK_COLOR}\` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+              <div style={{ width: 10, height: 10, borderRadius: '50%', background: WEBPACK_COLOR }} />
+              <div style={{ fontSize: 14, color: WEBPACK_COLOR, fontWeight: 700 }}>Shell App (Host) — :3000</div>
+              <div style={{ fontSize: 11, color: MUTED, background: '#1e293b', padding: '2px 8px', borderRadius: 4 }}>Главное приложение</div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {loadedRemotes.size === 0
+                ? <span style={{ fontSize: 11, color: MUTED }}>Нет подключённых ремоутов. Нажмите "Подключить" ниже.</span>
+                : REMOTES.filter(r => loadedRemotes.has(r.id)).map(r => (
+                  <span key={r.id} style={{ fontSize: 11, background: '#0f2744', color: r.color, padding: '4px 10px', borderRadius: 6, border: \`1px solid \${r.color}40\` }}>
+                    import('{r.name}/...')
+                  </span>
+                ))
+              }
+            </div>
+          </div>
+
+          {/* Remotes */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+            {REMOTES.map(r => (
+              <div
+                key={r.id}
+                onClick={() => setSelectedRemote(selectedRemote === r.id ? null : r.id)}
+                style={{
+                  background: selectedRemote === r.id ? '#0f2744' : '#0a0f1e',
+                  border: \`2px solid \${loadedRemotes.has(r.id) ? r.color : (selectedRemote === r.id ? r.color + '80' : '#334155')}\`,
+                  borderRadius: 10, padding: '14px 16px', cursor: 'pointer', transition: 'all 0.2s',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: '50%', background: loadedRemotes.has(r.id) ? r.color : '#334155', boxShadow: loadedRemotes.has(r.id) ? \`0 0 8px \${r.color}\` : 'none' }} />
+                  <div style={{ fontSize: 13, color: loadedRemotes.has(r.id) ? r.color : TEXT, fontWeight: 700 }}>{r.name}</div>
+                  <div style={{ marginLeft: 'auto', fontSize: 10, color: MUTED }}>:{r.port}</div>
+                </div>
+                <div style={{ fontSize: 10, color: MUTED, marginBottom: 8 }}>{r.team} • {r.exposes.length} компонентов</div>
+                <button
+                  onClick={e => { e.stopPropagation(); loadRemote(r.id); }}
+                  disabled={loadedRemotes.has(r.id) || loadingRemote === r.id}
+                  style={{
+                    width: '100%', padding: '5px', fontSize: 10, fontFamily: 'monospace', fontWeight: 700,
+                    background: loadedRemotes.has(r.id) ? '#0a2e1a' : (loadingRemote === r.id ? MUTED : r.color),
+                    color: loadedRemotes.has(r.id) ? SUCCESS : BG, border: 'none', borderRadius: 4, cursor: 'pointer',
+                  }}
+                >
+                  {loadedRemotes.has(r.id) ? '✓ Подключён' : loadingRemote === r.id ? '⟳ Загрузка...' : '+ Подключить'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Detail + Config */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+          {/* Remote detail */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+            {remote ? (
+              <>
+                <div style={{ fontSize: 13, color: remote.color, fontWeight: 700, marginBottom: 4 }}>{remote.name}</div>
+                <div style={{ fontSize: 11, color: MUTED, marginBottom: 12 }}>localhost:{remote.port} • {remote.team}</div>
+                <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: 'uppercase' }}>Экспортирует</div>
+                {remote.exposes.map(e => (
+                  <div key={e.key} style={{ background: '#0a0f1e', borderRadius: 6, padding: '8px 10px', marginBottom: 6 }}>
+                    <div style={{ fontSize: 12, color: remote.color }}>{e.key}</div>
+                    <div style={{ fontSize: 10, color: MUTED }}>{e.description}</div>
+                    <div style={{ fontSize: 10, color: '#334155', marginTop: 2 }}>{e.path}</div>
+                  </div>
+                ))}
+                <div style={{ fontSize: 11, color: MUTED, marginTop: 12, marginBottom: 6, textTransform: 'uppercase' }}>Shared deps</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {remote.deps.map(d => (
+                    <span key={d} style={{ fontSize: 10, color: SHARED_DEPS.includes(d) ? SUCCESS : ACCENT, background: '#0a0f1e', padding: '2px 6px', borderRadius: 4 }}>{d}</span>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div style={{ color: MUTED, fontSize: 12, textAlign: 'center', paddingTop: 30 }}>
+                Нажмите на ремоут для просмотра деталей
+              </div>
+            )}
+          </div>
+
+          {/* Config */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <button onClick={() => setViewConfig('host')} style={{ flex: 1, padding: '6px', background: viewConfig === 'host' ? WEBPACK_COLOR : '#0a0f1e', color: viewConfig === 'host' ? BG : TEXT, border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>Host Config</button>
+              <button onClick={() => setViewConfig('remote')} disabled={!selectedRemote} style={{ flex: 1, padding: '6px', background: viewConfig === 'remote' && selectedRemote ? (remote?.color || ACCENT) : '#0a0f1e', color: viewConfig === 'remote' && selectedRemote ? BG : (selectedRemote ? TEXT : MUTED), border: 'none', borderRadius: 4, cursor: selectedRemote ? 'pointer' : 'default', fontSize: 11, fontWeight: 700 }}>Remote Config</button>
+            </div>
+            <pre style={{ margin: 0, background: '#0a0f1e', borderRadius: 8, padding: '12px', fontSize: 10, lineHeight: 1.5, overflow: 'auto', maxHeight: 320, color: TEXT }}>
+              <code>{config}</code>
+            </pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

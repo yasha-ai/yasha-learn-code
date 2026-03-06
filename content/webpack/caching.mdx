@@ -1,0 +1,408 @@
+import { Playground } from '../../components/Playground'
+
+# Кэширование в Webpack — стратегии для максимальной производительности
+
+Правильная стратегия кэширования — одна из самых важных оптимизаций для production-приложений. Цель: браузер должен кэшировать файлы как можно дольше, но мгновенно получать обновления при изменении кода.
+
+## Проблема без кэширования
+
+Без правильного кэширования каждое обновление приложения заставляет пользователей перезагружать **все** файлы, включая неизменённые (React, lodash и т.д.):
+
+```
+Без кэширования:
+bundle.js → Загрузка 580 KB при каждом обновлении
+
+С правильным кэшированием:
+main.a1b2c3.js (собственный код) → Загрузка 85 KB при обновлении
+vendor.d4e5f6.js (React + libs) → Из кеша (не изменился)
+```
+
+## Content Hash — основа кэширования
+
+```js
+output: {
+  filename: '[name].[contenthash:8].js',
+  // contenthash меняется только если содержимое файла изменилось
+  // Не меняется если изменился другой файл!
+}
+```
+
+Разница между хешами:
+
+| Тип хеша | Изменяется при | Использование |
+|----------|----------------|---------------|
+| `[hash]` | Любом изменении в сборке | Устарел, не рекомендуется |
+| `[chunkhash]` | Изменении конкретного чанка | JS бандлы (устаревает) |
+| `[contenthash]` | Изменении содержимого файла | Рекомендуется для всего |
+
+## runtimeChunk — изоляция webpack runtime
+
+```js
+optimization: {
+  runtimeChunk: 'single',
+  // Webpack runtime (маппинг чанков) в отдельный файл
+  // Без этого: изменение одного файла → инвалидируются хеши всех бандлов!
+}
+```
+
+Без `runtimeChunk`:
+```
+main.abc123.js  ← содержит runtime + код
+vendors.def456.js
+
+# При изменении App.tsx:
+main.xyz789.js  ← хеш изменился ✓
+vendors.mno012.js  ← хеш тоже изменился! ✗ (runtime обновился)
+```
+
+С `runtimeChunk: 'single'`:
+```
+runtime.qqq111.js  ← только runtime (маленький, часто меняется)
+main.abc123.js     ← только код (меняется при изменении App.tsx)
+vendors.def456.js  ← библиотеки (почти никогда не меняются) ✓
+```
+
+## cacheGroups — группировка модулей
+
+```js
+optimization: {
+  splitChunks: {
+    cacheGroups: {
+      // React и его друзья — меняются редко (при обновлении версий)
+      react: {
+        test: /[\\/]node_modules[\\/](react|react-dom|react-router)[\\/]/,
+        name: 'react-vendor',
+        chunks: 'all',
+        priority: 30,
+      },
+      // Все остальные node_modules
+      vendors: {
+        test: /[\\/]node_modules[\\/]/,
+        name: 'vendors',
+        chunks: 'all',
+        priority: 20,
+      },
+      // Общий код приложения (утилиты, hooks)
+      common: {
+        name: 'common',
+        minChunks: 2,
+        priority: 10,
+        reuseExistingChunk: true,
+      },
+    },
+  },
+}
+```
+
+## Persistent Caching — ускорение сборки
+
+```js
+cache: {
+  type: 'filesystem', // Кешировать на диск между сборками
+  cacheDirectory: path.resolve(__dirname, '.webpack-cache'),
+
+  // Инвалидировать кеш при изменении конфига
+  buildDependencies: {
+    config: [__filename],
+  },
+
+  // Версия кеша (менять при breaking changes)
+  version: '1.0.0',
+}
+
+// Результат:
+// Первая сборка: 45s
+// Повторная сборка: 2-3s! 🚀
+```
+
+## Настройка HTTP заголовков сервера
+
+```nginx
+# Nginx — длинный кеш для файлов с хешем в имени
+location ~* \.[0-9a-f]{8}\.(js|css)$ {
+  expires 1y;
+  add_header Cache-Control "public, immutable";
+}
+
+# Короткий кеш для index.html (не имеет хеша)
+location = /index.html {
+  expires 0;
+  add_header Cache-Control "no-cache";
+}
+```
+
+## Полный конфиг кэширования
+
+```js
+module.exports = {
+  mode: 'production',
+  output: {
+    filename: '[name].[contenthash:8].js',
+    chunkFilename: '[id].[contenthash:8].js',
+    assetModuleFilename: 'assets/[hash:8][ext]',
+    clean: true,
+  },
+  optimization: {
+    runtimeChunk: 'single',
+    moduleIds: 'deterministic', // Стабильные ID модулей
+    chunkIds: 'deterministic',
+    splitChunks: {
+      chunks: 'all',
+      cacheGroups: {
+        react: { test: /react/, name: 'react-vendor', priority: 30, chunks: 'all' },
+        vendors: { test: /node_modules/, name: 'vendors', priority: 20, chunks: 'all' },
+        common: { name: 'common', minChunks: 2, priority: 10 },
+      },
+    },
+  },
+  cache: {
+    type: 'filesystem',
+    buildDependencies: { config: [__filename] },
+  },
+};
+```
+
+Ниже — интерактивный симулятор кэширования. Изменяйте файлы и смотрите как меняются хеши бандлов.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const ERROR = '#f87171';
+
+interface SourceFile {
+  id: string;
+  name: string;
+  chunk: string;
+  content: string;
+  changed: boolean;
+  icon: string;
+}
+
+interface Bundle {
+  id: string;
+  name: string;
+  color: string;
+  files: string[];
+  hash: string;
+  size: string;
+  cacheStatus: 'fresh' | 'stale' | 'cached';
+}
+
+function randomHash(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(16).slice(0, 8).padStart(8, '0');
+}
+
+const INITIAL_FILES: SourceFile[] = [
+  { id: 'app', name: 'App.tsx', chunk: 'main', content: 'function App() { return <div>Hello</div>; }', changed: false, icon: '⚛️' },
+  { id: 'home', name: 'Home.tsx', chunk: 'main', content: 'function Home() { return <h1>Home</h1>; }', changed: false, icon: '🏠' },
+  { id: 'utils', name: 'utils.ts', chunk: 'common', content: 'export const formatDate = (d: Date) => d.toISOString();', changed: false, icon: '🔧' },
+  { id: 'hooks', name: 'useAuth.ts', chunk: 'common', content: 'export function useAuth() { return { user: null }; }', changed: false, icon: '🔑' },
+  { id: 'react', name: 'react', chunk: 'react-vendor', content: '[react source v18.2.0]', changed: false, icon: '⚛️' },
+  { id: 'reactdom', name: 'react-dom', chunk: 'react-vendor', content: '[react-dom source v18.2.0]', changed: false, icon: '🖥️' },
+  { id: 'lodash', name: 'lodash-es', chunk: 'vendors', content: '[lodash-es source v4.17]', changed: false, icon: '📦' },
+  { id: 'axios', name: 'axios', chunk: 'vendors', content: '[axios source v1.6.0]', changed: false, icon: '🌐' },
+];
+
+const CHUNK_COLORS: Record<string, string> = {
+  main: WEBPACK_COLOR,
+  common: ACCENT,
+  'react-vendor': '#3b82f6',
+  vendors: '#a78bfa',
+};
+
+export default function App() {
+  const [files, setFiles] = useState<SourceFile[]>(INITIAL_FILES);
+  const [bundles, setBundles] = useState<Bundle[]>([]);
+  const [prevBundles, setPrevBundles] = useState<Bundle[]>([]);
+  const [building, setBuilding] = useState(false);
+  const [built, setBuilt] = useState(false);
+  const [useRuntimeChunk, setUseRuntimeChunk] = useState(true);
+  const [strategy, setStrategy] = useState<'none' | 'contenthash' | 'full'>('full');
+
+  const buildBundles = (fs: SourceFile[]): Bundle[] => {
+    const chunks = ['main', 'common', 'react-vendor', 'vendors'];
+    const runtimeContent = useRuntimeChunk ? 'runtime' : '';
+
+    return [
+      ...(useRuntimeChunk ? [{
+        id: 'runtime',
+        name: 'runtime.js',
+        color: '#94a3b8',
+        files: ['webpack-runtime'],
+        hash: randomHash('runtime' + runtimeContent + fs.filter(f => f.changed).map(f => f.id).join('')),
+        size: '8 KB',
+        cacheStatus: 'fresh' as const,
+      }] : []),
+      ...chunks.map(chunk => {
+        const chunkFiles = fs.filter(f => f.chunk === chunk);
+        const hasChange = chunkFiles.some(f => f.changed);
+        const contentSeed = chunkFiles.map(f => f.content + (f.changed ? '_CHANGED' : '')).join('|');
+        const hash = strategy === 'none' ? 'abcdef12' : randomHash(contentSeed + (strategy === 'full' && !useRuntimeChunk ? fs.map(f => f.id).join('') : ''));
+        return {
+          id: chunk,
+          name: chunk + (strategy !== 'none' ? '.' + hash.slice(0, 8) : '') + '.js',
+          color: CHUNK_COLORS[chunk],
+          files: chunkFiles.map(f => f.name),
+          hash: hash.slice(0, 8),
+          size: chunk === 'react-vendor' ? '95 KB' : chunk === 'vendors' ? '68 KB' : chunk === 'common' ? '24 KB' : '42 KB',
+          cacheStatus: (hasChange ? 'stale' : 'cached') as 'fresh' | 'stale' | 'cached',
+        };
+      }),
+    ];
+  };
+
+  const runBuild = () => {
+    setPrevBundles(bundles);
+    setBuilding(true);
+    setTimeout(() => {
+      setBundles(buildBundles(files));
+      setBuilding(false);
+      setBuilt(true);
+    }, 1200);
+  };
+
+  const toggleChange = (id: string) => {
+    setFiles(prev => prev.map(f => f.id === id ? { ...f, changed: !f.changed } : f));
+  };
+
+  const reset = () => {
+    setFiles(INITIAL_FILES);
+    setBundles([]);
+    setPrevBundles([]);
+    setBuilt(false);
+  };
+
+  const changedCount = files.filter(f => f.changed).length;
+  const staleCount = bundles.filter(b => b.cacheStatus === 'stale').length;
+  const cachedCount = bundles.filter(b => b.cacheStatus === 'cached').length;
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>💾 Caching Strategy Simulator</div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Изменяйте файлы и наблюдайте как меняются хеши бандлов</div>
+        </div>
+
+        {/* Strategy selector */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 16, marginBottom: 20 }}>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12, color: MUTED }}>Стратегия:</div>
+            {[
+              { id: 'none', label: 'Без хеша', desc: 'bundle.js' },
+              { id: 'contenthash', label: 'contenthash', desc: 'bundle.[contenthash].js' },
+              { id: 'full', label: 'Полная', desc: 'cacheGroups + contenthash' },
+            ].map(s => (
+              <button key={s.id} onClick={() => setStrategy(s.id as any)} style={{ padding: '6px 14px', background: strategy === s.id ? WEBPACK_COLOR : '#0a0f1e', color: strategy === s.id ? BG : TEXT, border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: strategy === s.id ? 700 : 400, fontFamily: 'monospace' }}>
+                {s.label}
+              </button>
+            ))}
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: TEXT }}>
+                <input type="checkbox" checked={useRuntimeChunk} onChange={e => setUseRuntimeChunk(e.target.checked)} style={{ accentColor: WEBPACK_COLOR }} />
+                runtimeChunk: 'single'
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+          {/* Source files */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: MUTED, textTransform: 'uppercase' }}>Исходные файлы</div>
+              <button onClick={reset} style={{ padding: '4px 10px', background: '#334155', color: TEXT, border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 10 }}>Сбросить</button>
+            </div>
+            {['main', 'common', 'react-vendor', 'vendors'].map(chunk => (
+              <div key={chunk} style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 10, color: CHUNK_COLORS[chunk], marginBottom: 6, textTransform: 'uppercase' }}>Chunk: {chunk}</div>
+                {files.filter(f => f.chunk === chunk).map(file => (
+                  <div
+                    key={file.id}
+                    onClick={() => chunk !== 'react-vendor' && chunk !== 'vendors' && toggleChange(file.id)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, marginBottom: 4,
+                      background: file.changed ? '#2d1515' : '#0a0f1e', border: \`1px solid \${file.changed ? ERROR : 'transparent'}\`,
+                      cursor: chunk !== 'react-vendor' && chunk !== 'vendors' ? 'pointer' : 'default', transition: 'all 0.2s',
+                      opacity: chunk === 'react-vendor' || chunk === 'vendors' ? 0.7 : 1,
+                    }}
+                  >
+                    <span style={{ fontSize: 14 }}>{file.icon}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12, color: file.changed ? ERROR : TEXT }}>{file.name}</div>
+                    </div>
+                    {file.changed && <span style={{ fontSize: 10, color: ERROR, background: '#450a0a', padding: '2px 6px', borderRadius: 4 }}>ИЗМЕНЁН</span>}
+                    {chunk !== 'react-vendor' && chunk !== 'vendors' && !file.changed && (
+                      <span style={{ fontSize: 9, color: MUTED }}>нажмите чтобы изменить</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
+            <button
+              onClick={runBuild}
+              disabled={building}
+              style={{ width: '100%', padding: '10px', background: building ? MUTED : WEBPACK_COLOR, color: BG, border: 'none', borderRadius: 8, cursor: building ? 'wait' : 'pointer', fontWeight: 700, fontSize: 13, fontFamily: 'monospace', marginTop: 8 }}
+            >
+              {building ? '⟳ Building...' : \`▶ npm run build\${changedCount > 0 ? \` (\${changedCount} changed)\` : ''}\`}
+            </button>
+          </div>
+
+          {/* Bundles */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 12, textTransform: 'uppercase' }}>dist/ бандлы</div>
+            {!built ? (
+              <div style={{ color: MUTED, fontSize: 12, textAlign: 'center', paddingTop: 40 }}>Запустите сборку →</div>
+            ) : (
+              <>
+                {built && (
+                  <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+                    <div style={{ background: '#0a2e1a', borderRadius: 6, padding: '6px 10px', fontSize: 11, color: SUCCESS, flex: 1, textAlign: 'center' }}>
+                      ✓ Кеш: {cachedCount}
+                    </div>
+                    <div style={{ background: staleCount > 0 ? '#2d1515' : '#0a0f1e', borderRadius: 6, padding: '6px 10px', fontSize: 11, color: staleCount > 0 ? ERROR : MUTED, flex: 1, textAlign: 'center' }}>
+                      ↺ Обновлено: {staleCount}
+                    </div>
+                  </div>
+                )}
+                {bundles.map(bundle => {
+                  const prevBundle = prevBundles.find(b => b.id === bundle.id);
+                  const hashChanged = prevBundle && prevBundle.hash !== bundle.hash;
+                  return (
+                    <div key={bundle.id} style={{ background: '#0a0f1e', borderRadius: 8, padding: '10px 12px', marginBottom: 8, border: \`1px solid \${bundle.cacheStatus === 'stale' ? ERROR : bundle.color + '40'}\` }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: '50%', background: bundle.cacheStatus === 'stale' ? ERROR : SUCCESS }} />
+                        <div style={{ fontSize: 12, color: bundle.color, fontWeight: 700, flex: 1 }}>📦 {bundle.name}</div>
+                        <div style={{ fontSize: 11, color: MUTED }}>{bundle.size}</div>
+                        {bundle.cacheStatus === 'cached' && <span style={{ fontSize: 9, color: SUCCESS, background: '#0a2e1a', padding: '1px 5px', borderRadius: 3 }}>CACHED</span>}
+                        {bundle.cacheStatus === 'stale' && <span style={{ fontSize: 9, color: ERROR, background: '#450a0a', padding: '1px 5px', borderRadius: 3 }}>UPDATED</span>}
+                      </div>
+                      <div style={{ fontSize: 10, color: MUTED, marginBottom: 4 }}>
+                        hash: <span style={{ color: hashChanged ? ERROR : (built ? SUCCESS : MUTED) }}>{bundle.hash}</span>
+                        {hashChanged && <span style={{ color: ERROR, marginLeft: 6 }}>← было: {prevBundle?.hash}</span>}
+                      </div>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {bundle.files.slice(0, 4).map(f => (
+                          <span key={f} style={{ fontSize: 9, color: MUTED, background: '#1e293b', padding: '1px 5px', borderRadius: 3 }}>{f}</span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,317 @@
+import { Playground } from '../../components/Playground'
+
+# Кэширование HTTP
+
+Remix позволяет управлять HTTP кэшированием через заголовки `Cache-Control` прямо из loader функций. Это даёт полный контроль над тем, что кэшируется и на сколько.
+
+## Cache-Control в loader
+
+```typescript
+export async function loader({ params }) {
+  const post = await getPost(params.slug);
+
+  return json(post, {
+    headers: {
+      // Публичный кэш на 1 час, stale-while-revalidate на 1 день
+      "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+    },
+  });
+}
+```
+
+## Стратегии кэширования
+
+### no-store (нет кэша)
+```typescript
+"Cache-Control": "no-store"
+// Использовать для: персональные данные, финансовые данные
+```
+
+### no-cache (всегда проверять)
+```typescript
+"Cache-Control": "no-cache"
+// Ресурс кэшируется, но всегда проверяется на свежесть
+```
+
+### max-age (статичные данные)
+```typescript
+"Cache-Control": "public, max-age=31536000, immutable"
+// Использовать для: статические ресурсы с хэшами в URL
+```
+
+### stale-while-revalidate
+```typescript
+"Cache-Control": "public, max-age=60, stale-while-revalidate=3600"
+// Показываем кэш на 60с, обновляем в фоне до 1 часа
+```
+
+## ETag для условных запросов
+
+```typescript
+export async function loader({ request, params }) {
+  const post = await getPost(params.slug);
+  const etag = \`"\${post.updatedAt.getTime()}"\`;
+
+  // Если ETag совпадает — возвращаем 304
+  if (request.headers.get("If-None-Match") === etag) {
+    return new Response(null, { status: 304 });
+  }
+
+  return json(post, {
+    headers: {
+      "Cache-Control": "public, max-age=60",
+      "ETag": etag,
+    },
+  });
+}
+```
+
+## Варьирование кэша (Vary)
+
+```typescript
+export async function loader({ request }) {
+  const acceptLanguage = request.headers.get("Accept-Language");
+  const lang = parseLanguage(acceptLanguage);
+  const content = await getLocalizedContent(lang);
+
+  return json(content, {
+    headers: {
+      "Cache-Control": "public, max-age=3600",
+      "Vary": "Accept-Language",  // разный кэш для разных языков
+    },
+  });
+}
+```
+
+## HTTP кэш vs клиентский кэш
+
+```
+HTTP Cache (правильный подход в Remix):
+  ✅ Работает без JS
+  ✅ Общий для всех пользователей (CDN)
+  ✅ Стандартные заголовки
+  ✅ Автоматически инвалидируется при навигации
+
+Клиентский кэш (React Query, SWR):
+  ⚠️ Только при наличии JS
+  ⚠️ Только для текущего пользователя
+  ⚠️ Нужна ручная инвалидация
+  ✅ Мгновенные UI обновления
+```
+
+## Инвалидация кэша
+
+Remix автоматически инвалидирует кэш при:
+- Отправке формы (action вызывается)
+- Программной навигации с revalidate
+- Ручном вызове `revalidate()`
+
+```typescript
+import { useRevalidator } from "@remix-run/react";
+
+function AutoRefresh() {
+  const revalidator = useRevalidator();
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (revalidator.state === "idle") {
+        revalidator.revalidate();
+      }
+    }, 30_000);  // обновляем каждые 30 секунд
+
+    return () => clearInterval(id);
+  }, [revalidator]);
+}
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const WARN = "#f59e0b";
+
+type Strategy = {
+  id: string;
+  label: string;
+  directive: string;
+  maxAge: number | null;
+  swr: number | null;
+  color: string;
+  useCases: string[];
+  description: string;
+};
+
+const strategies: Strategy[] = [
+  {
+    id: "no-store",
+    label: "no-store",
+    directive: "no-store",
+    maxAge: null,
+    swr: null,
+    color: "#ef4444",
+    description: "Никакого кэширования. Каждый запрос идёт на сервер.",
+    useCases: ["Личный кабинет", "Финансовые данные", "Корзина покупок"],
+  },
+  {
+    id: "no-cache",
+    label: "no-cache",
+    directive: "no-cache",
+    maxAge: 0,
+    swr: null,
+    color: "#f59e0b",
+    description: "Кэшируется, но проверяется при каждом запросе (ETag/Last-Modified).",
+    useCases: ["API с частыми изменениями", "Страницы с условными запросами"],
+  },
+  {
+    id: "short",
+    label: "max-age=60s",
+    directive: "public, max-age=60",
+    maxAge: 60,
+    swr: null,
+    color: ACCENT,
+    description: "Кэш на 1 минуту. Подходит для данных с частыми обновлениями.",
+    useCases: ["Список новостей", "Курсы валют", "Цены товаров"],
+  },
+  {
+    id: "swr",
+    label: "SWR (stale-while-revalidate)",
+    directive: "public, max-age=60, stale-while-revalidate=3600",
+    maxAge: 60,
+    swr: 3600,
+    color: "#10b981",
+    description: "Свежий кэш 1 мин. Устаревший — до 1 часа с фоновым обновлением.",
+    useCases: ["Блог", "Каталог продуктов", "Профили пользователей"],
+  },
+  {
+    id: "immutable",
+    label: "immutable (статика)",
+    directive: "public, max-age=31536000, immutable",
+    maxAge: 31536000,
+    swr: null,
+    color: "#8b5cf6",
+    description: "Кэш на 1 год, не изменяется. Для статики с хэшем в URL.",
+    useCases: ["CSS/JS файлы", "Изображения", "Шрифты"],
+  },
+];
+
+export default function App() {
+  const [selected, setSelected] = useState(strategies[3]);
+  const [simulatedTime, setSimulatedTime] = useState(0);
+
+  const isFresh = selected.maxAge !== null && simulatedTime <= selected.maxAge;
+  const isStale = selected.swr !== null && simulatedTime > (selected.maxAge ?? 0) && simulatedTime <= (selected.maxAge ?? 0) + selected.swr;
+  const isExpired = !isFresh && !isStale;
+
+  const getStatus = () => {
+    if (selected.id === "no-store") return { label: "Без кэша", color: "#ef4444" };
+    if (selected.id === "no-cache") return { label: "Условный запрос (ETag)", color: WARN };
+    if (isFresh) return { label: "✅ Свежий кэш", color: SUCCESS };
+    if (isStale) return { label: "⏳ Устаревший (фон. обновление)", color: WARN };
+    return { label: "❌ Истёк, новый запрос", color: "#ef4444" };
+  };
+
+  const status = getStatus();
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>🗄️ HTTP Кэширование</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>Стратегии Cache-Control</p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: "20px", maxWidth: "900px" }}>
+        <div>
+          {strategies.map(s => (
+            <div key={s.id} onClick={() => { setSelected(s); setSimulatedTime(0); }} style={{
+              background: selected.id === s.id ? s.color + "22" : CARD,
+              border: \`1px solid \${selected.id === s.id ? s.color : "#334155"}\`,
+              borderRadius: "10px", padding: "12px", cursor: "pointer", marginBottom: "8px",
+            }}>
+              <div style={{ color: selected.id === s.id ? s.color : TEXT, fontWeight: 600, fontSize: "13px" }}>{s.label}</div>
+              <div style={{ fontFamily: "monospace", fontSize: "10px", color: MUTED, marginTop: "4px" }}>{s.directive}</div>
+            </div>
+          ))}
+        </div>
+
+        <div>
+          <div style={{ background: CARD, borderRadius: "12px", padding: "20px", marginBottom: "16px" }}>
+            <h3 style={{ color: selected.color, margin: "0 0 8px", fontSize: "15px" }}>{selected.label}</h3>
+            <div style={{ fontFamily: "monospace", fontSize: "12px", color: MUTED, marginBottom: "12px", background: BG, padding: "10px", borderRadius: "6px" }}>
+              Cache-Control: {selected.directive}
+            </div>
+            <p style={{ color: TEXT, fontSize: "14px", margin: "0 0 12px" }}>{selected.description}</p>
+            <div>
+              <div style={{ fontSize: "12px", color: MUTED, marginBottom: "6px" }}>Примеры использования:</div>
+              {selected.useCases.map((uc, i) => (
+                <span key={i} style={{ display: "inline-block", background: selected.color + "22", color: selected.color, padding: "2px 10px", borderRadius: "12px", fontSize: "12px", marginRight: "6px", marginBottom: "4px" }}>
+                  {uc}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {selected.maxAge !== null && selected.id !== "no-cache" && (
+            <div style={{ background: CARD, borderRadius: "12px", padding: "20px" }}>
+              <h3 style={{ color: ACCENT, margin: "0 0 16px", fontSize: "14px" }}>⏱️ Симуляция времени</h3>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px" }}>
+                <span style={{ color: MUTED, fontSize: "13px" }}>Прошло:</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={selected.swr ? (selected.maxAge + selected.swr) * 1.2 : selected.maxAge * 2}
+                  value={simulatedTime}
+                  onChange={e => setSimulatedTime(Number(e.target.value))}
+                  style={{ flex: 1, accentColor: selected.color }}
+                />
+                <span style={{ color: TEXT, minWidth: "60px", fontSize: "13px" }}>{simulatedTime}s</span>
+              </div>
+
+              <div style={{
+                padding: "12px 16px",
+                background: status.color + "11",
+                border: \`1px solid \${status.color}44\`,
+                borderRadius: "8px",
+                color: status.color,
+                fontWeight: 600,
+                fontSize: "14px",
+              }}>
+                {status.label}
+              </div>
+
+              {selected.maxAge !== null && (
+                <div style={{ marginTop: "12px", display: "flex", gap: "0" }}>
+                  <div style={{
+                    flex: selected.maxAge,
+                    height: "8px",
+                    background: SUCCESS,
+                    borderRadius: "4px 0 0 4px",
+                    opacity: simulatedTime <= selected.maxAge ? 1 : 0.3,
+                  }} />
+                  {selected.swr !== null && (
+                    <div style={{
+                      flex: selected.swr,
+                      height: "8px",
+                      background: WARN,
+                      opacity: isStale ? 1 : 0.3,
+                    }} />
+                  )}
+                  <div style={{
+                    flex: 20,
+                    height: "8px",
+                    background: "#ef4444",
+                    borderRadius: "0 4px 4px 0",
+                    opacity: isExpired ? 1 : 0.3,
+                  }} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

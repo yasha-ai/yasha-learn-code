@@ -1,0 +1,329 @@
+import { Playground } from '../../components/Playground'
+
+# Dockerizing React: Multi-Stage Build с Nginx
+
+React-приложение требует двух этапов: сборка статических файлов (требует Node.js, npm, все dev-зависимости) и раздача статики (достаточно легковесного nginx). Multi-stage build идеально подходит для этого случая.
+
+## Стратегия контейнеризации React
+
+React SPA (Single Page Application) компилируется в набор статических HTML, CSS и JS файлов. Для их раздачи в продакшене использует nginx — высокопроизводительный веб-сервер, образ которого всего ~25 MB.
+
+## Dockerfile для React приложения
+
+```dockerfile
+# ─── Этап 1: Сборка ────────────────────────────────
+FROM node:20-alpine AS build
+WORKDIR /app
+
+# Сначала зависимости (кеш)
+COPY package*.json ./
+RUN npm ci
+
+# Потом код
+COPY . .
+
+# Аргумент сборки для API URL
+ARG REACT_APP_API_URL=https://api.example.com
+ENV REACT_APP_API_URL=$REACT_APP_API_URL
+
+RUN npm run build
+# Результат: /app/build
+
+# ─── Этап 2: Nginx ─────────────────────────────────
+FROM nginx:1.25-alpine AS production
+
+# Скопировать собранное приложение
+COPY --from=build /app/build /usr/share/nginx/html
+
+# Кастомная конфигурация nginx
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Nginx работает от непривилегированного пользователя
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD wget -qO- http://localhost/health || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+## Конфигурация Nginx для React Router
+
+Если приложение использует React Router (client-side routing), nginx должен перенаправлять все запросы на `index.html`:
+
+```nginx
+# nginx.conf
+server {
+    listen 80;
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Сжатие
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml;
+
+    # Кеширование статики
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Роутинг SPA — все пути на index.html
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Health check endpoint
+    location /health {
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+}
+```
+
+## .dockerignore для React проекта
+
+```
+node_modules/
+build/
+.git/
+.gitignore
+.env
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+README.md
+.DS_Store
+Dockerfile*
+docker-compose*
+```
+
+## Передача environment variables в React
+
+React встраивает переменные окружения на этапе сборки (build time), а не во время выполнения. Переменные с префиксом `REACT_APP_` попадают в бандл.
+
+```dockerfile
+# Передача API URL при сборке
+ARG REACT_APP_API_URL
+ARG REACT_APP_VERSION
+
+ENV REACT_APP_API_URL=${REACT_APP_API_URL:-http://localhost:3001}
+ENV REACT_APP_VERSION=${REACT_APP_VERSION:-dev}
+
+RUN npm run build
+```
+
+```bash
+# Сборка с конкретными переменными
+docker build \
+  --build-arg REACT_APP_API_URL=https://api.prod.com \
+  --build-arg REACT_APP_VERSION=1.2.3 \
+  -t myapp:prod .
+```
+
+## Docker Compose для разработки и продакшена
+
+```yaml
+# docker-compose.yml
+services:
+  frontend-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev  # с hot reload
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:3001
+
+  frontend-prod:
+    build:
+      context: .
+      target: production
+      args:
+        REACT_APP_API_URL: https://api.example.com
+    ports:
+      - "80:80"
+```
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const [stage, setStage] = React.useState(0);
+  const [building, setBuilding] = React.useState(false);
+  const [built, setBuilt] = React.useState(false);
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const amber = '#f59e0b';
+  const purple = '#8b5cf6';
+
+  const stages = [
+    {
+      id: 0, name: 'Подготовка', icon: '📄', color: muted,
+      desc: 'Исходный код React-приложения',
+      files: [
+        { name: 'src/', size: '2.3 MB', icon: '📁' },
+        { name: 'public/', size: '200 KB', icon: '📁' },
+        { name: 'package.json', size: '3 KB', icon: '📄' },
+        { name: 'node_modules/', size: '450 MB', icon: '📁', ignore: true },
+      ],
+      total: '2.5 MB (без node_modules)',
+    },
+    {
+      id: 1, name: 'FROM node:20-alpine', icon: '📦', color: docker,
+      desc: 'Этап 1: Базовый образ с Node.js',
+      files: [{ name: 'node:20-alpine', size: '130 MB', icon: '🐳' }],
+      total: '130 MB',
+    },
+    {
+      id: 2, name: 'COPY + npm ci', icon: '📥', color: purple,
+      desc: 'Установка зависимостей (включая devDep)',
+      files: [
+        { name: 'package*.json', size: '3 KB', icon: '📄' },
+        { name: 'node_modules/', size: '450 MB', icon: '📦' },
+      ],
+      total: '580 MB',
+    },
+    {
+      id: 3, name: 'npm run build', icon: '⚙️', color: amber,
+      desc: 'Компиляция TypeScript, webpack, оптимизация',
+      files: [
+        { name: 'build/static/js/', size: '1.2 MB', icon: '📁' },
+        { name: 'build/static/css/', size: '50 KB', icon: '📁' },
+        { name: 'build/index.html', size: '2 KB', icon: '📄' },
+      ],
+      total: 'Образ: 600 MB | build/: 1.3 MB',
+    },
+    {
+      id: 4, name: 'FROM nginx:alpine', icon: '🔄', color: '#06b6d4',
+      desc: 'Этап 2: Чистый минимальный nginx образ',
+      files: [{ name: 'nginx:1.25-alpine', size: '41 MB', icon: '🐳' }],
+      total: '41 MB',
+    },
+    {
+      id: 5, name: 'COPY --from=build', icon: '✂️', color: green,
+      desc: 'Копируем только build/ из этапа 1',
+      files: [
+        { name: 'nginx binary', size: '41 MB', icon: '⚡' },
+        { name: 'build/ (from stage 1)', size: '1.3 MB', icon: '📁' },
+        { name: 'nginx.conf', size: '1 KB', icon: '⚙️' },
+      ],
+      total: 'Финальный образ: ~43 MB 🎉',
+    },
+  ];
+
+  const startBuild = () => {
+    if (building) return;
+    setBuilding(true);
+    setBuilt(false);
+    setStage(0);
+    let i = 0;
+    const tick = () => {
+      setStage(i);
+      i++;
+      if (i < stages.length) {
+        setTimeout(tick, 1000);
+      } else {
+        setBuilding(false);
+        setBuilt(true);
+      }
+    };
+    tick();
+  };
+
+  const s = stages[stage];
+
+  const sizeComparison = [
+    { label: 'node:20 (без opt)', size: 1600, color: '#ef4444' },
+    { label: 'node:20-alpine', size: 600, color: amber },
+    { label: 'nginx + build', size: 43, color: green },
+  ];
+  const maxSize = 1600;
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 8, fontSize: 20 }}>
+        ⚛️ React Docker Build Pipeline
+      </h2>
+      <p style={{ textAlign: 'center', color: muted, fontSize: 13, marginBottom: 20 }}>
+        Визуализация multi-stage build процесса
+      </p>
+
+      <div style={{ textAlign: 'center', marginBottom: 20 }}>
+        <button onClick={startBuild} disabled={building} style={{
+          background: building ? muted : docker, border: 'none', borderRadius: 8,
+          padding: '10px 24px', color: '#fff', cursor: building ? 'default' : 'pointer', fontSize: 14, fontWeight: 700,
+        }}>{building ? '⚙️ Сборка...' : '▶ docker build .'}</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+        {stages.map((st) => (
+          <div key={st.id} style={{
+            width: 28, height: 28, borderRadius: '50%',
+            background: stage >= st.id ? st.color : '#ffffff11',
+            border: \`2px solid \${stage === st.id ? st.color : 'transparent'}\`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 14, transition: 'all 0.3s',
+            boxShadow: stage === st.id ? \`0 0 10px \${st.color}\` : 'none',
+          }}>{stage >= st.id ? st.icon : ''}</div>
+        ))}
+      </div>
+
+      <div style={{ maxWidth: 640, margin: '0 auto' }}>
+        <div style={{ background: card, borderRadius: 12, padding: 18, border: \`1px solid \${s.color}44\`, marginBottom: 16 }}>
+          <div style={{ color: s.color, fontWeight: 700, fontSize: 16, marginBottom: 6 }}>
+            {s.icon} Шаг {s.id + 1}: {s.name}
+          </div>
+          <div style={{ color: muted, fontSize: 13, marginBottom: 12 }}>{s.desc}</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {s.files.map((f, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                background: f.ignore ? '#ef444411' : '#ffffff08',
+                borderRadius: 8, padding: '8px 12px',
+                border: f.ignore ? '1px solid #ef444433' : '1px solid transparent',
+                opacity: f.ignore ? 0.5 : 1,
+              }}>
+                <span style={{ fontSize: 18 }}>{f.icon}</span>
+                <span style={{ flex: 1, fontFamily: 'monospace', fontSize: 13 }}>{f.name}</span>
+                <span style={{ color: f.ignore ? '#ef4444' : amber, fontSize: 12, fontWeight: 600 }}>{f.size}</span>
+                {f.ignore && <span style={{ color: '#ef4444', fontSize: 10 }}>(.dockerignore)</span>}
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 12, background: s.color + '22', borderRadius: 8, padding: '8px 12px', color: s.color, fontSize: 13, fontWeight: 600 }}>
+            📊 {s.total}
+          </div>
+        </div>
+
+        {built && (
+          <div style={{ background: card, borderRadius: 12, padding: 16, border: \`1px solid \${green}44\` }}>
+            <div style={{ color: green, fontWeight: 700, fontSize: 14, marginBottom: 12 }}>📊 Сравнение размеров образов</div>
+            {sizeComparison.map((sc, i) => (
+              <div key={i} style={{ marginBottom: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ color: text, fontSize: 12 }}>{sc.label}</span>
+                  <span style={{ color: sc.color, fontWeight: 700, fontSize: 12 }}>{sc.size} MB</span>
+                </div>
+                <div style={{ background: '#ffffff11', borderRadius: 4, height: 8, overflow: 'hidden' }}>
+                  <div style={{ background: sc.color, height: '100%', width: \`\${sc.size / maxSize * 100}%\`, transition: 'width 0.5s' }} />
+                </div>
+              </div>
+            ))}
+            <div style={{ marginTop: 10, color: green, fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
+              🎉 Multi-stage сэкономил 1557 MB (97%)!
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

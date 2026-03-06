@@ -1,0 +1,326 @@
+import { Playground } from '../../components/Playground'
+
+# Переменные окружения в Vite
+
+Vite предоставляет удобный механизм для работы с переменными окружения через файлы `.env` и объект `import.meta.env`. В отличие от Webpack с его `process.env`, Vite использует стандарт ES Modules.
+
+## Файлы .env
+
+```bash
+# .env               — загружается всегда
+# .env.local         — загружается всегда, игнорируется git
+# .env.development   — только в dev режиме (vite)
+# .env.production    — только в production (vite build)
+# .env.test          — только при тестировании (vitest)
+
+# Специфичные для режима имеют приоритет над базовыми
+# .env.local > .env
+# .env.production.local > .env.production > .env
+```
+
+## VITE_ префикс — обязательный!
+
+```bash
+# .env
+VITE_API_URL=https://api.example.com       # ✓ Доступна в браузере
+VITE_APP_TITLE=My App                      # ✓ Доступна в браузере
+
+SECRET_KEY=super-secret                     # ✗ НЕ попадёт в бандл!
+DB_PASSWORD=mypassword                      # ✗ НЕ попадёт в бандл!
+
+# Только переменные с префиксом VITE_ доступны в клиентском коде.
+# Это защита от случайного слива секретов!
+```
+
+## import.meta.env
+
+```typescript
+// Доступные переменные в клиентском коде:
+import.meta.env.MODE        // 'development' | 'production' | 'test'
+import.meta.env.PROD        // boolean — true в production
+import.meta.env.DEV         // boolean — true в development
+import.meta.env.SSR         // boolean — true при SSR рендере
+import.meta.env.BASE_URL    // Базовый URL (из config.base)
+
+// Ваши переменные:
+import.meta.env.VITE_API_URL    // 'https://api.example.com'
+import.meta.env.VITE_APP_TITLE  // 'My App'
+
+// Пример использования:
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+```
+
+## TypeScript типы
+
+Чтобы получить автодополнение для ваших переменных, добавьте их в `vite-env.d.ts`:
+
+```typescript
+// src/vite-env.d.ts
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_API_URL: string
+  readonly VITE_APP_TITLE: string
+  readonly VITE_FEATURE_FLAG: 'true' | 'false'
+  // Добавьте все ваши переменные здесь
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv
+}
+```
+
+## Несколько .env файлов для разных окружений
+
+```bash
+# .env
+VITE_APP_TITLE=My App
+
+# .env.development
+VITE_API_URL=http://localhost:8080
+VITE_DEBUG=true
+
+# .env.production
+VITE_API_URL=https://api.myapp.com
+VITE_DEBUG=false
+
+# .env.staging (кастомный режим)
+VITE_API_URL=https://staging-api.myapp.com
+```
+
+```bash
+# Запуск с кастомным режимом
+vite build --mode staging
+```
+
+## Кастомный envPrefix
+
+```typescript
+// vite.config.ts — изменить префикс (не VITE_)
+export default defineConfig({
+  envPrefix: 'APP_',  // Теперь работают APP_* переменные
+  // или массив префиксов:
+  envPrefix: ['VITE_', 'APP_'],
+})
+```
+
+## Важные предостережения
+
+```typescript
+// ❌ Не используй string concatenation для имён переменных!
+const key = 'VITE_API_URL'
+const url = import.meta.env[key]  // Не работает в production!
+
+// ✓ Всегда обращайся напрямую
+const url = import.meta.env.VITE_API_URL  // Работает!
+
+// Vite делает статическую замену при сборке:
+// import.meta.env.VITE_API_URL → "https://api.example.com"
+// Динамический доступ невозможен по той же причине
+```
+
+Ниже — интерактивный менеджер переменных окружения: редактируй .env файлы и смотри объект `import.meta.env`:
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useMemo } from 'react';
+
+const BG = '#0f172a';
+const VITE_COLOR = '#646cff';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#38bdf8';
+const GREEN = '#4ade80';
+const RED = '#f87171';
+const AMBER = '#f59e0b';
+
+type EnvMode = '.env' | '.env.development' | '.env.production';
+
+const defaultEnvFiles: Record<EnvMode, string> = {
+  '.env': \`VITE_APP_TITLE=My Vite App
+VITE_APP_VERSION=1.0.0
+SECRET_KEY=dont-expose-me\`,
+  '.env.development': \`VITE_API_URL=http://localhost:8080
+VITE_DEBUG=true
+VITE_FEATURE_NEW_UI=true\`,
+  '.env.production': \`VITE_API_URL=https://api.myapp.com
+VITE_DEBUG=false
+VITE_FEATURE_NEW_UI=false\`,
+};
+
+function parseEnv(content: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  content.split('\\n').forEach(line => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) return;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim();
+    result[key] = val;
+  });
+  return result;
+}
+
+export default function App() {
+  const [mode, setMode] = useState<'development' | 'production'>('development');
+  const [envFiles, setEnvFiles] = useState(defaultEnvFiles);
+  const [activeFile, setActiveFile] = useState<EnvMode>('.env');
+
+  const importMetaEnv = useMemo(() => {
+    const base = parseEnv(envFiles['.env']);
+    const modeFile = mode === 'development' ? '.env.development' : '.env.production';
+    const modeVars = parseEnv(envFiles[modeFile]);
+    const merged = { ...base, ...modeVars };
+
+    const result: Record<string, { value: string; visible: boolean }> = {};
+
+    // Built-in vars
+    result['MODE'] = { value: mode, visible: true };
+    result['DEV'] = { value: String(mode === 'development'), visible: true };
+    result['PROD'] = { value: String(mode === 'production'), visible: true };
+    result['BASE_URL'] = { value: '/', visible: true };
+
+    // User vars
+    Object.entries(merged).forEach(([k, v]) => {
+      const isVite = k.startsWith('VITE_');
+      result[k] = { value: isVite ? v : '[FILTERED]', visible: isVite };
+    });
+
+    return result;
+  }, [mode, envFiles]);
+
+  const updateFile = (file: EnvMode, value: string) => {
+    setEnvFiles(prev => ({ ...prev, [file]: value }));
+  };
+
+  const files: EnvMode[] = ['.env', '.env.development', '.env.production'];
+  const activeFileColor = activeFile === '.env' ? '#94a3b8'
+    : activeFile === '.env.development' ? ACCENT : '#f97316';
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '24px 16px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <h1 style={{
+            margin: 0, fontSize: 22, fontWeight: 800,
+            background: \`linear-gradient(90deg, \${VITE_COLOR}, \${ACCENT})\`,
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+          }}>Environment Variables</h1>
+          <p style={{ color: '#64748b', fontSize: 13, marginTop: 6 }}>
+            Редактируй .env файлы и смотри import.meta.env
+          </p>
+        </div>
+
+        {/* Mode toggle */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20, alignItems: 'center' }}>
+          <span style={{ fontSize: 12, color: '#64748b' }}>Режим:</span>
+          {(['development', 'production'] as const).map(m => (
+            <button key={m} onClick={() => setMode(m)} style={{
+              padding: '6px 16px', borderRadius: 20, border: 'none', cursor: 'pointer',
+              background: mode === m ? (m === 'development' ? ACCENT : '#f97316') : CARD,
+              color: mode === m ? BG : '#94a3b8',
+              fontSize: 12, fontWeight: mode === m ? 700 : 400,
+              transition: 'all 0.2s',
+            }}>{m === 'development' ? '🔧 development' : '🚀 production'}</button>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          {/* Left: .env editor */}
+          <div>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>📝 .ENV ФАЙЛЫ</div>
+            <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap' }}>
+              {files.map(f => {
+                const fc = f === '.env' ? '#94a3b8' : f === '.env.development' ? ACCENT : '#f97316';
+                return (
+                  <button key={f} onClick={() => setActiveFile(f)} style={{
+                    padding: '4px 10px', borderRadius: 6, border: \`1px solid \${activeFile === f ? fc : '#334155'}\`,
+                    background: activeFile === f ? \`\${fc}15\` : 'transparent',
+                    color: activeFile === f ? fc : '#64748b', cursor: 'pointer', fontSize: 10, fontFamily: 'monospace',
+                  }}>{f}</button>
+                );
+              })}
+            </div>
+            <div style={{ background: CARD, borderRadius: 10, overflow: 'hidden', border: \`1px solid \${activeFileColor}30\` }}>
+              <div style={{ padding: '6px 10px', borderBottom: '1px solid #334155', fontSize: 10, color: activeFileColor, fontFamily: 'monospace' }}>
+                {activeFile}
+              </div>
+              <textarea
+                value={envFiles[activeFile]}
+                onChange={e => updateFile(activeFile, e.target.value)}
+                style={{
+                  width: '100%', minHeight: 220, background: 'transparent',
+                  border: 'none', color: TEXT, fontFamily: 'monospace', fontSize: 12,
+                  padding: 10, resize: 'vertical', outline: 'none', lineHeight: 1.7,
+                  boxSizing: 'border-box',
+                }}
+                spellCheck={false}
+              />
+            </div>
+            <div style={{ marginTop: 8, padding: 8, background: CARD, borderRadius: 8, fontSize: 11, color: '#475569', lineHeight: 1.6 }}>
+              💡 Только <span style={{ color: VITE_COLOR }}>VITE_</span> переменные попадают в браузер. Остальные фильтруются.
+            </div>
+          </div>
+
+          {/* Right: import.meta.env */}
+          <div>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8 }}>
+              ⚡ import.meta.env <span style={{ color: mode === 'development' ? ACCENT : '#f97316', fontWeight: 700 }}>({mode})</span>
+            </div>
+            <div style={{ background: CARD, borderRadius: 10, overflow: 'hidden', border: '1px solid #334155' }}>
+              <div style={{ padding: '6px 10px', borderBottom: '1px solid #334155', fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>
+                import.meta.env ({'{ '}object{'}'})
+              </div>
+              <div style={{ padding: 10, maxHeight: 280, overflowY: 'auto' }}>
+                {Object.entries(importMetaEnv).map(([key, { value, visible }]) => (
+                  <div key={key} style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    padding: '5px 0', borderBottom: '1px solid #1a2744',
+                    alignItems: 'flex-start', gap: 8,
+                  }}>
+                    <span style={{ fontFamily: 'monospace', fontSize: 11, color: visible ? ACCENT : '#475569', flexShrink: 0 }}>
+                      {key}:
+                    </span>
+                    <span style={{
+                      fontFamily: 'monospace', fontSize: 11,
+                      color: !visible ? RED : key.startsWith('VITE_') ? GREEN : '#e2e8f0',
+                      textAlign: 'right', wordBreak: 'break-all',
+                    }}>
+                      "{value}"
+                      {!visible && <span style={{ color: '#475569', fontSize: 9, display: 'block' }}>нет VITE_ префикса → скрыто</span>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Legend */}
+            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {[
+                { color: GREEN, label: 'Ваша VITE_ переменная' },
+                { color: ACCENT, label: 'Встроенная переменная Vite' },
+                { color: RED, label: 'Скрыта (нет VITE_ префикса)' },
+              ].map(item => (
+                <div key={item.label} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: '50%', background: item.color, flexShrink: 0 }} />
+                  <span style={{ color: '#64748b' }}>{item.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* TypeScript hint */}
+        <div style={{ marginTop: 16, background: CARD, borderRadius: 12, padding: 14, border: \`1px solid \${VITE_COLOR}25\` }}>
+          <div style={{ fontSize: 11, color: VITE_COLOR, fontWeight: 700, marginBottom: 8 }}>🔷 TypeScript типы (vite-env.d.ts)</div>
+          <pre style={{ margin: 0, fontSize: 11, fontFamily: 'monospace', color: '#94a3b8', lineHeight: 1.6 }}>
+{Object.keys(importMetaEnv)
+  .filter(k => k.startsWith('VITE_'))
+  .map(k => \`  readonly \${k}: string\`)
+  .join('\\n') || '  // Добавь VITE_ переменные в .env файлы'}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}` }} />

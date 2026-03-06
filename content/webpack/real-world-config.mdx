@@ -1,0 +1,545 @@
+import { Playground } from '../../components/Playground'
+
+# Production webpack.config.js — полный боевой конфиг
+
+Финальный урок курса — полный production-ready `webpack.config.js` для React + TypeScript приложения со всеми необходимыми оптимизациями. Это конфиг, который используется в реальных enterprise-проектах.
+
+## Полный webpack.config.js
+
+```js
+const path = require('path');
+const webpack = require('webpack');
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const MiniCssExtractPlugin = require('mini-css-extract-plugin');
+const TerserPlugin = require('terser-webpack-plugin');
+const CssMinimizerPlugin = require('css-minimizer-webpack-plugin');
+const CopyPlugin = require('copy-webpack-plugin');
+const ForkTsCheckerPlugin = require('fork-ts-checker-webpack-plugin');
+const ReactRefreshPlugin = require('@pmmmwh/react-refresh-webpack-plugin');
+const { BundleAnalyzerPlugin } = require('webpack-bundle-analyzer');
+
+const isDev = process.env.NODE_ENV === 'development';
+const isProd = !isDev;
+const isAnalyze = process.env.ANALYZE === 'true';
+
+module.exports = {
+  // ─────────────────────────── Core ───────────────────────────
+  mode: isDev ? 'development' : 'production',
+  target: 'browserslist',
+  bail: isProd, // Остановить сборку при первой ошибке в production
+
+  // ─────────────────────────── Entry ──────────────────────────
+  entry: {
+    main: './src/index.tsx',
+  },
+
+  // ─────────────────────────── Output ─────────────────────────
+  output: {
+    path: path.resolve(__dirname, 'dist'),
+    filename: isProd ? '[name].[contenthash:8].js' : '[name].js',
+    chunkFilename: isProd ? '[id].[contenthash:8].js' : '[id].js',
+    assetModuleFilename: 'assets/[hash:8][ext]',
+    publicPath: '/',
+    clean: true,
+  },
+
+  // ─────────────────────────── Resolve ────────────────────────
+  resolve: {
+    extensions: ['.tsx', '.ts', '.js', '.jsx'],
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+      '@api': path.resolve(__dirname, 'src/api'),
+      '@components': path.resolve(__dirname, 'src/components'),
+      '@hooks': path.resolve(__dirname, 'src/hooks'),
+      '@utils': path.resolve(__dirname, 'src/utils'),
+    },
+    modules: ['node_modules'],
+    symlinks: false,
+  },
+
+  // ─────────────────────────── Loaders ────────────────────────
+  module: {
+    rules: [
+      // JS/TS + JSX/TSX
+      {
+        test: /\\.([jt]sx?)$/,
+        use: {
+          loader: 'babel-loader',
+          options: {
+            presets: [
+              ['@babel/preset-env', { targets: 'defaults', useBuiltIns: 'usage', corejs: 3 }],
+              ['@babel/preset-react', { runtime: 'automatic' }],
+              '@babel/preset-typescript',
+            ],
+            plugins: [isDev && 'react-refresh/babel'].filter(Boolean),
+            cacheDirectory: true, // Кеш Babel
+          },
+        },
+        exclude: /node_modules/,
+      },
+
+      // Global CSS
+      {
+        test: /\\.css$/,
+        exclude: /\\.module\\.css$/,
+        use: [
+          isDev ? 'style-loader' : MiniCssExtractPlugin.loader,
+          { loader: 'css-loader', options: { importLoaders: 1, sourceMap: isDev } },
+          { loader: 'postcss-loader', options: { postcssOptions: { plugins: ['autoprefixer'] } } },
+        ],
+      },
+
+      // CSS Modules
+      {
+        test: /\\.module\\.css$/,
+        use: [
+          isDev ? 'style-loader' : MiniCssExtractPlugin.loader,
+          {
+            loader: 'css-loader',
+            options: {
+              importLoaders: 1,
+              modules: { localIdentName: isDev ? '[name]__[local]' : '[hash:base64:8]' },
+            },
+          },
+        ],
+      },
+
+      // SCSS
+      {
+        test: /\\.s[ac]ss$/,
+        use: [
+          isDev ? 'style-loader' : MiniCssExtractPlugin.loader,
+          { loader: 'css-loader', options: { importLoaders: 3 } },
+          'postcss-loader',
+          'sass-loader',
+        ],
+      },
+
+      // Images
+      {
+        test: /\\.(png|jpg|jpeg|gif|webp|avif)$/i,
+        type: 'asset',
+        parser: { dataUrlCondition: { maxSize: 8192 } },
+        generator: { filename: 'images/[hash:8][ext]' },
+      },
+
+      // SVG
+      { test: /\\.svg$/, type: 'asset/resource', generator: { filename: 'icons/[hash:8][ext]' } },
+
+      // Fonts
+      {
+        test: /\\.(woff|woff2|eot|ttf|otf)$/i,
+        type: 'asset/resource',
+        generator: { filename: 'fonts/[name][ext]' },
+      },
+    ],
+  },
+
+  // ─────────────────────────── Plugins ────────────────────────
+  plugins: [
+    new HtmlWebpackPlugin({ template: './public/index.html', minify: isProd }),
+
+    new webpack.DefinePlugin({
+      'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV),
+      'process.env.APP_VERSION': JSON.stringify(process.env.npm_package_version),
+    }),
+
+    isProd && new MiniCssExtractPlugin({ filename: '[name].[contenthash:8].css' }),
+    isDev && new ReactRefreshPlugin(),
+
+    new ForkTsCheckerPlugin({ async: isDev }),
+
+    isProd && new CopyPlugin({ patterns: [{ from: 'public', filter: (f) => !f.endsWith('.html') }] }),
+
+    isAnalyze && new BundleAnalyzerPlugin({ analyzerMode: 'static', openAnalyzer: false }),
+  ].filter(Boolean),
+
+  // ─────────────────────────── Optimization ───────────────────
+  optimization: {
+    minimize: isProd,
+    minimizer: [
+      new TerserPlugin({
+        parallel: true,
+        terserOptions: { compress: { drop_console: isProd }, format: { comments: false } },
+        extractComments: false,
+      }),
+      new CssMinimizerPlugin(),
+    ],
+    splitChunks: {
+      chunks: 'all',
+      cacheGroups: {
+        react: { test: /[\\/]node_modules[\\/](react|react-dom|react-router)[\\/]/, name: 'react-vendor', priority: 30, chunks: 'all' },
+        vendors: { test: /[\\/]node_modules[\\/]/, name: 'vendors', priority: 20, chunks: 'all' },
+        common: { name: 'common', minChunks: 2, priority: 10, reuseExistingChunk: true },
+      },
+    },
+    runtimeChunk: 'single',
+    moduleIds: 'deterministic',
+  },
+
+  // ─────────────────────────── Dev Server ─────────────────────
+  devServer: isDev ? {
+    port: 3000,
+    hot: true,
+    historyApiFallback: true,
+    compress: true,
+    proxy: { '/api': { target: 'http://localhost:8080', changeOrigin: true } },
+  } : undefined,
+
+  // ─────────────────────────── Cache ──────────────────────────
+  cache: {
+    type: 'filesystem',
+    buildDependencies: { config: [__filename] },
+  },
+
+  // ─────────────────────────── Performance ────────────────────
+  performance: isProd ? {
+    hints: 'warning',
+    maxEntrypointSize: 300000, // 300 KB
+    maxAssetSize: 300000,
+  } : false,
+
+  // ─────────────────────────── DevTool ────────────────────────
+  devtool: isDev ? 'eval-cheap-module-source-map' : 'source-map',
+
+  // ─────────────────────────── Stats ──────────────────────────
+  stats: isDev ? 'errors-warnings' : 'normal',
+};
+```
+
+## Структура dist/ после сборки
+
+```
+dist/
+├── index.html
+├── runtime.abc12345.js      (2 KB)  ← Webpack runtime
+├── main.def67890.js         (85 KB) ← Ваш код
+├── react-vendor.ghi23456.js (95 KB) ← React + React-DOM
+├── vendors.jkl78901.js      (68 KB) ← node_modules
+├── common.mno23456.js       (24 KB) ← Общий код
+├── main.pqr78901.css        (18 KB) ← CSS
+├── assets/
+│   ├── logo.abc12345.png
+│   └── hero.def67890.webp
+├── fonts/
+│   └── Inter-Regular.woff2
+└── icons/
+    └── icon-check.ghi23456.svg
+```
+
+Ниже — интерактивный **Webpack Stats Dashboard** — финальный playground курса. Полная аналитика сборки: размеры чанков, граф зависимостей, метрики производительности.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useCallback } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const ERROR = '#f87171';
+const PURPLE = '#a78bfa';
+
+interface BuildStats {
+  buildTime: number;
+  totalSize: number;
+  gzipSize: number;
+  chunks: ChunkStat[];
+  modules: ModuleStat[];
+  warnings: string[];
+  errors: string[];
+}
+
+interface ChunkStat {
+  name: string;
+  size: number;
+  gzip: number;
+  type: 'initial' | 'async' | 'runtime';
+  color: string;
+  cached: boolean;
+  modules: number;
+}
+
+interface ModuleStat {
+  name: string;
+  size: number;
+  chunk: string;
+  isNodeModule: boolean;
+  issuer: string;
+}
+
+const BASE_CHUNKS: ChunkStat[] = [
+  { name: 'react-vendor', size: 95200, gzip: 28400, type: 'initial', color: '#3b82f6', cached: true, modules: 3 },
+  { name: 'vendors', size: 68400, gzip: 22100, type: 'initial', color: PURPLE, cached: true, modules: 12 },
+  { name: 'main', size: 85100, gzip: 24800, type: 'initial', color: WEBPACK_COLOR, cached: false, modules: 48 },
+  { name: 'common', size: 24600, gzip: 7200, type: 'initial', color: ACCENT, cached: false, modules: 8 },
+  { name: 'runtime', size: 8200, gzip: 2100, type: 'runtime', color: MUTED, cached: false, modules: 1 },
+  { name: 'dashboard.chunk', size: 72400, gzip: 21200, type: 'async', color: '#f472b6', cached: false, modules: 24 },
+  { name: 'settings.chunk', size: 44800, gzip: 13400, type: 'async', color: SUCCESS, cached: false, modules: 16 },
+  { name: 'admin.chunk', size: 58200, gzip: 17600, type: 'async', color: '#fb7185', cached: false, modules: 19 },
+];
+
+const MODULES: ModuleStat[] = [
+  { name: 'react-dom/cjs/react-dom.production.min.js', size: 120400, chunk: 'react-vendor', isNodeModule: true, issuer: 'src/index.tsx' },
+  { name: 'react/cjs/react.production.min.js', size: 12800, chunk: 'react-vendor', isNodeModule: true, issuer: 'src/index.tsx' },
+  { name: 'lodash-es/debounce.js', size: 1840, chunk: 'vendors', isNodeModule: true, issuer: 'src/hooks/useDebounce.ts' },
+  { name: 'axios/dist/axios.js', size: 44200, chunk: 'vendors', isNodeModule: true, issuer: 'src/api/client.ts' },
+  { name: 'date-fns/format.js', size: 4100, chunk: 'vendors', isNodeModule: true, issuer: 'src/utils/date.ts' },
+  { name: 'src/App.tsx', size: 4800, chunk: 'main', isNodeModule: false, issuer: 'src/index.tsx' },
+  { name: 'src/components/Button.tsx', size: 1100, chunk: 'main', isNodeModule: false, issuer: 'src/App.tsx' },
+  { name: 'src/components/Header.tsx', size: 2300, chunk: 'main', isNodeModule: false, issuer: 'src/App.tsx' },
+  { name: 'src/api/client.ts', size: 3500, chunk: 'main', isNodeModule: false, issuer: 'src/App.tsx' },
+  { name: 'src/utils/date.ts', size: 800, chunk: 'common', isNodeModule: false, issuer: 'src/App.tsx' },
+  { name: 'src/hooks/useAuth.ts', size: 1200, chunk: 'common', isNodeModule: false, issuer: 'src/App.tsx' },
+  { name: 'src/pages/Dashboard.tsx', size: 8400, chunk: 'dashboard.chunk', isNodeModule: false, issuer: 'src/App.tsx' },
+  { name: 'src/pages/Settings.tsx', size: 5200, chunk: 'settings.chunk', isNodeModule: false, issuer: 'src/App.tsx' },
+];
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B';
+  return (bytes / 1024).toFixed(1) + ' KB';
+}
+
+function formatTime(ms: number): string {
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
+type Tab = 'overview' | 'chunks' | 'modules' | 'performance';
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const [building, setBuilding] = useState(false);
+  const [stats, setStats] = useState<BuildStats | null>(null);
+  const [buildCount, setBuildCount] = useState(0);
+  const [selectedChunk, setSelectedChunk] = useState<string | null>(null);
+
+  const runBuild = useCallback(() => {
+    setBuilding(true);
+    setBuildCount(c => c + 1);
+    const isFirstBuild = buildCount === 0;
+    const buildTime = isFirstBuild
+      ? 12000 + Math.random() * 8000
+      : 1200 + Math.random() * 800;
+
+    setTimeout(() => {
+      const chunks = BASE_CHUNKS.map(c => ({ ...c, cached: !isFirstBuild && (c.name === 'react-vendor' || c.name === 'vendors') }));
+      setStats({
+        buildTime: Math.round(buildTime),
+        totalSize: chunks.reduce((a, c) => a + c.size, 0),
+        gzipSize: chunks.reduce((a, c) => a + c.gzip, 0),
+        chunks,
+        modules: MODULES,
+        warnings: buildCount > 1 ? [] : ['Bundle size exceeds 244 KB for main entry'],
+        errors: [],
+      });
+      setBuilding(false);
+    }, 1800);
+  }, [buildCount]);
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: 'overview', label: '📊 Overview' },
+    { id: 'chunks', label: '📦 Chunks' },
+    { id: 'modules', label: '🧩 Modules' },
+    { id: 'performance', label: '⚡ Performance' },
+  ];
+
+  const maxChunkSize = stats ? Math.max(...stats.chunks.map(c => c.size)) : 1;
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 1100, margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 28 }}>
+          <div>
+            <div style={{ fontSize: 24, fontWeight: 700, color: WEBPACK_COLOR }}>📦 Webpack Stats Dashboard</div>
+            <div style={{ color: MUTED, fontSize: 12 }}>Production React + TypeScript — полная аналитика сборки</div>
+          </div>
+          <button
+            onClick={runBuild}
+            disabled={building}
+            style={{ padding: '10px 24px', background: building ? MUTED : WEBPACK_COLOR, color: BG, border: 'none', borderRadius: 8, cursor: building ? 'wait' : 'pointer', fontWeight: 700, fontSize: 13, fontFamily: 'monospace' }}
+          >
+            {building ? '⟳ Building...' : buildCount === 0 ? '▶ Run Build' : '↺ Rebuild'}
+          </button>
+        </div>
+
+        {!stats && !building && (
+          <div style={{ background: CARD, borderRadius: 12, padding: 40, textAlign: 'center' }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>📦</div>
+            <div style={{ fontSize: 16, color: TEXT, marginBottom: 8 }}>Запустите сборку</div>
+            <div style={{ fontSize: 12, color: MUTED }}>Нажмите "Run Build" чтобы увидеть полную аналитику webpack production сборки</div>
+          </div>
+        )}
+
+        {building && (
+          <div style={{ background: CARD, borderRadius: 12, padding: 40, textAlign: 'center' }}>
+            <div style={{ fontSize: 32, marginBottom: 16 }}>⚙️</div>
+            <div style={{ fontSize: 14, color: WEBPACK_COLOR, marginBottom: 8 }}>webpack --mode production</div>
+            <div style={{ background: '#0a0f1e', borderRadius: 6, overflow: 'hidden', height: 8, width: 300, margin: '0 auto' }}>
+              <div style={{ height: '100%', background: WEBPACK_COLOR, animation: 'none', width: '60%', transition: 'width 1s' }} />
+            </div>
+          </div>
+        )}
+
+        {stats && !building && (
+          <>
+            {/* Tab bar */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+              {tabs.map(t => (
+                <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ padding: '8px 16px', background: activeTab === t.id ? WEBPACK_COLOR : CARD, color: activeTab === t.id ? BG : TEXT, border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: activeTab === t.id ? 700 : 400, fontFamily: 'monospace' }}>{t.label}</button>
+              ))}
+            </div>
+
+            {/* Overview tab */}
+            {activeTab === 'overview' && (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20 }}>
+                  {[
+                    { label: 'Build Time', value: formatTime(stats.buildTime), color: stats.buildTime < 5000 ? SUCCESS : stats.buildTime < 15000 ? ACCENT : ERROR, icon: '⏱️' },
+                    { label: 'Total Size', value: formatSize(stats.totalSize), color: stats.totalSize < 300000 ? SUCCESS : ACCENT, icon: '📦' },
+                    { label: 'Gzip Size', value: formatSize(stats.gzipSize), color: SUCCESS, icon: '🗜️' },
+                    { label: 'Chunks', value: stats.chunks.length.toString(), color: WEBPACK_COLOR, icon: '✂️' },
+                  ].map(metric => (
+                    <div key={metric.label} style={{ background: CARD, borderRadius: 10, padding: '16px', textAlign: 'center' }}>
+                      <div style={{ fontSize: 20 }}>{metric.icon}</div>
+                      <div style={{ fontSize: 22, color: metric.color, fontWeight: 700 }}>{metric.value}</div>
+                      <div style={{ fontSize: 11, color: MUTED }}>{metric.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {stats.warnings.length > 0 && (
+                  <div style={{ background: '#1c1000', border: '1px solid #78350f', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+                    {stats.warnings.map((w, i) => <div key={i} style={{ fontSize: 12, color: '#fbbf24' }}>⚠️ {w}</div>)}
+                  </div>
+                )}
+
+                {/* Chunk breakdown */}
+                <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+                  <div style={{ fontSize: 12, color: MUTED, marginBottom: 16, textTransform: 'uppercase' }}>Breakdown по чанкам</div>
+                  {stats.chunks.map(chunk => (
+                    <div key={chunk.name} style={{ marginBottom: 12 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: '50%', background: chunk.color }} />
+                        <span style={{ flex: 1, fontSize: 12, color: TEXT }}>{chunk.name}.js</span>
+                        <span style={{ fontSize: 10, color: chunk.cached ? SUCCESS : MUTED, background: chunk.cached ? '#0a2e1a' : '#0a0f1e', padding: '1px 6px', borderRadius: 3 }}>{chunk.cached ? 'CACHED' : chunk.type}</span>
+                        <span style={{ fontSize: 12, color: TEXT, minWidth: 70, textAlign: 'right' }}>{formatSize(chunk.size)}</span>
+                        <span style={{ fontSize: 11, color: MUTED, minWidth: 60, textAlign: 'right' }}>{formatSize(chunk.gzip)} gz</span>
+                      </div>
+                      <div style={{ background: '#0a0f1e', borderRadius: 3, overflow: 'hidden', height: 6 }}>
+                        <div style={{ height: '100%', background: chunk.color, width: \`\${(chunk.size / maxChunkSize) * 100}%\`, opacity: chunk.cached ? 0.5 : 1, transition: 'width 0.5s' }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* Chunks tab */}
+            {activeTab === 'chunks' && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+                {stats.chunks.map(chunk => (
+                  <div
+                    key={chunk.name}
+                    onClick={() => setSelectedChunk(selectedChunk === chunk.name ? null : chunk.name)}
+                    style={{ background: CARD, borderRadius: 10, padding: 16, cursor: 'pointer', border: \`2px solid \${selectedChunk === chunk.name ? chunk.color : 'transparent'}\`, transition: 'all 0.2s' }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                      <div style={{ width: 10, height: 10, borderRadius: '50%', background: chunk.color }} />
+                      <div style={{ fontSize: 13, color: chunk.color, fontWeight: 700, flex: 1 }}>{chunk.name}</div>
+                      <div style={{ fontSize: 10, color: MUTED }}>{chunk.type}</div>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
+                      <div style={{ background: '#0a0f1e', borderRadius: 6, padding: 6, textAlign: 'center' }}>
+                        <div style={{ fontSize: 14, color: TEXT, fontWeight: 700 }}>{formatSize(chunk.size)}</div>
+                        <div style={{ fontSize: 9, color: MUTED }}>raw</div>
+                      </div>
+                      <div style={{ background: '#0a0f1e', borderRadius: 6, padding: 6, textAlign: 'center' }}>
+                        <div style={{ fontSize: 14, color: SUCCESS, fontWeight: 700 }}>{formatSize(chunk.gzip)}</div>
+                        <div style={{ fontSize: 9, color: MUTED }}>gzip</div>
+                      </div>
+                      <div style={{ background: '#0a0f1e', borderRadius: 6, padding: 6, textAlign: 'center' }}>
+                        <div style={{ fontSize: 14, color: ACCENT, fontWeight: 700 }}>{chunk.modules}</div>
+                        <div style={{ fontSize: 9, color: MUTED }}>modules</div>
+                      </div>
+                    </div>
+                    <div style={{ background: '#0a0f1e', borderRadius: 4, overflow: 'hidden', height: 6 }}>
+                      <div style={{ height: '100%', background: chunk.color, width: \`\${(chunk.size / maxChunkSize) * 100}%\` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Modules tab */}
+            {activeTab === 'modules' && (
+              <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+                <div style={{ fontSize: 12, color: MUTED, marginBottom: 16, textTransform: 'uppercase' }}>Топ модулей по размеру</div>
+                {[...stats.modules].sort((a, b) => b.size - a.size).map((mod, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #1e293b' }}>
+                    <div style={{ width: 24, fontSize: 11, color: MUTED, textAlign: 'right' }}>{i + 1}</div>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: mod.isNodeModule ? PURPLE : WEBPACK_COLOR, flexShrink: 0 }} />
+                    <div style={{ flex: 1, overflow: 'hidden' }}>
+                      <div style={{ fontSize: 11, color: TEXT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{mod.name}</div>
+                      <div style={{ fontSize: 9, color: MUTED }}>chunk: {mod.chunk} • from: {mod.issuer}</div>
+                    </div>
+                    <div style={{ fontSize: 12, color: mod.size > 50000 ? ERROR : mod.size > 10000 ? ACCENT : SUCCESS, minWidth: 60, textAlign: 'right' }}>{formatSize(mod.size)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Performance tab */}
+            {activeTab === 'performance' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+                  {[
+                    { label: 'Initial JS', value: stats.chunks.filter(c => c.type === 'initial').reduce((a, c) => a + c.size, 0), threshold: 300000, icon: '⚡' },
+                    { label: 'Initial CSS', value: 18400, threshold: 100000, icon: '🎨' },
+                    { label: 'Async chunks', value: stats.chunks.filter(c => c.type === 'async').length, threshold: 10, icon: '✂️', isCount: true },
+                  ].map(m => {
+                    const ratio = m.isCount ? (m.value as number) / m.threshold : (m.value as number) / m.threshold;
+                    const color = ratio < 0.5 ? SUCCESS : ratio < 0.8 ? ACCENT : ERROR;
+                    return (
+                      <div key={m.label} style={{ background: CARD, borderRadius: 10, padding: 16, textAlign: 'center' }}>
+                        <div style={{ fontSize: 20 }}>{m.icon}</div>
+                        <div style={{ fontSize: 20, color, fontWeight: 700 }}>{m.isCount ? m.value : formatSize(m.value as number)}</div>
+                        <div style={{ fontSize: 11, color: MUTED }}>{m.label}</div>
+                        <div style={{ background: '#0a0f1e', borderRadius: 3, overflow: 'hidden', height: 5, marginTop: 6 }}>
+                          <div style={{ height: '100%', background: color, width: \`\${Math.min(ratio * 100, 100)}%\` }} />
+                        </div>
+                        <div style={{ fontSize: 9, color: MUTED, marginTop: 2 }}>лимит: {m.isCount ? m.threshold : formatSize(m.threshold)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+                  <div style={{ fontSize: 12, color: MUTED, marginBottom: 16, textTransform: 'uppercase' }}>Рекомендации</div>
+                  {[
+                    { ok: stats.buildTime < 20000, msg: \`Build time: \${formatTime(stats.buildTime)}\`, hint: stats.buildTime > 20000 ? 'Включите persistent cache для ускорения' : 'Отлично!' },
+                    { ok: stats.gzipSize < 150000, msg: \`Gzip size: \${formatSize(stats.gzipSize)}\`, hint: stats.gzipSize > 150000 ? 'Разделите vendor чанки, включите tree shaking' : 'В пределах нормы' },
+                    { ok: true, msg: 'contenthash используется', hint: 'Браузерное кеширование настроено правильно' },
+                    { ok: true, msg: 'runtimeChunk: single', hint: 'Хеши бандлов стабильны' },
+                    { ok: stats.chunks.some(c => c.type === 'async'), msg: 'Code splitting активен', hint: stats.chunks.filter(c => c.type === 'async').length + ' async чанков' },
+                  ].map((rec, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0', borderBottom: '1px solid #1e293b' }}>
+                      <span style={{ color: rec.ok ? SUCCESS : ERROR, fontSize: 14 }}>{rec.ok ? '✓' : '✗'}</span>
+                      <div>
+                        <div style={{ fontSize: 12, color: rec.ok ? TEXT : ERROR }}>{rec.msg}</div>
+                        <div style={{ fontSize: 10, color: MUTED }}>{rec.hint}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

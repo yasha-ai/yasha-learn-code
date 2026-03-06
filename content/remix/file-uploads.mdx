@@ -1,0 +1,347 @@
+import { Playground } from '../../components/Playground'
+
+# Загрузка файлов
+
+Remix обрабатывает загрузку файлов через `unstable_parseMultipartFormData`. Файлы можно сохранять локально или в облачное хранилище (S3, Cloudflare R2).
+
+## Базовая загрузка файла
+
+```typescript
+import {
+  unstable_parseMultipartFormData,
+  unstable_createFileUploadHandler,
+  json,
+} from "@remix-run/node";
+
+export async function action({ request }) {
+  const uploadHandler = unstable_createFileUploadHandler({
+    directory: "./public/uploads",
+    maxPartSize: 5_000_000,  // 5MB
+  });
+
+  const formData = await unstable_parseMultipartFormData(
+    request,
+    uploadHandler
+  );
+
+  const file = formData.get("avatar");
+
+  if (!(file instanceof File)) {
+    return json({ error: "Файл не загружен" }, { status: 400 });
+  }
+
+  return json({
+    name: file.name,
+    size: file.size,
+    type: file.type,
+  });
+}
+```
+
+## Загрузка в память (для небольших файлов)
+
+```typescript
+import { unstable_parseMultipartFormData, unstable_createMemoryUploadHandler } from "@remix-run/node";
+
+export async function action({ request }) {
+  const uploadHandler = unstable_createMemoryUploadHandler({
+    maxPartSize: 500_000,  // 500KB
+  });
+
+  const formData = await unstable_parseMultipartFormData(
+    request,
+    uploadHandler
+  );
+
+  const image = formData.get("image") as File;
+  const buffer = await image.arrayBuffer();
+
+  // Обработка в памяти: ресайз, конвертация и т.д.
+  const processed = await processImage(Buffer.from(buffer));
+
+  return json({ url: processed.url });
+}
+```
+
+## Загрузка в S3
+
+```typescript
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+const s3 = new S3Client({ region: process.env.AWS_REGION });
+
+const s3UploadHandler: UploadHandler = async ({ name, filename, data }) => {
+  if (name !== "file") {
+    return undefined;  // игнорируем другие поля
+  }
+
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of data) {
+    chunks.push(chunk);
+  }
+  const buffer = Buffer.concat(chunks);
+
+  const key = \`uploads/\${Date.now()}-\${filename}\`;
+
+  await s3.send(new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+    Body: buffer,
+    ContentType: "image/jpeg",
+  }));
+
+  return \`https://s3.amazonaws.com/\${process.env.S3_BUCKET}/\${key}\`;
+};
+```
+
+## Форма загрузки с прогрессом
+
+```typescript
+import { useNavigation } from "@remix-run/react";
+
+export default function UploadForm() {
+  const navigation = useNavigation();
+  const isUploading = navigation.state === "submitting";
+
+  return (
+    <Form method="post" encType="multipart/form-data">
+      <input
+        type="file"
+        name="file"
+        accept="image/*"
+        required
+      />
+      <button type="submit" disabled={isUploading}>
+        {isUploading ? "Загрузка..." : "Загрузить"}
+      </button>
+    </Form>
+  );
+}
+```
+
+## Валидация типа и размера
+
+```typescript
+const uploadHandler: UploadHandler = async ({ name, filename, data, contentType }) => {
+  // Проверяем тип файла
+  const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
+  if (!allowedTypes.includes(contentType)) {
+    throw new Response("Неверный тип файла", { status: 400 });
+  }
+
+  // Проверяем расширение
+  const ext = path.extname(filename ?? "").toLowerCase();
+  const allowedExts = [".jpg", ".jpeg", ".png", ".webp"];
+  if (!allowedExts.includes(ext)) {
+    throw new Response("Неверное расширение", { status: 400 });
+  }
+
+  // Дальше — загрузка
+};
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useRef, useCallback } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+const WARN = "#f59e0b";
+
+type UploadState = "idle" | "dragging" | "uploading" | "success" | "error";
+
+type UploadedFile = {
+  name: string;
+  size: string;
+  type: string;
+  url: string;
+};
+
+const formatSize = (bytes: number): string => {
+  if (bytes < 1024) return \`\${bytes} B\`;
+  if (bytes < 1024 * 1024) return \`\${(bytes / 1024).toFixed(1)} KB\`;
+  return \`\${(bytes / (1024 * 1024)).toFixed(1)} MB\`;
+};
+
+export default function App() {
+  const [state, setState] = useState<UploadState>("idle");
+  const [progress, setProgress] = useState(0);
+  const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [error, setError] = useState("");
+  const [dragCount, setDragCount] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const simulateUpload = (file: File) => {
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"];
+    const maxSize = 5 * 1024 * 1024; // 5MB
+
+    if (!allowedTypes.includes(file.type)) {
+      setState("error");
+      setError(\`Неверный тип: \${file.type}. Разрешены: JPG, PNG, WEBP, GIF, PDF\`);
+      setTimeout(() => { setState("idle"); setError(""); }, 3000);
+      return;
+    }
+
+    if (file.size > maxSize) {
+      setState("error");
+      setError(\`Файл слишком большой: \${formatSize(file.size)}. Максимум: 5MB\`);
+      setTimeout(() => { setState("idle"); setError(""); }, 3000);
+      return;
+    }
+
+    setState("uploading");
+    setProgress(0);
+
+    // Simulate upload progress
+    const interval = setInterval(() => {
+      setProgress(p => {
+        if (p >= 100) {
+          clearInterval(interval);
+          setState("success");
+          setFiles(prev => [...prev, {
+            name: file.name,
+            size: formatSize(file.size),
+            type: file.type,
+            url: \`https://s3.example.com/uploads/\${Date.now()}-\${file.name}\`,
+          }]);
+          setTimeout(() => setState("idle"), 1500);
+          return 100;
+        }
+        return p + Math.random() * 15;
+      });
+    }, 100);
+  };
+
+  const handleFiles = (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    simulateUpload(fileList[0]);
+  };
+
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setState("dragging");
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setState("idle");
+    handleFiles(e.dataTransfer.files);
+  };
+
+  const borderColor = state === "dragging" ? ACCENT : state === "error" ? ERROR : state === "success" ? SUCCESS : "#334155";
+  const bgColor = state === "dragging" ? ACCENT + "11" : CARD;
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>📁 Загрузка файлов</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>
+        Симуляция unstable_parseMultipartFormData + S3
+      </p>
+
+      <div style={{ maxWidth: "600px" }}>
+        {/* Drop zone */}
+        <div
+          onDragOver={onDragOver}
+          onDragLeave={() => setState("idle")}
+          onDrop={onDrop}
+          onClick={() => state === "idle" && inputRef.current?.click()}
+          style={{
+            border: \`2px dashed \${borderColor}\`,
+            borderRadius: "14px",
+            padding: "40px",
+            textAlign: "center",
+            background: bgColor,
+            cursor: state === "idle" ? "pointer" : "default",
+            transition: "all 0.2s",
+            marginBottom: "20px",
+          }}
+        >
+          <input
+            ref={inputRef}
+            type="file"
+            style={{ display: "none" }}
+            accept="image/*,.pdf"
+            onChange={e => handleFiles(e.target.files)}
+          />
+
+          {state === "idle" && (
+            <>
+              <div style={{ fontSize: "40px", marginBottom: "12px" }}>📁</div>
+              <div style={{ color: TEXT, fontWeight: 600, marginBottom: "8px" }}>
+                Перетащи файл или нажми для выбора
+              </div>
+              <div style={{ color: MUTED, fontSize: "13px" }}>JPG, PNG, WEBP, GIF, PDF · до 5MB</div>
+            </>
+          )}
+
+          {state === "dragging" && (
+            <>
+              <div style={{ fontSize: "40px", marginBottom: "12px" }}>⬇️</div>
+              <div style={{ color: ACCENT, fontWeight: 600 }}>Отпусти для загрузки</div>
+            </>
+          )}
+
+          {state === "uploading" && (
+            <>
+              <div style={{ color: ACCENT, fontWeight: 600, marginBottom: "16px" }}>
+                ⏳ Загрузка на S3...
+              </div>
+              <div style={{ background: "#1e3a5f", borderRadius: "4px", height: "8px", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%",
+                  background: ACCENT,
+                  width: \`\${Math.min(progress, 100)}%\`,
+                  transition: "width 0.1s",
+                  borderRadius: "4px",
+                }} />
+              </div>
+              <div style={{ color: MUTED, fontSize: "12px", marginTop: "8px" }}>{Math.min(Math.round(progress), 100)}%</div>
+            </>
+          )}
+
+          {state === "success" && (
+            <>
+              <div style={{ fontSize: "40px", marginBottom: "12px" }}>✅</div>
+              <div style={{ color: SUCCESS, fontWeight: 600 }}>Файл загружен!</div>
+            </>
+          )}
+
+          {state === "error" && (
+            <>
+              <div style={{ fontSize: "40px", marginBottom: "12px" }}>❌</div>
+              <div style={{ color: ERROR, fontWeight: 600 }}>{error}</div>
+            </>
+          )}
+        </div>
+
+        {/* Uploaded files */}
+        {files.length > 0 && (
+          <div style={{ background: CARD, borderRadius: "12px", padding: "16px" }}>
+            <h3 style={{ color: ACCENT, margin: "0 0 12px", fontSize: "14px" }}>Загруженные файлы</h3>
+            {files.map((f, i) => (
+              <div key={i} style={{
+                display: "grid", gridTemplateColumns: "auto 1fr auto",
+                gap: "12px", alignItems: "center",
+                padding: "10px", background: BG, borderRadius: "8px", marginBottom: "8px",
+              }}>
+                <span style={{ fontSize: "24px" }}>
+                  {f.type.startsWith("image/") ? "🖼️" : "📄"}
+                </span>
+                <div>
+                  <div style={{ fontSize: "13px", color: TEXT }}>{f.name}</div>
+                  <div style={{ fontSize: "11px", color: MUTED, fontFamily: "monospace" }}>{f.url.slice(0, 40)}...</div>
+                </div>
+                <span style={{ color: MUTED, fontSize: "12px" }}>{f.size}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

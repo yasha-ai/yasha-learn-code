@@ -1,0 +1,341 @@
+import { Playground } from '../../components/Playground'
+
+# Resumability vs Hydration
+
+Resumability — это центральная концепция Qwik, которая принципиально отличает его от всех остальных фреймворков. Чтобы по-настоящему понять resumability, нужно детально разобраться с тем, как работает традиционная гидратация и почему Qwik предлагает принципиально другой подход.
+
+## Проблема с гидратацией в деталях
+
+### Что происходит при гидратации?
+
+Когда пользователь заходит на React/Vue/Angular сайт с SSR:
+
+```
+Фаза 1: Сервер рендерит HTML
+───────────────────────────────────────────────
+const html = renderToString(<App />)
+// Результат: <div id="root"><button>Count: 0</button></div>
+// Состояние потеряно! Сервер не знает что это Counter с value=0
+
+Фаза 2: Браузер получает HTML (страница выглядит готовой)
+───────────────────────────────────────────────
+// Пользователь ВИДИТ кнопку, но она НЕ РАБОТАЕТ
+// onClick ещё не привязан!
+
+Фаза 3: Браузер загружает JS (200-500 КБ)
+───────────────────────────────────────────────
+<script src="/bundle.js"></script>  // Весь код приложения!
+
+Фаза 4: React гидратирует (воссоздаёт то, что уже сделал сервер)
+───────────────────────────────────────────────
+ReactDOM.hydrateRoot(document, <App />)
+// React обходит ВСЁ дерево компонентов заново
+// Это избыточная работа — HTML уже есть!
+
+Фаза 5: Страница становится интерактивной ✅
+```
+
+**Ключевая проблема**: браузер проделывает работу, которую уже сделал сервер. Это называется **«дублирование работы»**.
+
+### Почему нельзя просто не делать гидратацию?
+
+Без гидратации браузер не знает:
+- Какие функции привязаны к каким DOM-элементам
+- Какое состояние у компонентов
+- Какие компоненты существуют и где они начинаются/заканчиваются
+
+React не может передать эту информацию в HTML, потому что функции JavaScript **не сериализуемы**.
+
+## Решение Qwik: Resumability
+
+### Идея сериализации состояния
+
+Qwik решает проблему, сохраняя **все необходимые данные прямо в HTML**:
+
+```html
+<!-- Обычный React SSR HTML -->
+<div id="root">
+  <button>Count: 0</button>
+</div>
+<!-- Обработчик события потерян! -->
+
+<!-- Qwik SSR HTML -->
+<div>
+  <button 
+    on:click="./chunk-abc.js#Counter_button_onClick_0BkQ6"
+    q:id="1">
+    Count: 0
+  </button>
+</div>
+
+<!-- Сериализованное состояние -->
+<script type="qwik/json">
+{
+  "objs": [0, "#1"],
+  "subs": [["3 #1 count 0"]]
+}
+</script>
+```
+
+### Что именно сериализует Qwik?
+
+```
+1. Ссылки на обработчики событий (как URL на чанки)
+   on:click="./chunk-abc.js#handler_name"
+   
+2. Состояние компонентов (через useSignal/useStore)
+   <script type="qwik/json">{...}</script>
+   
+3. Дерево компонентов (через q:id атрибуты)
+   q:id="0", q:id="1", q:id="2"...
+   
+4. Связи между состоянием и DOM
+   Какой сигнал управляет каким элементом
+```
+
+### Процесс Resumability
+
+```
+Фаза 1: Сервер рендерит HTML + сериализует состояние
+───────────────────────────────────────────────────
+HTML + <script type="qwik/json"> = полное описание приложения
+
+Фаза 2: Браузер получает HTML
+───────────────────────────────────────────────────
+✅ Страница СРАЗУ интерактивна!
+Qwik регистрирует один глобальный обработчик событий.
+
+Фаза 3: Пользователь кликает кнопку
+───────────────────────────────────────────────────
+Qwik runtime (~1 КБ) перехватывает событие.
+Читает URL обработчика из on:click атрибута.
+Загружает нужный чанк (только этот обработчик!).
+Десериализует состояние из qwik/json.
+Выполняет обработчик.
+Обновляет только нужные DOM-узлы.
+```
+
+## Ленивая загрузка с QRL
+
+QRL (Qwik Resource Locator) — это URL-ссылка на функцию вместо самой функции:
+
+```typescript
+// React — функция передаётся напрямую (не сериализуемо)
+<button onClick={() => {
+  // Весь этот код в начальном бандле
+  const result = heavyComputation();
+  setState(result);
+}}>
+  Click
+</button>
+
+// Qwik — функция преобразуется в QRL (URL)
+<button onClick$={() => {
+  // Этот код в ОТДЕЛЬНОМ чанке
+  // Загружается только при клике!
+  const result = heavyComputation();
+  state.value = result;
+}}>
+  Click
+</button>
+```
+
+Символ `$` в Qwik — это магический суффикс, который говорит оптимизатору: **«вынеси эту функцию в отдельный чанк»**.
+
+## Сравнение поведения при взаимодействии
+
+```
+React: пользователь кликает кнопку
+┌─ Все обработчики уже загружены (гидратация) ─┐
+│  handler уже в памяти → выполняется сразу     │
+│  Но: 2-5 секунд ожидания ДО этого момента     │
+└──────────────────────────────────────────────┘
+
+Qwik: пользователь кликает кнопку  
+┌─ Обработчик загружается лениво ──────────────┐
+│  1. Перехват события (~0 мс)                  │
+│  2. Загрузка чанка (~50-100 мс)               │
+│  3. Выполнение (~1 мс)                        │
+│  Но: страница интерактивна СРАЗУ              │
+└──────────────────────────────────────────────┘
+```
+
+## Playground: Визуализация Timeline
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useCallback } from 'react';
+
+const BG = '#0f172a';
+const QWIK = '#ac7ef4';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#22c55e';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+const BLUE = '#38bdf8';
+
+type Phase = {
+  id: string;
+  label: string;
+  detail: string;
+  duration: number;
+  color: string;
+  icon: string;
+  jsKb?: number;
+};
+
+const reactPhases: Phase[] = [
+  { id: 'server', label: 'Серверный рендер', detail: 'renderToString(<App />) — создаёт HTML', duration: 300, color: BLUE, icon: '🖥️', jsKb: 0 },
+  { id: 'download', label: 'Загрузка JS', detail: 'Браузер загружает весь бандл', duration: 1500, color: ORANGE, icon: '⬇️', jsKb: 350 },
+  { id: 'parse', label: 'Парсинг и компиляция', detail: 'V8 парсит и компилирует JavaScript', duration: 800, color: RED, icon: '⚙️', jsKb: 350 },
+  { id: 'hydrate', label: 'Гидратация', detail: 'React обходит всё дерево компонентов заново', duration: 600, color: '#f43f5e', icon: '💧', jsKb: 350 },
+  { id: 'bind', label: 'Привязка событий', detail: 'addEventListener для каждого обработчика', duration: 200, color: ORANGE, icon: '🔗', jsKb: 350 },
+  { id: 'ready', label: '✅ Интерактивно', detail: 'Страница полностью готова', duration: 0, color: GREEN, icon: '✅', jsKb: 350 },
+];
+
+const qwikPhases: Phase[] = [
+  { id: 'server', label: 'Серверный рендер + сериализация', detail: 'HTML + qwik/json со всем состоянием', duration: 350, color: BLUE, icon: '🖥️', jsKb: 0 },
+  { id: 'ready', label: '✅ Интерактивно!', detail: 'HTML содержит ссылки на обработчики — всё готово!', duration: 0, color: GREEN, icon: '✅', jsKb: 0 },
+  { id: 'runtime', label: 'Runtime ~1 КБ (при первом событии)', detail: 'Минимальный Qwik runtime загружается при взаимодействии', duration: 100, color: QWIK, icon: '⚡', jsKb: 1 },
+  { id: 'handler', label: 'Обработчик (лениво)', detail: 'Загружается только нужный чанк обработчика', duration: 80, color: QWIK, icon: '📦', jsKb: 3 },
+];
+
+function Timeline({ phases, title, color, totalLabel }: {
+  phases: Phase[];
+  title: string;
+  color: string;
+  totalLabel: string;
+}) {
+  const [step, setStep] = useState(-1);
+  const [running, setRunning] = useState(false);
+
+  const run = useCallback(() => {
+    if (running) return;
+    setRunning(true);
+    setStep(-1);
+    let t = 0;
+    phases.forEach((phase, i) => {
+      setTimeout(() => {
+        setStep(i);
+        if (i === phases.length - 1) setRunning(false);
+      }, t + 300);
+      t += phase.duration + 300;
+    });
+  }, [running, phases]);
+
+  const totalMs = phases.reduce((a, p) => a + p.duration, 0);
+  const currentKb = step >= 0 ? phases[step].jsKb ?? 0 : 0;
+
+  return (
+    <div style={{ flex: 1, minWidth: 280, background: CARD, borderRadius: 12, padding: 20, border: \`1px solid \${color}33\` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+        <h3 style={{ color, margin: 0, fontSize: 15 }}>{title}</h3>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ color: MUTED, fontSize: 11 }}>TTI</div>
+          <div style={{ color: step === phases.length - 1 ? GREEN : MUTED, fontFamily: 'monospace', fontWeight: 700 }}>
+            {totalLabel}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        {phases.map((phase, i) => {
+          const active = step === i;
+          const done = step > i;
+          return (
+            <div key={phase.id} style={{ display: 'flex', gap: 10, marginBottom: 8, opacity: done || active ? 1 : 0.3, transition: 'opacity 0.3s' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: '50%',
+                  background: done || active ? phase.color : '#334155',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 12, flexShrink: 0, transition: 'background 0.3s',
+                }}>
+                  {done ? '✓' : phase.icon}
+                </div>
+                {i < phases.length - 1 && (
+                  <div style={{ width: 2, flex: 1, minHeight: 12, background: done ? phase.color : '#334155', transition: 'background 0.3s', margin: '2px 0' }} />
+                )}
+              </div>
+              <div style={{ flex: 1, paddingBottom: 4 }}>
+                <div style={{ color: done || active ? phase.color : MUTED, fontSize: 13, fontWeight: 600 }}>{phase.label}</div>
+                {active && <div style={{ color: MUTED, fontSize: 11, marginTop: 2 }}>{phase.detail}</div>}
+                {phase.duration > 0 && <div style={{ color: '#475569', fontSize: 11 }}>{phase.duration}мс</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ background: '#0d1829', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', color: MUTED, marginBottom: 6 }}>
+          <span>JS загружено</span>
+          <span style={{ color: color }}>{currentKb} КБ</span>
+        </div>
+        <div style={{ background: '#1e293b', borderRadius: 3, height: 6 }}>
+          <div style={{
+            width: \`\${Math.min((currentKb / 350) * 100, 100)}%\`,
+            background: color, height: '100%', borderRadius: 3, transition: 'width 0.3s',
+            minWidth: currentKb > 0 ? 4 : 0,
+          }} />
+        </div>
+      </div>
+
+      <button
+        onClick={run}
+        disabled={running}
+        style={{
+          width: '100%', background: running ? '#334155' : color,
+          color: running ? MUTED : '#0f172a', border: 'none', borderRadius: 8,
+          padding: '10px 0', cursor: running ? 'not-allowed' : 'pointer',
+          fontWeight: 700, fontSize: 14, transition: 'all 0.2s',
+        }}
+      >
+        {running ? '⏳ Загрузка...' : '▶ Симулировать'}
+      </button>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 720, margin: '0 auto' }}>
+        <h1 style={{ color: QWIK, textAlign: 'center', margin: '0 0 8px' }}>Гидратация vs Resumability</h1>
+        <p style={{ color: MUTED, textAlign: 'center', margin: '0 0 24px', fontSize: 14 }}>
+          Детальная визуализация процессов загрузки
+        </p>
+
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 20 }}>
+          <Timeline
+            phases={reactPhases}
+            title="⚛️ React + гидратация"
+            color={ORANGE}
+            totalLabel="~3.4 сек"
+          />
+          <Timeline
+            phases={qwikPhases}
+            title="⚡ Qwik + resumability"
+            color={QWIK}
+            totalLabel="~0.35 сек"
+          />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          {[
+            { label: 'React начальный JS', value: '~350 КБ', color: ORANGE },
+            { label: 'Qwik начальный JS', value: '~1 КБ', color: QWIK },
+            { label: 'React TTI (мобильный)', value: '3–10 сек', color: RED },
+            { label: 'Qwik TTI (мобильный)', value: '~0.4 сек', color: GREEN },
+          ].map(item => (
+            <div key={item.label} style={{ background: CARD, borderRadius: 10, padding: 16, border: '1px solid #334155' }}>
+              <div style={{ color: MUTED, fontSize: 12 }}>{item.label}</div>
+              <div style={{ color: item.color, fontSize: 22, fontWeight: 700, fontFamily: 'monospace' }}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

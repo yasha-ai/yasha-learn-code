@@ -1,0 +1,407 @@
+import { Playground } from '../../components/Playground'
+
+# Оптимизация изображений в Qwik
+
+Qwik предоставляет встроенные инструменты для оптимизации изображений через пакет `@unpic/qwik` или интеграцию с Qwik City. Правильная работа с изображениями критически важна для производительности.
+
+## Базовая оптимизация
+
+Нативный `<img>` в HTML уже можно оптимизировать с помощью атрибутов:
+
+```tsx
+// Базовая оптимизация без библиотек
+<img
+  src="/images/hero.jpg"
+  alt="Hero image"
+  width={800}
+  height={400}
+  loading="lazy"           // Ленивая загрузка
+  decoding="async"         // Асинхронное декодирование
+  fetchpriority="high"     // Для LCP изображений
+/>
+```
+
+## Image компонент с @unpic/qwik
+
+```tsx
+import { Image } from '@unpic/qwik';
+
+export const HeroImage = component$(() => {
+  return (
+    <Image
+      src="https://example.com/hero.jpg"
+      alt="Hero"
+      width={800}
+      height={400}
+      priority    // Загрузить с высоким приоритетом
+      layout="fullWidth"   // Ширина во всю страницу
+    />
+  );
+});
+```
+
+## imageTools плагин для Vite
+
+```typescript
+// vite.config.ts
+import { qwikVite } from '@builder.io/qwik/optimizer';
+import { qwikCity } from '@builder.io/qwik-city/vite';
+
+export default defineConfig(() => ({
+  plugins: [
+    qwikCity(),
+    qwikVite(),
+    // Автоматическая оптимизация в dev-режиме
+  ],
+}));
+```
+
+```tsx
+// Импорт изображений с метаданными
+import heroImage from './hero.jpg?w=800&h=400&format=webp';
+
+export const Hero = component$(() => (
+  <img 
+    src={heroImage.src}
+    width={heroImage.width}
+    height={heroImage.height}
+  />
+));
+```
+
+## Lazy Loading стратегии
+
+```tsx
+// 1. loading="lazy" — браузерная ленивая загрузка
+<img src="..." loading="lazy" alt="..." />
+
+// 2. Intersection Observer — более гибкий контроль
+export const LazyImage = component$<{ src: string; alt: string }>((props) => {
+  const imgRef = useSignal<HTMLImageElement>();
+  const loaded = useSignal(false);
+  
+  useVisibleTask$(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          loaded.value = true;
+          observer.disconnect();
+        }
+      },
+      { threshold: 0.1 }
+    );
+    
+    if (imgRef.value) observer.observe(imgRef.value);
+    return () => observer.disconnect();
+  });
+  
+  return (
+    <div ref={imgRef} style={{ minHeight: 200 }}>
+      {loaded.value && (
+        <img src={props.src} alt={props.alt} />
+      )}
+    </div>
+  );
+});
+```
+
+## Адаптивные изображения
+
+```tsx
+export const ResponsiveImage = component$<{ src: string; alt: string }>((props) => {
+  return (
+    <picture>
+      {/* WebP для современных браузеров */}
+      <source
+        type="image/webp"
+        srcset={\`
+          \${props.src}?w=400&format=webp 400w,
+          \${props.src}?w=800&format=webp 800w,
+          \${props.src}?w=1200&format=webp 1200w
+        \`}
+      />
+      {/* Fallback JPEG */}
+      <img
+        src={props.src}
+        alt={props.alt}
+        sizes="(max-width: 400px) 100vw, (max-width: 800px) 50vw, 400px"
+        loading="lazy"
+      />
+    </picture>
+  );
+});
+```
+
+## Placeholder и blur-up техника
+
+```tsx
+export const BlurImage = component$<{
+  src: string;
+  placeholder: string;  // Base64 или низкоразрешённое изображение
+  alt: string;
+}>((props) => {
+  const isLoaded = useSignal(false);
+  
+  return (
+    <div style="position: relative; overflow: hidden;">
+      {/* Placeholder (blur) */}
+      <img
+        src={props.placeholder}
+        alt=""
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          inset: 0,
+          filter: 'blur(20px)',
+          transform: 'scale(1.1)',
+          opacity: isLoaded.value ? 0 : 1,
+          transition: 'opacity 0.3s',
+        }}
+      />
+      {/* Основное изображение */}
+      <img
+        src={props.src}
+        alt={props.alt}
+        loading="lazy"
+        onLoad$={() => { isLoaded.value = true; }}
+        style={{ opacity: isLoaded.value ? 1 : 0, transition: 'opacity 0.3s' }}
+      />
+    </div>
+  );
+});
+```
+
+## Playground: Симулятор оптимизации
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const QWIK = '#ac7ef4';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#22c55e';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+const BLUE = '#38bdf8';
+
+type ImageFormat = 'original' | 'webp' | 'avif';
+type LoadingStrategy = 'eager' | 'lazy' | 'intersection';
+type LayoutMode = 'fixed' | 'responsive' | 'fill';
+
+type ImageConfig = {
+  format: ImageFormat;
+  width: number;
+  quality: number;
+  loading: LoadingStrategy;
+  layout: LayoutMode;
+  blurPlaceholder: boolean;
+};
+
+const formatSizes: Record<ImageFormat, number> = {
+  original: 420,
+  webp: 180,
+  avif: 120,
+};
+
+const colors = [
+  { bg: '#1a0a2e', fg: QWIK },
+  { bg: '#0a1a2e', fg: BLUE },
+  { bg: '#0a2e1a', fg: GREEN },
+  { bg: '#2e1a0a', fg: ORANGE },
+];
+
+function FakeImage({ color, loaded, blur, width, height }: {
+  color: { bg: string; fg: string };
+  loaded: boolean;
+  blur: boolean;
+  width: number;
+  height: number;
+}) {
+  return (
+    <div style={{
+      width, height, borderRadius: 8, overflow: 'hidden',
+      position: 'relative', background: color.bg,
+      border: '1px solid #334155',
+    }}>
+      {blur && !loaded && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          background: color.bg,
+          filter: 'blur(8px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{ color: color.fg, fontSize: 24, opacity: 0.3 }}>🖼️</div>
+        </div>
+      )}
+      <div style={{
+        position: 'absolute', inset: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexDirection: 'column', gap: 8,
+        opacity: loaded ? 1 : 0,
+        transition: 'opacity 0.5s',
+      }}>
+        <div style={{ color: color.fg, fontSize: 28 }}>🏔️</div>
+        <div style={{ color: color.fg, fontSize: 10, fontFamily: 'monospace' }}>{width}×{height}</div>
+      </div>
+      {!loaded && !blur && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: CARD,
+        }}>
+          <div style={{ color: MUTED, fontSize: 11 }}>⏳</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [config, setConfig] = useState<ImageConfig>({
+    format: 'webp',
+    width: 800,
+    quality: 80,
+    loading: 'lazy',
+    layout: 'responsive',
+    blurPlaceholder: true,
+  });
+
+  const [images, setImages] = useState([false, false, false, false]);
+  const [loadTimes, setLoadTimes] = useState([0, 0, 0, 0]);
+
+  const startLoad = (i: number) => {
+    const baseTime = formatSizes[config.format] / 10 + Math.random() * 20;
+    const qualityFactor = config.quality / 100;
+    const time = Math.round(baseTime * qualityFactor + 50);
+
+    setImages(prev => { const n = [...prev]; n[i] = false; return n; });
+    setTimeout(() => {
+      setImages(prev => { const n = [...prev]; n[i] = true; return n; });
+      setLoadTimes(prev => { const n = [...prev]; n[i] = time; return n; });
+    }, time);
+  };
+
+  const loadAll = () => {
+    setImages([false, false, false, false]);
+    [0, 1, 2, 3].forEach(i => setTimeout(() => startLoad(i), i * 150));
+  };
+
+  const estimatedSize = Math.round(
+    (config.width * config.width * 0.75 * (config.quality / 100) / 1000) *
+    (config.format === 'original' ? 1 : config.format === 'webp' ? 0.43 : 0.29)
+  );
+
+  const update = (key: keyof ImageConfig, value: any) => {
+    setConfig(prev => ({ ...prev, [key]: value }));
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <h1 style={{ color: QWIK, margin: '0 0 4px' }}>🖼️ Оптимизация изображений</h1>
+        <p style={{ color: MUTED, margin: '0 0 20px', fontSize: 13 }}>Настрой параметры и симулируй загрузку</p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+          {/* Config panel */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 20, border: '1px solid #334155' }}>
+            <h3 style={{ color: TEXT, margin: '0 0 16px', fontSize: 15 }}>Настройки</h3>
+
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ color: MUTED, fontSize: 12, display: 'block', marginBottom: 6 }}>Формат</label>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {(['original', 'webp', 'avif'] as ImageFormat[]).map(f => (
+                  <button key={f} onClick={() => update('format', f)} style={{
+                    flex: 1, background: config.format === f ? QWIK : '#0d1829',
+                    color: config.format === f ? '#0f172a' : TEXT,
+                    border: \`1px solid \${config.format === f ? QWIK : '#334155'}\`,
+                    borderRadius: 6, padding: '6px 0', cursor: 'pointer', fontSize: 12, fontWeight: config.format === f ? 700 : 400,
+                  }}>{f}</button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <label style={{ color: MUTED, fontSize: 12 }}>Качество</label>
+                <span style={{ color: QWIK, fontFamily: 'monospace', fontSize: 12 }}>{config.quality}%</span>
+              </div>
+              <input type="range" min={10} max={100} step={5} value={config.quality}
+                onChange={e => update('quality', +e.target.value)}
+                style={{ width: '100%', accentColor: QWIK, marginTop: 4 }} />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <label style={{ color: MUTED, fontSize: 12 }}>Ширина (px)</label>
+                <span style={{ color: QWIK, fontFamily: 'monospace', fontSize: 12 }}>{config.width}</span>
+              </div>
+              <input type="range" min={200} max={1600} step={100} value={config.width}
+                onChange={e => update('width', +e.target.value)}
+                style={{ width: '100%', accentColor: QWIK, marginTop: 4 }} />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ color: MUTED, fontSize: 12, display: 'block', marginBottom: 6 }}>Загрузка</label>
+              <select value={config.loading} onChange={e => update('loading', e.target.value)}
+                style={{ width: '100%', background: '#0d1829', border: '1px solid #334155', borderRadius: 6, padding: '7px 10px', color: TEXT, fontSize: 13 }}>
+                <option value="eager">eager (немедленно)</option>
+                <option value="lazy">lazy (браузерная)</option>
+                <option value="intersection">intersection-observer</option>
+              </select>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input type="checkbox" id="blur" checked={config.blurPlaceholder}
+                onChange={e => update('blurPlaceholder', e.target.checked)} />
+              <label htmlFor="blur" style={{ color: TEXT, fontSize: 13, cursor: 'pointer' }}>
+                Blur placeholder
+              </label>
+            </div>
+          </div>
+
+          {/* Stats */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 20, border: '1px solid #334155' }}>
+            <h3 style={{ color: TEXT, margin: '0 0 16px', fontSize: 15 }}>Метрики</h3>
+            {[
+              { label: 'Формат', value: config.format.toUpperCase(), color: QWIK },
+              { label: 'Размер файла', value: \`~\${estimatedSize} КБ\`, color: config.format === 'avif' ? GREEN : config.format === 'webp' ? BLUE : RED },
+              { label: 'Экономия vs JPEG', value: config.format === 'original' ? '0%' : config.format === 'webp' ? '-57%' : '-71%', color: config.format === 'original' ? MUTED : GREEN },
+              { label: 'Качество', value: \`\${config.quality}%\`, color: config.quality >= 80 ? GREEN : config.quality >= 60 ? ORANGE : RED },
+              { label: 'Стратегия', value: config.loading, color: BLUE },
+              { label: 'Blur effect', value: config.blurPlaceholder ? 'Да' : 'Нет', color: config.blurPlaceholder ? GREEN : MUTED },
+            ].map(m => (
+              <div key={m.label} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #1e293b' }}>
+                <span style={{ color: MUTED, fontSize: 13 }}>{m.label}</span>
+                <span style={{ color: m.color, fontFamily: 'monospace', fontSize: 13, fontWeight: 600 }}>{m.value}</span>
+              </div>
+            ))}
+
+            <button onClick={loadAll} style={{ marginTop: 16, width: '100%', background: QWIK, color: '#0f172a', border: 'none', borderRadius: 8, padding: '10px 0', cursor: 'pointer', fontWeight: 700, fontSize: 14 }}>
+              ▶ Симулировать загрузку
+            </button>
+          </div>
+        </div>
+
+        {/* Image grid */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, border: '1px solid #334155' }}>
+          <h3 style={{ color: TEXT, margin: '0 0 16px', fontSize: 15 }}>Галерея изображений</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            {colors.map((color, i) => (
+              <div key={i}>
+                <FakeImage color={color} loaded={images[i]} blur={config.blurPlaceholder} width={240} height={140} />
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 11 }}>
+                  <span style={{ color: MUTED }}>img_{i + 1}.{config.format === 'original' ? 'jpg' : config.format}</span>
+                  {loadTimes[i] > 0 && (
+                    <span style={{ color: images[i] ? GREEN : ORANGE }}>{images[i] ? \`✓ \${loadTimes[i]}мс\` : '⏳'}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

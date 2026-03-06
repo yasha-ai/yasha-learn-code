@@ -1,0 +1,291 @@
+import { Playground } from '../../components/Playground'
+
+# Аутентификация
+
+Remix не навязывает конкретное решение для аутентификации, но предоставляет все инструменты для её реализации через сессии, cookies и middleware-паттерны в loaders.
+
+## Паттерн requireUser
+
+```typescript
+// app/session.server.ts
+import { redirect } from "@remix-run/node";
+import { getSession } from "./session";
+
+export async function requireUser(request: Request) {
+  const session = await getSession(request.headers.get("Cookie"));
+  const userId = session.get("userId");
+
+  if (!userId) {
+    throw redirect("/login");
+  }
+
+  const user = await db.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    throw redirect("/login");
+  }
+
+  return user;
+}
+```
+
+## Защита маршрутов
+
+```typescript
+// app/routes/dashboard.tsx
+import { requireUser } from "~/session.server";
+
+export async function loader({ request }) {
+  const user = await requireUser(request);  // throws redirect если нет авторизации
+  return json({ user });
+}
+```
+
+## Login Action
+
+```typescript
+// app/routes/login.tsx
+export async function action({ request }) {
+  const formData = await request.formData();
+  const email = formData.get("email") as string;
+  const password = formData.get("password") as string;
+
+  // Валидация
+  if (!email || !password) {
+    return json(
+      { errors: { email: "Обязательное поле", password: "Обязательное поле" } },
+      { status: 400 }
+    );
+  }
+
+  // Проверка пользователя
+  const user = await verifyLogin(email, password);
+  if (!user) {
+    return json(
+      { errors: { general: "Неверный email или пароль" } },
+      { status: 400 }
+    );
+  }
+
+  // Создание сессии
+  return createUserSession({
+    request,
+    userId: user.id,
+    remember: formData.get("remember") === "on",
+    redirectTo: formData.get("redirectTo") as string || "/dashboard",
+  });
+}
+```
+
+## Logout
+
+```typescript
+// app/routes/logout.tsx
+export async function action({ request }) {
+  const session = await getSession(request.headers.get("Cookie"));
+  return redirect("/login", {
+    headers: {
+      "Set-Cookie": await destroySession(session),
+    },
+  });
+}
+
+export function loader() {
+  return redirect("/");
+}
+```
+
+## Перенаправление после логина
+
+```typescript
+// Сохраняем URL куда хотел попасть пользователь
+export async function loader({ request }) {
+  const user = await getUser(request);
+  if (!user) {
+    const url = new URL(request.url);
+    throw redirect(\`/login?redirectTo=\${url.pathname}\`);
+  }
+  return json({ user });
+}
+
+// В login action
+const redirectTo = formData.get("redirectTo") as string || "/dashboard";
+return createUserSession({ userId: user.id, redirectTo });
+```
+
+## Роли и разрешения
+
+```typescript
+export async function requireRole(request: Request, role: "admin" | "editor") {
+  const user = await requireUser(request);
+
+  if (user.role !== role) {
+    throw new Response("Доступ запрещён", { status: 403 });
+  }
+
+  return user;
+}
+
+// Использование
+export async function loader({ request }) {
+  const admin = await requireRole(request, "admin");
+  return json({ stats: await getAdminStats() });
+}
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+const WARN = "#f59e0b";
+
+type Page = "login" | "dashboard" | "admin" | "forbidden";
+
+const MOCK_USERS = [
+  { email: "admin@example.com", password: "admin123", role: "admin", name: "Алексей (Admin)" },
+  { email: "user@example.com", password: "user123", role: "user", name: "Мария (User)" },
+];
+
+export default function App() {
+  const [page, setPage] = useState<Page>("login");
+  const [user, setUser] = useState<typeof MOCK_USERS[0] | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const login = (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    setTimeout(() => {
+      const found = MOCK_USERS.find(u => u.email === email && u.password === password);
+      setLoading(false);
+      if (!found) {
+        setError("Неверный email или пароль");
+        return;
+      }
+      setUser(found);
+      setPage("dashboard");
+    }, 800);
+  };
+
+  const logout = () => {
+    setUser(null);
+    setPage("login");
+    setEmail("");
+    setPassword("");
+  };
+
+  const goToAdmin = () => {
+    if (user?.role === "admin") {
+      setPage("admin");
+    } else {
+      setPage("forbidden");
+    }
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>🔑 Аутентификация Remix</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>
+        Попробуй: admin@example.com / admin123 или user@example.com / user123
+      </p>
+
+      <div style={{ maxWidth: "500px" }}>
+        {page === "login" && (
+          <div style={{ background: CARD, borderRadius: "16px", padding: "32px" }}>
+            <h2 style={{ color: TEXT, margin: "0 0 24px", fontSize: "20px", textAlign: "center" }}>Вход в систему</h2>
+            <form onSubmit={login}>
+              <div style={{ marginBottom: "16px" }}>
+                <label style={{ display: "block", fontSize: "13px", color: MUTED, marginBottom: "6px" }}>Email</label>
+                <input
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  placeholder="email@example.com"
+                  style={{ width: "100%", padding: "10px 12px", background: BG, border: \`1px solid \${error ? ERROR : "#334155"}\`, borderRadius: "8px", color: TEXT, fontSize: "14px", outline: "none", boxSizing: "border-box" }}
+                />
+              </div>
+              <div style={{ marginBottom: "20px" }}>
+                <label style={{ display: "block", fontSize: "13px", color: MUTED, marginBottom: "6px" }}>Пароль</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  style={{ width: "100%", padding: "10px 12px", background: BG, border: \`1px solid \${error ? ERROR : "#334155"}\`, borderRadius: "8px", color: TEXT, fontSize: "14px", outline: "none", boxSizing: "border-box" }}
+                />
+              </div>
+              {error && <div style={{ color: ERROR, fontSize: "13px", marginBottom: "16px", textAlign: "center" }}>{error}</div>}
+              <button type="submit" disabled={loading} style={{
+                width: "100%", padding: "12px", background: ACCENT, color: "#fff",
+                border: "none", borderRadius: "8px", cursor: loading ? "not-allowed" : "pointer",
+                fontSize: "14px", fontWeight: 700,
+              }}>
+                {loading ? "⏳ Проверка..." : "Войти"}
+              </button>
+            </form>
+          </div>
+        )}
+
+        {page === "dashboard" && user && (
+          <div style={{ background: CARD, borderRadius: "16px", padding: "24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
+              <h2 style={{ color: TEXT, margin: 0 }}>Dashboard</h2>
+              <button onClick={logout} style={{ padding: "6px 12px", background: ERROR+"22", color: ERROR, border: \`1px solid \${ERROR}44\`, borderRadius: "6px", cursor: "pointer", fontSize: "12px" }}>
+                Выйти
+              </button>
+            </div>
+            <div style={{ background: SUCCESS+"11", border: \`1px solid \${SUCCESS}44\`, borderRadius: "10px", padding: "16px", marginBottom: "16px" }}>
+              <div style={{ color: SUCCESS, fontWeight: 700 }}>✅ Авторизован</div>
+              <div style={{ color: TEXT, marginTop: "4px" }}>{user.name}</div>
+              <div style={{ color: MUTED, fontSize: "12px" }}>{user.email} · роль: {user.role}</div>
+            </div>
+            <button onClick={goToAdmin} style={{
+              padding: "10px 20px",
+              background: ACCENT+"22",
+              color: ACCENT,
+              border: \`1px solid \${ACCENT}44\`,
+              borderRadius: "8px",
+              cursor: "pointer",
+              fontSize: "13px",
+            }}>
+              Перейти в Админ панель →
+            </button>
+          </div>
+        )}
+
+        {page === "admin" && (
+          <div style={{ background: CARD, borderRadius: "16px", padding: "24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "16px" }}>
+              <h2 style={{ color: ACCENT, margin: 0 }}>⚡ Админ Панель</h2>
+              <button onClick={() => setPage("dashboard")} style={{ color: MUTED, background: "transparent", border: "none", cursor: "pointer" }}>← Назад</button>
+            </div>
+            <div style={{ background: ACCENT+"11", border: \`1px solid \${ACCENT}44\`, borderRadius: "10px", padding: "16px" }}>
+              <div style={{ color: ACCENT, fontSize: "13px" }}>requireRole(request, "admin") — ✅ пройдено</div>
+            </div>
+          </div>
+        )}
+
+        {page === "forbidden" && (
+          <div style={{ background: CARD, borderRadius: "16px", padding: "24px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "16px" }}>
+              <h2 style={{ color: ERROR, margin: 0 }}>403 Forbidden</h2>
+              <button onClick={() => setPage("dashboard")} style={{ color: MUTED, background: "transparent", border: "none", cursor: "pointer" }}>← Назад</button>
+            </div>
+            <div style={{ background: ERROR+"11", border: \`1px solid \${ERROR}44\`, borderRadius: "10px", padding: "16px" }}>
+              <div style={{ color: ERROR, fontSize: "13px" }}>throw new Response("Доступ запрещён", &#123; status: 403 &#125;)</div>
+              <div style={{ color: MUTED, fontSize: "12px", marginTop: "8px" }}>Роль "user" не имеет доступа к /admin</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

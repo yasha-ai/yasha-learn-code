@@ -1,0 +1,389 @@
+import { Playground } from '../../components/Playground'
+
+# Формы в Qwik City
+
+Qwik City предоставляет мощную систему работы с формами через `routeAction$`, `Form` компонент и валидацию через Zod. Всё это работает как с JavaScript, так и **без JavaScript** (progressive enhancement).
+
+## Базовая форма
+
+```tsx
+import { component$ } from '@builder.io/qwik';
+import { routeAction$, Form } from '@builder.io/qwik-city';
+
+export const useSubscribeAction = routeAction$(async (data) => {
+  await subscribe(data.email as string);
+  return { success: true };
+});
+
+export default component$(() => {
+  const action = useSubscribeAction();
+  
+  return (
+    <Form action={action}>
+      <input type="email" name="email" placeholder="your@email.com" />
+      <button type="submit">Подписаться</button>
+      
+      {action.value?.success && <p>✅ Подписка оформлена!</p>}
+    </Form>
+  );
+});
+```
+
+## Валидация с Zod
+
+```typescript
+import { routeAction$, zod$, z } from '@builder.io/qwik-city';
+
+const SignUpSchema = z.object({
+  name: z.string()
+    .min(2, 'Имя должно быть не менее 2 символов')
+    .max(50, 'Имя не может быть длиннее 50 символов'),
+  email: z.string()
+    .email('Введите корректный email'),
+  password: z.string()
+    .min(8, 'Пароль должен быть не менее 8 символов')
+    .regex(/[A-Z]/, 'Должна быть хотя бы одна заглавная буква')
+    .regex(/[0-9]/, 'Должна быть хотя бы одна цифра'),
+  confirmPassword: z.string(),
+}).refine(data => data.password === data.confirmPassword, {
+  message: 'Пароли не совпадают',
+  path: ['confirmPassword'],
+});
+
+export const useSignUp = routeAction$(
+  async (data, { redirect }) => {
+    await createUser(data);
+    throw redirect(302, '/dashboard');
+  },
+  zod$(SignUpSchema)
+);
+```
+
+## Отображение ошибок валидации
+
+```tsx
+export default component$(() => {
+  const signUp = useSignUp();
+  
+  return (
+    <Form action={signUp}>
+      <div>
+        <input name="email" type="email" />
+        {/* Ошибки валидации автоматически типизированы */}
+        {signUp.value?.fieldErrors?.email && (
+          <span class="error">{signUp.value.fieldErrors.email}</span>
+        )}
+      </div>
+      
+      <div>
+        <input name="password" type="password" />
+        {signUp.value?.fieldErrors?.password && (
+          <span class="error">{signUp.value.fieldErrors.password[0]}</span>
+        )}
+      </div>
+      
+      <button type="submit" disabled={signUp.isRunning}>
+        {signUp.isRunning ? 'Загрузка...' : 'Зарегистрироваться'}
+      </button>
+    </Form>
+  );
+});
+```
+
+## fail() — возврат ошибки
+
+```typescript
+export const useLogin = routeAction$(async (data, { fail }) => {
+  const user = await findUser(data.email as string);
+  
+  if (!user || user.password !== data.password) {
+    return fail(401, {
+      message: 'Неверный email или пароль'
+    });
+  }
+  
+  // Успешный вход
+  return { userId: user.id };
+});
+
+// В компоненте:
+{loginAction.value?.message && (
+  <div class="alert-error">{loginAction.value.message}</div>
+)}
+```
+
+## Оптимистичный UI
+
+```tsx
+export const useLikePost = routeAction$(async (data) => {
+  await db.posts.update({ id: data.id, likes: { increment: 1 } });
+});
+
+export const LikeButton = component$<{ postId: string; likes: number }>((props) => {
+  const likeAction = useLikePost();
+  
+  // Оптимистично показываем +1 до ответа сервера
+  const optimisticLikes = likeAction.isRunning
+    ? props.likes + 1
+    : props.likes;
+  
+  return (
+    <Form action={likeAction}>
+      <input type="hidden" name="id" value={props.postId} />
+      <button type="submit">❤️ {optimisticLikes}</button>
+    </Form>
+  );
+});
+```
+
+## Playground: Форма с валидацией
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useCallback } from 'react';
+
+const BG = '#0f172a';
+const QWIK = '#ac7ef4';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#22c55e';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+const BLUE = '#38bdf8';
+
+type FieldState = {
+  value: string;
+  error: string;
+  touched: boolean;
+  valid: boolean;
+};
+
+type FormState = {
+  name: FieldState;
+  email: FieldState;
+  password: FieldState;
+  confirm: FieldState;
+};
+
+const initialField = (value = ''): FieldState => ({ value, error: '', touched: false, valid: false });
+
+const validators: Record<keyof FormState, (v: string, form?: FormState) => string> = {
+  name: v => !v.trim() ? 'Имя обязательно' : v.length < 2 ? 'Минимум 2 символа' : v.length > 50 ? 'Максимум 50 символов' : '',
+  email: v => !v.trim() ? 'Email обязателен' : !/^[^@]+@[^@]+\.[^@]+$/.test(v) ? 'Некорректный email' : '',
+  password: v => !v ? 'Пароль обязателен' : v.length < 8 ? 'Минимум 8 символов' : !/[A-Z]/.test(v) ? 'Нужна заглавная буква' : !/[0-9]/.test(v) ? 'Нужна цифра' : '',
+  confirm: (v, form) => !v ? 'Подтвердите пароль' : v !== form?.password.value ? 'Пароли не совпадают' : '',
+};
+
+type SubmitStatus = 'idle' | 'loading' | 'success' | 'error';
+
+export default function App() {
+  const [form, setForm] = useState<FormState>({
+    name: initialField(),
+    email: initialField(),
+    password: initialField(),
+    confirm: initialField(),
+  });
+  const [submitStatus, setSubmitStatus] = useState<SubmitStatus>('idle');
+  const [submitError, setSubmitError] = useState('');
+
+  const getStrength = (password: string): { score: number; label: string; color: string } => {
+    let score = 0;
+    if (password.length >= 8) score++;
+    if (/[A-Z]/.test(password)) score++;
+    if (/[0-9]/.test(password)) score++;
+    if (/[^A-Za-z0-9]/.test(password)) score++;
+    if (password.length >= 12) score++;
+    const levels = [
+      { score: 0, label: 'Очень слабый', color: RED },
+      { score: 1, label: 'Слабый', color: RED },
+      { score: 2, label: 'Средний', color: ORANGE },
+      { score: 3, label: 'Хороший', color: BLUE },
+      { score: 4, label: 'Сильный', color: GREEN },
+      { score: 5, label: 'Отличный', color: GREEN },
+    ];
+    return levels[Math.min(score, 5)];
+  };
+
+  const handleChange = useCallback((field: keyof FormState, value: string) => {
+    setForm(prev => {
+      const updated = { ...prev, [field]: { ...prev[field], value, touched: true } };
+      const error = validators[field](value, updated);
+      updated[field].error = error;
+      updated[field].valid = !error;
+      if (field === 'password' && updated.confirm.touched) {
+        const confirmError = validators.confirm(updated.confirm.value, updated);
+        updated.confirm.error = confirmError;
+        updated.confirm.valid = !confirmError;
+      }
+      return updated;
+    });
+  }, []);
+
+  const handleBlur = (field: keyof FormState) => {
+    setForm(prev => {
+      const error = validators[field](prev[field].value, prev);
+      return { ...prev, [field]: { ...prev[field], touched: true, error, valid: !error } };
+    });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const touchedForm = { ...form };
+    let hasErrors = false;
+    (Object.keys(form) as (keyof FormState)[]).forEach(k => {
+      const error = validators[k](form[k].value, form);
+      touchedForm[k] = { ...form[k], touched: true, error, valid: !error };
+      if (error) hasErrors = true;
+    });
+    setForm(touchedForm);
+    if (hasErrors) return;
+
+    setSubmitStatus('loading');
+    await new Promise(r => setTimeout(r, 1500));
+    if (Math.random() > 0.2) {
+      setSubmitStatus('success');
+    } else {
+      setSubmitStatus('error');
+      setSubmitError('Email уже зарегистрирован');
+    }
+  };
+
+  const isFormValid = Object.values(form).every(f => f.valid);
+  const strength = getStrength(form.password.value);
+
+  const renderField = (
+    key: keyof FormState,
+    label: string,
+    type: string,
+    placeholder: string,
+    hint?: string
+  ) => {
+    const field = form[key];
+    const showError = field.touched && field.error;
+    const showSuccess = field.touched && field.valid;
+
+    return (
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ color: TEXT, fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+          {label}
+        </label>
+        <div style={{ position: 'relative' }}>
+          <input
+            type={type}
+            value={field.value}
+            onChange={e => handleChange(key, e.target.value)}
+            onBlur={() => handleBlur(key)}
+            placeholder={placeholder}
+            style={{
+              width: '100%',
+              background: '#0d1829',
+              border: \`1px solid \${showError ? RED : showSuccess ? GREEN : '#334155'}\`,
+              borderRadius: 8,
+              padding: '10px 36px 10px 12px',
+              color: TEXT,
+              fontSize: 14,
+              boxSizing: 'border-box',
+              outline: 'none',
+              transition: 'border-color 0.2s',
+            }}
+          />
+          {field.touched && (
+            <span style={{
+              position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+              color: showError ? RED : GREEN, fontSize: 14,
+            }}>
+              {showError ? '✕' : '✓'}
+            </span>
+          )}
+        </div>
+        {showError && <div style={{ color: RED, fontSize: 11, marginTop: 4 }}>⚠ {field.error}</div>}
+        {hint && !showError && <div style={{ color: MUTED, fontSize: 11, marginTop: 4 }}>{hint}</div>}
+
+        {key === 'password' && field.value && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ display: 'flex', gap: 3, marginBottom: 4 }}>
+              {[1, 2, 3, 4, 5].map(i => (
+                <div key={i} style={{
+                  flex: 1, height: 3, borderRadius: 2,
+                  background: i <= strength.score ? strength.color : '#334155',
+                  transition: 'background 0.3s',
+                }} />
+              ))}
+            </div>
+            <div style={{ color: strength.color, fontSize: 11 }}>Надёжность: {strength.label}</div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (submitStatus === 'success') {
+    return (
+      <div style={{ background: BG, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: 'system-ui, sans-serif' }}>
+        <div style={{ background: CARD, borderRadius: 16, padding: 40, textAlign: 'center', border: \`1px solid \${GREEN}44\`, maxWidth: 400 }}>
+          <div style={{ fontSize: 56, marginBottom: 16 }}>🎉</div>
+          <h2 style={{ color: GREEN, margin: '0 0 8px' }}>Регистрация успешна!</h2>
+          <p style={{ color: MUTED, marginBottom: 20 }}>Добро пожаловать, {form.name.value}!</p>
+          <button onClick={() => { setSubmitStatus('idle'); setForm({ name: initialField(), email: initialField(), password: initialField(), confirm: initialField() }); }}
+            style={{ background: QWIK, color: '#0f172a', border: 'none', borderRadius: 8, padding: '10px 24px', cursor: 'pointer', fontWeight: 700 }}>
+            Назад
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ background: CARD, borderRadius: 16, padding: 32, width: '100%', maxWidth: 440, border: '1px solid #334155' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>⚡</div>
+          <h2 style={{ color: QWIK, margin: '0 0 4px' }}>Регистрация</h2>
+          <p style={{ color: MUTED, margin: 0, fontSize: 13 }}>Симуляция Qwik Form + Zod</p>
+        </div>
+
+        {submitStatus === 'error' && (
+          <div style={{ background: \`\${RED}22\`, border: \`1px solid \${RED}44\`, borderRadius: 8, padding: '10px 14px', marginBottom: 16, color: RED, fontSize: 13 }}>
+            ⚠ {submitError}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          {renderField('name', 'Имя', 'text', 'Введи имя...', 'От 2 до 50 символов')}
+          {renderField('email', 'Email', 'email', 'your@email.com')}
+          {renderField('password', 'Пароль', 'password', 'Минимум 8 символов', 'Заглавная буква + цифра')}
+          {renderField('confirm', 'Подтвердить пароль', 'password', 'Повтори пароль')}
+
+          <button
+            type="submit"
+            disabled={submitStatus === 'loading'}
+            style={{
+              width: '100%',
+              background: isFormValid ? QWIK : '#334155',
+              color: isFormValid ? '#0f172a' : MUTED,
+              border: 'none', borderRadius: 10,
+              padding: '13px 0', cursor: submitStatus === 'loading' ? 'not-allowed' : 'pointer',
+              fontWeight: 700, fontSize: 16, marginTop: 8, transition: 'all 0.2s',
+            }}
+          >
+            {submitStatus === 'loading' ? '⏳ Регистрация...' : 'Зарегистрироваться'}
+          </button>
+        </form>
+
+        <div style={{ marginTop: 20, padding: 12, background: '#0d1829', borderRadius: 8 }}>
+          <div style={{ color: MUTED, fontSize: 11, marginBottom: 6 }}>📋 Состояние полей (Zod):</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+            {(Object.keys(form) as (keyof FormState)[]).map(k => (
+              <div key={k} style={{ fontSize: 11, display: 'flex', gap: 4 }}>
+                <span style={{ color: form[k].valid ? GREEN : form[k].error ? RED : MUTED }}>
+                  {form[k].valid ? '✓' : form[k].error ? '✕' : '○'}
+                </span>
+                <span style={{ color: MUTED }}>{k}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

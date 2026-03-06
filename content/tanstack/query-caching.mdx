@@ -1,0 +1,266 @@
+import { Playground } from '../../components/Playground'
+
+# Кэширование: staleTime, gcTime и Фоновые Обновления
+
+## Как работает кэш TanStack Query
+
+TanStack Query автоматически кэширует результаты запросов. Понимание жизненного цикла кэша —
+ключ к правильной настройке производительности приложения.
+
+## Состояния данных в кэше
+
+Данные в кэше TanStack Query могут находиться в одном из состояний:
+
+### Fresh (Свежие)
+Данные только что получены и считаются актуальными. TanStack Query **не будет** делать новый запрос,
+даже если компонент перемонтируется или окно получит фокус. Продолжительность — `staleTime`.
+
+### Stale (Устаревшие)
+Данные есть в кэше, но уже могли устареть. TanStack Query **автоматически обновит** их в фоне
+при следующем обращении (фокус окна, монтирование компонента, переключение вкладок).
+
+### Inactive (Неактивные)
+Компоненты, использующие данные, размонтированы. Данные ещё хранятся в кэше в течение `gcTime`.
+
+### Deleted (Удалённые)
+Данные удалены из кэша после истечения `gcTime`. Следующий запрос будет выполнен с нуля.
+
+## staleTime: Время до устаревания
+
+```typescript
+useQuery({
+  queryKey: ['users'],
+  queryFn: getUsers,
+  staleTime: 1000 * 60 * 5,  // 5 минут
+})
+```
+
+- По умолчанию: `0` (данные устаревают мгновенно после получения)
+- При `staleTime: Infinity` данные никогда не устаревают автоматически
+- Хорошие значения: 1-5 минут для часто меняющихся данных, `Infinity` для статичных (например, список стран)
+
+## gcTime: Время жизни в кэше (Garbage Collection)
+
+```typescript
+useQuery({
+  queryKey: ['users'],
+  queryFn: getUsers,
+  gcTime: 1000 * 60 * 10,  // 10 минут (было cacheTime в v3)
+})
+```
+
+- По умолчанию: `5 минут`
+- Отсчёт начинается когда запрос становится неактивным (нет подписчиков)
+- `gcTime` должен быть >= `staleTime` (иначе данные удалятся раньше, чем устареют)
+
+## Фоновые обновления
+
+Когда данные устарели (stale), но ещё в кэше, TanStack Query показывает старые данные мгновенно
+и **одновременно** делает фоновый запрос за новыми. Это обеспечивает моментальный отклик интерфейса.
+
+```typescript
+const { data, isFetching, isStale } = useQuery(...)
+// data — старые данные (показываем сразу)
+// isFetching === true — идёт фоновый запрос
+// isStale === true — данные устарели
+```
+
+## refetchOnWindowFocus
+
+По умолчанию TanStack Query обновляет устаревшие данные при фокусе вкладки браузера.
+Имитирует поведение нативных приложений — данные всегда актуальны.
+
+```typescript
+// Отключить для всего приложения
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { refetchOnWindowFocus: false } }
+})
+
+// Отключить для конкретного запроса
+useQuery({ ..., refetchOnWindowFocus: false })
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react'
+
+type CacheStatus = 'fresh' | 'stale' | 'inactive' | 'deleted'
+
+function useCacheLifecycle(staleTime: number, gcTime: number) {
+  const [status, setStatus] = useState<CacheStatus>('fresh')
+  const [elapsed, setElapsed] = useState(0)
+  const [subscribed, setSubscribed] = useState(true)
+  const [fetchCount, setFetchCount] = useState(1)
+  const [bgFetching, setBgFetching] = useState(false)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const startRef = useRef(Date.now())
+  const inactiveRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    setStatus('fresh')
+    setElapsed(0)
+    startRef.current = Date.now()
+    inactiveRef.current = null
+
+    intervalRef.current = setInterval(() => {
+      const now = Date.now()
+      const e = now - startRef.current
+      setElapsed(e)
+
+      if (!subscribed) {
+        if (inactiveRef.current === null) inactiveRef.current = e
+        const inactiveFor = e - (inactiveRef.current ?? e)
+        if (inactiveFor >= gcTime) {
+          setStatus('deleted')
+          clearInterval(intervalRef.current!)
+        } else {
+          setStatus('inactive')
+        }
+      } else {
+        inactiveRef.current = null
+        if (e >= staleTime) {
+          setStatus('stale')
+        } else {
+          setStatus('fresh')
+        }
+      }
+    }, 100)
+
+    return () => clearInterval(intervalRef.current!)
+  }, [staleTime, gcTime, subscribed, fetchCount])
+
+  const triggerBgFetch = () => {
+    if (status !== 'stale') return
+    setBgFetching(true)
+    setTimeout(() => {
+      setFetchCount(c => c + 1)
+      startRef.current = Date.now()
+      setStatus('fresh')
+      setElapsed(0)
+      setBgFetching(false)
+    }, 800)
+  }
+
+  return { status, elapsed, subscribed, setSubscribed, fetchCount, bgFetching, triggerBgFetch }
+}
+
+const STATUS_CONFIG: Record<CacheStatus, { color: string; label: string; desc: string; icon: string }> = {
+  fresh:    { color: '#22c55e', label: 'Fresh',    desc: 'Данные свежие. Новый запрос не нужен.', icon: '🟢' },
+  stale:    { color: '#eab308', label: 'Stale',    desc: 'Данные устарели. При обращении будет фоновый запрос.', icon: '🟡' },
+  inactive: { color: '#64748b', label: 'Inactive', desc: 'Нет подписчиков. Данные ждут удаления.', icon: '⚫' },
+  deleted:  { color: '#ef4444', label: 'Deleted',  desc: 'Данные удалены из кэша. Следующий запрос — с нуля.', icon: '🔴' },
+}
+
+function ProgressBar({ value, max, color, label }: { value: number; max: number; color: string; label: string }) {
+  const pct = Math.min(100, (value / max) * 100)
+  return (
+    <div style={{ marginBottom: '12px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+        <span style={{ fontSize: '12px', color: '#94a3b8' }}>{label}</span>
+        <span style={{ fontSize: '12px', color: color }}>{(value / 1000).toFixed(1)}s / {(max / 1000).toFixed(0)}s</span>
+      </div>
+      <div style={{ background: '#334155', borderRadius: '9999px', height: '8px', overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: \`\${pct}%\`, background: color, borderRadius: '9999px', transition: 'width 0.1s' }} />
+      </div>
+    </div>
+  )
+}
+
+export default function App() {
+  const [staleTime, setStaleTime] = useState(4000)
+  const [gcTime, setGcTime] = useState(8000)
+  const { status, elapsed, subscribed, setSubscribed, fetchCount, bgFetching, triggerBgFetch } = useCacheLifecycle(staleTime, gcTime)
+  const cfg = STATUS_CONFIG[status]
+
+  const inactiveElapsed = !subscribed && status !== 'deleted' ? elapsed : 0
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>Жизненный цикл кэша</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Визуализация staleTime и gcTime в реальном времени</p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '20px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '16px' }}>⚙️ Параметры</h3>
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+              <label style={{ fontSize: '13px', color: '#94a3b8' }}>staleTime</label>
+              <span style={{ fontSize: '13px', color: '#22c55e', fontWeight: 600 }}>{(staleTime / 1000).toFixed(1)}s</span>
+            </div>
+            <input type="range" min={500} max={10000} step={500} value={staleTime}
+              onChange={e => setStaleTime(Number(e.target.value))}
+              style={{ width: '100%', accentColor: '#22c55e' }} />
+          </div>
+          <div style={{ marginBottom: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+              <label style={{ fontSize: '13px', color: '#94a3b8' }}>gcTime</label>
+              <span style={{ fontSize: '13px', color: '#64748b', fontWeight: 600 }}>{(gcTime / 1000).toFixed(1)}s</span>
+            </div>
+            <input type="range" min={2000} max={20000} step={1000} value={gcTime}
+              onChange={e => setGcTime(Number(e.target.value))}
+              style={{ width: '100%', accentColor: '#64748b' }} />
+          </div>
+
+          <div style={{ borderTop: '1px solid #334155', paddingTop: '16px' }}>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+              <button
+                onClick={() => setSubscribed(!subscribed)}
+                style={{
+                  flex: 1, background: subscribed ? '#22c55e22' : '#334155',
+                  border: \`1px solid \${subscribed ? '#22c55e' : '#475569'}\`,
+                  borderRadius: '8px', padding: '8px', color: subscribed ? '#22c55e' : '#94a3b8',
+                  cursor: 'pointer', fontSize: '12px', fontWeight: 600,
+                }}
+              >
+                {subscribed ? '✓ Компонент подписан' : '○ Нет подписчиков'}
+              </button>
+              <button
+                onClick={triggerBgFetch}
+                disabled={status !== 'stale'}
+                style={{
+                  flex: 1, background: status === 'stale' ? '#ef444422' : '#1e293b',
+                  border: \`1px solid \${status === 'stale' ? '#ef4444' : '#334155'}\`,
+                  borderRadius: '8px', padding: '8px',
+                  color: status === 'stale' ? '#ef4444' : '#475569',
+                  cursor: status === 'stale' ? 'pointer' : 'not-allowed', fontSize: '12px',
+                }}
+              >
+                {bgFetching ? '⏳ Запрос...' : '🔄 Фоновый запрос'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '20px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '16px' }}>📊 Текущее состояние</h3>
+          <div style={{
+            background: cfg.color + '11',
+            border: \`2px solid \${cfg.color}\`,
+            borderRadius: '10px',
+            padding: '16px',
+            marginBottom: '16px',
+            textAlign: 'center',
+          }}>
+            <div style={{ fontSize: '32px', marginBottom: '8px' }}>{cfg.icon}</div>
+            <div style={{ fontSize: '20px', fontWeight: 800, color: cfg.color, marginBottom: '4px' }}>{cfg.label}</div>
+            <div style={{ fontSize: '12px', color: '#94a3b8' }}>{cfg.desc}</div>
+            {bgFetching && <div style={{ fontSize: '12px', color: '#f97316', marginTop: '8px' }}>🔄 Фоновый запрос выполняется...</div>}
+          </div>
+          <ProgressBar value={Math.min(elapsed, staleTime)} max={staleTime} color="#22c55e" label="До устаревания (staleTime)" />
+          {!subscribed && <ProgressBar value={Math.min(inactiveElapsed, gcTime)} max={gcTime} color="#64748b" label="До удаления (gcTime)" />}
+          <div style={{ fontSize: '12px', color: '#64748b', marginTop: '8px' }}>
+            Запросов выполнено: <span style={{ color: '#a5f3fc' }}>{fetchCount}</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+        <h3 style={{ color: '#e2e8f0', fontSize: '13px', marginBottom: '12px' }}>📖 Жизненный цикл</h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+          {['🟢 Fresh', '→', '🟡 Stale (при обращении: фоновый запрос)', '→', '⚫ Inactive (нет подписчиков)', '→', '🔴 Deleted (gcTime истёк)'].map((step, i) => (
+            <span key={i} style={{ fontSize: '12px', color: step === '→' ? '#334155' : '#94a3b8' }}>{step}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

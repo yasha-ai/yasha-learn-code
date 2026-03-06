@@ -1,0 +1,339 @@
+import { Playground } from '../../components/Playground'
+
+# Базы Данных в Docker: PostgreSQL, MySQL, Redis
+
+Запуск баз данных в контейнерах — обычная практика для разработки и тестирования. В продакшене требует особого внимания к персистентности данных, резервному копированию и healthcheck-проверкам.
+
+## PostgreSQL в Docker
+
+```bash
+# Запустить PostgreSQL
+docker run -d \
+  --name postgres \
+  -e POSTGRES_DB=mydb \
+  -e POSTGRES_USER=myuser \
+  -e POSTGRES_PASSWORD=secret \
+  -p 5432:5432 \
+  -v postgres_data:/var/lib/postgresql/data \
+  postgres:15-alpine
+
+# Подключиться к базе данных
+docker exec -it postgres psql -U myuser -d mydb
+
+# Выполнить SQL команду
+docker exec -it postgres psql -U myuser -d mydb -c "SELECT version();"
+
+# Дамп базы данных
+docker exec postgres pg_dump -U myuser mydb > backup.sql
+
+# Восстановление
+docker exec -i postgres psql -U myuser mydb < backup.sql
+```
+
+## MySQL в Docker
+
+```bash
+# Запустить MySQL 8
+docker run -d \
+  --name mysql \
+  -e MYSQL_ROOT_PASSWORD=rootsecret \
+  -e MYSQL_DATABASE=mydb \
+  -e MYSQL_USER=myuser \
+  -e MYSQL_PASSWORD=secret \
+  -p 3306:3306 \
+  -v mysql_data:/var/lib/mysql \
+  mysql:8.0
+
+# Подключиться
+docker exec -it mysql mysql -u myuser -psecret mydb
+
+# Дамп
+docker exec mysql mysqldump -u myuser -psecret mydb > backup.sql
+```
+
+## Redis в Docker
+
+```bash
+# Запустить Redis с персистентностью
+docker run -d \
+  --name redis \
+  -p 6379:6379 \
+  -v redis_data:/data \
+  redis:7-alpine \
+  redis-server --appendonly yes --requirepass "redissecret"
+
+# Подключиться через redis-cli
+docker exec -it redis redis-cli -a redissecret
+
+# Проверить работу
+docker exec -it redis redis-cli ping  # → PONG
+```
+
+## Docker Compose для полного стека БД
+
+```yaml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mydb}
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-mydb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redissecret} --appendonly yes
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redissecret}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+```
+
+## Healthcheck для баз данных
+
+Healthcheck позволяет Docker знать, когда база данных готова принимать запросы:
+
+```dockerfile
+# В Dockerfile PostgreSQL
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
+  CMD pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+
+# Проверить healthcheck
+docker inspect --format='{{.State.Health.Status}}' postgres
+# healthy | unhealthy | starting
+```
+
+## Лучшие практики для БД в Docker
+
+```yaml
+services:
+  postgres:
+    image: postgres:15-alpine          # Alpine для меньшего размера
+    restart: unless-stopped            # автоперезапуск
+    shm_size: '256mb'                  # shared memory для PostgreSQL
+    security_opt:
+      - no-new-privileges:true         # безопасность
+    read_only: false                   # БД нужна запись
+    tmpfs:
+      - /tmp                          # временные файлы в RAM
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+```
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const [db, setDb] = React.useState('postgres');
+  const [step, setStep] = React.useState(0);
+  const [status, setStatus] = React.useState('stopped');
+  const [log, setLog] = React.useState([]);
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  const dbs = {
+    postgres: {
+      name: 'PostgreSQL 15',
+      icon: '🐘',
+      color: '#336791',
+      image: 'postgres:15-alpine',
+      port: '5432',
+      dataDir: '/var/lib/postgresql/data',
+      healthCmd: 'pg_isready -U user -d mydb',
+      envVars: ['POSTGRES_DB=mydb', 'POSTGRES_USER=user', 'POSTGRES_PASSWORD=secret'],
+      size: '85 MB',
+      features: ['ACID транзакции', 'JSON поддержка', 'Full-text поиск', 'Репликация', 'Расширения (PostGIS)'],
+    },
+    mysql: {
+      name: 'MySQL 8.0',
+      icon: '🐬',
+      color: '#f59e0b',
+      image: 'mysql:8.0',
+      port: '3306',
+      dataDir: '/var/lib/mysql',
+      healthCmd: 'mysqladmin ping -h localhost',
+      envVars: ['MYSQL_ROOT_PASSWORD=root', 'MYSQL_DATABASE=mydb', 'MYSQL_USER=user', 'MYSQL_PASSWORD=secret'],
+      size: '530 MB',
+      features: ['InnoDB движок', 'MySQL Workbench', 'Широкая поддержка', 'Репликация', 'Партиционирование'],
+    },
+    redis: {
+      name: 'Redis 7',
+      icon: '🔴',
+      color: '#ef4444',
+      image: 'redis:7-alpine',
+      port: '6379',
+      dataDir: '/data',
+      healthCmd: 'redis-cli ping',
+      envVars: ['REDIS_PASSWORD=secret'],
+      size: '30 MB',
+      features: ['In-memory хранилище', 'Кеширование', 'Pub/Sub', 'Lua скрипты', 'Кластеризация'],
+    },
+    mongodb: {
+      name: 'MongoDB 7',
+      icon: '🍃',
+      color: '#22c55e',
+      image: 'mongo:7-jammy',
+      port: '27017',
+      dataDir: '/data/db',
+      healthCmd: 'mongosh --eval "db.adminCommand(\'ping\')"',
+      envVars: ['MONGO_INITDB_ROOT_USERNAME=root', 'MONGO_INITDB_ROOT_PASSWORD=secret'],
+      size: '685 MB',
+      features: ['NoSQL документы', 'GridFS', 'Агрегации', 'Atlas Search', 'Change Streams'],
+    },
+  };
+
+  const sel = dbs[db];
+
+  const addLog = (msg) => setLog(l => [...l.slice(-6), \`[\${new Date().toLocaleTimeString()}] \${msg}\`]);
+
+  const startDb = () => {
+    setStatus('starting');
+    setLog([]);
+    addLog(\`Pulling \${sel.image}...\`);
+    setTimeout(() => addLog('Creating container...'), 600);
+    setTimeout(() => addLog(\`Mounting volume → \${sel.dataDir}\`), 1200);
+    setTimeout(() => addLog('Initializing database...'), 1800);
+    setTimeout(() => {
+      addLog(\`\${sel.name} ready on port \${sel.port}!\`);
+      setStatus('running');
+    }, 2800);
+  };
+
+  const stopDb = () => {
+    setStatus('stopped');
+    setLog([]);
+  };
+
+  const connStr = {
+    postgres: \`postgresql://user:secret@localhost:\${sel.port}/mydb\`,
+    mysql:    \`mysql://user:secret@localhost:\${sel.port}/mydb\`,
+    redis:    \`redis://:secret@localhost:\${sel.port}/0\`,
+    mongodb:  \`mongodb://root:secret@localhost:\${sel.port}/mydb\`,
+  };
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        🗄️ База Данных в Docker: Мастер Настройки
+      </h2>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+        {Object.entries(dbs).map(([k, v]) => (
+          <button key={k} onClick={() => { setDb(k); setStatus('stopped'); setLog([]); }} style={{
+            padding: '8px 16px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            background: db === k ? v.color : card, color: db === k ? '#fff' : muted,
+          }}>{v.icon} {v.name}</button>
+        ))}
+      </div>
+
+      <div style={{ maxWidth: 660, margin: '0 auto' }}>
+        <div style={{ background: card, borderRadius: 12, padding: 18, border: \`1px solid \${sel.color}55\`, marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+            <span style={{ fontSize: 36 }}>{sel.icon}</span>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 18, color: sel.color }}>{sel.name}</div>
+              <div style={{ color: muted, fontSize: 12, marginTop: 2 }}>Образ: {sel.image} • {sel.size} • Порт: {sel.port}</div>
+            </div>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+              <button onClick={startDb} disabled={status !== 'stopped'} style={{
+                background: status !== 'stopped' ? muted : green, border: 'none', borderRadius: 8,
+                padding: '7px 14px', color: '#fff', cursor: status !== 'stopped' ? 'default' : 'pointer', fontSize: 12, fontWeight: 600,
+              }}>▶ Start</button>
+              <button onClick={stopDb} disabled={status === 'stopped'} style={{
+                background: status === 'stopped' ? muted : red, border: 'none', borderRadius: 8,
+                padding: '7px 14px', color: '#fff', cursor: status === 'stopped' ? 'default' : 'pointer', fontSize: 12, fontWeight: 600,
+              }}>■ Stop</button>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+            <div style={{ background: '#ffffff08', borderRadius: 8, padding: 10 }}>
+              <div style={{ color: muted, fontSize: 11, marginBottom: 6 }}>Переменные окружения:</div>
+              {sel.envVars.map((e, i) => (
+                <div key={i} style={{ fontFamily: 'monospace', fontSize: 11, color: amber, marginBottom: 2 }}>{e}</div>
+              ))}
+            </div>
+            <div style={{ background: '#ffffff08', borderRadius: 8, padding: 10 }}>
+              <div style={{ color: muted, fontSize: 11, marginBottom: 6 }}>Возможности:</div>
+              {sel.features.map((f, i) => (
+                <div key={i} style={{ fontSize: 11, color: text, marginBottom: 2 }}>• {f}</div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background: '#0d1117', borderRadius: 8, padding: 12, marginBottom: 10, fontFamily: 'monospace', fontSize: 11 }}>
+            <div style={{ color: muted, marginBottom: 4 }}>docker run команда:</div>
+            <div style={{ color: green }}>docker run -d \\</div>
+            <div style={{ color: text, marginLeft: 16 }}>--name {db} \\</div>
+            {sel.envVars.map((e, i) => (
+              <div key={i} style={{ color: amber, marginLeft: 16 }}>-e {e} \\</div>
+            ))}
+            <div style={{ color: docker, marginLeft: 16 }}>-p {sel.port}:{sel.port} \\</div>
+            <div style={{ color: '#8b5cf6', marginLeft: 16 }}>-v {db}_data:{sel.dataDir} \\</div>
+            <div style={{ color: text, marginLeft: 16 }}>{sel.image}</div>
+          </div>
+
+          {status !== 'stopped' && (
+            <div style={{ background: '#0d1117', borderRadius: 8, padding: 10, marginBottom: 10 }}>
+              <div style={{ color: muted, fontSize: 11, marginBottom: 6 }}>Лог запуска:</div>
+              {log.map((l, i) => (
+                <div key={i} style={{ color: l.includes('ready') ? green : amber, fontSize: 11, fontFamily: 'monospace', marginBottom: 2 }}>{l}</div>
+              ))}
+            </div>
+          )}
+
+          {status === 'running' && (
+            <div style={{ background: green + '15', borderRadius: 8, padding: 10, border: \`1px solid \${green}44\` }}>
+              <div style={{ color: green, fontWeight: 700, fontSize: 12, marginBottom: 4 }}>✅ База данных готова!</div>
+              <div style={{ color: muted, fontSize: 11 }}>Connection string:</div>
+              <div style={{ color: docker, fontFamily: 'monospace', fontSize: 11, marginTop: 2, wordBreak: 'break-all' }}>{connStr[db]}</div>
+              <div style={{ color: muted, fontSize: 11, marginTop: 6 }}>Healthcheck: <span style={{ color: green }}>{sel.healthCmd}</span></div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

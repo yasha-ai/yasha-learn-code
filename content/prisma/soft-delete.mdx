@@ -1,0 +1,262 @@
+import { Playground } from '../../components/Playground'
+
+# Мягкое удаление (Soft Delete)
+
+Мягкое удаление (soft delete) — это паттерн, при котором записи не удаляются физически из базы данных, а лишь помечаются как удалённые с помощью специального поля `deletedAt`. Это позволяет восстанавливать данные и сохранять историю изменений.
+
+## Схема с полем deletedAt
+
+```prisma
+model User {
+  id        Int       @id @default(autoincrement())
+  email     String    @unique
+  name      String
+  deletedAt DateTime? // null = активен, дата = удалён
+  createdAt DateTime  @default(now())
+}
+```
+
+## Middleware для soft delete
+
+```typescript
+prisma.$use(async (params, next) => {
+  if (params.model === 'User') {
+    // Перехватить delete → soft delete
+    if (params.action === 'delete') {
+      params.action = 'update'
+      params.args['data'] = { deletedAt: new Date() }
+    }
+    if (params.action === 'deleteMany') {
+      params.action = 'updateMany'
+      if (params.args.data !== undefined) {
+        params.args.data.deletedAt = new Date()
+      } else {
+        params.args['data'] = { deletedAt: new Date() }
+      }
+    }
+
+    // Автоматически фильтровать удалённые
+    if (['findFirst', 'findMany', 'findUnique'].includes(params.action)) {
+      params.args.where = {
+        ...params.args?.where,
+        deletedAt: null,
+      }
+    }
+  }
+
+  return next(params)
+})
+```
+
+## Восстановление записи
+
+```typescript
+// Восстановить удалённую запись
+const restored = await prisma.user.update({
+  where: { id: userId },
+  data: { deletedAt: null },
+})
+```
+
+## Получение удалённых записей
+
+Для доступа к удалённым записям нужно использовать `$queryRaw` или временно отключить middleware:
+
+```typescript
+// Все записи включая удалённые
+const allUsers = await prisma.$queryRaw`
+  SELECT * FROM "users" WHERE "deletedAt" IS NOT NULL
+`
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const initialRecords = [
+  { id: 1, name: 'Иван Петров', email: 'ivan@example.com', role: 'ADMIN', deletedAt: null },
+  { id: 2, name: 'Анна Смирнова', email: 'anna@example.com', role: 'USER', deletedAt: null },
+  { id: 3, name: 'Пётр Иванов', email: 'petr@example.com', role: 'USER', deletedAt: null },
+  { id: 4, name: 'Мария Козлова', email: 'maria@example.com', role: 'MODERATOR', deletedAt: null },
+  { id: 5, name: 'Дмитрий Новиков', email: 'dmitry@example.com', role: 'USER', deletedAt: null },
+]
+
+const schemaCode = \`model User {
+  id        Int       @id @default(autoincrement())
+  email     String    @unique
+  name      String
+  role      Role      @default(USER)
+  deletedAt DateTime? // null = активен
+  createdAt DateTime  @default(now())
+}\`
+
+const middlewareCode = \`prisma.$use(async (params, next) => {
+  if (params.model === 'User') {
+    if (params.action === 'delete') {
+      params.action = 'update'
+      params.args['data'] = {
+        deletedAt: new Date()
+      }
+    }
+    if (['findFirst', 'findMany'].includes(params.action)) {
+      params.args.where = {
+        ...params.args?.where,
+        deletedAt: null, // авто-фильтр
+      }
+    }
+  }
+  return next(params)
+})\`
+
+export default function App() {
+  const [records, setRecords] = useState(initialRecords)
+  const [showDeleted, setShowDeleted] = useState(false)
+  const [log, setLog] = useState([])
+  const [view, setView] = useState('data')
+
+  const addLog = (msg, color) => {
+    const time = new Date().toLocaleTimeString('ru-RU')
+    setLog(l => [{ msg, color, time }, ...l].slice(0, 8))
+  }
+
+  const softDelete = (id) => {
+    const record = records.find(r => r.id === id)
+    setRecords(r => r.map(rec => rec.id === id ? { ...rec, deletedAt: new Date().toISOString().slice(0, 19) } : rec))
+    addLog('prisma.user.delete({ where: { id: ' + id + ' } }) → UPDATE SET deletedAt = NOW()', '#fc8181')
+    addLog('✓ ' + record.name + ' помечен как удалённый', '#fca5a5')
+  }
+
+  const restore = (id) => {
+    const record = records.find(r => r.id === id)
+    setRecords(r => r.map(rec => rec.id === id ? { ...rec, deletedAt: null } : rec))
+    addLog('prisma.user.update({ where: { id: ' + id + ' }, data: { deletedAt: null } })', '#86efac')
+    addLog('✓ ' + record.name + ' восстановлен', '#86efac')
+  }
+
+  const resetAll = () => {
+    setRecords(initialRecords)
+    setLog([])
+  }
+
+  const activeRecords = records.filter(r => r.deletedAt === null)
+  const deletedRecords = records.filter(r => r.deletedAt !== null)
+  const displayRecords = showDeleted ? records : activeRecords
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '28px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 22px 0' }}>
+          Симулятор Soft Delete
+        </h2>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+          {['data', 'schema', 'middleware'].map(v => (
+            <button key={v} onClick={() => setView(v)}
+              style={{ background: view === v ? PRISMA : CARD, color: view === v ? '#fff' : '#94a3b8', border: '1px solid ' + (view === v ? PRISMA : '#334155'), borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {v === 'data' ? '📊 Данные' : v === 'schema' ? '📐 Схема' : '🔧 Middleware'}
+            </button>
+          ))}
+        </div>
+
+        {view === 'data' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                <span style={{ background: '#14532d', color: '#86efac', padding: '3px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600 }}>
+                  ✓ Активных: {activeRecords.length}
+                </span>
+                <span style={{ background: '#7f1d1d', color: '#fc8181', padding: '3px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600 }}>
+                  🗑️ Удалённых: {deletedRecords.length}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <label style={{ color: '#94a3b8', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={showDeleted} onChange={e => setShowDeleted(e.target.checked)} />
+                  Показать удалённые
+                </label>
+                <button onClick={resetAll}
+                  style={{ background: CARD, color: '#94a3b8', border: '1px solid #334155', borderRadius: 8, padding: '5px 12px', cursor: 'pointer', fontSize: 12 }}>
+                  ↺ Сброс
+                </button>
+              </div>
+            </div>
+
+            {displayRecords.map(record => (
+              <div key={record.id} style={{
+                background: record.deletedAt ? '#7f1d1d20' : CARD,
+                border: '1px solid ' + (record.deletedAt ? '#7f1d1d' : '#334155'),
+                borderRadius: 10,
+                padding: '12px 16px',
+                marginBottom: 6,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                opacity: record.deletedAt ? 0.7 : 1,
+                transition: 'all 0.2s',
+              }}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <span style={{ color: '#475569', fontSize: 12, fontFamily: 'monospace', width: 20 }}>#{record.id}</span>
+                  <div>
+                    <div style={{ color: TEXT, fontSize: 13, fontWeight: 600, textDecoration: record.deletedAt ? 'line-through' : 'none' }}>
+                      {record.name}
+                    </div>
+                    <div style={{ color: '#475569', fontSize: 11 }}>{record.email}</div>
+                    {record.deletedAt && (
+                      <div style={{ color: '#fc8181', fontSize: 10, marginTop: 2 }}>
+                        🗑️ deletedAt: {record.deletedAt}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <span style={{ background: record.role === 'ADMIN' ? '#5a67d8' + '30' : '#334155', color: record.role === 'ADMIN' ? '#a5b4fc' : '#94a3b8', fontSize: 11, padding: '2px 8px', borderRadius: 6 }}>
+                    {record.role}
+                  </span>
+                  {!record.deletedAt ? (
+                    <button onClick={() => softDelete(record.id)}
+                      style={{ background: '#7f1d1d', color: '#fc8181', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>
+                      🗑️ Удалить
+                    </button>
+                  ) : (
+                    <button onClick={() => restore(record.id)}
+                      style={{ background: '#14532d', color: '#86efac', border: 'none', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>
+                      ↺ Восстановить
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {log.length > 0 && (
+              <div style={{ background: '#0a0f1e', borderRadius: 10, padding: 12, marginTop: 12, border: '1px solid #1e3a5f' }}>
+                <div style={{ color: '#475569', fontSize: 11, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>Лог операций</div>
+                {log.map((l, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 3 }}>
+                    <span style={{ color: '#334155', fontSize: 10 }}>{l.time}</span>
+                    <span style={{ color: l.color, fontSize: 11 }}>{l.msg}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {view === 'schema' && (
+          <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 20, border: '1px solid #1e3a5f' }}>
+            <pre style={{ margin: 0, color: TEXT, fontSize: 13, lineHeight: 1.8, fontFamily: 'monospace' }}>{schemaCode}</pre>
+          </div>
+        )}
+
+        {view === 'middleware' && (
+          <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 20, border: '1px solid #1e3a5f' }}>
+            <pre style={{ margin: 0, color: TEXT, fontSize: 13, lineHeight: 1.8, fontFamily: 'monospace' }}>{middlewareCode}</pre>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+` }} />

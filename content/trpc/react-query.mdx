@@ -1,0 +1,266 @@
+import { Playground } from '../../components/Playground'
+
+# tRPC и React Query
+
+tRPC использует `@tanstack/react-query` как основу для клиентского кеширования. Это означает, что вы получаете все возможности React Query: умное кеширование, фоновые обновления, оптимистичные обновления, stale-while-revalidate и многое другое.
+
+## Доступ к QueryClient
+
+Получить прямой доступ к `QueryClient` можно через `trpc.useContext()` (в Pages Router) или `trpc.useUtils()` (в новых версиях). Это позволяет программно управлять кешем.
+
+## Инвалидация кеша
+
+`utils.procedureName.invalidate()` помечает кеш как устаревший и инициирует повторный запрос данных. Вызывайте это после мутаций, которые изменяют данные. Можно инвалидировать целые роутеры: `utils.user.invalidate()` инвалидирует все запросы `user.*`.
+
+## Ручное обновление кеша
+
+`utils.procedureName.setData(input, updater)` позволяет напрямую обновить кеш без нового запроса. Используется для оптимистичных обновлений — интерфейс обновляется мгновенно, до ответа сервера.
+
+## Оптимистичные обновления
+
+Оптимистичные обновления обеспечивают моментальный отклик UI. Паттерн: в `onMutate` обновите кеш локально; в `onError` откатите изменения; в `onSettled` инвалидируйте кеш для синхронизации с сервером.
+
+## Prefetching
+
+`utils.procedureName.prefetch(input)` загружает данные заранее. Используйте в hover-обработчиках или при предсказуемой навигации пользователя для улучшения perceived performance.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+const PURPLE = '#a855f7';
+
+interface CacheEntry {
+  key: string;
+  data: unknown;
+  status: 'fresh' | 'stale' | 'fetching' | 'invalidated';
+  updatedAt: string;
+}
+
+const formatTime = () => {
+  const d = new Date();
+  return d.getHours().toString().padStart(2, '0') + ':' +
+    d.getMinutes().toString().padStart(2, '0') + ':' +
+    d.getSeconds().toString().padStart(2, '0');
+};
+
+const initialCache: CacheEntry[] = [
+  { key: 'user.getAll', data: [{ id: '1', name: 'Alice' }, { id: '2', name: 'Bob' }], status: 'fresh', updatedAt: formatTime() },
+  { key: 'user.getById(1)', data: { id: '1', name: 'Alice', email: 'alice@example.com' }, status: 'fresh', updatedAt: formatTime() },
+  { key: 'post.getAll', data: [{ id: '1', title: 'Hello tRPC' }, { id: '2', title: 'Advanced tRPC' }], status: 'fresh', updatedAt: formatTime() },
+  { key: 'post.getById(1)', data: { id: '1', title: 'Hello tRPC', content: '...' }, status: 'stale', updatedAt: formatTime() },
+];
+
+const statusColors: Record<string, string> = {
+  fresh: GREEN,
+  stale: YELLOW,
+  fetching: TRPC,
+  invalidated: RED,
+};
+
+const statusIcons: Record<string, string> = {
+  fresh: '✅',
+  stale: '⚠️',
+  fetching: '⏳',
+  invalidated: '🗑',
+};
+
+const codeExamples = {
+  invalidate:
+    '// Инвалидация конкретного запроса\n' +
+    'const utils = trpc.useUtils();\n\n' +
+    'const mutation = trpc.user.create.useMutation({\n' +
+    '  onSuccess: () => {\n' +
+    '    // Инвалидируем список пользователей\n' +
+    '    utils.user.getAll.invalidate();\n' +
+    '  },\n' +
+    '});\n\n' +
+    '// Инвалидация всего роутера:\n' +
+    'utils.user.invalidate(); // все user.*',
+  setData:
+    '// Оптимистичное обновление\n' +
+    'const utils = trpc.useUtils();\n\n' +
+    'const mutation = trpc.user.update.useMutation({\n' +
+    '  onMutate: async (newData) => {\n' +
+    '    // Сохраняем предыдущее состояние\n' +
+    '    const prev = utils.user.getAll.getData();\n' +
+    '    // Обновляем кеш оптимистично\n' +
+    '    utils.user.getAll.setData(undefined, old =>\n' +
+    '      old?.map(u => u.id === newData.id\n' +
+    '        ? { ...u, ...newData } : u)\n' +
+    '    );\n' +
+    '    return { prev };\n' +
+    '  },\n' +
+    '  onError: (_, __, ctx) => {\n' +
+    '    // Откат при ошибке\n' +
+    '    utils.user.getAll.setData(undefined, ctx?.prev);\n' +
+    '  },\n' +
+    '});',
+  prefetch:
+    '// Prefetch при hover\n' +
+    'const utils = trpc.useUtils();\n\n' +
+    'function UserCard({ userId }) {\n' +
+    '  const handleHover = () => {\n' +
+    '    utils.user.getById.prefetch({ id: userId });\n' +
+    '  };\n\n' +
+    '  return (\n' +
+    '    <div onMouseEnter={handleHover}>\n' +
+    '      <Link href={"/users/" + userId}>View</Link>\n' +
+    '    </div>\n' +
+    '  );\n' +
+    '}',
+};
+
+type Operation = 'invalidate' | 'setData' | 'prefetch';
+
+export default function App() {
+  const [cache, setCache] = useState<CacheEntry[]>(initialCache);
+  const [selectedOp, setSelectedOp] = useState<Operation>('invalidate');
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const addLog = (msg: string) => {
+    const time = formatTime();
+    setLogs(prev => ['[' + time + '] ' + msg, ...prev].slice(0, 10));
+  };
+
+  const invalidateEntry = (key: string) => {
+    setCache(prev => prev.map(e => e.key === key ? { ...e, status: 'invalidated' } : e));
+    addLog('invalidate: ' + key + ' → refetching...');
+    setTimeout(() => {
+      setCache(prev => prev.map(e => e.key === key ? { ...e, status: 'fetching' } : e));
+      setTimeout(() => {
+        setCache(prev => prev.map(e => e.key === key ? { ...e, status: 'fresh', updatedAt: formatTime() } : e));
+        addLog('refetch done: ' + key + ' → fresh');
+      }, 800);
+    }, 300);
+  };
+
+  const invalidateAll = () => {
+    setCache(prev => prev.map(e => ({ ...e, status: 'invalidated' as const })));
+    addLog('invalidate ALL entries');
+    setTimeout(() => {
+      setCache(prev => prev.map(e => ({ ...e, status: 'fetching' as const })));
+      setTimeout(() => {
+        setCache(prev => prev.map(e => ({ ...e, status: 'fresh' as const, updatedAt: formatTime() })));
+        addLog('All entries refetched → fresh');
+      }, 1000);
+    }, 400);
+  };
+
+  const setDataOptimistic = (key: string) => {
+    const newData = { id: 'new', name: 'OptimisticUser', updatedAt: formatTime() };
+    setCache(prev => prev.map(e => e.key === key ? { ...e, data: newData, status: 'fresh', updatedAt: formatTime() } : e));
+    addLog('setData (optimistic): ' + key + ' updated');
+  };
+
+  const prefetchEntry = (key: string) => {
+    const exists = cache.find(e => e.key === key);
+    if (exists?.status === 'fresh') {
+      addLog('prefetch: ' + key + ' already fresh, skip');
+      return;
+    }
+    setCache(prev => prev.map(e => e.key === key ? { ...e, status: 'fetching' } : e));
+    addLog('prefetch: ' + key + ' → fetching...');
+    setTimeout(() => {
+      setCache(prev => prev.map(e => e.key === key ? { ...e, status: 'fresh', updatedAt: formatTime() } : e));
+      addLog('prefetch done: ' + key + ' → fresh');
+    }, 700);
+  };
+
+  const handleAction = (key: string) => {
+    if (selectedOp === 'invalidate') invalidateEntry(key);
+    else if (selectedOp === 'setData') setDataOptimistic(key);
+    else if (selectedOp === 'prefetch') prefetchEntry(key);
+  };
+
+  const ops: { key: Operation; label: string; color: string }[] = [
+    { key: 'invalidate', label: '🗑 invalidate', color: RED },
+    { key: 'setData', label: '✏️ setData', color: YELLOW },
+    { key: 'prefetch', label: '⚡ prefetch', color: PURPLE },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        React Query Cache Manager
+      </h2>
+
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: '220px', flex: '0 0 auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '12px' }}>
+            <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>Операция</div>
+            {ops.map(op => (
+              <button key={op.key} onClick={() => setSelectedOp(op.key)} style={{
+                display: 'block', width: '100%', background: selectedOp === op.key ? op.color + '33' : 'transparent',
+                color: selectedOp === op.key ? op.color : TEXT,
+                border: '1px solid ' + (selectedOp === op.key ? op.color : '#334155'),
+                borderRadius: '5px', padding: '6px 10px', cursor: 'pointer', fontSize: '12px', marginBottom: '4px', textAlign: 'left',
+              }}>
+                {op.label}
+              </button>
+            ))}
+            <button onClick={invalidateAll} style={{ width: '100%', background: 'rgba(239,68,68,0.15)', color: RED, border: '1px solid ' + RED, borderRadius: '5px', padding: '6px', cursor: 'pointer', fontSize: '11px', marginTop: '4px' }}>
+              🗑 Инвалидировать всё
+            </button>
+          </div>
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '12px' }}>
+            <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '11px', marginBottom: '8px' }}>Код операции</div>
+            <pre style={{ margin: 0, fontSize: '9px', color: TEXT, lineHeight: '1.5', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+              {codeExamples[selectedOp]}
+            </pre>
+          </div>
+        </div>
+
+        <div style={{ flex: '1', minWidth: '260px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+            <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '12px', marginBottom: '10px' }}>
+              📦 QueryCache — кликните на запись
+            </div>
+            {cache.map(entry => (
+              <div key={entry.key}
+                onClick={() => handleAction(entry.key)}
+                style={{
+                  background: BG, border: '1px solid ' + statusColors[entry.status] + '55',
+                  borderRadius: '6px', padding: '8px 12px', marginBottom: '5px', cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: TEXT, fontSize: '11px', fontWeight: 'bold' }}>{entry.key}</span>
+                  <span style={{ color: statusColors[entry.status], fontSize: '11px' }}>
+                    {statusIcons[entry.status]} {entry.status}
+                  </span>
+                </div>
+                <div style={{ color: TEXT, opacity: 0.5, fontSize: '9px', marginTop: '2px' }}>
+                  updated: {entry.updatedAt}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px', flex: '1' }}>
+            <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>📋 Лог операций</div>
+            {logs.length === 0 ? (
+              <div style={{ color: TEXT, opacity: 0.4, fontSize: '11px' }}>Кликните на запись кеша</div>
+            ) : (
+              logs.map((log, i) => (
+                <div key={i} style={{ color: i === 0 ? GREEN : TEXT, opacity: i === 0 ? 1 : 0.5, fontSize: '10px', padding: '2px 0', borderBottom: '1px solid #1e293b' }}>
+                  {log}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

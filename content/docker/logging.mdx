@@ -1,0 +1,298 @@
+import { Playground } from '../../components/Playground'
+
+# Docker Logging: Управление Журналами
+
+Логирование — критически важная часть мониторинга контейнеризованных приложений. Docker предоставляет гибкую систему логирования с поддержкой различных драйверов и интеграцией с централизованными системами сбора логов.
+
+## Базовые команды docker logs
+
+```bash
+# Просмотр логов контейнера
+docker logs mycontainer
+
+# Следить за логами в реальном времени
+docker logs -f mycontainer
+
+# Последние N строк
+docker logs --tail 100 mycontainer
+
+# Логи с временными метками
+docker logs --timestamps mycontainer
+
+# Логи за последние 30 минут
+docker logs --since 30m mycontainer
+
+# Логи с по конкретное время
+docker logs --since "2024-01-15T10:00:00" --until "2024-01-15T11:00:00" mycontainer
+
+# Комбинация: последние 50 строк с timestamp
+docker logs -f --tail 50 --timestamps mycontainer
+```
+
+## Драйверы логирования
+
+Docker поддерживает множество драйверов для отправки логов в разные системы:
+
+```bash
+# Просмотр текущего драйвера
+docker inspect --format='{{.HostConfig.LogConfig}}' mycontainer
+
+# Запуск с конкретным драйвером
+docker run --log-driver=json-file myapp    # стандартный (по умолчанию)
+docker run --log-driver=syslog myapp       # системный syslog
+docker run --log-driver=journald myapp     # systemd journal
+docker run --log-driver=gelf myapp         # Graylog Extended Log Format
+docker run --log-driver=fluentd myapp      # Fluentd/Fluent Bit
+docker run --log-driver=awslogs myapp      # Amazon CloudWatch
+docker run --log-driver=none myapp         # отключить логирование
+```
+
+## Конфигурация json-file драйвера
+
+```json
+// /etc/docker/daemon.json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3",
+    "compress": "true",
+    "labels": "production_status,geo",
+    "env": "os,customer"
+  }
+}
+```
+
+```bash
+# Или на уровне контейнера
+docker run \
+  --log-driver=json-file \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
+  myapp
+```
+
+## Централизованное логирование с ELK/EFK
+
+```yaml
+# docker-compose.yml с Fluentd
+version: '3.8'
+services:
+  app:
+    image: myapp
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: localhost:24224
+        tag: app.myservice
+
+  fluentd:
+    image: fluent/fluentd:v1.16
+    volumes:
+      - ./fluent.conf:/fluentd/etc/fluent.conf
+      - fluent_data:/fluentd/log
+    ports:
+      - "24224:24224"
+
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    environment:
+      - discovery.type=single-node
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  kibana:
+    image: kibana:8.11.0
+    ports:
+      - "5601:5601"
+```
+
+## Лучшие практики логирования
+
+**Формат логов в приложении:**
+```javascript
+// Структурированные JSON-логи
+const winston = require('winston');
+
+const logger = winston.createLogger({
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()  // ← Структурированный формат!
+  ),
+  transports: [new winston.transports.Console()],
+});
+
+logger.info('Request processed', {
+  method: 'GET',
+  path: '/api/users',
+  duration: 45,
+  statusCode: 200,
+  requestId: 'abc-123',
+});
+```
+
+```json
+{
+  "timestamp": "2024-01-15T10:00:00.000Z",
+  "level": "info",
+  "message": "Request processed",
+  "method": "GET",
+  "path": "/api/users",
+  "duration": 45,
+  "statusCode": 200,
+  "requestId": "abc-123"
+}
+```
+
+**Правила:**
+- Пишите в stdout/stderr (не в файлы внутри контейнера)
+- Используйте структурированный JSON формат
+- Не логируйте секреты и персональные данные
+- Настраивайте ротацию логов (max-size, max-file)
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const [filter, setFilter] = React.useState('all');
+  const [search, setSearch] = React.useState('');
+  const [streaming, setStreaming] = React.useState(false);
+  const [logs, setLogs] = React.useState([
+    { id: 1,  time: '10:00:01', level: 'info',  msg: 'Server started on port 3000', service: 'api',      ctx: { port: 3000 } },
+    { id: 2,  time: '10:00:02', level: 'info',  msg: 'Connected to PostgreSQL',     service: 'api',      ctx: { host: 'postgres' } },
+    { id: 3,  time: '10:00:05', level: 'info',  msg: 'GET /health 200 3ms',         service: 'nginx',    ctx: {} },
+    { id: 4,  time: '10:00:08', level: 'warn',  msg: 'Slow query detected: 450ms',  service: 'api',      ctx: { query: 'SELECT * FROM users' } },
+    { id: 5,  time: '10:00:10', level: 'info',  msg: 'POST /api/users 201 12ms',    service: 'api',      ctx: { userId: 42 } },
+    { id: 6,  time: '10:00:15', level: 'error', msg: 'Redis connection refused',    service: 'worker',   ctx: { host: 'redis', error: 'ECONNREFUSED' } },
+    { id: 7,  time: '10:00:16', level: 'warn',  msg: 'Retry 1/3 to Redis',         service: 'worker',   ctx: {} },
+    { id: 8,  time: '10:00:18', level: 'info',  msg: 'Redis reconnected',          service: 'worker',   ctx: {} },
+    { id: 9,  time: '10:00:20', level: 'info',  msg: 'GET /api/products 200 8ms',  service: 'api',      ctx: {} },
+    { id: 10, time: '10:00:22', level: 'debug', msg: 'Cache miss for key: prod:42', service: 'api',      ctx: { key: 'prod:42' } },
+  ]);
+  const idRef = React.useRef(11);
+
+  const bg = '#0a0e14';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+  const blue = '#3b82f6';
+
+  const levelColors = { info: blue, warn: amber, error: red, debug: '#8b5cf6' };
+  const levelBg     = { info: '#3b82f611', warn: '#f59e0b11', error: '#ef444411', debug: '#8b5cf611' };
+  const serviceColors = { api: docker, nginx: green, worker: '#f97316', postgres: '#336791' };
+
+  const mockMessages = [
+    { level: 'info',  msg: 'GET /api/orders 200 15ms',          service: 'api' },
+    { level: 'info',  msg: 'Cache hit for key: user:123',         service: 'api' },
+    { level: 'warn',  msg: 'Memory usage: 78% (limit: 512MB)',   service: 'api' },
+    { level: 'info',  msg: 'Job processed: email-notification',  service: 'worker' },
+    { level: 'error', msg: 'Unhandled exception in route /admin',service: 'api' },
+    { level: 'info',  msg: 'GET /health 200 1ms',                service: 'nginx' },
+    { level: 'debug', msg: 'DB query: 23ms (SELECT users)',      service: 'api' },
+    { level: 'info',  msg: 'New connection from 192.168.1.1',    service: 'nginx' },
+  ];
+
+  React.useEffect(() => {
+    if (!streaming) return;
+    const iv = setInterval(() => {
+      const m = mockMessages[Math.floor(Math.random() * mockMessages.length)];
+      const h = new Date().getHours();
+      const min = String(new Date().getMinutes()).padStart(2, '0');
+      const sec = String(new Date().getSeconds()).padStart(2, '0');
+      setLogs(ls => [...ls.slice(-29), {
+        id: idRef.current++,
+        time: \`\${h}:\${min}:\${sec}\`,
+        level: m.level, msg: m.msg, service: m.service, ctx: {},
+      }]);
+    }, 1500);
+    return () => clearInterval(iv);
+  }, [streaming]);
+
+  const filtered = logs.filter(l =>
+    (filter === 'all' || l.level === filter) &&
+    (search === '' || l.msg.toLowerCase().includes(search.toLowerCase()) || l.service.includes(search.toLowerCase()))
+  );
+
+  const counts = logs.reduce((a, l) => ({ ...a, [l.level]: (a[l.level] || 0) + 1 }), {});
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        📋 Docker Log Viewer
+      </h2>
+
+      <div style={{ display: 'flex', gap: 10, marginBottom: 16, maxWidth: 800, margin: '0 auto 16px', flexWrap: 'wrap', alignItems: 'center' }}>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Поиск в логах..."
+          style={{ flex: 1, minWidth: 150, background: card, border: '1px solid #ffffff15', borderRadius: 8, padding: '8px 12px', color: text, fontSize: 12, outline: 'none' }} />
+
+        <div style={{ display: 'flex', gap: 6 }}>
+          {['all', 'info', 'warn', 'error', 'debug'].map(l => (
+            <button key={l} onClick={() => setFilter(l)} style={{
+              background: filter === l ? (levelColors[l] || docker) : card,
+              border: \`1px solid \${levelColors[l] || docker}44\`,
+              borderRadius: 6, padding: '5px 10px',
+              color: filter === l ? '#fff' : (levelColors[l] || muted),
+              cursor: 'pointer', fontSize: 11, fontWeight: 600,
+            }}>{l === 'all' ? 'ALL' : l.toUpperCase()} {l !== 'all' && counts[l] ? \`(\${counts[l]})\` : ''}</button>
+          ))}
+        </div>
+
+        <button onClick={() => setStreaming(!streaming)} style={{
+          background: streaming ? red + '33' : green + '22',
+          border: \`1px solid \${streaming ? red : green}55\`,
+          borderRadius: 8, padding: '6px 14px',
+          color: streaming ? red : green, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+        }}>{streaming ? '■ Стоп' : '▶ Live'}</button>
+      </div>
+
+      <div style={{ maxWidth: 800, margin: '0 auto' }}>
+        <div style={{
+          background: card, borderRadius: 12, overflow: 'hidden', border: '1px solid #ffffff10',
+          height: 420, overflowY: 'auto',
+          fontFamily: 'Monaco, Consolas, monospace', fontSize: 11, lineHeight: 1.6,
+        }}>
+          <div style={{ padding: '8px 14px', background: '#1c1c1e', borderBottom: '1px solid #ffffff10', display: 'flex', gap: 6, alignItems: 'center' }}>
+            {['#ff5f57','#febc2e','#28c840'].map((c,i) => <div key={i} style={{ width:10,height:10,borderRadius:'50%',background:c }} />)}
+            <span style={{ color: muted, fontSize: 11, marginLeft: 6 }}>docker logs -f --tail 30 api</span>
+            {streaming && <span style={{ color: green, fontSize: 10, marginLeft: 'auto', animation: 'pulse 1s infinite' }}>● LIVE</span>}
+          </div>
+          <div style={{ padding: '8px 0' }}>
+            {filtered.length === 0 && (
+              <div style={{ color: muted, textAlign: 'center', padding: 40 }}>Нет совпадений</div>
+            )}
+            {filtered.map(log => (
+              <div key={log.id} style={{
+                display: 'flex', alignItems: 'baseline', gap: 8,
+                padding: '2px 14px',
+                background: levelBg[log.level],
+                borderLeft: \`2px solid \${levelColors[log.level]}44\`,
+                marginBottom: 1,
+              }}>
+                <span style={{ color: muted, fontSize: 10, minWidth: 55 }}>{log.time}</span>
+                <span style={{
+                  color: levelColors[log.level], fontWeight: 700, fontSize: 10,
+                  minWidth: 40, textAlign: 'center',
+                  background: levelColors[log.level] + '22', borderRadius: 3, padding: '0 4px',
+                }}>{log.level.toUpperCase()}</span>
+                <span style={{ color: serviceColors[log.service] || muted, minWidth: 50 }}>[{log.service}]</span>
+                <span style={{ color: text, flex: 1 }}>{log.msg}</span>
+                {Object.keys(log.ctx).length > 0 && (
+                  <span style={{ color: muted, fontSize: 10 }}>{JSON.stringify(log.ctx)}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+          {Object.entries(counts).map(([level, count]) => (
+            <div key={level} style={{ background: card, borderRadius: 6, padding: '6px 12px', border: \`1px solid \${levelColors[level]}44\` }}>
+              <span style={{ color: levelColors[level], fontWeight: 700, fontSize: 12 }}>{level.toUpperCase()}: {count}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

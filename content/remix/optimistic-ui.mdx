@@ -1,0 +1,274 @@
+import { Playground } from '../../components/Playground'
+
+# Optimistic UI
+
+Optimistic UI — техника, при которой интерфейс обновляется мгновенно, не дожидаясь ответа сервера. Remix делает это простым с помощью `useFetcher` и `useOptimistic`.
+
+## useFetcher для Optimistic Updates
+
+```typescript
+import { useFetcher } from "@remix-run/react";
+
+function TodoItem({ todo }: { todo: Todo }) {
+  const fetcher = useFetcher();
+
+  // Оптимистично определяем состояние
+  const isCompleted = fetcher.formData
+    ? fetcher.formData.get("completed") === "true"
+    : todo.completed;
+
+  return (
+    <div style={{ opacity: fetcher.state !== "idle" ? 0.7 : 1 }}>
+      <fetcher.Form method="post" action="/todos/toggle">
+        <input type="hidden" name="id" value={todo.id} />
+        <input type="hidden" name="completed" value={String(!isCompleted)} />
+        <button type="submit">
+          {isCompleted ? "✅" : "⬜"} {todo.title}
+        </button>
+      </fetcher.Form>
+    </div>
+  );
+}
+```
+
+## Оптимистичное удаление
+
+```typescript
+function TodoList({ todos }: { todos: Todo[] }) {
+  const fetcher = useFetcher();
+
+  // Фильтруем удалённый элемент оптимистично
+  const deletingId = fetcher.formData?.get("id");
+  const optimisticTodos = todos.filter(t => t.id !== deletingId);
+
+  return (
+    <ul>
+      {optimisticTodos.map(todo => (
+        <li key={todo.id}>
+          {todo.title}
+          <fetcher.Form method="post" action="/todos/delete">
+            <input type="hidden" name="id" value={todo.id} />
+            <button type="submit">Удалить</button>
+          </fetcher.Form>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+## Оптимистичное добавление
+
+```typescript
+function AddTodo() {
+  const fetcher = useFetcher<{ todo: Todo }>();
+  const formRef = useRef<HTMLFormElement>(null);
+
+  // Сбрасываем форму после успешного сохранения
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.todo) {
+      formRef.current?.reset();
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  // Создаём временный todo пока запрос выполняется
+  const optimisticTodo = fetcher.formData
+    ? {
+        id: "temp",
+        title: fetcher.formData.get("title") as string,
+        completed: false,
+      }
+    : null;
+
+  return (
+    <>
+      {optimisticTodo && <TodoItem todo={optimisticTodo} />}
+      <fetcher.Form ref={formRef} method="post" action="/todos">
+        <input name="title" placeholder="Новая задача..." required />
+        <button type="submit">Добавить</button>
+      </fetcher.Form>
+    </>
+  );
+}
+```
+
+## useOptimistic (React 19+)
+
+```typescript
+import { useOptimistic } from "react";
+import { useFetcher } from "@remix-run/react";
+
+function LikeCounter({ postId, likes }: { postId: string; likes: number }) {
+  const fetcher = useFetcher();
+  const [optimisticLikes, addLike] = useOptimistic(
+    likes,
+    (state, increment: number) => state + increment
+  );
+
+  return (
+    <fetcher.Form
+      method="post"
+      action="/like"
+      onSubmit={() => addLike(1)}
+    >
+      <input type="hidden" name="postId" value={postId} />
+      <button type="submit">❤️ {optimisticLikes}</button>
+    </fetcher.Form>
+  );
+}
+```
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, useRef } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+
+type Todo = {
+  id: string;
+  title: string;
+  completed: boolean;
+  pending?: boolean;
+  deleting?: boolean;
+};
+
+const initialTodos: Todo[] = [
+  { id: "1", title: "Изучить Remix loaders", completed: true },
+  { id: "2", title: "Написать action функцию", completed: false },
+  { id: "3", title: "Настроить аутентификацию", completed: false },
+];
+
+export default function App() {
+  const [todos, setTodos] = useState<Todo[]>(initialTodos);
+  const [input, setInput] = useState("");
+  const [latency, setLatency] = useState(600);
+
+  const addTodo = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+
+    const tempId = "temp-" + Date.now();
+    const optimistic: Todo = { id: tempId, title: input, completed: false, pending: true };
+
+    // Оптимистично добавляем
+    setTodos(p => [optimistic, ...p]);
+    setInput("");
+
+    // Симулируем сохранение
+    setTimeout(() => {
+      setTodos(p => p.map(t =>
+        t.id === tempId
+          ? { ...t, id: Date.now().toString(), pending: false }
+          : t
+      ));
+    }, latency);
+  };
+
+  const toggleTodo = (id: string) => {
+    // Оптимистично переключаем
+    setTodos(p => p.map(t => t.id === id ? { ...t, completed: !t.completed, pending: true } : t));
+
+    setTimeout(() => {
+      setTodos(p => p.map(t => t.id === id ? { ...t, pending: false } : t));
+    }, latency);
+  };
+
+  const deleteTodo = (id: string) => {
+    // Оптимистично помечаем для удаления
+    setTodos(p => p.map(t => t.id === id ? { ...t, deleting: true } : t));
+
+    setTimeout(() => {
+      setTodos(p => p.filter(t => t.id !== id));
+    }, latency);
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>⚡ Optimistic UI</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "8px" }}>
+        Интерфейс обновляется мгновенно, не дожидаясь сервера
+      </p>
+
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "24px" }}>
+        <span style={{ color: MUTED, fontSize: "13px" }}>Задержка сервера:</span>
+        <input
+          type="range" min={100} max={2000} value={latency}
+          onChange={e => setLatency(Number(e.target.value))}
+          style={{ accentColor: ACCENT }}
+        />
+        <span style={{ color: ACCENT, fontSize: "13px", minWidth: "50px" }}>{latency}ms</span>
+      </div>
+
+      <div style={{ maxWidth: "500px" }}>
+        <form onSubmit={addTodo} style={{ display: "flex", gap: "8px", marginBottom: "20px" }}>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            placeholder="Новая задача..."
+            style={{ flex: 1, padding: "10px 14px", background: CARD, border: "1px solid #334155", borderRadius: "8px", color: TEXT, fontSize: "14px", outline: "none" }}
+          />
+          <button type="submit" style={{
+            padding: "10px 20px", background: ACCENT, color: "#fff",
+            border: "none", borderRadius: "8px", cursor: "pointer", fontWeight: 700,
+          }}>
+            + Добавить
+          </button>
+        </form>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          {todos.map(todo => (
+            <div key={todo.id} style={{
+              background: CARD,
+              borderRadius: "10px",
+              padding: "12px 16px",
+              display: "flex",
+              alignItems: "center",
+              gap: "12px",
+              opacity: todo.deleting ? 0.3 : todo.pending ? 0.7 : 1,
+              transition: "opacity 0.2s",
+              borderLeft: \`3px solid \${todo.pending ? ACCENT : todo.completed ? SUCCESS : "#334155"}\`,
+            }}>
+              <button
+                onClick={() => toggleTodo(todo.id)}
+                style={{ background: "none", border: "none", cursor: "pointer", fontSize: "18px", padding: 0 }}
+              >
+                {todo.completed ? "✅" : "⬜"}
+              </button>
+              <span style={{
+                flex: 1,
+                fontSize: "14px",
+                color: todo.completed ? MUTED : TEXT,
+                textDecoration: todo.completed ? "line-through" : "none",
+              }}>
+                {todo.title}
+              </span>
+              {todo.pending && (
+                <span style={{ fontSize: "11px", color: ACCENT }}>⏳ sync</span>
+              )}
+              <button
+                onClick={() => deleteTodo(todo.id)}
+                style={{ background: "none", border: "none", cursor: "pointer", color: ERROR, fontSize: "16px", padding: "0 4px" }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: "20px", padding: "14px", background: CARD, borderRadius: "10px", borderLeft: \`4px solid \${ACCENT}\` }}>
+          <p style={{ color: TEXT, margin: 0, fontSize: "13px", lineHeight: 1.6 }}>
+            <strong style={{ color: ACCENT }}>Optimistic UI:</strong>{" "}
+            Изменения видны сразу. Если сервер вернёт ошибку — UI откатится назад.
+            Попробуй увеличить задержку до 2000ms — интерфейс всё равно остаётся отзывчивым.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

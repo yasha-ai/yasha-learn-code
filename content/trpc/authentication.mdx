@@ -1,0 +1,258 @@
+import { Playground } from '../../components/Playground'
+
+# Аутентификация
+
+Аутентификация — один из ключевых аспектов любого production-приложения. tRPC предоставляет гибкие инструменты для реализации любой схемы аутентификации через механизм контекста и middleware.
+
+## Паттерн аутентификации в tRPC
+
+Стандартный паттерн состоит из трёх частей: во-первых, `createContext` читает токен/сессию из запроса и добавляет пользователя в контекст; во-вторых, middleware `isAuthed` проверяет наличие пользователя; в-третьих, `protectedProcedure` создаётся на основе `publicProcedure` с добавленным middleware.
+
+## JWT-аутентификация
+
+При использовании JWT: клиент отправляет токен в заголовке `Authorization: Bearer <token>`. Функция `createContext` декодирует токен через `jwt.verify()` и добавляет декодированные данные пользователя в контекст.
+
+## Сессионная аутентификация
+
+При использовании сессий (например, через NextAuth.js): `createContext` вызывает `getServerSession()` или читает cookie сессии и получает объект пользователя из базы данных. Этот объект становится доступен через `ctx.session.user`.
+
+## Ролевая авторизация
+
+Помимо проверки аутентификации, можно реализовать ролевую авторизацию. Создайте middleware `isAdmin`, который дополнительно проверяет `ctx.user.role === 'admin'` и выбрасывает ошибку `FORBIDDEN` при недостатке прав.
+
+## Обновление токена
+
+Для автоматического обновления JWT-токенов используйте `link` на клиенте, который перехватывает ошибки `UNAUTHORIZED` и выполняет refresh-запрос перед повторной попыткой.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+
+interface MockUser {
+  id: string;
+  name: string;
+  email: string;
+  role: 'admin' | 'user' | 'moderator';
+  token: string;
+}
+
+const mockUsers: Record<string, MockUser> = {
+  'admin@example.com': { id: '1', name: 'Алиса (Admin)', email: 'admin@example.com', role: 'admin', token: 'eyJhbGci.admin.token' },
+  'user@example.com': { id: '2', name: 'Боб (User)', email: 'user@example.com', role: 'user', token: 'eyJhbGci.user.token' },
+};
+
+interface Procedure {
+  name: string;
+  path: string;
+  requiredRole: 'public' | 'user' | 'admin';
+  description: string;
+  result?: string;
+}
+
+const procedures: Procedure[] = [
+  { name: 'getPublicData', path: 'public.getData', requiredRole: 'public', description: 'Публичные данные — доступны всем', result: '{ message: "Добро пожаловать в tRPC API!" }' },
+  { name: 'getProfile', path: 'user.getProfile', requiredRole: 'user', description: 'Профиль текущего пользователя', result: '{ id: "...", name: "...", email: "..." }' },
+  { name: 'getPosts', path: 'post.getAll', requiredRole: 'user', description: 'Список постов авторизованного пользователя', result: '[{ id: "1", title: "Hello tRPC" }, ...]' },
+  { name: 'createPost', path: 'post.create', requiredRole: 'user', description: 'Создание нового поста', result: '{ id: "new", title: "..." }' },
+  { name: 'getUsers', path: 'admin.getUsers', requiredRole: 'admin', description: 'Список всех пользователей (только admin)', result: '[{ id: "1", ... }, { id: "2", ... }]' },
+  { name: 'deleteUser', path: 'admin.deleteUser', requiredRole: 'admin', description: 'Удаление пользователя (только admin)', result: '{ success: true }' },
+  { name: 'getStats', path: 'admin.getStats', requiredRole: 'admin', description: 'Статистика приложения (только admin)', result: '{ users: 42, posts: 156, rps: 1234 }' },
+];
+
+const middlewareCode =
+  'const isAuthed = t.middleware(({ ctx, next }) => {\n' +
+  '  if (!ctx.user) {\n' +
+  '    throw new TRPCError({ code: "UNAUTHORIZED" });\n' +
+  '  }\n' +
+  '  return next({ ctx: { ...ctx, user: ctx.user } });\n' +
+  '});\n\n' +
+  'const isAdmin = t.middleware(({ ctx, next }) => {\n' +
+  '  if (ctx.user?.role !== "admin") {\n' +
+  '    throw new TRPCError({ code: "FORBIDDEN" });\n' +
+  '  }\n' +
+  '  return next();\n' +
+  '});\n\n' +
+  'export const protectedProcedure =\n' +
+  '  publicProcedure.use(isAuthed);\n\n' +
+  'export const adminProcedure =\n' +
+  '  protectedProcedure.use(isAdmin);';
+
+export default function App() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [currentUser, setCurrentUser] = useState<MockUser | null>(null);
+  const [loginError, setLoginError] = useState('');
+  const [isLogging, setIsLogging] = useState(false);
+  const [callResult, setCallResult] = useState<{ proc: string; success: boolean; message: string } | null>(null);
+
+  const login = () => {
+    setIsLogging(true);
+    setLoginError('');
+    setTimeout(() => {
+      const user = mockUsers[email];
+      if (user && password === 'password') {
+        setCurrentUser(user);
+        setLoginError('');
+      } else {
+        setLoginError('Неверный email или пароль. Используйте: admin@example.com или user@example.com / password');
+      }
+      setIsLogging(false);
+    }, 700);
+  };
+
+  const logout = () => {
+    setCurrentUser(null);
+    setCallResult(null);
+  };
+
+  const callProcedure = (proc: Procedure) => {
+    const hasAccess = proc.requiredRole === 'public' ||
+      (proc.requiredRole === 'user' && currentUser) ||
+      (proc.requiredRole === 'admin' && currentUser?.role === 'admin');
+
+    if (!hasAccess) {
+      if (!currentUser) {
+        setCallResult({ proc: proc.path, success: false, message: 'TRPCError: UNAUTHORIZED — Необходима авторизация' });
+      } else {
+        setCallResult({ proc: proc.path, success: false, message: 'TRPCError: FORBIDDEN — Недостаточно прав (требуется: admin)' });
+      }
+      return;
+    }
+
+    setCallResult({ proc: proc.path, success: true, message: proc.result || '{}' });
+  };
+
+  const getRoleColor = (role: string) => {
+    if (role === 'admin') return RED;
+    if (role === 'moderator') return ORANGE;
+    return GREEN;
+  };
+
+  const getProcColor = (requiredRole: string) => {
+    if (requiredRole === 'public') return TRPC;
+    if (requiredRole === 'user') return GREEN;
+    return RED;
+  };
+
+  const canAccess = (proc: Procedure) => {
+    if (proc.requiredRole === 'public') return true;
+    if (proc.requiredRole === 'user' && currentUser) return true;
+    if (proc.requiredRole === 'admin' && currentUser?.role === 'admin') return true;
+    return false;
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        Аутентификация в tRPC
+      </h2>
+
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: '240px', flex: '0 0 auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {!currentUser ? (
+            <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '16px' }}>
+              <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '13px', marginBottom: '12px' }}>🔐 Вход в систему</div>
+              <div style={{ marginBottom: '8px' }}>
+                <label style={{ color: TEXT, opacity: 0.7, fontSize: '11px', display: 'block', marginBottom: '3px' }}>Email</label>
+                <input value={email} onChange={e => setEmail(e.target.value)} placeholder="admin@example.com"
+                  style={{ width: '100%', background: BG, border: '1px solid #334155', borderRadius: '5px', padding: '6px 8px', color: TEXT, fontSize: '11px', boxSizing: 'border-box' }} />
+              </div>
+              <div style={{ marginBottom: '10px' }}>
+                <label style={{ color: TEXT, opacity: 0.7, fontSize: '11px', display: 'block', marginBottom: '3px' }}>Пароль</label>
+                <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="password"
+                  style={{ width: '100%', background: BG, border: '1px solid #334155', borderRadius: '5px', padding: '6px 8px', color: TEXT, fontSize: '11px', boxSizing: 'border-box' }} />
+              </div>
+              {loginError && (
+                <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid ' + RED, borderRadius: '5px', padding: '6px 8px', color: RED, fontSize: '10px', marginBottom: '8px' }}>
+                  {loginError}
+                </div>
+              )}
+              <button onClick={login} disabled={isLogging} style={{ width: '100%', background: TRPC, color: '#fff', border: 'none', borderRadius: '6px', padding: '8px', cursor: 'pointer', fontSize: '12px' }}>
+                {isLogging ? '⏳ Вход...' : 'Войти'}
+              </button>
+              <div style={{ marginTop: '8px', color: TEXT, opacity: 0.5, fontSize: '10px' }}>
+                Тест: admin@example.com / password<br />или user@example.com / password
+              </div>
+            </div>
+          ) : (
+            <div style={{ background: CARD, border: '1px solid ' + GREEN, borderRadius: '10px', padding: '14px' }}>
+              <div style={{ color: GREEN, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>✅ Авторизован</div>
+              <div style={{ background: BG, borderRadius: '6px', padding: '8px', marginBottom: '10px' }}>
+                <div style={{ color: TEXT, fontSize: '11px' }}>👤 {currentUser.name}</div>
+                <div style={{ color: TEXT, opacity: 0.6, fontSize: '10px' }}>{currentUser.email}</div>
+                <div style={{ marginTop: '4px' }}>
+                  <span style={{ background: getRoleColor(currentUser.role) + '22', color: getRoleColor(currentUser.role), fontSize: '10px', padding: '1px 6px', borderRadius: '4px' }}>
+                    {currentUser.role}
+                  </span>
+                </div>
+                <div style={{ color: TEXT, opacity: 0.4, fontSize: '9px', marginTop: '4px' }}>token: {currentUser.token.slice(0, 20)}...</div>
+              </div>
+              <button onClick={logout} style={{ width: '100%', background: 'transparent', color: RED, border: '1px solid ' + RED, borderRadius: '6px', padding: '6px', cursor: 'pointer', fontSize: '11px' }}>
+                Выйти
+              </button>
+            </div>
+          )}
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '12px' }}>
+            <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '11px', marginBottom: '8px' }}>Middleware код</div>
+            <pre style={{ margin: 0, fontSize: '9px', color: TEXT, lineHeight: '1.5', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+              {middlewareCode}
+            </pre>
+          </div>
+        </div>
+
+        <div style={{ flex: '1', minWidth: '260px' }}>
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px', marginBottom: '10px' }}>
+            <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '12px', marginBottom: '10px' }}>
+              API Процедуры — кликните для вызова
+            </div>
+            {procedures.map(proc => {
+              const accessible = canAccess(proc);
+              return (
+                <div key={proc.path}
+                  onClick={() => callProcedure(proc)}
+                  style={{
+                    background: accessible ? BG : '#0a0e1a',
+                    border: '1px solid ' + (accessible ? getProcColor(proc.requiredRole) + '55' : '#1e293b'),
+                    borderRadius: '6px', padding: '8px 12px', marginBottom: '5px', cursor: 'pointer',
+                    opacity: accessible ? 1 : 0.5, transition: 'all 0.15s',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: accessible ? getProcColor(proc.requiredRole) : '#475569', fontSize: '11px', fontWeight: 'bold' }}>
+                      {accessible ? '🔓' : '🔒'} {proc.path}
+                    </span>
+                    <span style={{ background: getProcColor(proc.requiredRole) + '22', color: getProcColor(proc.requiredRole), fontSize: '9px', padding: '1px 5px', borderRadius: '3px' }}>
+                      {proc.requiredRole}
+                    </span>
+                  </div>
+                  <div style={{ color: TEXT, opacity: 0.5, fontSize: '10px', marginTop: '2px' }}>{proc.description}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          {callResult && (
+            <div style={{ background: CARD, border: '1px solid ' + (callResult.success ? GREEN : RED), borderRadius: '10px', padding: '14px' }}>
+              <div style={{ color: callResult.success ? GREEN : RED, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>
+                {callResult.success ? '✅ Успешный ответ' : '❌ Ошибка'}
+              </div>
+              <div style={{ color: TEXT, opacity: 0.6, fontSize: '10px', marginBottom: '6px' }}>{callResult.proc}</div>
+              <pre style={{ margin: 0, background: BG, borderRadius: '5px', padding: '8px', fontSize: '10px', color: callResult.success ? GREEN : RED, lineHeight: '1.5', whiteSpace: 'pre-wrap' }}>
+                {callResult.message}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

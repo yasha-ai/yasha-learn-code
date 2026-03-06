@@ -1,0 +1,539 @@
+import { Playground } from '../../components/Playground'
+
+# Full-Stack приложение с Docker Compose
+
+Реальное production-приложение обычно состоит из нескольких сервисов: фронтенд, бэкенд API, база данных, кэш, прокси-сервер. Docker Compose позволяет описать всю эту инфраструктуру в одном файле и управлять ею как единым целым.
+
+## Архитектура приложения
+
+Рассмотрим типичный full-stack стек:
+
+```
+Internet → Nginx (80/443) → React SPA (статика)
+                          → Node.js API (:3000)
+                              ↓              ↓
+                         PostgreSQL       Redis
+                          (данные)      (кэш/сессии)
+```
+
+Nginx выступает точкой входа: отдаёт статические файлы React и проксирует `/api/*` запросы к Node.js.
+
+## Структура проекта
+
+```
+myapp/
+├── docker-compose.yml
+├── .env
+├── nginx/
+│   ├── Dockerfile
+│   └── nginx.conf
+├── api/
+│   ├── Dockerfile
+│   └── src/
+└── web/
+    ├── Dockerfile
+    └── src/
+```
+
+## Полный docker-compose.yml
+
+```yaml
+version: '3.9'
+
+services:
+  # ──────────────────────────────────────
+  # PostgreSQL — основная база данных
+  # ──────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: myapp_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-myapp}
+      POSTGRES_USER: ${DB_USER:-myapp}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-myapp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────
+  # Redis — кэш и хранилище сессий
+  # ──────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: myapp_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ──────────────────────────────────────
+  # Node.js API
+  # ──────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      target: production
+    container_name: myapp_api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ──────────────────────────────────────
+  # React frontend (собирается и отдаётся Nginx)
+  # ──────────────────────────────────────
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      target: production
+    container_name: myapp_web
+    networks:
+      - frontend
+
+  # ──────────────────────────────────────
+  # Nginx — reverse proxy + статика
+  # ──────────────────────────────────────
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: myapp_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true   # backend недоступен снаружи напрямую
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+```
+
+## Dockerfile для Node.js API
+
+```dockerfile
+FROM node:20-alpine AS base
+WORKDIR /app
+COPY package*.json ./
+
+FROM base AS deps
+RUN npm ci --only=production
+
+FROM base AS build
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM base AS production
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+USER node
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+## Nginx конфигурация
+
+```nginx
+events { worker_connections 1024; }
+
+http {
+  upstream api {
+    server api:3000;
+    keepalive 32;
+  }
+
+  server {
+    listen 80;
+
+    # Статика React
+    location / {
+      root /usr/share/nginx/html;
+      try_files $uri $uri/ /index.html;
+      expires 1y;
+      add_header Cache-Control "public, immutable";
+    }
+
+    # API proxy
+    location /api/ {
+      proxy_pass http://api/;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header Connection "";
+    }
+
+    # WebSocket поддержка
+    location /ws {
+      proxy_pass http://api;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+    }
+  }
+}
+```
+
+## Переменные окружения (.env)
+
+```bash
+# .env (НЕ коммитить в Git!)
+DB_NAME=myapp
+DB_USER=myapp
+DB_PASSWORD=super_secret_db_password
+REDIS_PASSWORD=super_secret_redis_password
+JWT_SECRET=your_jwt_secret_here_min_32_chars
+```
+
+## Управление стеком
+
+```bash
+# Запуск всех сервисов
+docker compose up -d
+
+# Только зависимости (без приложения)
+docker compose up -d postgres redis
+
+# Просмотр логов
+docker compose logs -f api
+
+# Проверка статуса
+docker compose ps
+
+# Выполнение команд внутри контейнера
+docker compose exec api node scripts/migrate.js
+docker compose exec postgres psql -U myapp -d myapp
+
+# Остановка без удаления данных
+docker compose stop
+
+# Полная очистка (ОСТОРОЖНО: удаляет volumes)
+docker compose down -v
+```
+
+## Порядок запуска и зависимости
+
+Docker Compose запускает сервисы с учётом `depends_on`. Граф зависимостей нашего стека:
+
+```
+postgres ─────┐
+               ├──→ api ──→ nginx
+redis ────────┘
+
+web ──────────────→ nginx
+```
+
+`condition: service_healthy` гарантирует, что сервис не просто запущен, но прошёл health check.
+
+<Playground template="react" files={{ 'App.tsx': `export default function App() {
+  const bg = '#0f172a', card = '#1e293b', docker = '#2496ed', text = '#e2e8f0', muted = '#64748b';
+  const green = '#22c55e', amber = '#f59e0b', border = '#334155', red = '#ef4444';
+  const purple = '#a855f7', teal = '#14b8a6', orange = '#f97316';
+
+  const services = [
+    {
+      id: 'postgres',
+      label: 'PostgreSQL',
+      icon: '🐘',
+      color: '#336791',
+      port: '5432',
+      image: 'postgres:16-alpine',
+      network: 'backend',
+      deps: [],
+      startDelay: 0,
+      volume: 'postgres_data',
+      desc: 'Основная база данных. Хранит пользователей, данные приложения.',
+      env: ['POSTGRES_DB=myapp', 'POSTGRES_USER=myapp', 'POSTGRES_PASSWORD=***'],
+    },
+    {
+      id: 'redis',
+      label: 'Redis',
+      icon: '⚡',
+      color: '#dc382c',
+      port: '6379',
+      image: 'redis:7-alpine',
+      network: 'backend',
+      deps: [],
+      startDelay: 200,
+      volume: 'redis_data',
+      desc: 'Кэш и хранилище сессий. Ускоряет повторные запросы.',
+      env: ['requirepass ***'],
+    },
+    {
+      id: 'api',
+      label: 'Node.js API',
+      icon: '⚙️',
+      color: docker,
+      port: '3000',
+      image: './api (custom)',
+      network: 'backend + frontend',
+      deps: ['postgres', 'redis'],
+      startDelay: 2000,
+      volume: null,
+      desc: 'REST API сервер. Обращается к PostgreSQL и Redis.',
+      env: ['NODE_ENV=production', 'DATABASE_URL=...', 'REDIS_URL=...', 'JWT_SECRET=***'],
+    },
+    {
+      id: 'web',
+      label: 'React (build)',
+      icon: '⚛️',
+      color: '#61dafb',
+      port: null,
+      image: './web (custom)',
+      network: 'frontend',
+      deps: [],
+      startDelay: 400,
+      volume: null,
+      desc: 'Билд React-приложения. Статические файлы копируются в Nginx.',
+      env: ['REACT_APP_API_URL=/api'],
+    },
+    {
+      id: 'nginx',
+      label: 'Nginx',
+      icon: '🌐',
+      color: '#009900',
+      port: '80 / 443',
+      image: './nginx (custom)',
+      network: 'frontend',
+      deps: ['api', 'web'],
+      startDelay: 3500,
+      volume: null,
+      desc: 'Reverse proxy. Отдаёт статику React, проксирует /api → Node.js.',
+      env: [],
+    },
+  ];
+
+  const [statuses, setStatuses] = React.useState({});
+  const [selected, setSelected] = React.useState('postgres');
+  const [composing, setComposing] = React.useState(false);
+  const [log, setLog]   = React.useState([]);
+  const [tab, setTab]   = React.useState('info');
+
+  const sel = services.find(s => s.id === selected);
+
+  const runCompose = () => {
+    if (composing) return;
+    setComposing(true);
+    setStatuses({});
+    setLog([]);
+    const newLog = [];
+
+    services.forEach(svc => {
+      setTimeout(() => {
+        setStatuses(prev => ({ ...prev, [svc.id]: 'starting' }));
+        setLog(prev => [...prev, '  Starting ' + svc.label + '...']);
+      }, svc.startDelay);
+
+      setTimeout(() => {
+        setStatuses(prev => ({ ...prev, [svc.id]: 'healthy' }));
+        setLog(prev => [...prev, '  ✓ ' + svc.label + ' is healthy']);
+        if (svc.id === 'nginx') {
+          setLog(prev => [...prev, '', '  ✓ All services started!', '  → http://localhost:80']);
+          setComposing(false);
+        }
+      }, svc.startDelay + 1000 + Math.random() * 500);
+    });
+  };
+
+  const resetAll = () => {
+    if (!composing) { setStatuses({}); setLog([]); }
+  };
+
+  const statusColor = (id) => {
+    const s = statuses[id];
+    if (s === 'healthy')  return green;
+    if (s === 'starting') return amber;
+    return muted;
+  };
+
+  const statusDot = (id) => {
+    const s = statuses[id];
+    if (s === 'healthy')  return '●';
+    if (s === 'starting') return '◌';
+    return '○';
+  };
+
+  const Arrow = ({ from, to }) => (
+    <div style={{ fontSize: 12, color: muted, textAlign: 'center', marginBottom: 4 }}>
+      {from} → {to}
+    </div>
+  );
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ color: docker, textAlign: 'center', marginBottom: 20, fontSize: 18 }}>
+        🏗️ Full-Stack Docker Compose
+      </h2>
+
+      <div style={{ maxWidth: 860, margin: '0 auto' }}>
+
+        {/* Service graph */}
+        <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+          <div style={{ color: muted, fontSize: 11, marginBottom: 12, letterSpacing: 1 }}>СЕРВИСЫ</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
+            {services.map(svc => (
+              <button key={svc.id} onClick={() => setSelected(svc.id)}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', background: selected === svc.id ? svc.color + '30' : bg, border: '1px solid ' + (selected === svc.id ? svc.color : border), borderRadius: 8, cursor: 'pointer', color: text, transition: 'all 0.2s' }}>
+                <span style={{ fontSize: 16 }}>{svc.icon}</span>
+                <span style={{ fontSize: 13 }}>{svc.label}</span>
+                <span style={{ color: statusColor(svc.id), fontSize: 14 }}>{statusDot(svc.id)}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Dependency arrows */}
+          <div style={{ background: bg, borderRadius: 8, padding: 12, fontSize: 12 }}>
+            <div style={{ color: muted, fontSize: 11, marginBottom: 8 }}>ЗАВИСИМОСТИ</div>
+            {services.filter(s => s.deps.length > 0).map(svc => (
+              <div key={svc.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <span style={{ color: muted }}>{svc.deps.join(', ')}</span>
+                <span style={{ color: muted }}>→</span>
+                <span style={{ color: svc.color }}>{svc.label}</span>
+                <span style={{ color: muted, fontSize: 10 }}>(depends_on: service_healthy)</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Selected service details */}
+        {sel && (
+          <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 16, borderLeft: '3px solid ' + sel.color }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+              <span style={{ fontSize: 24 }}>{sel.icon}</span>
+              <span style={{ fontSize: 16, fontWeight: 'bold' }}>{sel.label}</span>
+              <span style={{ marginLeft: 'auto', fontSize: 12, color: statusColor(sel.id) }}>{statusDot(sel.id)} {statuses[sel.id] || 'stopped'}</span>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              {['info', 'env', 'network'].map(t => (
+                <button key={t} onClick={() => setTab(t)}
+                  style={{ padding: '4px 12px', background: tab === t ? sel.color : bg, color: text, border: '1px solid ' + border, borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+                  {t}
+                </button>
+              ))}
+            </div>
+
+            {tab === 'info' && (
+              <div style={{ fontSize: 13 }}>
+                <div style={{ marginBottom: 8, color: muted }}>{sel.desc}</div>
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                  <div><span style={{ color: muted }}>image: </span><span style={{ color: amber }}>{sel.image}</span></div>
+                  {sel.port && <div><span style={{ color: muted }}>ports: </span><span style={{ color: green }}>{sel.port}</span></div>}
+                  {sel.volume && <div><span style={{ color: muted }}>volume: </span><span style={{ color: purple }}>{sel.volume}</span></div>}
+                  <div><span style={{ color: muted }}>network: </span><span style={{ color: teal }}>{sel.network}</span></div>
+                </div>
+              </div>
+            )}
+
+            {tab === 'env' && (
+              <div style={{ background: bg, borderRadius: 6, padding: 10 }}>
+                {sel.env.length === 0
+                  ? <div style={{ color: muted, fontSize: 12 }}>Нет переменных окружения</div>
+                  : sel.env.map((e, i) => (
+                    <div key={i} style={{ fontSize: 12, color: e.includes('***') ? amber : green, marginBottom: 4, fontFamily: 'monospace' }}>
+                      {e.includes('***') ? '🔒 ' : '  '}{e}
+                    </div>
+                  ))
+                }
+              </div>
+            )}
+
+            {tab === 'network' && (
+              <div style={{ fontSize: 13 }}>
+                {sel.network.includes('backend') && (
+                  <div style={{ background: bg, borderRadius: 6, padding: 8, marginBottom: 6 }}>
+                    <div style={{ color: red, marginBottom: 4 }}>🔒 backend (internal: true)</div>
+                    <div style={{ color: muted, fontSize: 12 }}>Изолирована от внешнего мира. Доступна только внутри stack.</div>
+                  </div>
+                )}
+                {sel.network.includes('frontend') && (
+                  <div style={{ background: bg, borderRadius: 6, padding: 8 }}>
+                    <div style={{ color: green, marginBottom: 4 }}>🌐 frontend</div>
+                    <div style={{ color: muted, fontSize: 12 }}>Доступна для Nginx, который принимает внешние запросы.</div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Log + controls */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'start' }}>
+          <div style={{ background: '#08101e', borderRadius: 10, padding: 14, minHeight: 80, fontFamily: 'monospace' }}>
+            <div style={{ color: muted, fontSize: 11, marginBottom: 6 }}>docker compose up -d</div>
+            {log.length === 0 && <div style={{ color: muted, fontSize: 12 }}>Нажмите кнопку для запуска стека…</div>}
+            {log.map((l, i) => (
+              <div key={i} style={{ fontSize: 12, color: l.includes('✓') ? green : l.includes('→') ? docker : l === '' ? muted : amber, marginBottom: 2 }}>{l}</div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button onClick={runCompose} disabled={composing}
+              style={{ padding: '10px 18px', background: composing ? muted : green, color: '#fff', border: 'none', borderRadius: 8, cursor: composing ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+              {composing ? '⏳ Starting…' : '▶ compose up'}
+            </button>
+            <button onClick={resetAll} disabled={composing}
+              style={{ padding: '10px 18px', background: card, color: text, border: '1px solid ' + border, borderRadius: 8, cursor: composing ? 'not-allowed' : 'pointer', fontSize: 13 }}>
+              ↺ Reset
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

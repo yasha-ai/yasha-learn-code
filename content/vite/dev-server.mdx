@@ -1,0 +1,410 @@
+import { Playground } from '../../components/Playground'
+
+# Dev сервер Vite: HMR, Proxy и настройки
+
+Dev сервер Vite — это не просто HTTP сервер. Это полноценная среда разработки с мгновенным Hot Module Replacement, встроенным прокси для API запросов, поддержкой HTTPS и WebSocket.
+
+## Основные опции сервера
+
+```typescript
+// vite.config.ts
+export default defineConfig({
+  server: {
+    host: '0.0.0.0',   // Слушать все интерфейсы (не только localhost)
+    port: 3000,         // Порт (по умолчанию 5173)
+    strictPort: true,   // Падать, если порт занят (не искать другой)
+    open: true,         // Открывать браузер при запуске
+    open: '/dashboard', // Или открывать конкретный URL
+
+    // HTTPS
+    https: true,        // Самоподписанный сертификат
+    https: {
+      key: './certs/key.pem',
+      cert: './certs/cert.pem',
+    },
+  },
+})
+```
+
+## Proxy — Проксирование API запросов
+
+Это одна из самых важных функций для разработки. Позволяет избежать CORS ошибок при работе с backend:
+
+```typescript
+server: {
+  proxy: {
+    // Строковое правило — простое проксирование
+    '/api': 'http://localhost:8080',
+    // GET /api/users → http://localhost:8080/api/users
+
+    // Объектное правило — с опциями
+    '/api': {
+      target: 'http://localhost:8080',
+      changeOrigin: true,  // Меняет заголовок Host
+      rewrite: (path) => path.replace(/^\/api/, ''),
+      // /api/users → http://localhost:8080/users
+    },
+
+    // WebSocket проксирование
+    '/ws': {
+      target: 'ws://localhost:8080',
+      ws: true,
+    },
+
+    // Regex правило
+    '^/fallback/.*': {
+      target: 'https://external-api.com',
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/fallback/, ''),
+    },
+  },
+}
+```
+
+## HMR (Hot Module Replacement)
+
+HMR — это механизм замены модулей без перезагрузки страницы:
+
+```typescript
+// Кастомная HMR конфигурация
+server: {
+  hmr: {
+    port: 8080,         // WebSocket порт для HMR (если отличается от server.port)
+    host: 'localhost',  // HMR WebSocket host
+    overlay: false,     // Отключить overlay с ошибками
+    clientPort: 443,    // Порт для клиента (например за nginx)
+  },
+}
+
+// Программный HMR API в модулях
+if (import.meta.hot) {
+  import.meta.hot.accept((newModule) => {
+    // Обработать обновление модуля
+  })
+
+  import.meta.hot.dispose((data) => {
+    // Cleanup перед заменой модуля
+    clearInterval(data.timer)
+  })
+
+  import.meta.hot.data.timer = setInterval(...)
+}
+```
+
+## CORS настройки
+
+```typescript
+server: {
+  cors: true,          // Разрешить все origins (для dev)
+
+  // Или с деталями:
+  cors: {
+    origin: ['http://localhost:3001', 'https://myapp.com'],
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+}
+```
+
+## Headers
+
+```typescript
+server: {
+  headers: {
+    'Cross-Origin-Embedder-Policy': 'require-corp',
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    // Нужно для SharedArrayBuffer (WebAssembly, workers)
+  },
+}
+```
+
+## Preview сервер (для production сборки)
+
+```typescript
+// vite.config.ts — настройки preview сервера
+preview: {
+  port: 8080,
+  strictPort: true,
+  host: true,
+}
+
+// CLI: запуск production preview
+// npm run build && vite preview
+```
+
+## Полный пример конфига сервера
+
+```typescript
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig(({ command }) => ({
+  plugins: [react()],
+  server: {
+    port: 3000,
+    host: true,
+    open: true,
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_TARGET || 'http://localhost:8080',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
+    hmr: {
+      overlay: true,
+    },
+  },
+}))
+```
+
+Ниже — интерактивный конфигуратор dev сервера: включай параметры и получай готовый конфиг с объяснениями:
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const VITE_COLOR = '#646cff';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#38bdf8';
+const GREEN = '#4ade80';
+const AMBER = '#f59e0b';
+
+interface ServerOption {
+  id: string;
+  group: string;
+  label: string;
+  description: string;
+  configKey: string;
+  configValue: string;
+  enabled: boolean;
+  icon: string;
+}
+
+const defaultOptions: ServerOption[] = [
+  { id: 'port', group: 'Basic', label: 'Порт 3000', description: 'Изменить стандартный порт 5173 на 3000', configKey: 'port', configValue: '3000', enabled: true, icon: '🔌' },
+  { id: 'open', group: 'Basic', label: 'Открывать браузер', description: 'Автоматически открывать браузер при vite dev', configKey: 'open', configValue: 'true', enabled: false, icon: '🌐' },
+  { id: 'host', group: 'Basic', label: 'Network доступ', description: 'Слушать 0.0.0.0 — доступен в локальной сети', configKey: 'host', configValue: 'true', enabled: false, icon: '🌍' },
+  { id: 'strict-port', group: 'Basic', label: 'Strict Port', description: 'Падать с ошибкой если порт занят', configKey: 'strictPort', configValue: 'true', enabled: false, icon: '⚠️' },
+  { id: 'proxy', group: 'Proxy', label: 'API Proxy', description: 'Проксировать /api на backend сервер', configKey: 'proxy', configValue: "{ '/api': { target: 'http://localhost:8080', changeOrigin: true, rewrite: (p) => p.replace(/^\\/api/, '') } }", enabled: false, icon: '🔀' },
+  { id: 'ws-proxy', group: 'Proxy', label: 'WebSocket Proxy', description: 'Проксировать WebSocket /ws соединения', configKey: 'proxy', configValue: "{ '/ws': { target: 'ws://localhost:8080', ws: true } }", enabled: false, icon: '🔌' },
+  { id: 'https', group: 'Security', label: 'HTTPS', description: 'Включить HTTPS с самоподписанным сертификатом', configKey: 'https', configValue: 'true', enabled: false, icon: '🔒' },
+  { id: 'cors', group: 'Security', label: 'CORS', description: 'Разрешить Cross-Origin запросы (для dev)', configKey: 'cors', configValue: 'true', enabled: false, icon: '🌐' },
+  { id: 'hmr-overlay', group: 'HMR', label: 'HMR Overlay', description: 'Показывать overlay с ошибками компиляции', configKey: 'hmr', configValue: "{ overlay: true }", enabled: true, icon: '🔥' },
+  { id: 'hmr-off', group: 'HMR', label: 'Отключить HMR', description: 'Полностью отключить Hot Module Replacement', configKey: 'hmr', configValue: 'false', enabled: false, icon: '❄️' },
+];
+
+const groupColors: Record<string, string> = {
+  Basic: VITE_COLOR,
+  Proxy: ACCENT,
+  Security: '#a78bfa',
+  HMR: '#f97316',
+};
+
+function generateServerConfig(options: ServerOption[]): string {
+  const enabled = options.filter(o => o.enabled);
+  if (enabled.length === 0) return 'server: {\\n  // Все настройки по умолчанию\\n},';
+
+  // Merge proxy options
+  const lines: string[] = ['server: {'];
+
+  const port = enabled.find(o => o.id === 'port');
+  if (port) lines.push(\`  port: \${port.configValue},\`);
+
+  const host = enabled.find(o => o.id === 'host');
+  if (host) lines.push(\`  host: \${host.configValue},\`);
+
+  const strictPort = enabled.find(o => o.id === 'strict-port');
+  if (strictPort) lines.push(\`  strictPort: \${strictPort.configValue},\`);
+
+  const open = enabled.find(o => o.id === 'open');
+  if (open) lines.push(\`  open: \${open.configValue},\`);
+
+  const https = enabled.find(o => o.id === 'https');
+  if (https) lines.push(\`  https: \${https.configValue},\`);
+
+  const cors = enabled.find(o => o.id === 'cors');
+  if (cors) lines.push(\`  cors: \${cors.configValue},\`);
+
+  const proxy = enabled.find(o => o.id === 'proxy');
+  const wsProxy = enabled.find(o => o.id === 'ws-proxy');
+  if (proxy || wsProxy) {
+    lines.push('  proxy: {');
+    if (proxy) {
+      lines.push("    '/api': {");
+      lines.push("      target: 'http://localhost:8080',");
+      lines.push('      changeOrigin: true,');
+      lines.push("      rewrite: (p) => p.replace(/^\\/api/, ''),");
+      lines.push('    },');
+    }
+    if (wsProxy) {
+      lines.push("    '/ws': { target: 'ws://localhost:8080', ws: true },");
+    }
+    lines.push('  },');
+  }
+
+  const hmrOff = enabled.find(o => o.id === 'hmr-off');
+  const hmrOverlay = enabled.find(o => o.id === 'hmr-overlay');
+  if (hmrOff) {
+    lines.push('  hmr: false,');
+  } else if (hmrOverlay) {
+    lines.push('  hmr: { overlay: true },');
+  }
+
+  lines.push('},');
+  return lines.join('\\n');
+}
+
+export default function App() {
+  const [options, setOptions] = useState<ServerOption[]>(defaultOptions);
+  const [activeGroup, setActiveGroup] = useState('All');
+  const [tab, setTab] = useState<'config' | 'hmr'>('config');
+
+  const toggle = (id: string) => {
+    setOptions(prev => prev.map(o => o.id === id ? { ...o, enabled: !o.enabled } : o));
+  };
+
+  const groups = ['All', ...Array.from(new Set(defaultOptions.map(o => o.group)))];
+  const filtered = activeGroup === 'All' ? options : options.filter(o => o.group === activeGroup);
+  const config = generateServerConfig(options);
+
+  const hmrSteps = [
+    { phase: 'Изменение файла', detail: 'src/App.tsx сохранён', color: AMBER },
+    { phase: 'File System Watcher', detail: 'Chokidar обнаружил изменение', color: ACCENT },
+    { phase: 'Module Graph', detail: 'Найдены зависимые модули', color: VITE_COLOR },
+    { phase: 'Invalidate', detail: 'Только затронутые модули помечены', color: '#a78bfa' },
+    { phase: 'WebSocket', detail: 'Отправлен { type: "update" }', color: '#f97316' },
+    { phase: 'Browser', detail: 'Импортирует обновлённый модуль', color: ACCENT },
+    { phase: 'Hot Accept', detail: 'import.meta.hot.accept() вызван', color: GREEN },
+    { phase: 'Render', detail: 'React Fast Refresh — состояние сохранено!', color: GREEN },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '24px 16px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <h1 style={{
+            margin: 0, fontSize: 22, fontWeight: 800,
+            background: \`linear-gradient(90deg, \${VITE_COLOR}, \${ACCENT})\`,
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+          }}>Dev Server Configurator</h1>
+          <p style={{ color: '#64748b', fontSize: 13, marginTop: 6 }}>
+            Настрой dev сервер и пойми как работает HMR
+          </p>
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 20, background: CARD, padding: 4, borderRadius: 10 }}>
+          {[
+            { id: 'config' as const, label: '⚙️ Server Config' },
+            { id: 'hmr' as const, label: '🔥 HMR Pipeline' },
+          ].map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              flex: 1, padding: '8px 4px', borderRadius: 7, border: 'none', cursor: 'pointer',
+              background: tab === t.id ? VITE_COLOR : 'transparent',
+              color: tab === t.id ? '#fff' : '#94a3b8',
+              fontSize: 13, fontWeight: tab === t.id ? 700 : 400,
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {tab === 'config' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.1fr', gap: 16 }}>
+            {/* Options */}
+            <div>
+              {/* Group filter */}
+              <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap' }}>
+                {groups.map(g => (
+                  <button key={g} onClick={() => setActiveGroup(g)} style={{
+                    padding: '3px 10px', borderRadius: 10, border: 'none', cursor: 'pointer',
+                    background: activeGroup === g ? (groupColors[g] || VITE_COLOR) : CARD,
+                    color: activeGroup === g ? '#fff' : '#94a3b8', fontSize: 11,
+                  }}>{g}</button>
+                ))}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {filtered.map(opt => {
+                  const gc = groupColors[opt.group] || VITE_COLOR;
+                  return (
+                    <div key={opt.id} onClick={() => toggle(opt.id)} style={{
+                      background: opt.enabled ? \`\${gc}12\` : CARD,
+                      border: \`1px solid \${opt.enabled ? gc + '50' : '#334155'}\`,
+                      borderRadius: 10, padding: '10px 12px', cursor: 'pointer',
+                      transition: 'all 0.2s',
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: 13 }}>
+                          {opt.icon} <span style={{ fontWeight: 600, color: opt.enabled ? gc : TEXT }}>{opt.label}</span>
+                        </span>
+                        <div style={{
+                          width: 28, height: 16, borderRadius: 8, position: 'relative',
+                          background: opt.enabled ? gc : '#334155', transition: 'all 0.2s', flexShrink: 0,
+                        }}>
+                          <div style={{
+                            position: 'absolute', top: 2, left: opt.enabled ? 14 : 2,
+                            width: 12, height: 12, borderRadius: '50%', background: '#fff',
+                            transition: 'left 0.2s',
+                          }} />
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: '#64748b', marginTop: 3 }}>{opt.description}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Config output */}
+            <div style={{ position: 'sticky', top: 16 }}>
+              <div style={{ background: CARD, borderRadius: 12, overflow: 'hidden', border: '1px solid #334155' }}>
+                <div style={{ padding: '8px 12px', borderBottom: '1px solid #334155', background: '#1a2744', display: 'flex', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', gap: 5 }}>
+                    {['#ef4444','#f59e0b','#22c55e'].map(c => <div key={c} style={{ width: 9, height: 9, borderRadius: '50%', background: c }} />)}
+                  </div>
+                  <span style={{ fontSize: 10, color: '#64748b' }}>vite.config.ts → server: {'{'}</span>
+                </div>
+                <pre style={{ margin: 0, padding: 14, fontSize: 11.5, color: TEXT, fontFamily: 'monospace', lineHeight: 1.6, overflowX: 'auto', maxHeight: 400, overflowY: 'auto' }}>
+                  <code>{config}</code>
+                </pre>
+              </div>
+              <div style={{ marginTop: 8, padding: 10, background: CARD, borderRadius: 8, border: '1px solid #334155', fontSize: 11, color: '#64748b' }}>
+                ✅ Активно: <span style={{ color: GREEN }}>{options.filter(o => o.enabled).length}</span> опций
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === 'hmr' && (
+          <div style={{ background: CARD, borderRadius: 14, padding: 20, border: '1px solid #334155' }}>
+            <h3 style={{ margin: '0 0 20px', fontSize: 15, color: ACCENT }}>🔥 HMR Pipeline: как работает Hot Module Replacement</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {hmrSteps.map((step, i) => (
+                <div key={i} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                    <div style={{
+                      width: 34, height: 34, borderRadius: '50%', display: 'flex',
+                      alignItems: 'center', justifyContent: 'center',
+                      background: \`\${step.color}20\`, border: \`2px solid \${step.color}\`,
+                      fontSize: 12, color: step.color, fontWeight: 700, flexShrink: 0,
+                    }}>{i + 1}</div>
+                    {i < hmrSteps.length - 1 && (
+                      <div style={{ width: 2, height: 16, background: '#334155' }} />
+                    )}
+                  </div>
+                  <div style={{ paddingTop: 8, paddingBottom: 4 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: step.color }}>{step.phase}</div>
+                    <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>{step.detail}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 16, padding: 12, background: \`\${GREEN}10\`, borderRadius: 8, border: \`1px solid \${GREEN}30\`, fontSize: 12, color: '#94a3b8' }}>
+              💡 <strong style={{ color: GREEN }}>Ключевое отличие от Webpack:</strong> Vite invalidate только изменённый модуль, а не весь бандл. Это даёт &lt;10ms HMR независимо от размера проекта.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}` }} />

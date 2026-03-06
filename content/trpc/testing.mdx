@@ -1,0 +1,344 @@
+import { Playground } from '../../components/Playground'
+
+# Тестирование tRPC
+
+Тестирование tRPC-процедур не требует поднятия HTTP-сервера. Вы можете вызывать процедуры напрямую через `createCaller()`, передавая mock-контекст. Это делает unit-тесты быстрыми и изолированными.
+
+## Прямой вызов процедур
+
+Метод `appRouter.createCaller(ctx)` создаёт объект, через который можно вызывать процедуры как обычные async-функции. Это идеально для unit-тестов: нет HTTP, нет сети, только чистая бизнес-логика.
+
+## Mock-контекст
+
+При тестировании передайте mock-контекст в `createCaller`. Для публичных процедур — пустой объект `{}`. Для защищённых процедур — объект с mock-пользователем: `{ user: { id: '1', role: 'admin' } }`.
+
+## Тестирование валидации
+
+Для проверки, что невалидные данные корректно отклоняются, оберните вызов в `try-catch` и проверьте, что выброшена ошибка `TRPCError` с кодом `BAD_REQUEST`.
+
+## Тестирование ошибок авторизации
+
+Вызовите защищённую процедуру с пустым контекстом (без пользователя) и убедитесь, что получите `TRPCError` с кодом `UNAUTHORIZED`.
+
+## Интеграционные тесты
+
+Для интеграционных тестов используйте `createHTTPServerlessHandler` или поднимайте реальный сервер через `createHTTPServer`. Это позволяет тестировать полный цикл запроса, включая middleware и serialization.
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+
+type TestStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
+
+interface TestCase {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  code: string;
+  expectedResult: string;
+  shouldPass: boolean;
+  status: TestStatus;
+  output?: string;
+  duration?: number;
+}
+
+const initialTests: TestCase[] = [
+  {
+    id: 't1',
+    name: 'user.getAll возвращает список пользователей',
+    description: 'Публичная процедура должна вернуть массив пользователей',
+    category: 'Queries',
+    code:
+      'it("getAll returns users", async () => {\n' +
+      '  const caller = appRouter.createCaller({});\n' +
+      '  const result = await caller.user.getAll();\n' +
+      '  expect(result).toBeArray();\n' +
+      '  expect(result[0]).toHaveProperty("id");\n' +
+      '  expect(result[0]).toHaveProperty("name");\n' +
+      '});',
+    expectedResult: 'result: [{ id: "1", name: "Alice" }, ...]',
+    shouldPass: true,
+    status: 'pending',
+  },
+  {
+    id: 't2',
+    name: 'user.getById возвращает пользователя по ID',
+    description: 'Должен вернуть конкретного пользователя по переданному ID',
+    category: 'Queries',
+    code:
+      'it("getById returns user", async () => {\n' +
+      '  const caller = appRouter.createCaller({});\n' +
+      '  const result = await caller.user.getById({ id: "1" });\n' +
+      '  expect(result.id).toBe("1");\n' +
+      '  expect(result.name).toBeString();\n' +
+      '});',
+    expectedResult: 'result: { id: "1", name: "Alice", email: "..." }',
+    shouldPass: true,
+    status: 'pending',
+  },
+  {
+    id: 't3',
+    name: 'user.getById выбрасывает NOT_FOUND для несуществующего ID',
+    description: 'При запросе несуществующего пользователя должна выброситься ошибка NOT_FOUND',
+    category: 'Error Handling',
+    code:
+      'it("getById throws NOT_FOUND", async () => {\n' +
+      '  const caller = appRouter.createCaller({});\n' +
+      '  await expect(\n' +
+      '    caller.user.getById({ id: "999" })\n' +
+      '  ).rejects.toMatchObject({\n' +
+      '    code: "NOT_FOUND",\n' +
+      '  });\n' +
+      '});',
+    expectedResult: 'throws TRPCError { code: "NOT_FOUND" }',
+    shouldPass: true,
+    status: 'pending',
+  },
+  {
+    id: 't4',
+    name: 'post.create требует аутентификации',
+    description: 'Вызов защищённой процедуры без пользователя должен вернуть UNAUTHORIZED',
+    category: 'Auth',
+    code:
+      'it("create requires auth", async () => {\n' +
+      '  // Пустой контекст — нет пользователя\n' +
+      '  const caller = appRouter.createCaller({});\n' +
+      '  await expect(\n' +
+      '    caller.post.create({\n' +
+      '      title: "Test",\n' +
+      '      content: "Content"\n' +
+      '    })\n' +
+      '  ).rejects.toMatchObject({\n' +
+      '    code: "UNAUTHORIZED",\n' +
+      '  });\n' +
+      '});',
+    expectedResult: 'throws TRPCError { code: "UNAUTHORIZED" }',
+    shouldPass: true,
+    status: 'pending',
+  },
+  {
+    id: 't5',
+    name: 'post.create создаёт пост для авторизованного',
+    description: 'С авторизованным пользователем в контексте, создание должно работать',
+    category: 'Mutations',
+    code:
+      'it("create works for authed user", async () => {\n' +
+      '  const caller = appRouter.createCaller({\n' +
+      '    user: { id: "1", name: "Alice" },\n' +
+      '  });\n' +
+      '  const result = await caller.post.create({\n' +
+      '    title: "Hello",\n' +
+      '    content: "World",\n' +
+      '  });\n' +
+      '  expect(result).toHaveProperty("id");\n' +
+      '  expect(result.title).toBe("Hello");\n' +
+      '});',
+    expectedResult: 'result: { id: "new", title: "Hello", content: "World" }',
+    shouldPass: true,
+    status: 'pending',
+  },
+  {
+    id: 't6',
+    name: 'user.create валидирует email',
+    description: 'Невалидный email должен вызвать ошибку BAD_REQUEST',
+    category: 'Validation',
+    code:
+      'it("create validates email", async () => {\n' +
+      '  const caller = appRouter.createCaller({\n' +
+      '    user: { id: "1", role: "admin" },\n' +
+      '  });\n' +
+      '  await expect(\n' +
+      '    caller.user.create({\n' +
+      '      name: "Test",\n' +
+      '      email: "not-valid-email",\n' +
+      '    })\n' +
+      '  ).rejects.toMatchObject({\n' +
+      '    code: "BAD_REQUEST",\n' +
+      '  });\n' +
+      '});',
+    expectedResult: 'throws TRPCError { code: "BAD_REQUEST" }',
+    shouldPass: true,
+    status: 'pending',
+  },
+  {
+    id: 't7',
+    name: 'admin.deleteUser требует роль admin',
+    description: 'Обычный пользователь не должен иметь доступ к admin-процедурам',
+    category: 'Auth',
+    code:
+      'it("deleteUser requires admin role", async () => {\n' +
+      '  const caller = appRouter.createCaller({\n' +
+      '    user: { id: "2", role: "user" },\n' +
+      '  });\n' +
+      '  await expect(\n' +
+      '    caller.admin.deleteUser({ id: "1" })\n' +
+      '  ).rejects.toMatchObject({\n' +
+      '    code: "FORBIDDEN",\n' +
+      '  });\n' +
+      '});',
+    expectedResult: 'throws TRPCError { code: "FORBIDDEN" }',
+    shouldPass: true,
+    status: 'pending',
+  },
+  {
+    id: 't8',
+    name: 'post.getAll фильтрует по authorId (симуляция падения)',
+    description: 'Тест специально настроен на падение для демонстрации',
+    category: 'Queries',
+    code:
+      'it("getAll filters by authorId", async () => {\n' +
+      '  const caller = appRouter.createCaller({\n' +
+      '    user: { id: "1" },\n' +
+      '  });\n' +
+      '  const result = await caller.post.getAll({\n' +
+      '    authorId: "1",\n' +
+      '  });\n' +
+      '  // Этот assert специально неверный:\n' +
+      '  expect(result.length).toBe(999);\n' +
+      '});',
+    expectedResult: 'Ожидается: 999, получено: 2',
+    shouldPass: false,
+    status: 'pending',
+  },
+];
+
+const categories = ['Queries', 'Mutations', 'Validation', 'Auth', 'Error Handling'];
+
+export default function App() {
+  const [tests, setTests] = useState<TestCase[]>(initialTests);
+  const [isRunning, setIsRunning] = useState(false);
+  const [selectedTest, setSelectedTest] = useState<TestCase | null>(initialTests[0]);
+  const [filterCat, setFilterCat] = useState<string>('all');
+
+  const updateTest = (id: string, changes: Partial<TestCase>) => {
+    setTests(prev => prev.map(t => t.id === id ? { ...t, ...changes } : t));
+  };
+
+  const runTest = async (test: TestCase) => {
+    updateTest(test.id, { status: 'running', output: undefined, duration: undefined });
+    const start = Date.now();
+    await new Promise(resolve => setTimeout(resolve, 400 + Math.random() * 600));
+    const duration = Date.now() - start;
+    if (test.shouldPass) {
+      updateTest(test.id, { status: 'passed', output: test.expectedResult, duration });
+    } else {
+      updateTest(test.id, { status: 'failed', output: 'AssertionError: ' + test.expectedResult, duration });
+    }
+  };
+
+  const runAll = async () => {
+    if (isRunning) return;
+    setIsRunning(true);
+    setTests(prev => prev.map(t => ({ ...t, status: 'pending', output: undefined, duration: undefined })));
+
+    const filtered = filterCat === 'all' ? tests : tests.filter(t => t.category === filterCat);
+    for (const test of filtered) {
+      await runTest(test);
+    }
+    setIsRunning(false);
+  };
+
+  const runSingle = async (test: TestCase) => {
+    if (isRunning) return;
+    setIsRunning(true);
+    await runTest(test);
+    setIsRunning(false);
+  };
+
+  const filtered = filterCat === 'all' ? tests : tests.filter(t => t.category === filterCat);
+  const passed = tests.filter(t => t.status === 'passed').length;
+  const failed = tests.filter(t => t.status === 'failed').length;
+  const total = tests.length;
+
+  const statusColors: Record<TestStatus, string> = { pending: '#475569', running: YELLOW, passed: GREEN, failed: RED, skipped: ORANGE };
+  const statusIcons: Record<TestStatus, string> = { pending: '○', running: '⏳', passed: '✓', failed: '✗', skipped: '◌' };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        tRPC Test Suite
+      </h2>
+
+      <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '14px', flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <span style={{ color: GREEN, fontSize: '12px' }}>✓ {passed} passed</span>
+          <span style={{ color: RED, fontSize: '12px' }}>✗ {failed} failed</span>
+          <span style={{ color: TEXT, opacity: 0.5, fontSize: '12px' }}>○ {total - passed - failed} pending</span>
+        </div>
+        <button onClick={runAll} disabled={isRunning} style={{ background: isRunning ? '#334155' : TRPC, color: '#fff', border: 'none', borderRadius: '6px', padding: '7px 18px', cursor: isRunning ? 'not-allowed' : 'pointer', fontSize: '12px' }}>
+          {isRunning ? '⏳ Запуск...' : '▶ Запустить все'}
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
+        {['all', ...categories].map(cat => (
+          <button key={cat} onClick={() => setFilterCat(cat)} style={{
+            background: filterCat === cat ? TRPC : CARD,
+            color: filterCat === cat ? '#fff' : TEXT,
+            border: '1px solid ' + (filterCat === cat ? TRPC : '#334155'),
+            borderRadius: '5px', padding: '4px 10px', cursor: 'pointer', fontSize: '11px',
+          }}>
+            {cat === 'all' ? 'Все' : cat}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1', minWidth: '220px' }}>
+          {filtered.map(test => (
+            <div key={test.id}
+              onClick={() => { setSelectedTest(test); }}
+              style={{
+                background: selectedTest?.id === test.id ? 'rgba(57,140,203,0.1)' : CARD,
+                border: '1px solid ' + (selectedTest?.id === test.id ? TRPC : '#334155'),
+                borderRadius: '8px', padding: '10px 12px', marginBottom: '6px', cursor: 'pointer', transition: 'all 0.15s',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ color: statusColors[test.status], fontSize: '14px', marginRight: '6px' }}>{statusIcons[test.status]}</span>
+                <span style={{ color: TEXT, fontSize: '11px', flex: 1 }}>{test.name}</span>
+                <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                  {test.duration && <span style={{ color: TEXT, opacity: 0.4, fontSize: '9px' }}>{test.duration}ms</span>}
+                  <span style={{ background: TRPC + '22', color: TRPC, fontSize: '9px', padding: '1px 5px', borderRadius: '3px' }}>{test.category}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {selectedTest && (
+          <div style={{ flex: '1', minWidth: '260px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ background: CARD, border: '1px solid ' + statusColors[selectedTest.status], borderRadius: '10px', padding: '14px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <div style={{ color: statusColors[selectedTest.status], fontWeight: 'bold', fontSize: '12px' }}>
+                  {statusIcons[selectedTest.status]} {selectedTest.name}
+                </div>
+                <button onClick={() => { const t = tests.find(x => x.id === selectedTest.id); if (t) runSingle(t); }} disabled={isRunning} style={{ background: TRPC, color: '#fff', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '10px' }}>
+                  Run
+                </button>
+              </div>
+              <p style={{ color: TEXT, opacity: 0.7, fontSize: '11px', margin: '0 0 10px 0' }}>{selectedTest.description}</p>
+              <pre style={{ margin: 0, background: BG, borderRadius: '6px', padding: '10px', fontSize: '10px', color: TEXT, lineHeight: '1.6', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+                {selectedTest.code}
+              </pre>
+              {selectedTest.output && (
+                <div style={{ marginTop: '8px', background: selectedTest.status === 'passed' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', border: '1px solid ' + statusColors[selectedTest.status], borderRadius: '5px', padding: '8px', fontSize: '10px', color: statusColors[selectedTest.status] }}>
+                  {selectedTest.status === 'passed' ? '✓ ' : '✗ '}{selectedTest.output}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

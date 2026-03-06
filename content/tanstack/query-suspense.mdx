@@ -1,0 +1,322 @@
+import { Playground } from '../../components/Playground'
+
+# Suspense Mode и useSuspenseQuery
+
+## Традиционный подход vs Suspense
+
+Традиционный подход с `useQuery` требует явной обработки каждого состояния:
+
+```tsx
+function UserList() {
+  const { data, isLoading, isError, error } = useQuery(...)
+  if (isLoading) return <Spinner />
+  if (isError) return <Error message={error.message} />
+  return <List data={data} />
+}
+```
+
+Suspense подход разделяет ответственность: компонент всегда получает данные, а загрузка и ошибки
+обрабатываются выше в дереве компонентов:
+
+```tsx
+// Компонент получает данные напрямую — нет isLoading, нет isError
+function UserList() {
+  const { data } = useSuspenseQuery(...)
+  return <List data={data} />  // data всегда определена
+}
+
+// Родитель обрабатывает состояния
+function App() {
+  return (
+    <ErrorBoundary fallback={<Error />}>
+      <Suspense fallback={<Spinner />}>
+        <UserList />
+      </Suspense>
+    </ErrorBoundary>
+  )
+}
+```
+
+## useSuspenseQuery
+
+Идентичен `useQuery`, но с ключевым отличием: **гарантирует**, что `data` всегда определена.
+Если данных нет — компонент "suspends" (приостанавливается), и React показывает `fallback` из `<Suspense>`.
+
+```typescript
+import { useSuspenseQuery } from '@tanstack/react-query'
+
+function UserProfile({ userId }: { userId: number }) {
+  // data гарантированно User, не User | undefined
+  const { data } = useSuspenseQuery({
+    queryKey: ['user', userId],
+    queryFn: () => fetchUser(userId),
+  })
+
+  // Никакого isLoading/isError — React Suspense обрабатывает это
+  return <div>{data.name}</div>
+}
+```
+
+## ErrorBoundary
+
+Для перехвата ошибок в Suspense-режиме используется `ErrorBoundary`:
+
+```tsx
+import { ErrorBoundary } from 'react-error-boundary'
+
+function App() {
+  return (
+    <ErrorBoundary
+      fallbackRender={({ error, resetErrorBoundary }) => (
+        <div>
+          <p>Ошибка: {error.message}</p>
+          <button onClick={resetErrorBoundary}>Повторить</button>
+        </div>
+      )}
+    >
+      <Suspense fallback={<Spinner />}>
+        <UserList />
+      </Suspense>
+    </ErrorBoundary>
+  )
+}
+```
+
+## useSuspenseQueries и useSuspenseInfiniteQuery
+
+```typescript
+// Параллельные запросы с Suspense
+const [{ data: users }, { data: posts }] = useSuspenseQueries({
+  queries: [
+    { queryKey: ['users'], queryFn: getUsers },
+    { queryKey: ['posts'], queryFn: getPosts },
+  ],
+})
+
+// Бесконечный скролл с Suspense
+const { data } = useSuspenseInfiniteQuery({
+  queryKey: ['posts'],
+  queryFn: fetchPosts,
+  initialPageParam: 0,
+  getNextPageParam: (last) => last.nextPage,
+})
+```
+
+## Когда использовать Suspense?
+
+**Используйте Suspense, когда:**
+- Хотите чистые компоненты без if/else для загрузки
+- Используете параллельные запросы
+- Работаете с React Server Components
+- Хотите "waterfall-free" загрузку
+
+**Оставайтесь с useQuery, когда:**
+- Нужен тонкий контроль над состояниями загрузки
+- Partial loading (показываем данные по частям)
+- Компонент должен показывать что-то даже во время фоновой загрузки
+
+<Playground template="react" files={{ 'App.tsx': `import { useState, Suspense } from 'react'
+
+// Симуляция useSuspenseQuery с реальным поведением suspend
+type Resource<T> = {
+  read: () => T
+}
+
+function createResource<T>(promise: Promise<T>): Resource<T> {
+  let status: 'pending' | 'success' | 'error' = 'pending'
+  let result: T
+  let error: Error
+
+  const suspender = promise.then(
+    (data) => { status = 'success'; result = data },
+    (err) => { status = 'error'; error = err }
+  )
+
+  return {
+    read() {
+      if (status === 'pending') throw suspender
+      if (status === 'error') throw error
+      return result
+    }
+  }
+}
+
+type User = { id: number; name: string; role: string; projects: number }
+
+function fakeDelay(ms: number) {
+  return new Promise<void>(res => setTimeout(res, ms))
+}
+
+async function fetchUsers(shouldFail: boolean): Promise<User[]> {
+  await fakeDelay(1500)
+  if (shouldFail) throw new Error('Сервер вернул 503: Service Unavailable')
+  return [
+    { id: 1, name: 'Анна Петрова', role: 'Senior Frontend', projects: 12 },
+    { id: 2, name: 'Иван Смирнов', role: 'Backend Lead', projects: 8 },
+    { id: 3, name: 'Мария Козлова', role: 'Product Manager', projects: 15 },
+  ]
+}
+
+// Компонент который "suspends" — нет isLoading, data всегда определена
+function UserListContent({ resource }: { resource: Resource<User[]> }) {
+  const users = resource.read() // Если данных нет — "выбрасывает" promise
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+        <span style={{ fontSize: '16px' }}>✅</span>
+        <span style={{ color: '#22c55e', fontSize: '13px', fontWeight: 600 }}>Данные получены через useSuspenseQuery</span>
+      </div>
+      {users.map(user => (
+        <div key={user.id} style={{
+          background: '#0f172a',
+          borderRadius: '8px',
+          padding: '12px',
+          marginBottom: '8px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <div>
+            <p style={{ margin: 0, fontWeight: 600, fontSize: '14px', color: '#e2e8f0' }}>{user.name}</p>
+            <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>{user.role}</p>
+          </div>
+          <span style={{ background: '#ef444422', color: '#ef4444', padding: '3px 8px', borderRadius: '4px', fontSize: '12px' }}>
+            {user.projects} проектов
+          </span>
+        </div>
+      ))}
+      <div style={{ fontSize: '11px', color: '#475569', marginTop: '8px', fontStyle: 'italic' }}>
+        Компонент UserListContent не содержит никакой логики загрузки — только рендеринг данных
+      </div>
+    </div>
+  )
+}
+
+// Suspense fallback — показывается пока данные загружаются
+function LoadingFallback() {
+  return (
+    <div style={{ padding: '30px 0', textAlign: 'center' }}>
+      <div style={{ fontSize: '28px', marginBottom: '12px' }}>⏳</div>
+      <p style={{ color: '#f97316', fontWeight: 600, margin: '0 0 4px 0' }}>Suspense fallback активен</p>
+      <p style={{ color: '#64748b', fontSize: '12px', margin: 0 }}>React приостановил рендеринг компонента</p>
+      {[...Array(3)].map((_, i) => (
+        <div key={i} style={{
+          background: '#334155',
+          borderRadius: '8px',
+          height: '52px',
+          marginBottom: '8px',
+          marginTop: i === 0 ? '16px' : '0',
+          opacity: 1 - i * 0.2,
+        }} />
+      ))}
+    </div>
+  )
+}
+
+// ErrorBoundary симуляция
+function ErrorFallback({ error, retry }: { error: Error; retry: () => void }) {
+  return (
+    <div style={{ background: '#ef444422', border: '1px solid #ef4444', borderRadius: '8px', padding: '20px' }}>
+      <p style={{ color: '#ef4444', fontWeight: 700, margin: '0 0 4px 0' }}>❌ ErrorBoundary перехватил ошибку</p>
+      <p style={{ color: '#fca5a5', fontSize: '13px', margin: '0 0 12px 0' }}>{error.message}</p>
+      <button
+        onClick={retry}
+        style={{ background: '#ef4444', border: 'none', borderRadius: '6px', padding: '8px 16px', color: 'white', cursor: 'pointer', fontSize: '13px' }}
+      >
+        🔄 Повторить запрос
+      </button>
+    </div>
+  )
+}
+
+function SuspenseDemo({ shouldFail, key }: { shouldFail: boolean; key: string }) {
+  const [resource] = useState(() => createResource(fetchUsers(shouldFail)))
+  const [error, setError] = useState<Error | null>(null)
+
+  if (error) return <ErrorFallback error={error} retry={() => setError(null)} />
+
+  return (
+    <Suspense fallback={<LoadingFallback />}>
+      <ErrorCatcher onError={setError}>
+        <UserListContent resource={resource} />
+      </ErrorCatcher>
+    </Suspense>
+  )
+}
+
+// Простой Error Catcher
+class ErrorCatcher extends (function() {} as any) {
+  state = { error: null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  componentDidUpdate(prevProps: any) {
+    if (prevProps.children !== this.props.children && this.state.error) {
+      this.setState({ error: null })
+    }
+  }
+  render() {
+    if (this.state.error) {
+      this.props.onError(this.state.error)
+      return null
+    }
+    return this.props.children
+  }
+}
+
+export default function App() {
+  const [key, setKey] = useState('initial')
+  const [shouldFail, setShouldFail] = useState(false)
+
+  const reload = () => setKey(String(Date.now()))
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>Suspense Mode</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Демонстрация useSuspenseQuery + ErrorBoundary</p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>⚙️ Управление</h3>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#94a3b8', cursor: 'pointer', marginBottom: '12px' }}>
+            <input type="checkbox" checked={shouldFail} onChange={e => setShouldFail(e.target.checked)} />
+            Симулировать ошибку сервера
+          </label>
+          <button
+            onClick={reload}
+            style={{ width: '100%', background: '#ef4444', border: 'none', borderRadius: '8px', padding: '10px', color: 'white', cursor: 'pointer', fontSize: '13px', fontWeight: 600 }}
+          >
+            🔄 Перезапустить запрос
+          </button>
+
+          <div style={{ marginTop: '16px', borderTop: '1px solid #334155', paddingTop: '16px' }}>
+            <h4 style={{ color: '#94a3b8', fontSize: '12px', margin: '0 0 8px 0' }}>Архитектура компонентов:</h4>
+            <div style={{ fontFamily: 'monospace', fontSize: '11px', lineHeight: '1.8' }}>
+              <div style={{ color: '#a855f7' }}>{'<ErrorBoundary>'}</div>
+              <div style={{ color: '#f97316', paddingLeft: '16px' }}>{'<Suspense fallback={<Spinner/>}>'}</div>
+              <div style={{ color: '#22c55e', paddingLeft: '32px' }}>{'<UserList />'}</div>
+              <div style={{ color: '#64748b', paddingLeft: '48px' }}>{'// data всегда определена'}</div>
+              <div style={{ color: '#64748b', paddingLeft: '48px' }}>{'// нет isLoading/isError'}</div>
+              <div style={{ color: '#f97316', paddingLeft: '16px' }}>{'</Suspense>'}</div>
+              <div style={{ color: '#a855f7' }}>{'</ErrorBoundary>'}</div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>📡 Результат</h3>
+          <SuspenseDemo shouldFail={shouldFail} key={key} />
+        </div>
+      </div>
+
+      <div style={{ marginTop: '16px', background: '#1e293b', borderRadius: '8px', padding: '14px' }}>
+        <h4 style={{ color: '#94a3b8', fontSize: '12px', margin: '0 0 8px 0' }}>Преимущества Suspense подхода:</h4>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          {['Чистые компоненты', 'Разделение ответственности', 'TypeScript: data не undefined', 'Легче тестировать'].map(item => (
+            <span key={item} style={{ background: '#22c55e22', color: '#22c55e', padding: '3px 10px', borderRadius: '6px', fontSize: '11px' }}>{item}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

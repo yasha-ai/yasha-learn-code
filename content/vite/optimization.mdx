@@ -1,0 +1,392 @@
+import { Playground } from '../../components/Playground'
+
+# Оптимизация бандла в Vite
+
+Оптимизация production сборки — ключевой шаг для создания быстрых приложений. Vite предоставляет мощные инструменты для code splitting, анализа бандла и уменьшения размера итоговых файлов.
+
+## Code Splitting стратегии
+
+### Dynamic Import — самый важный приём
+
+```typescript
+// ❌ Плохо: всё в одном бандле
+import Dashboard from './pages/Dashboard'
+import Settings from './pages/Settings'
+import AdminPanel from './pages/AdminPanel'
+
+// ✓ Хорошо: каждая страница загружается по требованию
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Settings = lazy(() => import('./pages/Settings'))
+const AdminPanel = lazy(() => import('./pages/AdminPanel'))
+
+// Vite автоматически создаст:
+// assets/Dashboard-abc.js   (загрузится при /dashboard)
+// assets/Settings-def.js    (загрузится при /settings)
+// assets/AdminPanel-ghi.js  (загрузится при /admin)
+```
+
+### manualChunks — Ручное управление чанками
+
+```typescript
+// vite.config.ts
+build: {
+  rollupOptions: {
+    output: {
+      manualChunks: {
+        // Реакт в отдельный чанк (большой, редко меняется → хорошо кэшируется)
+        'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+
+        // UI библиотека отдельно
+        'vendor-ui': ['@radix-ui/react-dialog', '@radix-ui/react-dropdown-menu'],
+
+        // Data fetching
+        'vendor-query': ['@tanstack/react-query', 'axios'],
+
+        // Утилиты
+        'vendor-utils': ['lodash-es', 'date-fns', 'zod'],
+      },
+    },
+  },
+}
+```
+
+## Tree Shaking
+
+```typescript
+// ✓ Named imports — tree-shakeable!
+import { format, parseISO } from 'date-fns'
+// В бандл попадёт ТОЛЬКО format и parseISO
+
+// ❌ Default import всей библиотеки — НЕ tree-shakeable
+import _ from 'lodash'
+// Весь lodash (70KB) попадёт в бандл!
+
+// ✓ lodash-es — ESM версия, полностью tree-shakeable
+import { debounce, throttle } from 'lodash-es'
+// Только debounce и throttle
+```
+
+## rollup-plugin-visualizer — Анализ бандла
+
+```bash
+npm i -D rollup-plugin-visualizer
+```
+
+```typescript
+// vite.config.ts
+import { visualizer } from 'rollup-plugin-visualizer'
+
+export default defineConfig({
+  plugins: [
+    react(),
+    visualizer({
+      open: true,          // Открыть в браузере после сборки
+      gzipSize: true,      // Показать размер после gzip
+      brotliSize: true,    // Показать размер после brotli
+      filename: 'stats.html',
+      template: 'treemap', // 'treemap' | 'sunburst' | 'network'
+    }),
+  ],
+})
+```
+
+## Минификация и сжатие
+
+```typescript
+// esbuild (по умолчанию) — быстро
+build: {
+  minify: 'esbuild',
+}
+
+// terser — лучшее сжатие
+build: {
+  minify: 'terser',
+  terserOptions: {
+    compress: {
+      drop_console: true,       // Удалить console.log
+      drop_debugger: true,      // Удалить debugger
+      pure_funcs: ['console.log'], // Аналог drop_console
+    },
+    mangle: {
+      safari10: true,           // Фикс для Safari 10
+    },
+  },
+}
+```
+
+## Preload / Prefetch директивы
+
+```typescript
+// Vite автоматически добавляет <link rel="modulepreload">
+// для критических чанков
+
+// Настройка в vite.config.ts:
+build: {
+  modulePreload: {
+    polyfill: true, // Полифил для браузеров без modulepreload
+  },
+}
+```
+
+## Оптимизация изображений
+
+```bash
+# Плагин для сжатия изображений
+npm i -D vite-plugin-imagemin
+```
+
+```typescript
+import viteImagemin from 'vite-plugin-imagemin'
+
+plugins: [
+  react(),
+  viteImagemin({
+    gifsicle: { optimizationLevel: 7 },
+    mozjpeg: { quality: 80 },
+    pngquant: { quality: [0.8, 0.9] },
+    svgo: { plugins: [{ name: 'removeViewBox' }] },
+  }),
+]
+```
+
+## Анализ bundle size в CI
+
+```typescript
+// vite.config.ts
+build: {
+  // Предупреждение если чанк > 500KB
+  chunkSizeWarningLimit: 500,
+
+  // Подробный вывод о размерах
+  reportCompressedSize: true,
+}
+```
+
+Ниже — интерактивный анализатор бандла: включай/выключай зависимости и смотри как меняется размер:
+
+<Playground template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const VITE_COLOR = '#646cff';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#38bdf8';
+const GREEN = '#4ade80';
+const RED = '#f87171';
+const AMBER = '#f59e0b';
+
+interface Dependency {
+  id: string;
+  name: string;
+  size: number;      // KB (minified)
+  gzipSize: number;  // KB
+  category: string;
+  color: string;
+  treeshakeable: boolean;
+  included: boolean;
+  alternatives?: { name: string; size: number; gzip: number };
+}
+
+const deps: Dependency[] = [
+  { id: 'react', name: 'react', size: 7, gzipSize: 2.7, category: 'Core', color: '#61dafb', treeshakeable: false, included: true },
+  { id: 'react-dom', name: 'react-dom', size: 135, gzipSize: 42, category: 'Core', color: '#61dafb', treeshakeable: false, included: true },
+  { id: 'react-router', name: 'react-router-dom', size: 28, gzipSize: 8.5, category: 'Routing', color: '#ca8a04', treeshakeable: true, included: true },
+  { id: 'lodash', name: 'lodash', size: 72, gzipSize: 25, category: 'Utils', color: '#6366f1', treeshakeable: false, included: false, alternatives: { name: 'lodash-es', size: 8, gzip: 3 } },
+  { id: 'moment', name: 'moment', size: 295, gzipSize: 72, category: 'Date', color: '#ef4444', treeshakeable: false, included: false, alternatives: { name: 'date-fns', size: 12, gzip: 4 } },
+  { id: 'axios', name: 'axios', size: 48, gzipSize: 14, category: 'HTTP', color: '#8b5cf6', treeshakeable: false, included: true },
+  { id: 'zod', name: 'zod', size: 57, gzipSize: 14, category: 'Validation', color: '#0ea5e9', treeshakeable: true, included: false },
+  { id: 'react-query', name: '@tanstack/react-query', size: 42, gzipSize: 12, category: 'State', color: '#f59e0b', treeshakeable: true, included: false },
+  { id: 'mui', name: '@mui/material', size: 620, gzipSize: 165, category: 'UI', color: '#0081cb', treeshakeable: true, included: false, alternatives: { name: 'Radix UI', size: 45, gzip: 12 } },
+  { id: 'recharts', name: 'recharts', size: 186, gzipSize: 52, category: 'Charts', color: '#22d3ee', treeshakeable: false, included: false },
+];
+
+const categoryColors: Record<string, string> = {
+  Core: '#61dafb', Routing: '#ca8a04', Utils: '#6366f1', Date: '#ef4444',
+  HTTP: '#8b5cf6', Validation: '#0ea5e9', State: AMBER, UI: '#0081cb', Charts: '#22d3ee',
+};
+
+export default function App() {
+  const [dependencies, setDependencies] = useState(deps);
+  const [view, setView] = useState<'treemap' | 'list' | 'tips'>('treemap');
+
+  const toggleDep = (id: string) => {
+    setDependencies(prev => prev.map(d => d.id === id ? { ...d, included: !d.included } : d));
+  };
+
+  const included = dependencies.filter(d => d.included);
+  const totalSize = included.reduce((s, d) => s + d.size, 0);
+  const totalGzip = included.reduce((s, d) => s + d.gzipSize, 0);
+
+  const sizeLimit = 500; // KB warning limit
+  const isOverLimit = totalSize > sizeLimit;
+
+  const maxSize = Math.max(...included.map(d => d.size), 10);
+
+  const treemapData = included.map(d => ({
+    ...d,
+    area: (d.size / totalSize) * 100,
+    width: Math.max(8, (d.gzipSize / totalGzip) * 100),
+  }));
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '24px 16px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <h1 style={{
+            margin: 0, fontSize: 22, fontWeight: 800,
+            background: \`linear-gradient(90deg, \${VITE_COLOR}, \${ACCENT})\`,
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+          }}>Bundle Analyzer</h1>
+          <p style={{ color: '#64748b', fontSize: 13, marginTop: 6 }}>
+            Включай зависимости и наблюдай за размером бандла
+          </p>
+        </div>
+
+        {/* Stats */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginBottom: 20 }}>
+          {[
+            { label: 'Минифиц.', value: \`\${totalSize}KB\`, color: isOverLimit ? RED : GREEN },
+            { label: 'Gzip', value: \`\${totalGzip.toFixed(1)}KB\`, color: ACCENT },
+            { label: 'Пакетов', value: included.length, color: VITE_COLOR },
+            { label: 'Лимит', value: \`\${sizeLimit}KB\`, color: '#64748b' },
+          ].map(s => (
+            <div key={s.label} style={{ background: CARD, borderRadius: 10, padding: '10px 6px', textAlign: 'center', border: '1px solid #334155' }}>
+              <div style={{ fontSize: 17, fontWeight: 800, color: s.color }}>{s.value}</div>
+              <div style={{ fontSize: 10, color: '#64748b' }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Warning */}
+        {isOverLimit && (
+          <div style={{ padding: 10, borderRadius: 10, background: \`\${RED}12\`, border: \`1px solid \${RED}30\`, marginBottom: 14, fontSize: 12, color: RED }}>
+            ⚠️ Бандл превышает {sizeLimit}KB лимит! Рассмотри lazy loading или замену тяжёлых библиотек.
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 16, background: CARD, padding: 4, borderRadius: 10 }}>
+          {[
+            { id: 'treemap' as const, label: '⊞ Карта' },
+            { id: 'list' as const, label: '≡ Список' },
+            { id: 'tips' as const, label: '💡 Советы' },
+          ].map(t => (
+            <button key={t.id} onClick={() => setView(t.id)} style={{
+              flex: 1, padding: '7px 4px', borderRadius: 7, border: 'none', cursor: 'pointer',
+              background: view === t.id ? VITE_COLOR : 'transparent',
+              color: view === t.id ? '#fff' : '#94a3b8', fontSize: 12, fontWeight: view === t.id ? 700 : 400,
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {view === 'treemap' && (
+          <div>
+            <div style={{ background: CARD, borderRadius: 14, padding: 12, marginBottom: 14, border: '1px solid #334155', minHeight: 160 }}>
+              <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>Размер пакетов (площадь = gzip размер)</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {treemapData.map(d => {
+                  const w = Math.max(40, (d.gzipSize / totalGzip) * 640);
+                  const h = Math.max(30, Math.min(80, d.gzipSize * 0.8));
+                  return (
+                    <div key={d.id} style={{
+                      width: w, height: h,
+                      background: \`\${d.color}30\`, borderRadius: 8,
+                      border: \`2px solid \${d.color}60\`,
+                      display: 'flex', flexDirection: 'column',
+                      alignItems: 'center', justifyContent: 'center',
+                      padding: '4px 6px', overflow: 'hidden',
+                    }}>
+                      <div style={{ fontSize: Math.max(8, Math.min(12, w / 8)), color: d.color, fontWeight: 700, textAlign: 'center', overflow: 'hidden', whiteSpace: 'nowrap', maxWidth: '100%' }}>
+                        {d.name.split('/').pop()}
+                      </div>
+                      <div style={{ fontSize: 9, color: '#94a3b8' }}>{d.gzipSize}KB gz</div>
+                    </div>
+                  );
+                })}
+                {included.length === 0 && (
+                  <div style={{ color: '#475569', fontSize: 13, padding: '20px 0', width: '100%', textAlign: 'center' }}>
+                    Нет включённых зависимостей
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Toggle deps */}
+            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>Включить/выключить:</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {dependencies.map(d => (
+                <button key={d.id} onClick={() => toggleDep(d.id)} style={{
+                  padding: '4px 10px', borderRadius: 14, border: \`1px solid \${d.included ? d.color : '#334155'}\`,
+                  background: d.included ? \`\${d.color}15\` : 'transparent',
+                  color: d.included ? d.color : '#64748b',
+                  cursor: 'pointer', fontSize: 11, fontWeight: d.included ? 700 : 400, fontFamily: 'monospace',
+                }}>
+                  {d.included ? '☑' : '☐'} {d.name} ({d.gzipSize}KB)
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {view === 'list' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {dependencies.sort((a, b) => b.gzipSize - a.gzipSize).map(d => (
+              <div key={d.id} style={{
+                background: CARD, borderRadius: 10, padding: '10px 14px',
+                border: \`1px solid \${d.included ? d.color + '40' : '#334155'}\`,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <code style={{ fontFamily: 'monospace', fontSize: 12, color: d.included ? d.color : '#64748b', fontWeight: 700 }}>{d.name}</code>
+                    {!d.treeshakeable && d.included && <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: \`\${AMBER}20\`, color: AMBER }}>не tree-shakeable</span>}
+                    {d.alternatives && <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: \`\${GREEN}20\`, color: GREEN }}>есть альтернатива</span>}
+                  </div>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                    <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>{d.size}KB / {d.gzipSize}KB gz</span>
+                    <button onClick={() => toggleDep(d.id)} style={{
+                      padding: '3px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                      background: d.included ? '#ef444420' : \`\${d.color}20\`,
+                      color: d.included ? RED : d.color, fontSize: 11, fontWeight: 700,
+                    }}>
+                      {d.included ? 'Убрать' : 'Добавить'}
+                    </button>
+                  </div>
+                </div>
+                <div style={{ height: 5, background: '#334155', borderRadius: 3 }}>
+                  <div style={{ height: '100%', width: \`\${(d.gzipSize / 165) * 100}%\`, background: d.color, borderRadius: 3 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {view === 'tips' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {[
+              { title: '⚡ Dynamic Imports', desc: 'Используй React.lazy() для страниц — они загрузятся только при переходе', example: "const Page = lazy(() => import('./Page'))", impact: 'high' },
+              { title: '🌳 Tree Shaking', desc: 'Используй named imports вместо default для tree-shakeable библиотек', example: "import { format } from 'date-fns'  // не import dayjs", impact: 'high' },
+              { title: '📦 Bundle Analysis', desc: 'Запусти visualizer чтобы увидеть что занимает место', example: "npx vite build && open stats.html", impact: 'medium' },
+              { title: '🔄 Замени тяжёлые пакеты', desc: 'moment (295KB) → date-fns (12KB), lodash (72KB) → lodash-es + tree-shake', example: "import { format } from 'date-fns'", impact: 'high' },
+              { title: '🗜️ Compression', desc: 'Включи gzip/brotli сжатие на сервере — экономит 60-80% трафика', example: "server.enableGzip() // nginx, express-static", impact: 'medium' },
+            ].map(tip => (
+              <div key={tip.title} style={{
+                background: CARD, borderRadius: 12, padding: 14,
+                border: \`1px solid \${tip.impact === 'high' ? VITE_COLOR + '40' : '#334155'}\`,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontWeight: 700, fontSize: 14, color: tip.impact === 'high' ? VITE_COLOR : TEXT }}>{tip.title}</span>
+                  <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 10, background: tip.impact === 'high' ? \`\${GREEN}20\` : \`\${AMBER}20\`, color: tip.impact === 'high' ? GREEN : AMBER }}>
+                    {tip.impact === 'high' ? 'Высокий эффект' : 'Средний эффект'}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8 }}>{tip.desc}</div>
+                <code style={{ fontFamily: 'monospace', fontSize: 11, color: ACCENT, background: \`\${ACCENT}10\`, padding: '3px 8px', borderRadius: 5 }}>{tip.example}</code>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}` }} />
