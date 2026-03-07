@@ -1,0 +1,273 @@
+# Docker для Node.js
+
+![Иллюстрация к уроку](/lessons/nodejs-docker.png)
+
+**Docker** — контейнеризация приложения. Работает одинаково на любой машине: dev, staging, production.
+
+## Зачем Docker?
+
+```
+Без Docker:
+"У меня на машине работает!" → На сервере — нет
+Разные версии Node → конфликты
+Разные ОС → несовместимости
+Ручная установка зависимостей
+
+С Docker:
+Один Dockerfile → одинаковое окружение везде
+Node, npm, зависимости — всё внутри контейнера
+Воспроизводимые сборки
+Масштабирование — запустил ещё один контейнер
+```
+
+## Dockerfile — базовый
+
+```dockerfile
+# Dockerfile
+FROM node:20-alpine
+
+# Рабочая директория
+WORKDIR /app
+
+# Копируем package файлы (кэширование слоёв)
+COPY package.json package-lock.json ./
+
+# Устанавливаем зависимости
+RUN npm ci --only=production
+
+# Копируем исходный код
+COPY src/ ./src/
+
+# Переменные окружения
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# Порт
+EXPOSE 3000
+
+# Запуск
+CMD ["node", "src/index.js"]
+```
+
+## Dockerfile — production-ready
+
+```dockerfile
+# Многоэтапная сборка (multi-stage)
+
+# Этап 1: Установка зависимостей
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Этап 2: Сборка (если есть TypeScript)
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build
+# После сборки — только production deps
+RUN npm ci --only=production && npm cache clean --force
+
+# Этап 3: Runtime
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+# Безопасность: не root пользователь
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nodeuser
+
+# Копируем только нужное
+COPY --from=builder --chown=nodeuser:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nodeuser:nodejs /app/dist ./dist
+COPY --from=builder --chown=nodeuser:nodejs /app/package.json ./
+
+# Переключаемся на безопасного пользователя
+USER nodeuser
+
+ENV NODE_ENV=production
+ENV PORT=3000
+EXPOSE 3000
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+
+CMD ["node", "dist/index.js"]
+```
+
+## .dockerignore
+
+```
+# .dockerignore — не копировать в контейнер
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+.env.local
+Dockerfile
+docker-compose.yml
+README.md
+tests/
+coverage/
+.vscode/
+.idea/
+*.md
+```
+
+## Команды Docker
+
+```bash
+# Сборка образа
+docker build -t my-api .
+docker build -t my-api:1.0.0 .     # с тегом версии
+
+# Запуск контейнера
+docker run -p 3000:3000 my-api
+docker run -d -p 3000:3000 my-api   # в фоне (detached)
+docker run -d \
+  --name my-api \
+  -p 3000:3000 \
+  -e DATABASE_URL=postgres://... \
+  -e JWT_SECRET=secret \
+  --restart unless-stopped \
+  my-api
+
+# Управление контейнерами
+docker ps                            # запущенные
+docker ps -a                         # все (включая остановленные)
+docker logs my-api                   # логи
+docker logs -f my-api                # логи в реальном времени
+docker exec -it my-api sh            # зайти внутрь контейнера
+docker stop my-api                   # остановить
+docker rm my-api                     # удалить
+docker image ls                      # список образов
+docker image rm my-api               # удалить образ
+```
+
+## docker-compose — несколько контейнеров
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # API сервер
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=postgresql://postgres:password@db:5432/myapp
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  # PostgreSQL
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: myapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (кэш, сессии, очередь)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
+```
+
+```bash
+# docker-compose команды
+docker compose up                   # запустить всё
+docker compose up -d                # в фоне
+docker compose up --build           # пересобрать и запустить
+docker compose down                 # остановить и удалить
+docker compose down -v              # + удалить volumes (данные!)
+docker compose logs -f api          # логи конкретного сервиса
+docker compose exec api sh          # зайти в контейнер
+docker compose ps                   # статус сервисов
+```
+
+## Dev vs Production compose
+
+```yaml
+# docker-compose.dev.yml — для разработки
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+      - "9229:9229"    # для Node.js debugger
+    volumes:
+      - .:/app          # монтируем код (hot reload!)
+      - /app/node_modules  # но НЕ node_modules
+    environment:
+      - NODE_ENV=development
+    command: npx nodemon --inspect=0.0.0.0:9229 src/index.js
+```
+
+```bash
+# Запуск dev окружения
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+```
+
+## Health Check эндпоинт
+
+```javascript
+// routes/health.js — для Docker и мониторинга
+app.get('/health', async (req, res) => {
+  try {
+    // Проверяем БД
+    await db.$queryRaw`SELECT 1`;
+
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+    });
+  } catch (err) {
+    res.status(503).json({
+      status: 'error',
+      message: 'Database connection failed',
+    });
+  }
+});
+```
+
+## Практика
+
+1. Создай Dockerfile для Express API с multi-stage build
+2. Напиши .dockerignore — исключи всё лишнее
+3. Создай docker-compose.yml с API + PostgreSQL + Redis
+4. Добавь healthcheck для API контейнера
+5. Запусти `docker compose up` и убедись что всё работает

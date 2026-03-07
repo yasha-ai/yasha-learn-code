@@ -1,0 +1,314 @@
+# Hono: Edge-first фреймворк
+
+![Иллюстрация к уроку](/lessons/nodejs-hono.png)
+
+**Hono** — ультралёгкий фреймворк для любого JavaScript рантайма: Node.js, Deno, Bun, Cloudflare Workers, Vercel Edge. Один код — везде работает.
+
+## Почему Hono?
+
+```
+Express           Fastify         Hono
+────────────────  ──────────────  ────────────────
+Node.js only      Node.js only    Любой рантайм
+~15K req/s        ~30K req/s      ~80K+ req/s (Bun)
+200+ KB           ~2 MB           ~14 KB (core!)
+Middleware        Plugins         Middleware
+2010 год          2016 год        2022 год
+```
+
+Hono идеален для:
+- Edge функций (Cloudflare Workers, Vercel Edge)
+- Serverless (AWS Lambda, Google Cloud Functions)
+- API, микросервисов
+- Когда нужна максимальная скорость
+
+## Быстрый старт
+
+```bash
+npm install hono @hono/node-server
+```
+
+```javascript
+// Node.js
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+
+const app = new Hono();
+
+app.get('/', (c) => {
+  return c.json({ message: 'Привет от Hono!' });
+});
+
+app.get('/hello/:name', (c) => {
+  const name = c.req.param('name');
+  return c.text(`Привет, ${name}!`);
+});
+
+serve({ fetch: app.fetch, port: 3000 });
+console.log('Сервер на порту 3000');
+```
+
+## Контекст (c) — единый объект
+
+```javascript
+// В Express: (req, res)
+// В Hono: (c) — один объект контекста
+
+app.post('/users', async (c) => {
+  // === Получение данных ===
+  const body = await c.req.json();         // JSON тело
+  const form = await c.req.formData();     // FormData
+  const text = await c.req.text();         // сырой текст
+
+  // Параметры URL
+  const id = c.req.param('id');            // /users/:id
+  const { id, slug } = c.req.param();      // все параметры
+
+  // Query
+  const page = c.req.query('page');        // ?page=1
+  const queries = c.req.queries('tags');   // ?tags=a&tags=b → ['a', 'b']
+
+  // Заголовки
+  const auth = c.req.header('Authorization');
+  const ua = c.req.header('User-Agent');
+
+  // === Отправка ответа ===
+  return c.json({ data: 'value' });                    // JSON
+  return c.json({ data: 'value' }, 201);               // JSON с кодом
+  return c.text('Привет!');                             // текст
+  return c.html('<h1>Привет</h1>');                     // HTML
+  return c.redirect('/new-path');                       // редирект
+  return c.redirect('/new-path', 301);                 // постоянный
+  return c.body(buffer);                               // бинарные данные
+  return c.notFound();                                 // 404
+  return new Response('raw', { status: 200 });         // Web API
+  
+  // Заголовки ответа
+  c.header('X-Custom', 'value');
+  c.status(201);
+  return c.json({ created: true });
+});
+```
+
+## Роутинг
+
+```javascript
+const app = new Hono();
+
+// Базовый роутинг
+app.get('/users', listUsers);
+app.post('/users', createUser);
+app.get('/users/:id', getUser);
+app.put('/users/:id', updateUser);
+app.delete('/users/:id', deleteUser);
+
+// Группировка через app.route()
+const api = new Hono();
+api.get('/users', listUsers);
+api.post('/users', createUser);
+
+const admin = new Hono();
+admin.get('/stats', getStats);
+admin.get('/logs', getLogs);
+
+app.route('/api', api);       // /api/users
+app.route('/admin', admin);   // /admin/stats
+
+// Группировка через basePath
+const app = new Hono().basePath('/api/v1');
+app.get('/users', listUsers);  // /api/v1/users
+```
+
+## Middleware
+
+```javascript
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
+import { prettyJSON } from 'hono/pretty-json';
+import { secureHeaders } from 'hono/secure-headers';
+import { timing } from 'hono/timing';
+import { jwt } from 'hono/jwt';
+import { compress } from 'hono/compress';
+
+const app = new Hono();
+
+// Встроенные middleware
+app.use('*', logger());              // логирование
+app.use('*', cors({ origin: '*' })); // CORS
+app.use('*', secureHeaders());       // безопасность
+app.use('*', prettyJSON());          // ?pretty для форматирования
+app.use('*', compress());            // gzip
+app.use('*', timing());             // Server-Timing заголовок
+
+// JWT защита для /api/*
+app.use('/api/*', jwt({ secret: process.env.JWT_SECRET }));
+
+// Кастомный middleware
+app.use('*', async (c, next) => {
+  const start = Date.now();
+  await next();
+  const duration = Date.now() - start;
+  c.header('X-Response-Time', `${duration}ms`);
+});
+
+// Middleware для конкретного роута
+const adminOnly = async (c, next) => {
+  const payload = c.get('jwtPayload');
+  if (payload?.role !== 'admin') {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  await next();
+};
+
+app.get('/admin/users', adminOnly, (c) => {
+  return c.json({ users: [] });
+});
+```
+
+## Валидация через Zod
+
+```bash
+npm install zod @hono/zod-validator
+```
+
+```javascript
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
+
+const createUserSchema = z.object({
+  name: z.string().min(2).max(50),
+  email: z.string().email(),
+  password: z.string().min(8),
+});
+
+const querySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+});
+
+// Валидация тела
+app.post('/users',
+  zValidator('json', createUserSchema),
+  async (c) => {
+    const data = c.req.valid('json');  // уже валидированные данные
+    // ...
+    return c.json({ data }, 201);
+  }
+);
+
+// Валидация query
+app.get('/users',
+  zValidator('query', querySchema),
+  async (c) => {
+    const { page, limit } = c.req.valid('query');
+    return c.json({ page, limit, users: [] });
+  }
+);
+
+// Валидация параметров
+app.get('/users/:id',
+  zValidator('param', z.object({ id: z.coerce.number().int().positive() })),
+  async (c) => {
+    const { id } = c.req.valid('param');
+    return c.json({ id });
+  }
+);
+```
+
+## Обработка ошибок
+
+```javascript
+// Глобальный обработчик ошибок
+app.onError((err, c) => {
+  console.error(err);
+
+  if (err.status) {
+    return c.json({ error: err.message }, err.status);
+  }
+
+  return c.json({
+    error: process.env.NODE_ENV === 'production'
+      ? 'Internal Server Error'
+      : err.message,
+  }, 500);
+});
+
+// 404 handler
+app.notFound((c) => {
+  return c.json({
+    error: `Route ${c.req.method} ${c.req.path} not found`,
+  }, 404);
+});
+
+// HTTPException для кастомных ошибок
+import { HTTPException } from 'hono/http-exception';
+
+app.get('/secret', (c) => {
+  throw new HTTPException(403, { message: 'Доступ запрещён' });
+});
+```
+
+## Пример: полный CRUD API
+
+```javascript
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
+import { jwt } from 'hono/jwt';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
+
+const app = new Hono().basePath('/api');
+
+app.use('*', logger());
+app.use('*', cors());
+
+let todos = [
+  { id: 1, title: 'Изучить Hono', done: false },
+];
+
+const todoSchema = z.object({
+  title: z.string().min(1).max(200),
+  done: z.boolean().default(false),
+});
+
+app.get('/todos', (c) => c.json({ data: todos }));
+
+app.get('/todos/:id', (c) => {
+  const todo = todos.find(t => t.id === Number(c.req.param('id')));
+  return todo ? c.json({ data: todo }) : c.json({ error: 'Not found' }, 404);
+});
+
+app.post('/todos', zValidator('json', todoSchema), (c) => {
+  const body = c.req.valid('json');
+  const todo = { id: Date.now(), ...body };
+  todos.push(todo);
+  return c.json({ data: todo }, 201);
+});
+
+app.patch('/todos/:id', zValidator('json', todoSchema.partial()), (c) => {
+  const id = Number(c.req.param('id'));
+  const idx = todos.findIndex(t => t.id === id);
+  if (idx === -1) return c.json({ error: 'Not found' }, 404);
+  todos[idx] = { ...todos[idx], ...c.req.valid('json') };
+  return c.json({ data: todos[idx] });
+});
+
+app.delete('/todos/:id', (c) => {
+  const id = Number(c.req.param('id'));
+  todos = todos.filter(t => t.id !== id);
+  return c.body(null, 204);
+});
+
+serve({ fetch: app.fetch, port: 3000 });
+```
+
+## Практика
+
+1. Создай Hono API с CRUD для задач (todos)
+2. Подключи Zod валидацию для body и query параметров
+3. Добавь JWT middleware для защищённых роутов
+4. Реализуй кастомный middleware для логирования
+5. Сравни: перепиши один Express роут на Hono — почувствуй разницу в API

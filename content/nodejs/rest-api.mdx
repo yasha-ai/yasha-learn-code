@@ -1,0 +1,284 @@
+# REST API дизайн
+
+![Иллюстрация к уроку](/lessons/nodejs-rest.png)
+
+**REST** (Representational State Transfer) — архитектурный стиль для создания API. Правильный REST API — читаемый, предсказуемый и удобный для клиентов.
+
+## REST принципы
+
+```
+1. Ресурсы — URL представляет ресурс, не действие
+   ✅ /users/42
+   ❌ /getUser?id=42
+   ❌ /user/get/42
+
+2. HTTP методы — смысл определяет метод
+   GET    — получить
+   POST   — создать
+   PUT    — заменить полностью
+   PATCH  — обновить частично
+   DELETE — удалить
+
+3. Stateless — каждый запрос независим, сервер не хранит состояние клиента
+
+4. Единообразие — одинаковые конвенции для всего API
+```
+
+## Именование URL
+
+```
+# Коллекции — множественное число
+GET    /users          — список пользователей
+GET    /users/42       — конкретный пользователь
+POST   /users          — создать пользователя
+PUT    /users/42       — заменить пользователя
+PATCH  /users/42       — обновить поля пользователя
+DELETE /users/42       — удалить пользователя
+
+# Вложенные ресурсы
+GET    /users/42/posts          — посты юзера 42
+GET    /users/42/posts/7        — пост 7 юзера 42
+POST   /users/42/posts          — создать пост для юзера 42
+DELETE /users/42/posts/7        — удалить пост 7 юзера 42
+
+# Действия (когда CRUD не подходит)
+POST   /auth/login              — войти
+POST   /auth/logout             — выйти
+POST   /auth/refresh            — обновить токен
+POST   /orders/42/cancel        — отменить заказ
+POST   /emails/send             — отправить email
+GET    /reports/generate        — сгенерировать отчёт
+
+# Версионирование
+/api/v1/users
+/api/v2/users
+```
+
+## HTTP статус коды
+
+```javascript
+// 2xx — Успех
+200 OK              // GET, PATCH, PUT — успешно
+201 Created         // POST — создано
+204 No Content      // DELETE — удалено, нет тела ответа
+
+// 3xx — Перенаправления
+301 Moved Permanently  // постоянный редирект
+302 Found              // временный редирект
+304 Not Modified       // кэш актуален (с ETag/If-None-Match)
+
+// 4xx — Ошибки клиента
+400 Bad Request         // некорректный запрос / ошибка валидации
+401 Unauthorized        // не авторизован (нет токена)
+403 Forbidden           // нет прав (токен есть, но доступа нет)
+404 Not Found           // ресурс не найден
+405 Method Not Allowed  // метод не поддерживается
+409 Conflict            // конфликт (например, email уже занят)
+410 Gone                // ресурс удалён навсегда
+422 Unprocessable Entity// семантически некорректный запрос
+429 Too Many Requests   // превышен rate limit
+
+// 5xx — Ошибки сервера
+500 Internal Server Error // что-то сломалось на сервере
+502 Bad Gateway           // upstream сервер ответил ошибкой
+503 Service Unavailable   // сервер недоступен (обслуживание)
+```
+
+## Формат ответов
+
+```javascript
+// Успешный ответ с данными
+{
+  "data": { ... },
+  "meta": {
+    "requestId": "uuid",
+    "timestamp": "2024-01-15T12:00:00Z"
+  }
+}
+
+// Список с пагинацией
+{
+  "data": [ ... ],
+  "pagination": {
+    "page": 1,
+    "limit": 10,
+    "total": 150,
+    "pages": 15
+  }
+}
+
+// Ошибка
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Некорректные данные",
+    "details": {
+      "email": ["Неверный формат email"],
+      "name": ["Минимум 2 символа"]
+    }
+  }
+}
+```
+
+## Полный CRUD пример
+
+```javascript
+// routes/products.js
+const { Router } = require('express');
+const { z } = require('zod');
+const { authenticate } = require('../middleware/auth');
+const { validate } = require('../middleware/validate');
+const asyncHandler = require('../utils/asyncHandler');
+const ProductService = require('../services/product');
+
+const router = Router();
+
+const createSchema = z.object({
+  name: z.string().min(2).max(100),
+  price: z.number().positive(),
+  category: z.string(),
+  stock: z.number().int().nonnegative().default(0),
+});
+
+const updateSchema = createSchema.partial();  // все поля опциональны
+
+const querySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+  category: z.string().optional(),
+  minPrice: z.coerce.number().optional(),
+  maxPrice: z.coerce.number().optional(),
+  search: z.string().optional(),
+});
+
+// GET /products
+router.get('/',
+  validate(querySchema, 'query'),
+  asyncHandler(async (req, res) => {
+    const result = await ProductService.getAll(req.query);
+    res.json(result);
+  })
+);
+
+// GET /products/:id
+router.get('/:id',
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json({ error: { message: 'Некорректный ID' } });
+    }
+
+    const product = await ProductService.getById(id);
+    if (!product) {
+      return res.status(404).json({ error: { message: 'Товар не найден' } });
+    }
+
+    res.json({ data: product });
+  })
+);
+
+// POST /products
+router.post('/',
+  authenticate,
+  validate(createSchema),
+  asyncHandler(async (req, res) => {
+    const product = await ProductService.create(req.body);
+    res.status(201).json({ data: product });
+  })
+);
+
+// PATCH /products/:id
+router.patch('/:id',
+  authenticate,
+  validate(updateSchema),
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id);
+    const product = await ProductService.update(id, req.body);
+    if (!product) {
+      return res.status(404).json({ error: { message: 'Товар не найден' } });
+    }
+    res.json({ data: product });
+  })
+);
+
+// DELETE /products/:id
+router.delete('/:id',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id);
+    await ProductService.delete(id);
+    res.sendStatus(204);
+  })
+);
+
+module.exports = router;
+```
+
+## Пагинация, сортировка, фильтрация
+
+```javascript
+// services/product.js
+async function getAll({ page, limit, category, minPrice, maxPrice, search }) {
+  const offset = (page - 1) * limit;
+  
+  // Строим фильтры
+  const where = {};
+  if (category) where.category = category;
+  if (minPrice || maxPrice) {
+    where.price = {};
+    if (minPrice) where.price.gte = minPrice;
+    if (maxPrice) where.price.lte = maxPrice;
+  }
+  if (search) {
+    where.name = { contains: search, mode: 'insensitive' };
+  }
+
+  const [products, total] = await Promise.all([
+    db.product.findMany({
+      where,
+      skip: offset,
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+    }),
+    db.product.count({ where }),
+  ]);
+
+  return {
+    data: products,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  };
+}
+```
+
+## Версионирование API
+
+```javascript
+// Способ 1: В URL
+app.use('/api/v1', v1Router);
+app.use('/api/v2', v2Router);
+
+// Способ 2: Через заголовок
+app.use((req, res, next) => {
+  const version = req.headers['api-version'] || '1';
+  req.apiVersion = parseInt(version);
+  next();
+});
+
+// Способ 3: Accept header
+// Accept: application/vnd.myapi.v2+json
+```
+
+## Практика
+
+1. Создай полный REST API для блога (posts, comments) с правильными статус-кодами
+2. Реализуй фильтрацию, сортировку и пагинацию для GET /posts
+3. Добавь единый формат ответов (`{ data: ... }` и `{ error: { message, details } }`)
+4. Реализуй версионирование: `/api/v1/posts` и `/api/v2/posts` с разными форматами
+5. Протестируй API через Postman или HTTPie

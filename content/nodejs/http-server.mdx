@@ -1,0 +1,240 @@
+# HTTP сервер
+
+![Иллюстрация к уроку](/lessons/nodejs-http.png)
+
+Node.js умеет создавать HTTP сервер без установки каких-либо пакетов — только встроенный модуль `http`.
+
+## Базовый HTTP сервер
+
+```javascript
+const http = require('http');
+
+const server = http.createServer((req, res) => {
+  // req — входящий запрос (IncomingMessage)
+  // res — исходящий ответ (ServerResponse)
+  
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('Привет от Node.js сервера!');
+});
+
+server.listen(3000, () => {
+  console.log('Сервер запущен: http://localhost:3000');
+});
+```
+
+## Разбор запроса
+
+```javascript
+const http = require('http');
+
+const server = http.createServer((req, res) => {
+  console.log('Метод:', req.method);      // GET, POST, PUT, DELETE
+  console.log('URL:', req.url);           // /api/users?page=1
+  console.log('Заголовки:', req.headers); // { host: 'localhost', ... }
+
+  // Разбор URL
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  console.log('Путь:', url.pathname);     // /api/users
+  console.log('Параметры:', url.searchParams.get('page')); // 1
+});
+```
+
+## Чтение тела запроса
+
+```javascript
+const http = require('http');
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === 'POST') {
+    // Собираем тело запроса из потока
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(chunk);
+    }
+    const body = Buffer.concat(chunks).toString();
+    
+    try {
+      const data = JSON.parse(body);
+      console.log('Получены данные:', data);
+      
+      res.writeHead(201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, received: data }));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+    }
+  }
+});
+```
+
+## Простой роутер
+
+```javascript
+const http = require('http');
+const { readFile } = require('fs/promises');
+
+// База "данных"
+let users = [
+  { id: 1, name: 'Яша' },
+  { id: 2, name: 'Лёха' },
+];
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const pathname = url.pathname;
+
+  // Helper для отправки JSON
+  const sendJSON = (status, data) => {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+  };
+
+  // Читаем тело запроса
+  const getBody = async () => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    return JSON.parse(Buffer.concat(chunks).toString() || '{}');
+  };
+
+  // Роутинг
+  if (pathname === '/' && req.method === 'GET') {
+    sendJSON(200, { message: 'API работает!' });
+
+  } else if (pathname === '/users' && req.method === 'GET') {
+    sendJSON(200, users);
+
+  } else if (pathname === '/users' && req.method === 'POST') {
+    const body = await getBody();
+    const newUser = { id: users.length + 1, ...body };
+    users.push(newUser);
+    sendJSON(201, newUser);
+
+  } else if (pathname.startsWith('/users/') && req.method === 'GET') {
+    const id = parseInt(pathname.split('/')[2]);
+    const user = users.find(u => u.id === id);
+    if (user) {
+      sendJSON(200, user);
+    } else {
+      sendJSON(404, { error: 'User not found' });
+    }
+
+  } else {
+    sendJSON(404, { error: 'Route not found' });
+  }
+});
+
+server.listen(3000, () => console.log('http://localhost:3000'));
+```
+
+## HTTPS сервер
+
+```javascript
+const https = require('https');
+const { readFileSync } = require('fs');
+
+const options = {
+  key: readFileSync('./ssl/private.key'),
+  cert: readFileSync('./ssl/certificate.crt'),
+};
+
+const server = https.createServer(options, (req, res) => {
+  res.writeHead(200);
+  res.end('Защищённое соединение!');
+});
+
+server.listen(443, () => console.log('HTTPS сервер запущен'));
+```
+
+## События сервера
+
+```javascript
+const http = require('http');
+
+const server = http.createServer((req, res) => {
+  res.end('OK');
+});
+
+// Событие: сервер начал слушать
+server.on('listening', () => {
+  const { port } = server.address();
+  console.log(`Слушаем порт ${port}`);
+});
+
+// Событие: ошибка
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Порт ${err.port} уже занят!`);
+  } else {
+    console.error('Ошибка сервера:', err);
+  }
+});
+
+// Событие: соединение закрыто
+server.on('close', () => {
+  console.log('Сервер остановлен');
+});
+
+// Запуск
+server.listen(3000);
+
+// Корректное завершение (graceful shutdown)
+process.on('SIGTERM', () => {
+  console.log('Получен SIGTERM, завершаем...');
+  server.close(() => {
+    console.log('Все соединения закрыты');
+    process.exit(0);
+  });
+});
+```
+
+## Делаем HTTP запросы из Node.js
+
+```javascript
+const https = require('https');
+
+// Простой GET запрос
+function httpGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString();
+        resolve(JSON.parse(body));
+      });
+    }).on('error', reject);
+  });
+}
+
+// Лучше использовать fetch (Node.js 18+)
+const response = await fetch('https://api.github.com/users/yasha-ai');
+const user = await response.json();
+console.log(user.name);
+
+// Или пакет axios
+const axios = require('axios');
+const { data } = await axios.get('https://api.example.com/users');
+```
+
+## Почему нужен Express?
+
+Встроенный http модуль — это хорошо, но для реальных проектов неудобно:
+
+```
+Встроенный http          Express
+──────────────────────   ──────────────────────
+Ручной роутинг           Декларативный роутинг
+Ручной разбор body       app.use(express.json())
+Нет middleware           Middleware система
+Нет статических файлов  express.static()
+Ручная обработка ошибок  Встроенная обработка
+Много boilerplate кода   Минимум кода
+```
+
+## Практика
+
+1. Создай HTTP сервер, который возвращает текущее время при GET `/time`
+2. Добавь роут POST `/echo`, который возвращает то, что получил в теле
+3. Реализуй простой CRUD для задач (tasks) без Express
+4. Добавь обработку ошибок и возврат правильных HTTP статус-кодов
+5. Сделай корректное завершение сервера (graceful shutdown) по SIGTERM

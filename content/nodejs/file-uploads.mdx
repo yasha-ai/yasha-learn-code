@@ -1,0 +1,266 @@
+# Загрузка файлов (multer)
+
+![Иллюстрация к уроку](/lessons/nodejs-uploads.png)
+
+**multer** — middleware для обработки `multipart/form-data` (загрузки файлов). Самый популярный выбор для Express.
+
+## Установка
+
+```bash
+npm install multer
+npm install sharp        # обработка изображений (опционально)
+npm install uuid         # уникальные имена файлов
+```
+
+## Базовая настройка
+
+```javascript
+const multer = require('multer');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+
+// Хранение в памяти (для небольших файлов)
+const memoryStorage = multer.memoryStorage();
+
+// Хранение на диске
+const diskStorage = multer.diskStorage({
+  destination: (req, file, callback) => {
+    callback(null, './uploads/');  // куда сохранять
+  },
+  filename: (req, file, callback) => {
+    // Уникальное имя файла
+    const ext = path.extname(file.originalname);
+    const uniqueName = `${uuidv4()}${ext}`;
+    callback(null, uniqueName);
+  },
+});
+
+// Фильтр файлов
+const fileFilter = (req, file, callback) => {
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+  if (allowedTypes.includes(file.mimetype)) {
+    callback(null, true);   // принять
+  } else {
+    callback(new Error('Только изображения: JPEG, PNG, WebP, GIF'), false);
+  }
+};
+
+// Создаём middleware
+const upload = multer({
+  storage: diskStorage,
+  fileFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024,  // 5 МБ максимум
+    files: 10,                   // максимум 10 файлов
+  },
+});
+```
+
+## Загрузка одного файла
+
+```javascript
+// POST /upload — поле 'avatar'
+app.post('/upload/avatar',
+  authenticate,
+  upload.single('avatar'),  // имя поля в форме
+  async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Файл не загружен' });
+    }
+
+    // req.file содержит:
+    const {
+      originalname,  // 'photo.jpg'
+      filename,      // 'uuid.jpg'
+      mimetype,      // 'image/jpeg'
+      size,          // 204800 (в байтах)
+      path,          // './uploads/uuid.jpg'
+      buffer,        // если memoryStorage
+    } = req.file;
+
+    // Сохраняем путь в БД
+    await db.users.update({
+      where: { id: req.user.id },
+      data: { avatar: `/uploads/${filename}` },
+    });
+
+    res.json({
+      message: 'Аватар загружен!',
+      url: `/uploads/${filename}`,
+    });
+  }
+);
+```
+
+## Загрузка нескольких файлов
+
+```javascript
+// Несколько файлов в одном поле
+app.post('/upload/gallery',
+  authenticate,
+  upload.array('photos', 10),  // поле 'photos', максимум 10
+  async (req, res) => {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'Файлы не загружены' });
+    }
+
+    const urls = req.files.map(f => `/uploads/${f.filename}`);
+    res.json({ urls });
+  }
+);
+
+// Разные поля
+app.post('/upload/product',
+  authenticate,
+  upload.fields([
+    { name: 'thumbnail', maxCount: 1 },
+    { name: 'gallery', maxCount: 5 },
+    { name: 'document', maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const thumbnail = req.files['thumbnail']?.[0];
+    const gallery = req.files['gallery'] || [];
+    const document = req.files['document']?.[0];
+
+    res.json({
+      thumbnail: thumbnail ? `/uploads/${thumbnail.filename}` : null,
+      gallery: gallery.map(f => `/uploads/${f.filename}`),
+      document: document ? `/uploads/${document.filename}` : null,
+    });
+  }
+);
+```
+
+## Обработка изображений через Sharp
+
+```javascript
+const sharp = require('sharp');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+
+// Загрузка в память + обработка через sharp
+const uploadToMemory = multer({
+  storage: multer.memoryStorage(),
+  fileFilter,
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+app.post('/upload/image',
+  authenticate,
+  uploadToMemory.single('image'),
+  async (req, res, next) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'Файл не загружен' });
+      }
+
+      const id = uuidv4();
+      const outputDir = './uploads/processed/';
+
+      // Создаём несколько размеров
+      await Promise.all([
+        sharp(req.file.buffer)
+          .resize(1200, 800, { fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 85 })
+          .toFile(`${outputDir}${id}-large.webp`),
+
+        sharp(req.file.buffer)
+          .resize(600, 400, { fit: 'cover' })
+          .webp({ quality: 80 })
+          .toFile(`${outputDir}${id}-medium.webp`),
+
+        sharp(req.file.buffer)
+          .resize(150, 150, { fit: 'cover' })
+          .webp({ quality: 75 })
+          .toFile(`${outputDir}${id}-thumb.webp`),
+      ]);
+
+      res.json({
+        large: `/uploads/processed/${id}-large.webp`,
+        medium: `/uploads/processed/${id}-medium.webp`,
+        thumb: `/uploads/processed/${id}-thumb.webp`,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+```
+
+## Загрузка в облако (AWS S3)
+
+```javascript
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const multer = require('multer');
+
+const s3 = new S3Client({ region: process.env.AWS_REGION });
+
+// Загружаем в память, потом в S3
+const upload = multer({ storage: multer.memoryStorage() });
+
+async function uploadToS3(file, folder = 'uploads') {
+  const key = `${folder}/${uuidv4()}-${file.originalname}`;
+
+  await s3.send(new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+    Body: file.buffer,
+    ContentType: file.mimetype,
+    ACL: 'public-read',
+  }));
+
+  return `https://${process.env.S3_BUCKET}.s3.amazonaws.com/${key}`;
+}
+
+app.post('/upload',
+  authenticate,
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    const url = await uploadToS3(req.file);
+    res.json({ url });
+  })
+);
+```
+
+## Обработка ошибок multer
+
+```javascript
+// Кастомный middleware для обработки ошибок multer
+function multerErrorHandler(err, req, res, next) {
+  if (err instanceof multer.MulterError) {
+    switch (err.code) {
+      case 'LIMIT_FILE_SIZE':
+        return res.status(400).json({
+          error: `Файл слишком большой. Максимум: 5 МБ`
+        });
+      case 'LIMIT_FILE_COUNT':
+        return res.status(400).json({
+          error: 'Слишком много файлов'
+        });
+      case 'LIMIT_UNEXPECTED_FILE':
+        return res.status(400).json({
+          error: `Неожиданное поле: ${err.field}`
+        });
+      default:
+        return res.status(400).json({ error: err.message });
+    }
+  }
+
+  if (err.message && err.message.includes('Только изображения')) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  next(err);
+}
+
+// Подключаем ПОСЛЕ роутов с multer
+app.use(multerErrorHandler);
+```
+
+## Практика
+
+1. Настрой multer с хранением на диске и уникальными именами файлов
+2. Создай роут для загрузки аватара пользователя (один файл, только JPEG/PNG, до 2 МБ)
+3. Реализуй загрузку галереи (до 5 изображений одним запросом)
+4. Подключи sharp: при загрузке создавай оригинал, medium (600px) и thumb (150px)
+5. Добавь обработку всех ошибок multer (размер, тип, количество файлов)
