@@ -1,0 +1,281 @@
+# Socket.io: основы
+
+**Socket.io** — самая популярная библиотека для real-time приложений. Строится поверх WebSocket, добавляя надёжность и удобство.
+
+## Почему Socket.io, а не чистый WebSocket?
+
+```
+WebSocket (нативный):
+❌ Нет автопереподключения
+❌ Нет fallback (если WS заблокирован)
+❌ Нет комнат/namespace
+❌ Нет гарантии доставки
+❌ Нет middleware
+✅ Просто, маленький
+
+Socket.io:
+✅ Автопереподключение
+✅ Fallback на long-polling
+✅ Комнаты и namespace
+✅ Acknowledgements (подтверждение)
+✅ Middleware
+✅ Работает везде
+⚠️ Больше (~200KB)
+```
+
+## Установка
+
+```bash
+# Сервер
+npm install socket.io
+
+# Клиент (npm)
+npm install socket.io-client
+
+# Клиент (CDN)
+<script src="/socket.io/socket.io.js"></script>
+```
+
+## Минимальный пример
+
+**Сервер:**
+```javascript
+const express = require('express');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+
+const app = express();
+const httpServer = createServer(app);
+
+const io = new Server(httpServer, {
+  cors: {
+    origin: 'http://localhost:3000',
+    methods: ['GET', 'POST'],
+  },
+});
+
+io.on('connection', (socket) => {
+  console.log('Подключился:', socket.id);
+
+  socket.on('message', (data) => {
+    console.log('Получено:', data);
+    socket.emit('reply', { text: 'Получил: ' + data.text });
+  });
+
+  socket.on('disconnect', (reason) => {
+    console.log('Отключился:', socket.id, reason);
+  });
+});
+
+httpServer.listen(3000);
+```
+
+**Клиент (браузер):**
+```javascript
+import { io } from 'socket.io-client';
+
+const socket = io('http://localhost:3000');
+
+socket.on('connect', () => {
+  console.log('Подключён, ID:', socket.id);
+  socket.emit('message', { text: 'Привет, сервер!' });
+});
+
+socket.on('reply', (data) => {
+  console.log('Ответ:', data.text);
+});
+
+socket.on('disconnect', (reason) => {
+  console.log('Отключён:', reason);
+});
+
+socket.on('connect_error', (err) => {
+  console.error('Ошибка подключения:', err.message);
+});
+```
+
+## Emit & On — отправка событий
+
+Socket.io работает через **именованные события**:
+
+```javascript
+// Сервер отправляет клиенту
+socket.emit('event-name', data);                    // одному
+io.emit('event-name', data);                        // всем
+socket.broadcast.emit('event-name', data);           // всем кроме себя
+io.to(roomId).emit('event-name', data);             // в комнату
+
+// Клиент отправляет серверу
+socket.emit('event-name', data);
+
+// Обработка события
+socket.on('event-name', (data) => { /* ... */ });
+```
+
+## Acknowledgements — подтверждение доставки
+
+Socket.io позволяет ждать ответа (как HTTP request/response, но через WebSocket):
+
+```javascript
+// Сервер — отвечает на событие
+socket.on('save-message', async (message, callback) => {
+  try {
+    const saved = await db.messages.create({ data: message });
+    callback({ success: true, id: saved.id }); // Подтверждение
+  } catch (err) {
+    callback({ success: false, error: err.message });
+  }
+});
+
+// Клиент — ждёт подтверждения
+socket.emit('save-message', { text: 'Привет!' }, (response) => {
+  if (response.success) {
+    console.log('Сохранено! ID:', response.id);
+  } else {
+    console.error('Ошибка:', response.error);
+  }
+});
+
+// Timeout на acknowledgement
+socket.timeout(5000).emit('save-message', data, (err, response) => {
+  if (err) {
+    console.error('Timeout — сервер не ответил');
+  } else {
+    console.log('Ответ:', response);
+  }
+});
+```
+
+## Middleware
+
+Можно перехватывать соединения для аутентификации:
+
+```javascript
+// Middleware для авторизации
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth.token;
+  
+  if (!token) {
+    return next(new Error('Требуется токен'));
+  }
+
+  try {
+    const user = await verifyToken(token);
+    socket.data.user = user; // Сохраняем данные пользователя
+    next();
+  } catch (err) {
+    next(new Error('Невалидный токен'));
+  }
+});
+
+io.on('connection', (socket) => {
+  // Пользователь авторизован!
+  console.log('Пользователь:', socket.data.user.name);
+});
+
+// Клиент передаёт токен
+const socket = io('http://localhost:3000', {
+  auth: {
+    token: localStorage.getItem('token'),
+  },
+});
+```
+
+## Состояние подключения
+
+```javascript
+// Клиент
+socket.connected;    // true/false
+socket.id;           // уникальный ID сокета
+
+socket.on('connect', () => console.log('ID:', socket.id));
+socket.on('disconnect', () => console.log('Отключились'));
+socket.on('reconnect', (attempt) => console.log('Переподключились, попытка:', attempt));
+socket.on('reconnect_attempt', (attempt) => console.log('Попытка:', attempt));
+socket.on('reconnect_error', (err) => console.error('Ошибка:', err));
+socket.on('reconnect_failed', () => console.error('Не смогли переподключиться'));
+```
+
+## Конфигурация переподключения
+
+```javascript
+const socket = io('http://localhost:3000', {
+  reconnection: true,           // включить автопереподключение
+  reconnectionAttempts: 5,      // максимум попыток
+  reconnectionDelay: 1000,      // начальная задержка (мс)
+  reconnectionDelayMax: 5000,   // максимальная задержка (мс)
+  randomizationFactor: 0.5,     // добавить случайность
+  
+  timeout: 20000,               // таймаут подключения
+  
+  transports: ['websocket'],    // только WS, без polling
+});
+```
+
+## Socket.io с React
+
+```jsx
+import { createContext, useContext, useEffect, useState } from 'react';
+import { io } from 'socket.io-client';
+
+// Контекст для socket
+const SocketContext = createContext(null);
+
+export function SocketProvider({ children }) {
+  const [socket, setSocket] = useState(null);
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const s = io(process.env.NEXT_PUBLIC_WS_URL, {
+      auth: { token },
+    });
+
+    s.on('connect', () => setConnected(true));
+    s.on('disconnect', () => setConnected(false));
+
+    setSocket(s);
+
+    return () => s.disconnect();
+  }, []);
+
+  return (
+    <SocketContext.Provider value={{ socket, connected }}>
+      {children}
+    </SocketContext.Provider>
+  );
+}
+
+export const useSocket = () => useContext(SocketContext);
+
+// В компоненте
+function ChatComponent() {
+  const { socket, connected } = useSocket();
+  const [messages, setMessages] = useState([]);
+
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on('new-message', (message) => {
+      setMessages((prev) => [...prev, message]);
+    });
+
+    return () => socket.off('new-message');
+  }, [socket]);
+
+  const sendMessage = (text) => {
+    socket.emit('send-message', { text });
+  };
+}
+```
+
+## Задания
+
+1. Создай простой чат с Socket.io: сервер + HTML клиент
+2. Добавь middleware для аутентификации через JWT
+3. Реализуй систему подтверждений: клиент получает ID после отправки
+4. Настрой только WebSocket transport (без polling)
+
+## Итог
+
+Socket.io — это WebSocket с батарейками: автопереподключение, middleware, acknowledgements. В следующем уроке — комнаты и Namespaces для организации сложной логики.

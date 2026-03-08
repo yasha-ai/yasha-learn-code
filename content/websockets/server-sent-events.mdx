@@ -1,0 +1,302 @@
+# Server-Sent Events (SSE)
+
+**SSE** — простой механизм однонаправленного потока данных: сервер → клиент. Встроен в браузер, не требует библиотек.
+
+## Когда SSE, а не WebSocket
+
+```
+SSE лучше WebSocket когда:
+✅ Нужен только поток от сервера (уведомления, прогресс, новости)
+✅ Автоматическое переподключение браузером
+✅ Работает через обычный HTTP (прокси, CDN friendly)
+✅ Простота реализации
+✅ Нативная поддержка кодировки
+
+WebSocket нужен когда:
+✅ Двусторонняя связь (чат, игры)
+✅ Бинарные данные эффективно
+✅ Нужен кастомный контроль соединения
+```
+
+## Формат SSE
+
+SSE — это HTTP-ответ с `Content-Type: text/event-stream`:
+
+```
+data: {"message": "hello"}\n\n
+
+event: user-joined\n
+data: {"username": "Alice"}\n\n
+
+id: 42\n
+data: {"count": 42}\n\n
+
+: Это комментарий (игнорируется)\n\n
+
+retry: 3000\n
+data: {"reconnect": "delay"}\n\n
+```
+
+Каждое событие разделяется двойным `\n\n`. Поля:
+- `data:` — данные (можно несколько строк)
+- `event:` — имя события (по умолчанию `message`)
+- `id:` — ID для Last-Event-ID
+- `retry:` — задержка переподключения (мс)
+- `:` — комментарий (keepalive)
+
+## Сервер — Express
+
+```javascript
+const express = require('express');
+const app = express();
+
+// Хранилище клиентов
+const clients = new Map();
+
+app.get('/events', (req, res) => {
+  // SSE заголовки
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Отключить буферизацию в Nginx
+  res.flushHeaders();
+
+  const clientId = Date.now();
+  clients.set(clientId, res);
+
+  // Первое сообщение
+  res.write(`data: ${JSON.stringify({ connected: true, id: clientId })}\n\n`);
+
+  // Удалить клиента при отключении
+  req.on('close', () => {
+    clients.delete(clientId);
+    console.log(`Клиент ${clientId} отключился`);
+  });
+});
+
+// Отправить событие всем клиентам
+function broadcast(event, data) {
+  const message = event !== 'message'
+    ? `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+    : `data: ${JSON.stringify(data)}\n\n`;
+  
+  clients.forEach((res) => {
+    res.write(message);
+  });
+}
+
+// Отправить событие конкретному клиенту
+function sendToClient(clientId, event, data) {
+  const res = clients.get(clientId);
+  if (res) {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+}
+
+// Keepalive — предотвращает таймаут прокси
+setInterval(() => {
+  clients.forEach((res) => res.write(': keepalive\n\n'));
+}, 25000);
+
+// Пример: отправка уведомлений
+app.post('/notify', express.json(), (req, res) => {
+  broadcast('notification', req.body);
+  res.json({ sent: clients.size });
+});
+
+app.listen(3000);
+```
+
+## Last-Event-ID — восстановление после обрыва
+
+Браузер автоматически отправляет `Last-Event-ID` при переподключении:
+
+```javascript
+let eventId = 0;
+const eventStore = []; // В реальности — БД
+
+app.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Отправить пропущенные события
+  const lastId = parseInt(req.headers['last-event-id'] || '0');
+  const missed = eventStore.filter((e) => e.id > lastId);
+  
+  missed.forEach((e) => {
+    res.write(`id: ${e.id}\ndata: ${JSON.stringify(e.data)}\n\n`);
+  });
+
+  clients.set(req.socket, res);
+  req.on('close', () => clients.delete(req.socket));
+});
+
+function publish(data) {
+  eventId++;
+  const event = { id: eventId, data };
+  eventStore.push(event);
+  
+  clients.forEach((res) => {
+    res.write(`id: ${eventId}\ndata: ${JSON.stringify(data)}\n\n`);
+  });
+}
+```
+
+## SSE в Next.js (App Router)
+
+```typescript
+// app/api/events/route.ts
+import { NextRequest } from 'next/server';
+
+export async function GET(request: NextRequest) {
+  const encoder = new TextEncoder();
+  
+  const stream = new ReadableStream({
+    start(controller) {
+      // Отправить первые данные
+      controller.enqueue(
+        encoder.encode(`data: ${JSON.stringify({ connected: true })}\n\n`)
+      );
+      
+      // Подписаться на события
+      const unsubscribe = subscribeToEvents((event) => {
+        controller.enqueue(
+          encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`)
+        );
+      });
+      
+      // Keepalive
+      const interval = setInterval(() => {
+        controller.enqueue(encoder.encode(': keepalive\n\n'));
+      }, 25000);
+      
+      // Закрытие
+      request.signal.addEventListener('abort', () => {
+        unsubscribe();
+        clearInterval(interval);
+        controller.close();
+      });
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    },
+  });
+}
+```
+
+## Браузерный EventSource API
+
+```javascript
+// Подключение
+const eventSource = new EventSource('/api/events');
+
+// Стандартное событие 'message'
+eventSource.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log('Данные:', data);
+  console.log('ID:', event.lastEventId);
+};
+
+// Именованные события
+eventSource.addEventListener('notification', (event) => {
+  const notification = JSON.parse(event.data);
+  showNotification(notification);
+});
+
+eventSource.addEventListener('user-joined', (event) => {
+  const user = JSON.parse(event.data);
+  updateUserList(user);
+});
+
+// Состояние
+console.log(eventSource.readyState);
+// 0 = CONNECTING
+// 1 = OPEN
+// 2 = CLOSED
+
+// Ошибки и переподключение
+eventSource.onerror = (event) => {
+  if (eventSource.readyState === EventSource.CLOSED) {
+    console.error('Соединение закрыто');
+  } else {
+    console.warn('Ошибка, переподключаемся...');
+    // Браузер автоматически переподключится!
+  }
+};
+
+// Закрыть соединение
+eventSource.close();
+```
+
+## SSE с авторизацией
+
+EventSource не поддерживает заголовки напрямую! Варианты:
+
+```javascript
+// Вариант 1: Токен в query параметре
+const token = localStorage.getItem('token');
+const eventSource = new EventSource(`/api/events?token=${token}`);
+
+// Сервер проверяет токен
+app.get('/api/events', (req, res) => {
+  const token = req.query.token;
+  const user = verifyToken(token);
+  if (!user) {
+    res.status(401).end();
+    return;
+  }
+  // ... устанавливаем SSE
+});
+
+// Вариант 2: Сессионные куки (автоматически отправляются!)
+const eventSource = new EventSource('/api/events', {
+  withCredentials: true, // Включить куки
+});
+
+// Вариант 3: Использовать fetch вместо EventSource
+async function* streamEvents(url, token) {
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    
+    const text = decoder.decode(value);
+    const lines = text.split('\n');
+    
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        yield JSON.parse(line.slice(6));
+      }
+    }
+  }
+}
+
+// Использование
+for await (const event of streamEvents('/api/events', token)) {
+  console.log('Событие:', event);
+}
+```
+
+## Задания
+
+1. Создай SSE endpoint для real-time уведомлений. Протестируй через curl
+2. Реализуй отправку пропущенных событий через `Last-Event-ID`
+3. Добавь авторизацию через куки в SSE endpoint
+4. Сравни нагрузку: SSE vs polling каждую секунду (открой 100 вкладок DevTools)
+
+## Итог
+
+SSE — элегантное решение для однонаправленных потоков. Проще WebSocket, работает через HTTP/2, автоматически переподключается. В следующем уроке строим полноценный real-time чат.
