@@ -1,0 +1,194 @@
+## Design Patterns. Урок: Adapter (Адаптер)
+
+**Adapter** — структурный паттерн, позволяющий объектам с несовместимыми интерфейсами работать вместе. Как переходник для розетки: ты прилетел из России в Европу, розетки другие — нужен адаптер.
+
+---
+
+### Когда нужен Adapter?
+
+- Хочешь использовать стороннюю библиотеку с другим интерфейсом
+- Нужно интегрировать легаси-код с новой системой
+- Работаешь с несколькими внешними API с разными форматами данных
+
+---
+
+### Object Adapter (через композицию)
+
+```typescript
+// Существующий интерфейс (то что ожидает наш код)
+interface Logger {
+  log(message: string, level: 'info' | 'warn' | 'error'): void;
+}
+
+// Сторонняя библиотека с другим интерфейсом (мы не можем её изменить)
+class WinstonLogger {
+  info(msg: string, meta?: object): void { /* Winston-специфичная реализация */ }
+  warn(msg: string, meta?: object): void { /* ... */ }
+  error(msg: string, error?: Error): void { /* ... */ }
+  debug(msg: string): void { /* ... */ }
+}
+
+// Адаптер: оборачивает WinstonLogger под наш интерфейс Logger
+class WinstonLoggerAdapter implements Logger {
+  constructor(private winston: WinstonLogger) {}
+
+  log(message: string, level: 'info' | 'warn' | 'error'): void {
+    switch (level) {
+      case 'info': this.winston.info(message); break;
+      case 'warn': this.winston.warn(message); break;
+      case 'error': this.winston.error(message); break;
+    }
+  }
+}
+
+// Использование — наш код работает через стандартный интерфейс
+const winstonLogger = new WinstonLogger();
+const logger: Logger = new WinstonLoggerAdapter(winstonLogger);
+
+logger.log('Application started', 'info');
+logger.log('Low memory warning', 'warn');
+```
+
+---
+
+### Class Adapter (через наследование)
+
+```typescript
+// Легаси код с устаревшим API
+class OldPaymentGateway {
+  processPayment(amount: number, cardNumber: string, expiry: string): boolean {
+    // Старый метод с параметрами через запятую
+    return true;
+  }
+}
+
+// Новый интерфейс
+interface ModernPaymentGateway {
+  charge(payment: { amount: number; card: { number: string; expiry: string } }): Promise<{ success: boolean; transactionId: string }>;
+}
+
+// Class Adapter через наследование
+class PaymentGatewayAdapter extends OldPaymentGateway implements ModernPaymentGateway {
+  async charge(payment: { amount: number; card: { number: string; expiry: string } }): Promise<{ success: boolean; transactionId: string }> {
+    const success = this.processPayment(
+      payment.amount,
+      payment.card.number,
+      payment.card.expiry,
+    );
+    return {
+      success,
+      transactionId: success ? `txn_${Date.now()}` : '',
+    };
+  }
+}
+```
+
+---
+
+### Реальный пример: адаптеры для разных облачных сервисов
+
+```typescript
+// Единый интерфейс для хранилища файлов
+interface FileStorage {
+  upload(filename: string, content: Buffer, mimeType: string): Promise<string>;
+  download(filename: string): Promise<Buffer>;
+  delete(filename: string): Promise<void>;
+  getPublicUrl(filename: string): string;
+}
+
+// Адаптер для AWS S3
+class S3Adapter implements FileStorage {
+  constructor(private s3Client: S3Client, private bucket: string) {}
+
+  async upload(filename: string, content: Buffer, mimeType: string): Promise<string> {
+    await this.s3Client.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: filename,
+      Body: content,
+      ContentType: mimeType,
+    }));
+    return filename;
+  }
+
+  async download(filename: string): Promise<Buffer> {
+    const response = await this.s3Client.send(new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: filename,
+    }));
+    return Buffer.from(await response.Body!.transformToByteArray());
+  }
+
+  async delete(filename: string): Promise<void> {
+    await this.s3Client.send(new DeleteObjectCommand({
+      Bucket: this.bucket,
+      Key: filename,
+    }));
+  }
+
+  getPublicUrl(filename: string): string {
+    return `https://${this.bucket}.s3.amazonaws.com/${filename}`;
+  }
+}
+
+// Адаптер для Cloudflare R2 (тот же S3 API, но другой URL)
+class R2Adapter implements FileStorage {
+  constructor(private r2Client: S3Client, private bucket: string, private publicUrl: string) {}
+  // ... похожая реализация
+  getPublicUrl(filename: string): string {
+    return `${this.publicUrl}/${filename}`;
+  }
+}
+
+// Адаптер для локального файловой системы (для разработки)
+class LocalStorageAdapter implements FileStorage {
+  constructor(private basePath: string) {}
+
+  async upload(filename: string, content: Buffer): Promise<string> {
+    await fs.writeFile(path.join(this.basePath, filename), content);
+    return filename;
+  }
+  // ...
+}
+
+// Весь код работает через единый интерфейс
+class FileUploadService {
+  constructor(private storage: FileStorage) {}
+
+  async uploadAvatar(userId: string, imageBuffer: Buffer): Promise<string> {
+    const filename = `avatars/${userId}.jpg`;
+    await this.storage.upload(filename, imageBuffer, 'image/jpeg');
+    return this.storage.getPublicUrl(filename);
+  }
+}
+
+// Конфигурация — выбираем адаптер по среде
+const storage = process.env.STORAGE_TYPE === 's3'
+  ? new S3Adapter(s3Client, 'my-bucket')
+  : new LocalStorageAdapter('./uploads');
+
+const uploadService = new FileUploadService(storage);
+```
+
+---
+
+### Adapter vs Facade vs Proxy
+
+| Паттерн | Цель |
+|---------|------|
+| **Adapter** | Преобразование интерфейса (несовместимые → совместимые) |
+| **Facade** | Упрощение интерфейса (сложная система → простое API) |
+| **Proxy** | Контроль доступа к объекту (без изменения интерфейса) |
+
+---
+
+### Практические задания
+
+1. Создай адаптер для популярной библиотеки дат (moment.js → dayjs или date-fns), чтобы можно было легко поменять библиотеку не меняя остальной код.
+
+2. Напиши адаптеры для двух SMS-провайдеров (Twilio и Vonage) с единым интерфейсом `SmsService`.
+
+3. Создай адаптер который преобразует callback-based API в Promise-based.
+
+4. Где в Node.js стандартной библиотеке используется паттерн Adapter?
+
+5. Реализуй адаптер для работы с localStorage и sessionStorage через единый интерфейс `KeyValueStore`.

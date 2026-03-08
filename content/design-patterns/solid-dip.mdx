@@ -1,0 +1,251 @@
+## Design Patterns. Урок: SOLID — Dependency Inversion Principle
+
+> 1. Модули верхнего уровня не должны зависеть от модулей нижнего уровня. Оба должны зависеть от абстракций.
+> 2. Абстракции не должны зависеть от деталей. Детали должны зависеть от абстракций.
+
+DIP — самый «архитектурный» из принципов SOLID. Именно он лежит в основе Dependency Injection и инверсии управления (IoC).
+
+---
+
+### Проблема жёстких зависимостей
+
+```typescript
+// ❌ Высокоуровневый модуль жёстко зависит от низкоуровневого
+class OrderService {
+  // Прямая зависимость от конкретных классов
+  private emailSender = new GmailSender();
+  private database = new MySQLDatabase();
+  private logger = new FileLogger();
+
+  async processOrder(order: Order): Promise<void> {
+    await this.database.save(order);
+    await this.emailSender.send(order.userEmail, 'Order confirmed!');
+    this.logger.log(`Order ${order.id} processed`);
+  }
+}
+```
+
+Проблемы:
+- Хочешь заменить Gmail на SendGrid? Меняй `OrderService`
+- Хочешь перейти с MySQL на Postgres? Меняй `OrderService`
+- Как тестировать `OrderService` без реального сервера БД и email?
+
+---
+
+### Решение: зависимость через абстракции
+
+```typescript
+// ✅ Абстракции (интерфейсы)
+interface EmailService {
+  send(to: string, message: string): Promise<void>;
+}
+
+interface Database {
+  save<T>(entity: T): Promise<void>;
+  findById<T>(id: string): Promise<T>;
+}
+
+interface Logger {
+  log(message: string): void;
+  error(message: string, error?: Error): void;
+}
+
+// Конкретные реализации (детали зависят от абстракций)
+class GmailSender implements EmailService {
+  async send(to: string, message: string): Promise<void> {
+    // Gmail-специфичная реализация
+  }
+}
+
+class SendGridSender implements EmailService {
+  async send(to: string, message: string): Promise<void> {
+    // SendGrid-специфичная реализация
+  }
+}
+
+class MySQLDatabase implements Database {
+  async save<T>(entity: T): Promise<void> { ... }
+  async findById<T>(id: string): Promise<T> { ... }
+}
+
+// Высокоуровневый модуль зависит только от абстракций
+class OrderService {
+  constructor(
+    private readonly database: Database,
+    private readonly emailService: EmailService,
+    private readonly logger: Logger,
+  ) {}
+
+  async processOrder(order: Order): Promise<void> {
+    await this.database.save(order);
+    await this.emailService.send(order.userEmail, 'Order confirmed!');
+    this.logger.log(`Order ${order.id} processed`);
+  }
+}
+
+// Dependency Injection — подключаем конкретные реализации снаружи
+const orderService = new OrderService(
+  new MySQLDatabase(),
+  new SendGridSender(),  // Легко заменить на GmailSender
+  new ConsoleLogger(),
+);
+```
+
+---
+
+### Dependency Injection (DI)
+
+DI — это паттерн, реализующий DIP. Зависимости передаются извне, а не создаются внутри:
+
+```typescript
+// Constructor Injection (предпочтительный способ)
+class UserService {
+  constructor(
+    private userRepo: UserRepository,
+    private emailService: EmailService,
+  ) {}
+}
+
+// Method Injection (если зависимость нужна только для одного метода)
+class ReportGenerator {
+  generate(data: any[], formatter: ReportFormatter): string {
+    return formatter.format(data);
+  }
+}
+
+// Property Injection (редко используется)
+class NotificationSender {
+  logger!: Logger; // Устанавливается снаружи
+  
+  send(message: string): void {
+    this.logger?.log(`Sending: ${message}`);
+  }
+}
+```
+
+---
+
+### DI контейнер
+
+В крупных приложениях используют DI-контейнеры (InversifyJS, tsyringe, NestJS):
+
+```typescript
+import { injectable, inject, container } from 'tsyringe';
+
+@injectable()
+class OrderService {
+  constructor(
+    @inject('Database') private db: Database,
+    @inject('EmailService') private email: EmailService,
+  ) {}
+}
+
+// Регистрируем реализации
+container.register('Database', { useClass: PostgresDatabase });
+container.register('EmailService', { useClass: SendGridSender });
+
+// Контейнер сам создаёт экземпляр с нужными зависимостями
+const service = container.resolve(OrderService);
+```
+
+---
+
+### Тестирование с DIP
+
+Главное преимущество DIP — лёгкое тестирование через моки:
+
+```typescript
+// Mock-реализации для тестов
+class MockEmailService implements EmailService {
+  public sentEmails: Array<{ to: string; message: string }> = [];
+
+  async send(to: string, message: string): Promise<void> {
+    this.sentEmails.push({ to, message });
+  }
+}
+
+class MockDatabase implements Database {
+  private data = new Map<string, any>();
+
+  async save<T extends { id: string }>(entity: T): Promise<void> {
+    this.data.set(entity.id, entity);
+  }
+
+  async findById<T>(id: string): Promise<T> {
+    return this.data.get(id) as T;
+  }
+}
+
+// Тест без реальной БД и email сервиса
+describe('OrderService', () => {
+  it('should send email after processing order', async () => {
+    const mockEmail = new MockEmailService();
+    const mockDb = new MockDatabase();
+    const service = new OrderService(mockDb, mockEmail, new ConsoleLogger());
+
+    await service.processOrder({ id: '1', userEmail: 'test@test.com', items: [] });
+
+    expect(mockEmail.sentEmails).toHaveLength(1);
+    expect(mockEmail.sentEmails[0].to).toBe('test@test.com');
+  });
+});
+```
+
+---
+
+### DIP в React: Context и Hooks
+
+React Context — это DI для компонентов:
+
+```typescript
+// Абстракция
+interface AuthService {
+  login(email: string, password: string): Promise<User>;
+  logout(): Promise<void>;
+  getCurrentUser(): User | null;
+}
+
+// Context — «DI контейнер» для React
+const AuthContext = createContext<AuthService | null>(null);
+
+// Provider инжектирует конкретную реализацию
+function App() {
+  const authService = new FirebaseAuthService(); // или MockAuthService для тестов
+  return (
+    <AuthContext.Provider value={authService}>
+      <Router />
+    </AuthContext.Provider>
+  );
+}
+
+// Компонент зависит от абстракции, не от конкретики
+function LoginForm() {
+  const auth = useContext(AuthContext)!;
+  const handleLogin = async (email: string, password: string) => {
+    await auth.login(email, password);
+  };
+}
+```
+
+---
+
+### Практические задания
+
+1. Рефактори следующий класс согласно DIP:
+```typescript
+class WeatherWidget {
+  async getWeather(city: string): Promise<string> {
+    const response = await fetch(`https://api.openweathermap.org/weather?q=${city}`);
+    const data = await response.json();
+    return `${city}: ${data.main.temp}°C`;
+  }
+}
+```
+
+2. Создай мини DI-контейнер: класс `Container` с методами `register(token, factory)` и `resolve(token)`.
+
+3. Напиши тесты для `OrderService` из примера выше с 3 сценариями.
+
+4. Изучи как NestJS реализует DI через декораторы `@Injectable()` и `@Inject()`.
+
+5. В чём разница между DIP и DI (Dependency Injection)? (Подсказка: DIP — принцип, DI — паттерн его реализации)
