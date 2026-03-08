@@ -1,0 +1,181 @@
+# Mocking
+
+![Mocking](/lessons/mocking.png)
+
+## Зачем нужны моки?
+
+Мок заменяет реальную зависимость на контролируемую имитацию:
+- Изолировать тестируемую функцию
+- Контролировать поведение зависимостей
+- Проверить, что функция вызывалась правильно
+- Ускорить тесты (нет HTTP, нет БД)
+
+## jest.fn() / vi.fn() — Mock Function
+
+```javascript
+import { jest } from '@jest/globals'; // или import { vi } from 'vitest'
+
+// Создать мок-функцию
+const mockFn = jest.fn();
+
+// Настроить возвращаемое значение
+mockFn.mockReturnValue(42);
+mockFn.mockReturnValueOnce(1).mockReturnValueOnce(2); // разные значения
+
+// Асинхронные возвращаемые значения
+const mockAsync = jest.fn();
+mockAsync.mockResolvedValue({ name: 'Alice' });    // Promise.resolve
+mockAsync.mockRejectedValue(new Error('Failed')); // Promise.reject
+
+// Вызов и проверки
+mockFn(1, 2);
+mockFn('hello');
+
+expect(mockFn).toHaveBeenCalled();               // был вызван
+expect(mockFn).toHaveBeenCalledTimes(2);         // 2 раза
+expect(mockFn).toHaveBeenCalledWith(1, 2);       // с этими аргументами
+expect(mockFn).toHaveBeenLastCalledWith('hello');// последний вызов
+
+// Очистить историю вызовов
+mockFn.mockClear();     // очищает вызовы, но сохраняет имплементацию
+mockFn.mockReset();     // очищает вызовы И имплементацию
+mockFn.mockRestore();   // только для spyOn — восстанавливает оригинал
+```
+
+## Мокирование модуля (jest.mock / vi.mock)
+
+```javascript
+// ── Автоматический мок ──
+jest.mock('./emailService');
+// emailService.sendEmail будет jest.fn() автоматически
+
+// ── Ручной мок ──
+jest.mock('./database', () => ({
+  findUser: jest.fn(),
+  createUser: jest.fn(),
+  deleteUser: jest.fn(),
+}));
+
+// ── Пример: тест без реальной БД ──
+import { findUser } from './database';
+import { getUserProfile } from './userService';
+
+jest.mock('./database', () => ({
+  findUser: jest.fn(),
+}));
+
+test('getUserProfile returns formatted profile', async () => {
+  findUser.mockResolvedValue({
+    id: 1,
+    name: 'Alice',
+    email: 'alice@test.com',
+    created_at: new Date('2024-01-01'),
+  });
+
+  const profile = await getUserProfile(1);
+
+  expect(findUser).toHaveBeenCalledWith(1);
+  expect(profile).toMatchObject({
+    displayName: 'Alice',
+    memberSince: '2024',
+  });
+});
+```
+
+## Мокирование ES модулей (Vitest)
+
+```typescript
+// api.ts
+export async function fetchUser(id: number) {
+  const res = await fetch(`/api/users/${id}`);
+  return res.json();
+}
+
+// userService.ts
+import { fetchUser } from './api';
+
+export async function getDisplayName(id: number) {
+  const user = await fetchUser(id);
+  return `${user.firstName} ${user.lastName}`;
+}
+
+// userService.test.ts
+import { vi, describe, it, expect } from 'vitest';
+import { getDisplayName } from './userService';
+
+vi.mock('./api', () => ({
+  fetchUser: vi.fn(),
+}));
+
+import { fetchUser } from './api';
+
+describe('getDisplayName', () => {
+  it('returns full name', async () => {
+    vi.mocked(fetchUser).mockResolvedValue({
+      firstName: 'Alice',
+      lastName: 'Smith',
+    });
+
+    const name = await getDisplayName(1);
+    expect(name).toBe('Alice Smith');
+  });
+});
+```
+
+## Мокирование Node.js модулей
+
+```javascript
+// Мок файловой системы
+jest.mock('fs/promises', () => ({
+  readFile: jest.fn().mockResolvedValue('file content'),
+  writeFile: jest.fn().mockResolvedValue(undefined),
+}));
+
+// Мок path
+jest.mock('path', () => ({
+  ...jest.requireActual('path'), // сохранить оригинальные методы
+  join: jest.fn().mockReturnValue('/mocked/path'),
+}));
+```
+
+## Мокирование fetch
+
+```javascript
+// Глобальный мок fetch
+global.fetch = jest.fn();
+
+beforeEach(() => {
+  global.fetch.mockClear();
+});
+
+test('fetches and processes data', async () => {
+  global.fetch.mockResolvedValueOnce({
+    ok: true,
+    json: () => Promise.resolve({ id: 1, name: 'Alice' }),
+  });
+
+  const result = await getUserData(1);
+
+  expect(fetch).toHaveBeenCalledWith('/api/users/1');
+  expect(result.name).toBe('Alice');
+});
+
+test('handles fetch error', async () => {
+  global.fetch.mockResolvedValueOnce({ ok: false, status: 404 });
+
+  await expect(getUserData(999)).rejects.toThrow('User not found');
+});
+```
+
+## Практические задания
+
+1. Замокируй `emailService.send()` и проверь, что он вызывается при регистрации
+2. Замокируй `fetch` и протестируй обработку ошибок API
+3. Используй `mockReturnValueOnce` для последовательных разных ответов
+
+## Итоги
+
+- jest.fn()/vi.fn() — мок-функция с историей вызовов
+- jest.mock()/vi.mock() — мокирование целого модуля
+- mockResolvedValue / mockRejectedValue — для async функций
+- mockClear() — между тестами, mockRestore() — для spyOn

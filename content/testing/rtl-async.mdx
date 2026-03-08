@@ -1,0 +1,214 @@
+# Async компоненты в RTL
+
+![Async RTL](/lessons/rtl-async.png)
+
+## Тестирование загрузки данных
+
+```jsx
+// UserList.tsx
+import { useEffect, useState } from 'react';
+
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+export function UserList() {
+  const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch('/api/users')
+      .then(res => res.json())
+      .then(data => {
+        setUsers(data);
+        setLoading(false);
+      })
+      .catch(err => {
+        setError('Failed to load users');
+        setLoading(false);
+      });
+  }, []);
+
+  if (loading) return <div role="status">Loading...</div>;
+  if (error) return <div role="alert">{error}</div>;
+
+  return (
+    <ul>
+      {users.map(user => (
+        <li key={user.id}>
+          <span>{user.name}</span>
+          <span>{user.email}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+```jsx
+// UserList.test.tsx
+import { render, screen, waitFor } from '@testing-library/react';
+import { UserList } from './UserList';
+
+const mockUsers = [
+  { id: 1, name: 'Alice', email: 'alice@test.com' },
+  { id: 2, name: 'Bob', email: 'bob@test.com' },
+];
+
+describe('UserList', () => {
+  beforeEach(() => {
+    global.fetch = jest.fn();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('shows loading initially', () => {
+    (global.fetch as jest.Mock).mockReturnValue(new Promise(() => {})); // никогда не резолвится
+    render(<UserList />);
+
+    expect(screen.getByRole('status')).toHaveTextContent('Loading...');
+  });
+
+  test('renders users after loading', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      json: () => Promise.resolve(mockUsers),
+    });
+
+    render(<UserList />);
+
+    // Ждём исчезновения loading
+    await waitFor(() => {
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    // Или findBy — более удобно
+    expect(await screen.findByText('Alice')).toBeInTheDocument();
+    expect(screen.getByText('Bob')).toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+  });
+
+  test('shows error on fetch failure', async () => {
+    (global.fetch as jest.Mock).mockRejectedValue(new Error('Network error'));
+
+    render(<UserList />);
+
+    const errorMsg = await screen.findByRole('alert');
+    expect(errorMsg).toHaveTextContent('Failed to load users');
+  });
+
+  test('shows empty list', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      json: () => Promise.resolve([]),
+    });
+
+    render(<UserList />);
+    await screen.findByRole('list');
+
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+  });
+});
+```
+
+## waitFor и waitForElementToBeRemoved
+
+```javascript
+// waitFor: ждём пока условие выполнится
+await waitFor(() => {
+  expect(screen.getByText('Loaded!')).toBeInTheDocument();
+});
+
+// waitFor с таймаутом
+await waitFor(
+  () => expect(screen.getByText('Data ready')).toBeInTheDocument(),
+  { timeout: 3000, interval: 100 }
+);
+
+// waitForElementToBeRemoved: ждём исчезновения элемента
+await waitForElementToBeRemoved(() => screen.queryByRole('status'));
+
+// или
+await waitForElementToBeRemoved(screen.getByText('Loading...'));
+```
+
+## act() — обёртка для обновлений состояния
+
+```javascript
+import { act } from '@testing-library/react';
+
+// RTL автоматически оборачивает в act()
+// Но иногда нужно явно:
+test('updates on event', async () => {
+  render(<Counter />);
+
+  await act(async () => {
+    await userEvent.click(screen.getByRole('button'));
+    // Все обновления state внутри act
+  });
+
+  expect(screen.getByText('Count: 1')).toBeInTheDocument();
+});
+```
+
+## Тестирование с React Router
+
+```jsx
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+
+function renderWithRouter(ui, { initialEntries = ['/'] } = {}) {
+  return render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <Routes>
+        <Route path="/" element={ui} />
+        <Route path="/profile/:id" element={<ProfilePage />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+test('navigates to profile on click', async () => {
+  const user = userEvent.setup();
+  renderWithRouter(<UserCard userId={1} />);
+
+  await user.click(screen.getByRole('link', { name: /profile/i }));
+
+  expect(await screen.findByRole('heading', { name: /alice/i })).toBeInTheDocument();
+});
+```
+
+## Тестирование с Context
+
+```jsx
+import { ThemeProvider } from './ThemeContext';
+
+function renderWithTheme(ui, theme = 'light') {
+  return render(
+    <ThemeProvider initialTheme={theme}>
+      {ui}
+    </ThemeProvider>
+  );
+}
+
+test('renders dark theme correctly', () => {
+  renderWithTheme(<Button>Click</Button>, 'dark');
+  expect(screen.getByRole('button')).toHaveClass('dark-btn');
+});
+```
+
+## Практические задания
+
+1. Протестируй компонент `SearchResults` — загрузку, результаты, ошибку, пустой ответ
+2. Протестируй навигацию между страницами с MemoryRouter
+3. Протестируй компонент, использующий Context
+
+## Итоги
+
+- findBy* — для асинхронно появляющихся элементов
+- waitFor — для проверки условий после async операций
+- waitForElementToBeRemoved — для ожидания исчезновения
+- Замокируй fetch/axios перед тестами
+- Кастомные render-обёртки для Provider'ов
