@@ -1,0 +1,194 @@
+## Design Patterns. Урок: Facade (Фасад)
+
+**Facade** — структурный паттерн, предоставляющий упрощённый интерфейс к сложной системе классов, библиотеке или фреймворку.
+
+Фасад — это ресепшн в отеле. Ты говоришь «Мне нужен такси» — ресепшн сам звонит в таксопарк, забронирует машину и скажет когда будет готово. Ты не знаешь ни номер таксопарка, ни как бронировать.
+
+---
+
+### Проблема: сложная подсистема
+
+```typescript
+// ❌ Клиент должен знать о всех компонентах подсистемы
+async function sendOrderConfirmation(orderId: string) {
+  // Знаем о OrderDB, EmailValidator, TemplateEngine, SmtpClient, Logger...
+  const orderDb = new OrderDatabase(process.env.DB_URL!);
+  const order = await orderDb.getOrder(orderId);
+  
+  const validator = new EmailValidator();
+  if (!validator.isValid(order.userEmail)) throw new Error('Invalid email');
+  
+  const templateEngine = new HandlebarsTemplateEngine();
+  await templateEngine.loadTemplate('order-confirmation');
+  const html = templateEngine.render({ order });
+  
+  const smtpClient = new SmtpClient({
+    host: process.env.SMTP_HOST!,
+    port: Number(process.env.SMTP_PORT!),
+    auth: { user: process.env.SMTP_USER!, pass: process.env.SMTP_PASS! },
+  });
+  
+  await smtpClient.connect();
+  await smtpClient.sendMail({
+    from: process.env.FROM_EMAIL!,
+    to: order.userEmail,
+    subject: `Order #${order.id} confirmed`,
+    html,
+  });
+  await smtpClient.disconnect();
+  
+  const logger = new FileLogger('./logs/emails.log');
+  logger.log(`Confirmation sent for order ${orderId}`);
+}
+```
+
+---
+
+### Facade Pattern
+
+```typescript
+// ✅ Фасад скрывает всю сложность
+
+// Подсистема 1: Email
+class EmailValidator {
+  isValid(email: string): boolean {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  }
+}
+
+class SmtpEmailSender {
+  async send(to: string, subject: string, html: string): Promise<void> {
+    const client = new SmtpClient({ /* конфиг */ });
+    await client.connect();
+    await client.sendMail({ from: process.env.FROM_EMAIL!, to, subject, html });
+    await client.disconnect();
+  }
+}
+
+// Подсистема 2: Шаблоны
+class EmailTemplateRenderer {
+  async render(templateName: string, data: Record<string, any>): Promise<string> {
+    const engine = new HandlebarsTemplateEngine();
+    await engine.loadTemplate(templateName);
+    return engine.render(data);
+  }
+}
+
+// Подсистема 3: Заказы
+class OrderRepository {
+  async findById(id: string): Promise<Order> {
+    return await db.query('SELECT * FROM orders WHERE id = $1', [id]);
+  }
+}
+
+// ФАСАД — единая точка входа для операций с заказами и emails
+class OrderEmailFacade {
+  private validator = new EmailValidator();
+  private sender = new SmtpEmailSender();
+  private renderer = new EmailTemplateRenderer();
+  private orderRepo = new OrderRepository();
+  private logger = new Logger();
+
+  async sendOrderConfirmation(orderId: string): Promise<void> {
+    const order = await this.orderRepo.findById(orderId);
+    
+    if (!this.validator.isValid(order.userEmail)) {
+      throw new Error(`Invalid email for order ${orderId}`);
+    }
+
+    const html = await this.renderer.render('order-confirmation', { order });
+    await this.sender.send(order.userEmail, `Order #${order.id} confirmed`, html);
+    this.logger.log(`Confirmation sent for order ${orderId}`);
+  }
+
+  async sendShippingNotification(orderId: string, trackingCode: string): Promise<void> {
+    const order = await this.orderRepo.findById(orderId);
+    const html = await this.renderer.render('shipping-notification', { order, trackingCode });
+    await this.sender.send(order.userEmail, `Your order #${order.id} has shipped!`, html);
+  }
+}
+
+// Клиентский код — просто и понятно
+const emailFacade = new OrderEmailFacade();
+await emailFacade.sendOrderConfirmation('order-123');
+await emailFacade.sendShippingNotification('order-123', 'TRACK123456');
+```
+
+---
+
+### Facade для сторонних библиотек
+
+Фасад особенно полезен как обёртка над внешними зависимостями:
+
+```typescript
+// Фасад над Stripe API
+class PaymentFacade {
+  private stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+  async createCustomer(email: string, name: string): Promise<string> {
+    const customer = await this.stripe.customers.create({ email, name });
+    return customer.id;
+  }
+
+  async chargeCard(customerId: string, amount: number, currency = 'usd'): Promise<{ success: boolean; chargeId: string }> {
+    try {
+      const paymentIntent = await this.stripe.paymentIntents.create({
+        amount: Math.round(amount * 100), // Stripe принимает центы
+        currency,
+        customer: customerId,
+        confirm: true,
+        automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
+      });
+      return { success: true, chargeId: paymentIntent.id };
+    } catch (error) {
+      return { success: false, chargeId: '' };
+    }
+  }
+
+  async refund(chargeId: string, amount?: number): Promise<boolean> {
+    try {
+      await this.stripe.refunds.create({
+        payment_intent: chargeId,
+        amount: amount ? Math.round(amount * 100) : undefined,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+// Если завтра захочешь заменить Stripe на PayPal — меняешь только PaymentFacade
+```
+
+---
+
+### Когда НЕ нужен Facade
+
+- Когда у тебя уже простая система — не создавай фасад ради фасада
+- Когда нужен полный доступ к API подсистемы — фасад скрывает возможности
+- Когда подсистема постоянно меняется — фасад придётся постоянно обновлять
+
+---
+
+### Facade vs Adapter vs Mediator
+
+| Паттерн | Цель |
+|---------|------|
+| **Facade** | Упрощает интерфейс к сложной подсистеме |
+| **Adapter** | Делает несовместимые интерфейсы совместимыми |
+| **Mediator** | Устраняет прямые связи между компонентами |
+
+---
+
+### Практические задания
+
+1. Создай `AuthFacade` с методами `register`, `login`, `logout`, `resetPassword` — инкапсулируй работу с JWT, хешированием паролей и БД.
+
+2. Напиши `SearchFacade` который объединяет поиск по нескольким источникам (база данных, Elasticsearch, внешнее API).
+
+3. Создай `FileFacade` для работы с файлами: upload, download, resize (для изображений), delete, getPublicUrl.
+
+4. Чем Facade отличается от «God Object» (антипаттерна)? Где граница?
+
+5. Изучи как Next.js API Routes можно организовать используя Facade pattern.

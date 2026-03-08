@@ -1,0 +1,294 @@
+# Performance и оптимизация
+
+![Иллюстрация к уроку](/lessons/nodejs-performance.png)
+
+Производительность Node.js — это не только скорость, но и эффективное использование памяти, CPU и I/O.
+
+## Золотые правила
+
+```
+1. Не блокируй Event Loop
+2. Используй кэширование
+3. Стримь данные вместо загрузки в память
+4. Сжимай ответы (gzip/brotli)
+5. Измеряй, прежде чем оптимизировать
+```
+
+## Не блокируй Event Loop
+
+```javascript
+// ❌ Блокирующий код — вешает весь сервер
+app.get('/hash', (req, res) => {
+  // Синхронный хэш — блокирует Event Loop!
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512');
+  res.json({ hash: hash.toString('hex') });
+});
+
+// ✅ Асинхронный — не блокирует
+app.get('/hash', async (req, res) => {
+  const hash = await new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, 100000, 64, 'sha512', (err, key) => {
+      if (err) reject(err);
+      else resolve(key);
+    });
+  });
+  res.json({ hash: hash.toString('hex') });
+});
+
+// ❌ Тяжёлые вычисления блокируют Event Loop
+app.get('/process', (req, res) => {
+  // Fibonacci, сортировка больших массивов, парсинг XML
+  const result = heavyComputation(data); // БЛОКИРУЕТ!
+  res.json(result);
+});
+
+// ✅ Выноси тяжёлые задачи в Worker Threads
+const { Worker } = require('worker_threads');
+
+app.get('/process', (req, res) => {
+  const worker = new Worker('./workers/heavy.js', {
+    workerData: { input: req.query.data },
+  });
+  
+  worker.on('message', (result) => {
+    res.json(result);
+  });
+  
+  worker.on('error', (err) => {
+    res.status(500).json({ error: err.message });
+  });
+});
+```
+
+## Кэширование
+
+```javascript
+// 1. In-memory кэш (простой Map)
+const cache = new Map();
+const CACHE_TTL = 60 * 1000; // 1 минута
+
+function withCache(key, fn) {
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  
+  const data = fn();
+  cache.set(key, { data, timestamp: Date.now() });
+  return data;
+}
+
+// 2. Redis кэш (для кластера)
+const Redis = require('ioredis');
+const redis = new Redis(process.env.REDIS_URL);
+
+async function cachedQuery(key, ttlSeconds, queryFn) {
+  // Проверяем кэш
+  const cached = await redis.get(key);
+  if (cached) return JSON.parse(cached);
+
+  // Выполняем запрос
+  const data = await queryFn();
+
+  // Сохраняем в кэш
+  await redis.setex(key, ttlSeconds, JSON.stringify(data));
+
+  return data;
+}
+
+// Использование
+app.get('/api/products', async (req, res) => {
+  const products = await cachedQuery(
+    `products:${req.query.page}:${req.query.limit}`,
+    300, // 5 минут
+    () => db.product.findMany({ take: 10 })
+  );
+  res.json({ data: products });
+});
+
+// 3. HTTP кэширование
+app.get('/api/static-data', (req, res) => {
+  res.set({
+    'Cache-Control': 'public, max-age=3600',  // 1 час
+    'ETag': '"v1.0"',
+  });
+  res.json(staticData);
+});
+```
+
+## Сжатие ответов
+
+```bash
+npm install compression
+```
+
+```javascript
+const compression = require('compression');
+
+// Gzip/deflate сжатие
+app.use(compression({
+  threshold: 1024,    // сжимать ответы > 1 KB
+  level: 6,           // уровень сжатия (1-9)
+  filter: (req, res) => {
+    // Не сжимаем SSE
+    if (req.headers['accept'] === 'text/event-stream') return false;
+    return compression.filter(req, res);
+  },
+}));
+
+// Brotli (лучше gzip, Node.js 11.7+)
+const zlib = require('zlib');
+
+app.use(compression({
+  // Brotli предпочтительнее
+  brotli: { enabled: true, zlib: {} },
+}));
+```
+
+## Оптимизация базы данных
+
+```javascript
+// 1. N+1 проблема — самая частая ошибка
+
+// ❌ N+1 запросов
+const users = await db.user.findMany();
+for (const user of users) {
+  user.posts = await db.post.findMany({ where: { authorId: user.id } });
+  // 1 запрос для users + N запросов для posts = N+1!
+}
+
+// ✅ Один запрос с include
+const users = await db.user.findMany({
+  include: { posts: true },
+});
+
+// 2. Выбирай только нужные поля
+// ❌ Забираем всё (включая пароли, огромные поля)
+const users = await db.user.findMany();
+
+// ✅ Только нужные поля
+const users = await db.user.findMany({
+  select: { id: true, name: true, email: true },
+});
+
+// 3. Пагинация — ВСЕГДА
+// ❌ Все записи (10000+)
+const products = await db.product.findMany();
+
+// ✅ С пагинацией
+const products = await db.product.findMany({
+  take: 20,
+  skip: (page - 1) * 20,
+});
+
+// 4. Индексы в БД
+// CREATE INDEX idx_users_email ON users(email);
+// CREATE INDEX idx_posts_author ON posts(author_id);
+```
+
+## Стриминг больших данных
+
+```javascript
+// ❌ Загружаем всё в память
+app.get('/export', async (req, res) => {
+  const allData = await db.log.findMany(); // 1 млн записей = OOM!
+  res.json(allData);
+});
+
+// ✅ Стримим через cursor
+app.get('/export', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.write('[');
+
+  let first = true;
+  let cursor = undefined;
+
+  while (true) {
+    const batch = await db.log.findMany({
+      take: 1000,
+      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+      orderBy: { id: 'asc' },
+    });
+
+    if (batch.length === 0) break;
+
+    for (const item of batch) {
+      if (!first) res.write(',');
+      res.write(JSON.stringify(item));
+      first = false;
+    }
+
+    cursor = batch[batch.length - 1].id;
+  }
+
+  res.write(']');
+  res.end();
+});
+```
+
+## Мониторинг и профилирование
+
+```javascript
+// 1. process.memoryUsage()
+app.get('/debug/memory', (req, res) => {
+  const mem = process.memoryUsage();
+  res.json({
+    rss: `${Math.round(mem.rss / 1024 / 1024)} МБ`,
+    heapTotal: `${Math.round(mem.heapTotal / 1024 / 1024)} МБ`,
+    heapUsed: `${Math.round(mem.heapUsed / 1024 / 1024)} МБ`,
+    external: `${Math.round(mem.external / 1024 / 1024)} МБ`,
+  });
+});
+
+// 2. Event Loop Lag — измеряем задержку
+let lastCheck = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const lag = now - lastCheck - 1000;  // ожидаем 1000мс
+  if (lag > 100) {
+    console.warn(`Event Loop lag: ${lag}ms`);
+  }
+  lastCheck = now;
+}, 1000).unref();
+
+// 3. Node.js --inspect для Chrome DevTools
+// node --inspect src/index.js
+// Открыть chrome://inspect → профилирование CPU и памяти
+```
+
+## Чеклист производительности
+
+```
+Сервер:
+□ compression (gzip/brotli) включён
+□ Node.js cluster mode (PM2 -i max)
+□ Rate limiting настроен
+□ Graceful shutdown реализован
+□ Health check эндпоинт есть
+
+База данных:
+□ Индексы на часто используемых полях
+□ N+1 запросов нет (include/join)
+□ Пагинация везде
+□ SELECT только нужные поля
+□ Connection pooling настроен
+
+Кэширование:
+□ Redis для горячих данных
+□ HTTP Cache-Control заголовки
+□ CDN для статики
+
+Код:
+□ Нет синхронных операций (readFileSync и т.д.)
+□ Тяжёлые задачи в Worker Threads
+□ Streams для больших данных
+□ JSON parse/stringify для больших объектов — стримить
+```
+
+## Практика
+
+1. Найди и исправь N+1 проблему в своём API
+2. Добавь Redis кэширование для GET эндпоинтов
+3. Подключи compression middleware
+4. Реализуй стриминг CSV экспорта для большой таблицы
+5. Профилируй приложение через `node --inspect` — найди узкое место

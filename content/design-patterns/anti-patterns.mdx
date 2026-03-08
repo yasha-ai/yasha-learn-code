@@ -1,0 +1,300 @@
+## Design Patterns. Урок: Anti-patterns и как их избегать
+
+Антипаттерн — это общее решение, которое кажется разумным, но на практике контрпродуктивно. Знать антипаттерны так же важно, как знать паттерны — чтобы не повторять чужих ошибок.
+
+---
+
+### 1. God Object (Объект-бог)
+
+Один класс знает слишком много и делает слишком много.
+
+```typescript
+// ❌ God Object — нарушение SRP до абсурда
+class Application {
+  database: Database;
+  userService: UserService;
+  emailService: EmailService;
+  paymentProcessor: PaymentProcessor;
+  cacheManager: CacheManager;
+  logger: Logger;
+  configManager: ConfigManager;
+  
+  // 500+ методов...
+  processOrder(data: any) { ... }
+  sendEmail(to: string, text: string) { ... }
+  validateUser(user: any) { ... }
+  cacheData(key: string, value: any) { ... }
+  connectToDatabase() { ... }
+}
+
+// ✅ Разделённые ответственности через SRP и DIP
+class OrderService {
+  constructor(
+    private orderRepo: OrderRepository,
+    private paymentService: PaymentService,
+    private notificationService: NotificationService,
+  ) {}
+}
+```
+
+---
+
+### 2. Spaghetti Code
+
+Код без структуры — сложная запутанная логика, нет разделения слоёв:
+
+```typescript
+// ❌ Всё в одном месте
+app.post('/order', async (req, res) => {
+  const { userId, items, cardNumber } = req.body;
+  
+  if (!userId) return res.status(400).json({ error: 'No userId' });
+  
+  const user = await db.query(`SELECT * FROM users WHERE id = '${userId}'`); // SQL Injection!
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  
+  let total = 0;
+  for (const item of items) {
+    const product = await db.query(`SELECT * FROM products WHERE id = '${item.id}'`);
+    total += product.price * item.qty;
+  }
+  
+  const charged = await fetch('https://stripe.com/charge', {
+    method: 'POST',
+    body: JSON.stringify({ amount: total, card: cardNumber }),
+  });
+  
+  await db.query(`INSERT INTO orders VALUES (...)`)
+  
+  await fetch('https://smtp.gmail.com/send', { /* ... */ });
+  
+  res.json({ success: true });
+});
+
+// ✅ Чёткие слои: Router → Controller → Service → Repository
+app.post('/orders', orderController.create);
+```
+
+---
+
+### 3. Magic Numbers & Strings
+
+```typescript
+// ❌ Магические числа
+if (user.role === 2 && order.status === 7) {
+  applyDiscount(0.15);
+  setTimeout(checkStatus, 86400000);
+}
+
+// ✅ Именованные константы
+const UserRole = { ADMIN: 1, PREMIUM: 2, BASIC: 3 } as const;
+const OrderStatus = { PENDING: 1, CONFIRMED: 7, SHIPPED: 10 } as const;
+const PREMIUM_DISCOUNT = 0.15;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+if (user.role === UserRole.PREMIUM && order.status === OrderStatus.CONFIRMED) {
+  applyDiscount(PREMIUM_DISCOUNT);
+  setTimeout(checkStatus, ONE_DAY_MS);
+}
+```
+
+---
+
+### 4. Premature Optimization
+
+```typescript
+// ❌ Оптимизация до понимания проблемы
+class UserList {
+  // Битовые операции для «скорости» в простом коде
+  private userBitmap = new Uint32Array(1000);
+  
+  addUser(id: number): void {
+    this.userBitmap[id >> 5] |= (1 << (id & 31));
+  }
+  
+  hasUser(id: number): boolean {
+    return !!(this.userBitmap[id >> 5] & (1 << (id & 31)));
+  }
+}
+
+// ✅ Простое и понятное решение сначала
+class UserList {
+  private users = new Set<number>();
+  
+  addUser(id: number): void {
+    this.users.add(id);
+  }
+  
+  hasUser(id: number): boolean {
+    return this.users.has(id);
+  }
+}
+// Профилируй СНАЧАЛА, оптимизируй ПОТОМ если нужно
+```
+
+---
+
+### 5. Copy-Paste Programming (нарушение DRY)
+
+```typescript
+// ❌ Логика дублируется в 5 местах
+async function getAdminUsers() {
+  try {
+    const res = await fetch('/api/users?role=admin');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error('Failed to fetch admin users:', err);
+    return [];
+  }
+}
+
+async function getPremiumUsers() {
+  try {
+    const res = await fetch('/api/users?tier=premium');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error('Failed to fetch premium users:', err);
+    return [];
+  }
+}
+
+// ✅ Общая функция
+async function fetchUsers(params: Record<string, string>): Promise<User[]> {
+  try {
+    const query = new URLSearchParams(params).toString();
+    const res = await fetch(`/api/users?${query}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error('Failed to fetch users:', err);
+    return [];
+  }
+}
+
+const adminUsers = fetchUsers({ role: 'admin' });
+const premiumUsers = fetchUsers({ tier: 'premium' });
+```
+
+---
+
+### 6. Callback Hell (Pyramid of Doom)
+
+```typescript
+// ❌ Callback hell
+getUser(userId, (err, user) => {
+  if (err) return handleError(err);
+  getOrders(user.id, (err, orders) => {
+    if (err) return handleError(err);
+    getProducts(orders[0].id, (err, products) => {
+      if (err) return handleError(err);
+      processProducts(products, (err, result) => {
+        if (err) return handleError(err);
+        // Ещё глубже...
+      });
+    });
+  });
+});
+
+// ✅ Async/await
+async function processUserOrders(userId: string): Promise<ProcessResult> {
+  const user = await getUser(userId);
+  const orders = await getOrders(user.id);
+  const products = await getProducts(orders[0].id);
+  return await processProducts(products);
+}
+```
+
+---
+
+### 7. Anemic Domain Model
+
+Объекты только с данными (геттеры/сеттеры), логика вынесена в сервисы:
+
+```typescript
+// ❌ Анемичная модель — Order ничего не умеет делать
+class Order {
+  id: string;
+  status: string;
+  items: any[];
+  total: number;
+}
+
+class OrderService {
+  confirmOrder(order: Order): void {
+    // Вся логика здесь, объект пустой
+    if (order.items.length === 0) throw new Error('...');
+    if (order.status !== 'pending') throw new Error('...');
+    order.status = 'confirmed';
+  }
+}
+
+// ✅ Rich Domain Model — объект сам знает свою логику
+class Order {
+  constructor(
+    private readonly id: OrderId,
+    private items: OrderItem[],
+    private status: OrderStatus,
+  ) {}
+
+  confirm(): void {
+    if (this.items.length === 0) throw new DomainError('Cannot confirm empty order');
+    if (this.status !== OrderStatus.PENDING) throw new DomainError('Order already confirmed');
+    this.status = OrderStatus.CONFIRMED;
+  }
+}
+```
+
+---
+
+### 8. Silver Bullet (Универсальное решение)
+
+Попытка решить все проблемы одним паттерном или инструментом:
+
+- «Микросервисы решат все наши проблемы!» — а стало только хуже
+- «Используем GraphQL везде!» — даже там где REST проще
+- «NoSQL быстрее!» — но нарушена целостность данных
+- «Reactive Everywhere!» — RxJS в простой форме без сетевых запросов
+
+Нет серебряной пули. Правильный инструмент для правильной задачи.
+
+---
+
+### Чек-лист: как не создавать антипаттерны
+
+- [ ] Класс/файл > 300 строк → нужен рефакторинг?
+- [ ] Функция > 30 строк → нужно разбить?
+- [ ] Magic numbers → заменены константами?
+- [ ] Copy-paste 3+ раза → вынести в функцию?
+- [ ] `// TODO` старше 3 месяцев → сделать или удалить?
+- [ ] Тест занимает > 50 строк → слишком много логики в одном?
+
+---
+
+### Практические задания
+
+1. Найди в своём проекте пример одного из антипаттернов и исправь его.
+
+2. Проведи code review чужого проекта (GitHub) и найди 3+ антипаттерна.
+
+3. Рефактори следующий God Object:
+```typescript
+class UserManager {
+  createUser(data: any) { /* SQL + validation + email + logging */ }
+  deleteUser(id: string) { /* SQL + cascade + notification + logging */ }
+  sendPasswordReset(email: string) { /* DB + token + email + logging */ }
+  generateReport() { /* DB query + CSV + email */ }
+  backupDatabase() { /* Full DB backup to S3 */ }
+}
+```
+
+4. Объясни разницу между «Spaghetti Code» и «Lasagna Code» (антипаттерн с чрезмерным числом слоёв).
+
+5. Почему преждевременная оптимизация считается «корнем всех зол» (Donald Knuth)?
+
+---
+
+### Ссылки
+- [Refactoring Guru: Anti-patterns](https://refactoring.guru/ru/antipatterns)
+- [SourceMaking: AntiPatterns](https://sourcemaking.com/antipatterns)

@@ -1,0 +1,315 @@
+# GraphQL: Урок 12. Fragments — переиспользование запросов
+
+![GraphQL Fragments](/lessons/graphql-fragments.png)
+
+Fragments — механизм переиспользования частей запросов. Как компоненты в React, только для GraphQL.
+
+## Базовый синтаксис
+
+```graphql
+fragment UserBasic on User {
+  id
+  name
+  avatar
+}
+
+fragment UserFull on User {
+  ...UserBasic
+  email
+  bio
+  createdAt
+  posts {
+    id
+    title
+  }
+}
+
+query GetUser($id: ID!) {
+  user(id: $id) {
+    ...UserFull
+  }
+}
+```
+
+## Зачем нужны fragments
+
+Без фрагментов — дублирование:
+
+```graphql
+# ❌ Повторяем поля пользователя везде
+query GetPost($id: ID!) {
+  post(id: $id) {
+    title
+    author {
+      id          # дублируем
+      name        # дублируем
+      avatar      # дублируем
+    }
+    comments {
+      author {
+        id        # дублируем снова
+        name      # дублируем снова
+        avatar    # дублируем снова
+      }
+    }
+  }
+}
+```
+
+С фрагментами:
+
+```graphql
+# ✅ Определяем один раз, используем везде
+fragment AuthorInfo on User {
+  id
+  name
+  avatar
+}
+
+query GetPost($id: ID!) {
+  post(id: $id) {
+    title
+    author { ...AuthorInfo }
+    comments {
+      body
+      author { ...AuthorInfo }
+    }
+  }
+}
+```
+
+## Fragments в Apollo Client (React)
+
+```jsx
+import { gql, useQuery } from '@apollo/client';
+
+// Определяем фрагменты
+const USER_BASIC_FRAGMENT = gql`
+  fragment UserBasic on User {
+    id
+    name
+    avatar
+    email
+  }
+`;
+
+const POST_CARD_FRAGMENT = gql`
+  fragment PostCard on Post {
+    id
+    title
+    excerpt
+    createdAt
+    author {
+      ...UserBasic
+    }
+  }
+  ${USER_BASIC_FRAGMENT}
+`;
+
+// Используем в запросе
+const GET_POSTS = gql`
+  query GetPosts {
+    posts {
+      items {
+        ...PostCard
+      }
+      total
+    }
+  }
+  ${POST_CARD_FRAGMENT}
+`;
+
+function PostList() {
+  const { data, loading } = useQuery(GET_POSTS);
+
+  if (loading) return <p>Загрузка...</p>;
+
+  return (
+    <div>
+      {data.posts.items.map(post => (
+        <PostCard key={post.id} post={post} />
+      ))}
+    </div>
+  );
+}
+```
+
+## Co-located Fragments (лучшая практика)
+
+Держи фрагмент рядом с компонентом, который его использует:
+
+```jsx
+// components/PostCard/index.jsx
+import { gql } from '@apollo/client';
+
+// Фрагмент объявлен рядом с компонентом
+export const POST_CARD_FRAGMENT = gql`
+  fragment PostCardFragment on Post {
+    id
+    title
+    excerpt
+    cover
+    createdAt
+    author {
+      id
+      name
+      avatar
+    }
+  }
+`;
+
+export function PostCard({ post }) {
+  return (
+    <div className="post-card">
+      <img src={post.cover} alt={post.title} />
+      <h2>{post.title}</h2>
+      <p>{post.excerpt}</p>
+      <div className="author">
+        <img src={post.author.avatar} alt={post.author.name} />
+        <span>{post.author.name}</span>
+      </div>
+      <time>{new Date(post.createdAt).toLocaleDateString()}</time>
+    </div>
+  );
+}
+```
+
+```jsx
+// pages/BlogPage.jsx
+import { POST_CARD_FRAGMENT, PostCard } from '../components/PostCard';
+
+const GET_BLOG_POSTS = gql`
+  query GetBlogPosts {
+    posts(status: PUBLISHED, limit: 10) {
+      items {
+        ...PostCardFragment  # Используем фрагмент компонента
+      }
+      total
+    }
+  }
+  ${POST_CARD_FRAGMENT}
+`;
+
+function BlogPage() {
+  const { data } = useQuery(GET_BLOG_POSTS);
+  return (
+    <div>
+      {data?.posts.items.map(post => (
+        <PostCard key={post.id} post={post} />
+      ))}
+    </div>
+  );
+}
+```
+
+**Преимущества:** Если нужно добавить поле в PostCard — меняем только фрагмент в одном месте, все запросы обновляются автоматически.
+
+## Inline Fragments
+
+Inline fragments используются для polymorphic типов (interface/union):
+
+```graphql
+query GetSearchResults($query: String!) {
+  search(query: $query) {
+    ... on User {       # Если результат — User
+      id
+      name
+      email
+    }
+    ... on Post {       # Если результат — Post
+      id
+      title
+      excerpt
+    }
+    ... on Product {    # Если результат — Product
+      id
+      name
+      price
+    }
+  }
+}
+```
+
+В Apollo Client с TypeScript:
+
+```typescript
+const SEARCH_QUERY = gql`
+  query Search($query: String!) {
+    search(query: $query) {
+      __typename   # ОБЯЗАТЕЛЬНО для union типов!
+      ... on User {
+        id
+        name
+      }
+      ... on Post {
+        id
+        title
+      }
+    }
+  }
+`;
+
+function SearchResults({ data }) {
+  return data.search.map((item, i) => {
+    switch (item.__typename) {
+      case 'User':
+        return <UserCard key={i} user={item} />;
+      case 'Post':
+        return <PostCard key={i} post={item} />;
+      default:
+        return null;
+    }
+  });
+}
+```
+
+## Fragments на сервере: useFragment (Apollo Client 3.7+)
+
+```jsx
+import { useFragment, gql } from '@apollo/client';
+
+const USER_FRAGMENT = gql`
+  fragment UserData on User {
+    id
+    name
+    email
+    avatar
+  }
+`;
+
+function UserCard({ userId }) {
+  // Читаем фрагмент прямо из кэша
+  const { data, complete } = useFragment({
+    fragment: USER_FRAGMENT,
+    fragmentName: 'UserData',
+    from: { __typename: 'User', id: userId },
+  });
+
+  if (!complete) return <Skeleton />;
+
+  return (
+    <div>
+      <img src={data.avatar} alt={data.name} />
+      <h3>{data.name}</h3>
+    </div>
+  );
+}
+```
+
+## Практика
+
+1. Создай `UserFragment` с основными полями и используй его в 3 разных запросах
+2. Реализуй co-located fragment для компонента `CommentItem`
+3. Напиши запрос с inline fragments для union типа `SearchResult = Post | User | Product`
+4. Создай `PageInfoFragment` для переиспользования полей пагинации
+5. Попробуй `useFragment` для чтения данных из кэша без запроса
+
+## Итого
+
+- Fragments — переиспользуемые части запросов
+- Co-located фрагменты — рядом с компонентом, который их использует
+- Inline fragments — для union и interface типов
+- `__typename` — обязательно для определения типа в union
+- `useFragment` — чтение из кэша без нового запроса
+
+**Следующий урок** → [Variables и Arguments →](/graphql/variables)

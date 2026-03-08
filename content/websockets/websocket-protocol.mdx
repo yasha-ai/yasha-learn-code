@@ -1,0 +1,221 @@
+# WebSocket: протокол
+
+WebSocket — стандартный протокол (RFC 6455), обеспечивающий постоянное двустороннее соединение между клиентом и сервером поверх TCP.
+
+## Как устанавливается соединение
+
+### HTTP Upgrade Handshake
+
+WebSocket начинается с обычного HTTP-запроса и затем "апгрейдится":
+
+```
+1. Клиент отправляет HTTP запрос:
+───────────────────────────────
+GET /chat HTTP/1.1
+Host: example.com
+Upgrade: websocket          ← запрос на апгрейд
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+
+2. Сервер отвечает (101 Switching Protocols):
+─────────────────────────────────────────────
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+
+3. Соединение установлено — теперь это не HTTP, а WebSocket!
+```
+
+### Ключ безопасности
+
+`Sec-WebSocket-Key` — случайный base64 ключ от клиента. Сервер вычисляет ответ:
+
+```javascript
+const crypto = require('crypto');
+
+function computeAccept(key) {
+  const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+  return crypto
+    .createHash('sha1')
+    .update(key + GUID)
+    .digest('base64');
+}
+
+// Пример
+const key = 'dGhlIHNhbXBsZSBub25jZQ==';
+console.log(computeAccept(key)); // s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+```
+
+## Фреймы (Frames)
+
+После установки соединения данные передаются в виде **фреймов**:
+
+```
+WebSocket Frame:
+┌─────────┬──────────┬──────────────┬────────────────┐
+│  Flags  │  Opcode  │  Payload len │  Payload data  │
+│  (1byte)│  (4bits) │  (7/16/64bit)│  (переменная)  │
+└─────────┴──────────┴──────────────┴────────────────┘
+
+Opcodes:
+  0x0 = continuation frame
+  0x1 = text frame     ← текст (UTF-8)
+  0x2 = binary frame   ← бинарные данные
+  0x8 = close
+  0x9 = ping
+  0xA = pong
+```
+
+## Heartbeat: Ping/Pong
+
+Чтобы держать соединение живым и проверять, что клиент ещё там:
+
+```javascript
+const WebSocket = require('ws');
+const wss = new WebSocket.Server({ port: 8080 });
+
+wss.on('connection', (ws) => {
+  ws.isAlive = true;
+
+  ws.on('pong', () => {
+    // Клиент ответил на ping
+    ws.isAlive = true;
+  });
+});
+
+// Пингуем всех клиентов каждые 30 секунд
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) {
+      console.log('Клиент не отвечает — отключаем');
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping(); // Отправляем ping
+  });
+}, 30000);
+
+wss.on('close', () => clearInterval(interval));
+```
+
+## Закрытие соединения
+
+Закрытие происходит с кодом статуса:
+
+```javascript
+// Клиент закрывает нормально
+ws.close(1000, 'Пользователь вышел');
+
+// Сервер закрывает с причиной
+ws.close(1001, 'Сервер перезагружается');
+
+// Коды закрытия (RFC 6455):
+const CLOSE_CODES = {
+  1000: 'Normal closure',          // нормальное закрытие
+  1001: 'Going away',              // вкладка закрыта
+  1002: 'Protocol error',          // ошибка протокола
+  1003: 'Unsupported data',        // неподдерживаемый тип данных
+  1006: 'Abnormal closure',        // соединение потеряно
+  1007: 'Invalid frame payload',   // невалидные данные
+  1008: 'Policy violation',        // нарушение политики
+  1009: 'Message too big',         // слишком большое сообщение
+  1011: 'Internal error',          // внутренняя ошибка сервера
+  1012: 'Service restart',         // перезапуск сервиса
+};
+```
+
+## Маскировка данных
+
+**Клиент** обязан маскировать все данные (XOR с 4-байтным ключом). Сервер — нет:
+
+```
+Клиент → Сервер:  ВСЕГДА маскировать
+Сервер → Клиент:  НИКОГДА не маскировать
+```
+
+Это защита от кеш-отравления прокси-серверов.
+
+## Максимальный размер сообщения
+
+По умолчанию ограничений нет, но рекомендуется ограничивать на сервере:
+
+```javascript
+const wss = new WebSocket.Server({
+  port: 8080,
+  maxPayload: 1024 * 1024, // 1 MB максимум
+});
+```
+
+## Расширения протокола
+
+WebSocket поддерживает расширения (Extensions):
+
+```
+Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+```
+
+`permessage-deflate` — сжатие данных (уменьшает трафик на 60-80% для JSON):
+
+```javascript
+const WebSocket = require('ws');
+
+const wss = new WebSocket.Server({
+  port: 8080,
+  perMessageDeflate: {
+    zlibDeflateOptions: {
+      chunkSize: 1024,
+      memLevel: 7,
+      level: 3,
+    },
+    threshold: 1024, // Сжимать только если больше 1KB
+  },
+});
+```
+
+## SubProtocols
+
+Можно договориться о вложенном протоколе:
+
+```
+Клиент: Sec-WebSocket-Protocol: chat, superchat
+Сервер: Sec-WebSocket-Protocol: chat
+```
+
+```javascript
+// Клиент указывает предпочитаемые протоколы
+const ws = new WebSocket('ws://example.com/chat', ['json', 'binary']);
+
+// Сервер выбирает один
+const wss = new WebSocket.Server({
+  port: 8080,
+  handleProtocols: (protocols, req) => {
+    if (protocols.has('json')) return 'json';
+    if (protocols.has('binary')) return 'binary';
+    return false; // Отказать
+  },
+});
+```
+
+## ws vs socket.io vs native
+
+| Аспект | ws (native) | socket.io | Browser WebSocket |
+|--------|-------------|-----------|-------------------|
+| Авто-переподключение | ❌ | ✅ | ❌ |
+| Fallback на polling | ❌ | ✅ | ❌ |
+| Комнаты | ❌ | ✅ | ❌ |
+| Namespace | ❌ | ✅ | ❌ |
+| Размер | ~50KB | ~200KB | 0KB (браузер) |
+| Контроль | Полный | Ограничен | Браузерный |
+
+## Задания
+
+1. Реализуй функцию `computeAccept(key)` для WebSocket handshake
+2. Объясни, почему клиент маскирует данные, а сервер — нет
+3. Что произойдёт, если сервер не ответит на ping в течение 30 секунд?
+4. Когда использовать бинарный фрейм вместо текстового?
+
+## Итог
+
+WebSocket — это надстройка над TCP с простым протоколом: handshake через HTTP, затем фреймы с данными в обе стороны. В следующем уроке — работа с браузерным WebSocket API.

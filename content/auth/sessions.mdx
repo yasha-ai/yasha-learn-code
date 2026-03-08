@@ -1,0 +1,289 @@
+# Сессии и куки
+
+## Что такое HTTP-сессия?
+
+HTTP — протокол без состояния (stateless). Каждый запрос независим. Сессии решают проблему "запомнить пользователя" между запросами.
+
+**Механизм сессий:**
+1. Пользователь вводит логин/пароль
+2. Сервер создаёт сессию и сохраняет её (в памяти, Redis, БД)
+3. Сервер отправляет клиенту cookie с Session ID
+4. При каждом запросе браузер отправляет cookie
+5. Сервер находит сессию по Session ID
+
+```
+Client                    Server
+  │                          │
+  │─── POST /login ─────────▶│
+  │                          │─── db.sessions.create({userId, data})
+  │                          │
+  │◀── Set-Cookie: sid=abc ──│
+  │                          │
+  │─── GET /profile ─────────│
+  │    Cookie: sid=abc        │
+  │                          │─── db.sessions.find({id: 'abc'})
+  │◀── 200 OK (user data) ───│
+```
+
+## Куки (Cookies)
+
+Куки — небольшие фрагменты данных, хранимые браузером.
+
+### Создание куки
+
+```javascript
+// Простая кука
+res.cookie('name', 'value');
+
+// Кука с настройками безопасности
+res.cookie('sessionId', sessionId, {
+  httpOnly: true,    // недоступна JavaScript — защита от XSS
+  secure: true,      // только HTTPS
+  sameSite: 'Strict', // защита от CSRF
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 дней в мс
+  path: '/',
+});
+```
+
+### Флаги безопасности куки
+
+| Флаг | Описание | Зачем |
+|------|----------|-------|
+| `HttpOnly` | Недоступна JavaScript | Защита от XSS |
+| `Secure` | Только HTTPS | Защита от MITM |
+| `SameSite=Strict` | Не отправляется с других сайтов | Защита от CSRF |
+| `SameSite=Lax` | Отправляется при навигации (default) | Баланс |
+| `SameSite=None` | Отправляется всегда (нужен Secure) | Для iframe |
+| `Path` | Ограничивает путь | Минимизация данных |
+| `Domain` | Поддомены | Шаринг сессий |
+| `Expires/MaxAge` | Время жизни | Авто-удаление |
+
+## express-session
+
+Стандартный модуль для сессий в Express:
+
+```bash
+npm install express-session
+```
+
+### Базовая настройка
+
+```javascript
+import express from 'express';
+import session from 'express-session';
+
+const app = express();
+
+app.use(session({
+  secret: process.env.SESSION_SECRET, // длинная случайная строка
+  resave: false,           // не сохранять если не изменилась
+  saveUninitialized: false, // не создавать пустые сессии
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'Lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 дней
+  }
+}));
+
+// Теперь req.session доступна
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = await authenticateUser(email, password);
+  
+  // Сохраняем данные в сессии
+  req.session.userId = user.id;
+  req.session.email = user.email;
+  
+  res.json({ success: true });
+});
+
+app.get('/profile', (req, res) => {
+  if (!req.session.userId) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  
+  res.json({ userId: req.session.userId });
+});
+
+app.post('/logout', (req, res) => {
+  req.session.destroy((err) => {
+    res.clearCookie('connect.sid');
+    res.json({ success: true });
+  });
+});
+```
+
+### SESSION_SECRET
+
+Secret должен быть длинным и случайным:
+
+```bash
+# Генерация в терминале
+node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+```
+
+```
+# .env
+SESSION_SECRET=a1b2c3d4...очень-длинная-строка...z9y8x7
+```
+
+## Хранилище сессий
+
+По умолчанию express-session хранит сессии в памяти. Это плохо для production!
+
+### Redis (рекомендуется)
+
+```bash
+npm install connect-redis redis
+```
+
+```javascript
+import { createClient } from 'redis';
+import { RedisStore } from 'connect-redis';
+
+const redisClient = createClient({
+  url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+
+await redisClient.connect();
+
+app.use(session({
+  store: new RedisStore({ client: redisClient }),
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  }
+}));
+```
+
+### PostgreSQL
+
+```bash
+npm install connect-pg-simple
+```
+
+```javascript
+import pgSession from 'connect-pg-simple';
+
+const PgSession = pgSession(session);
+
+app.use(session({
+  store: new PgSession({
+    conString: process.env.DATABASE_URL,
+    tableName: 'sessions',
+    createTableIfMissing: true,
+  }),
+  // ...остальные настройки
+}));
+```
+
+## Middleware для защиты роутов
+
+```javascript
+// Middleware проверки аутентификации
+function requireAuth(req, res, next) {
+  if (!req.session.userId) {
+    return res.status(401).json({ 
+      error: 'Authentication required' 
+    });
+  }
+  next();
+}
+
+// Загрузка пользователя в каждый запрос
+async function loadUser(req, res, next) {
+  if (req.session.userId) {
+    req.user = await db.users.findById(req.session.userId);
+  }
+  next();
+}
+
+app.use(loadUser);
+
+// Защищённый роут
+app.get('/dashboard', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+```
+
+## Безопасность сессий
+
+### Session Fixation Attack
+
+Злоумышленник устанавливает Session ID жертве заранее, затем ждёт входа.
+
+**Защита**: регенерировать Session ID после логина!
+
+```javascript
+app.post('/login', async (req, res) => {
+  const user = await authenticateUser(req.body.email, req.body.password);
+  
+  // Регенерируем Session ID перед сохранением данных
+  req.session.regenerate((err) => {
+    if (err) return res.status(500).json({ error: 'Server error' });
+    
+    req.session.userId = user.id;
+    req.session.save((err) => {
+      if (err) return res.status(500).json({ error: 'Server error' });
+      res.json({ success: true });
+    });
+  });
+});
+```
+
+### Ограничение срока жизни
+
+```javascript
+// Проверяем последнюю активность
+function checkSessionExpiry(req, res, next) {
+  const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 минут
+  
+  if (req.session.lastActivity) {
+    const idle = Date.now() - req.session.lastActivity;
+    
+    if (idle > IDLE_TIMEOUT) {
+      req.session.destroy();
+      return res.status(401).json({ error: 'Session expired' });
+    }
+  }
+  
+  req.session.lastActivity = Date.now();
+  next();
+}
+```
+
+### Привязка к IP (опционально)
+
+```javascript
+function bindSessionToIP(req, res, next) {
+  if (req.session.ip && req.session.ip !== req.ip) {
+    // IP изменился — возможна кража сессии
+    req.session.destroy();
+    return res.status(401).json({ error: 'Session invalid' });
+  }
+  
+  if (!req.session.ip) {
+    req.session.ip = req.ip;
+  }
+  
+  next();
+}
+```
+
+## Практические задания
+
+1. Настрой express-session с Redis хранилищем
+2. Реализуй login/logout с регенерацией session ID
+3. Добавь middleware для проверки аутентификации
+4. Реализуй "запомнить меня" (Remember Me) с длинным сроком сессии
+
+## Дополнительные ресурсы
+
+- [express-session docs](https://www.npmjs.com/package/express-session)
+- [OWASP Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)

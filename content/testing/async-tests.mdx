@@ -1,0 +1,199 @@
+# Тестирование async кода
+
+![Async Testing](/lessons/async-tests.png)
+
+## Async/Await (рекомендуется)
+
+```javascript
+// Функция для тестирования
+async function fetchUser(id) {
+  const res = await fetch(`/api/users/${id}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// Тест
+test('fetchUser returns user data', async () => {
+  global.fetch = jest.fn().mockResolvedValue({
+    ok: true,
+    json: () => Promise.resolve({ id: 1, name: 'Alice' }),
+  });
+
+  const user = await fetchUser(1);
+  expect(user.name).toBe('Alice');
+});
+
+test('fetchUser throws on error', async () => {
+  global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404 });
+
+  await expect(fetchUser(999)).rejects.toThrow('HTTP 404');
+});
+```
+
+## Promises
+
+```javascript
+// Возвращать Promise из теста
+test('fetches data (promise style)', () => {
+  return fetchData().then(data => {
+    expect(data).toBeDefined();
+  });
+});
+
+// .resolves / .rejects — удобные хелперы
+test('resolves with correct data', async () => {
+  await expect(fetchUser(1)).resolves.toMatchObject({ name: 'Alice' });
+});
+
+test('rejects for invalid id', async () => {
+  await expect(fetchUser(-1)).rejects.toThrow();
+  await expect(fetchUser(-1)).rejects.toBeInstanceOf(Error);
+  await expect(fetchUser(-1)).rejects.toHaveProperty('message', 'Invalid ID');
+});
+```
+
+## ВНИМАНИЕ: частые ошибки
+
+```javascript
+// ❌ НЕПРАВИЛЬНО: тест всегда проходит, даже если Promise отклонён
+test('WRONG test', () => {
+  fetchUser(1).then(user => {
+    expect(user.name).toBe('Alice'); // если ошибка — тест не знает
+  });
+  // нет return и нет await!
+});
+
+// ✅ ПРАВИЛЬНО
+test('correct test', async () => {
+  const user = await fetchUser(1);
+  expect(user.name).toBe('Alice');
+});
+
+// ❌ НЕПРАВИЛЬНО: не проверяем что ошибка БЫЛА выброшена
+test('WRONG error test', async () => {
+  try {
+    await fetchUser(-1);
+  } catch (e) {
+    expect(e.message).toBe('Invalid ID');
+  }
+  // если ошибки не было — тест прошёл без проверок!
+});
+
+// ✅ ПРАВИЛЬНО: expect.assertions гарантирует выполнение проверок
+test('correct error test', async () => {
+  expect.assertions(1); // ОБЯЗАТЕЛЬНО выполнится 1 проверка
+  try {
+    await fetchUser(-1);
+  } catch (e) {
+    expect(e.message).toBe('Invalid ID');
+  }
+});
+```
+
+## Тестирование с реальными таймаутами
+
+```javascript
+// Для операций с реальными задержками (не рекомендуется — медленно)
+test('operation completes within 5 seconds', async () => {
+  const result = await longRunningOperation();
+  expect(result).toBeDefined();
+}, 10000); // увеличить таймаут теста (по умолчанию 5000мс)
+
+// Лучше: использовать fake timers
+test('retries 3 times before failing', async () => {
+  jest.useFakeTimers();
+  const operation = jest.fn()
+    .mockRejectedValueOnce(new Error('timeout'))
+    .mockRejectedValueOnce(new Error('timeout'))
+    .mockResolvedValue({ success: true });
+
+  const promise = withRetry(operation, { retries: 3, delay: 1000 });
+  await jest.runAllTimersAsync();
+
+  await expect(promise).resolves.toEqual({ success: true });
+  expect(operation).toHaveBeenCalledTimes(3);
+
+  jest.useRealTimers();
+});
+```
+
+## Параллельные операции
+
+```javascript
+test('handles concurrent requests', async () => {
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ id: 1 }) })
+    .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ id: 2 }) })
+    .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ id: 3 }) });
+
+  const results = await Promise.all([
+    fetchUser(1),
+    fetchUser(2),
+    fetchUser(3),
+  ]);
+
+  expect(results).toHaveLength(3);
+  expect(results.map(u => u.id)).toEqual([1, 2, 3]);
+});
+
+test('Promise.allSettled handles partial failures', async () => {
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ id: 1 }) })
+    .mockResolvedValueOnce({ ok: false, status: 404 });
+
+  const results = await Promise.allSettled([fetchUser(1), fetchUser(2)]);
+
+  expect(results[0].status).toBe('fulfilled');
+  expect(results[1].status).toBe('rejected');
+});
+```
+
+## EventEmitter / Streams
+
+```javascript
+import { EventEmitter } from 'events';
+
+test('emits data events', done => {
+  const emitter = new EventEmitter();
+  const received = [];
+
+  emitter.on('data', chunk => received.push(chunk));
+  emitter.on('end', () => {
+    expect(received).toEqual(['chunk1', 'chunk2']);
+    done(); // сигнализировать что тест завершён
+  });
+
+  // Симулировать события
+  emitter.emit('data', 'chunk1');
+  emitter.emit('data', 'chunk2');
+  emitter.emit('end');
+});
+
+// Или с промисом
+test('emits data events (promise)', () => {
+  return new Promise((resolve, reject) => {
+    const emitter = createDataStream();
+    const received = [];
+
+    emitter.on('data', chunk => received.push(chunk));
+    emitter.on('end', () => {
+      expect(received).toHaveLength(3);
+      resolve();
+    });
+    emitter.on('error', reject);
+  });
+});
+```
+
+## Практические задания
+
+1. Протестируй async функцию с retry логикой используя fake timers
+2. Напиши тест для функции `fetchWithTimeout` (откидывает после N мс)
+3. Протестируй EventEmitter, который генерирует события
+
+## Итоги
+
+- async/await — рекомендуемый способ тестирования асинхронного кода
+- .resolves/.rejects — удобные матчеры для Promise
+- expect.assertions(N) — гарантия что проверки действительно были
+- Fake timers вместо реальных таймаутов

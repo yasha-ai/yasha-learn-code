@@ -1,0 +1,228 @@
+# Mock Service Worker (MSW)
+
+![MSW](/lessons/msw.png)
+
+## Что такое MSW?
+
+MSW перехватывает HTTP-запросы на уровне сети (Service Worker или Node interceptor), позволяя мокировать API без изменения кода приложения.
+
+```
+App → fetch('/api/users') → [MSW перехватывает] → фейковый ответ
+                            ↑ реальный fetch не доходит до сервера
+```
+
+## Установка
+
+```bash
+npm install --save-dev msw
+```
+
+## Создание обработчиков
+
+```typescript
+// src/mocks/handlers.ts
+import { http, HttpResponse, delay } from 'msw';
+
+const users = [
+  { id: 1, name: 'Alice', email: 'alice@test.com' },
+  { id: 2, name: 'Bob', email: 'bob@test.com' },
+];
+
+export const handlers = [
+  // GET /api/users
+  http.get('/api/users', () => {
+    return HttpResponse.json(users);
+  }),
+
+  // GET /api/users/:id
+  http.get('/api/users/:id', ({ params }) => {
+    const user = users.find(u => u.id === Number(params.id));
+    if (!user) {
+      return HttpResponse.json(
+        { error: 'User not found' },
+        { status: 404 }
+      );
+    }
+    return HttpResponse.json(user);
+  }),
+
+  // POST /api/users
+  http.post('/api/users', async ({ request }) => {
+    const body = await request.json();
+    const newUser = { id: users.length + 1, ...body };
+    return HttpResponse.json(newUser, { status: 201 });
+  }),
+
+  // PATCH /api/users/:id
+  http.patch('/api/users/:id', async ({ params, request }) => {
+    const body = await request.json();
+    const user = users.find(u => u.id === Number(params.id));
+    if (!user) return HttpResponse.json(null, { status: 404 });
+    Object.assign(user, body);
+    return HttpResponse.json(user);
+  }),
+
+  // DELETE /api/users/:id
+  http.delete('/api/users/:id', ({ params }) => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  // С задержкой (для тестирования loading state)
+  http.get('/api/slow', async () => {
+    await delay(2000);
+    return HttpResponse.json({ data: 'slow response' });
+  }),
+];
+```
+
+## Настройка для тестов (Node.js)
+
+```typescript
+// src/mocks/server.ts
+import { setupServer } from 'msw/node';
+import { handlers } from './handlers';
+
+export const server = setupServer(...handlers);
+```
+
+```typescript
+// src/setupTests.ts (или jest.setup.ts / vitest.setup.ts)
+import { server } from './mocks/server';
+
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+```
+
+## Использование в тестах
+
+```typescript
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
+import { server } from '../mocks/server';
+import { UserList } from './UserList';
+
+test('displays users from API', async () => {
+  render(<UserList />);
+
+  expect(await screen.findByText('Alice')).toBeInTheDocument();
+  expect(screen.getByText('Bob')).toBeInTheDocument();
+});
+
+test('handles server error', async () => {
+  // Переопределить обработчик для ОДНОГО теста
+  server.use(
+    http.get('/api/users', () => {
+      return HttpResponse.json(
+        { error: 'Internal Server Error' },
+        { status: 500 }
+      );
+    })
+  );
+
+  render(<UserList />);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Failed to load');
+});
+
+test('handles empty list', async () => {
+  server.use(
+    http.get('/api/users', () => {
+      return HttpResponse.json([]);
+    })
+  );
+
+  render(<UserList />);
+
+  expect(await screen.findByText('No users found')).toBeInTheDocument();
+});
+
+test('creates new user', async () => {
+  const user = userEvent.setup();
+
+  // Перехватить POST и проверить тело
+  let capturedBody: any;
+  server.use(
+    http.post('/api/users', async ({ request }) => {
+      capturedBody = await request.json();
+      return HttpResponse.json({ id: 3, ...capturedBody }, { status: 201 });
+    })
+  );
+
+  render(<CreateUserForm />);
+
+  await user.type(screen.getByLabelText('Name'), 'Carol');
+  await user.type(screen.getByLabelText('Email'), 'carol@test.com');
+  await user.click(screen.getByRole('button', { name: /create/i }));
+
+  expect(await screen.findByText('User created!')).toBeInTheDocument();
+  expect(capturedBody).toMatchObject({ name: 'Carol', email: 'carol@test.com' });
+});
+```
+
+## Настройка для браузера (Storybook / Dev)
+
+```typescript
+// src/mocks/browser.ts
+import { setupWorker } from 'msw/browser';
+import { handlers } from './handlers';
+
+export const worker = setupWorker(...handlers);
+```
+
+```bash
+# Создать Service Worker файл
+npx msw init ./public --save
+```
+
+```typescript
+// src/main.tsx (для разработки)
+async function enableMocking() {
+  if (process.env.NODE_ENV !== 'development') return;
+
+  const { worker } = await import('./mocks/browser');
+  return worker.start({ onUnhandledRequest: 'bypass' });
+}
+
+enableMocking().then(() => {
+  ReactDOM.createRoot(document.getElementById('root')!).render(<App />);
+});
+```
+
+## MSW v2 Network Logging
+
+```typescript
+// Логировать все перехваченные запросы
+server.events.on('request:start', ({ request }) => {
+  console.log('MSW intercepted:', request.method, request.url);
+});
+
+server.events.on('response:mocked', ({ request, response }) => {
+  console.log('MSW responded:', request.url, response.status);
+});
+```
+
+## MSW vs jest.mock(fetch)
+
+| | MSW | jest.mock(fetch) |
+|--|-----|-----------------|
+| Уровень перехвата | Сеть | Код |
+| Работает с axios | ✅ | Нужен отдельный мок |
+| Работает с ky, got | ✅ | Нужен отдельный мок |
+| Используется в dev | ✅ | ❌ |
+| Storybook | ✅ | ❌ |
+| Реалистичность | Высокая | Низкая |
+
+## Практические задания
+
+1. Настрой MSW для React-проекта (3 эндпойнта: GET, POST, DELETE)
+2. Напиши тесты с переопределением handlers для ошибок
+3. Используй MSW в Storybook для компонента с API
+
+## Итоги
+
+- MSW перехватывает HTTP на уровне сети — самый реалистичный мок
+- Один набор handlers для тестов, Storybook и dev-окружения
+- server.use() переопределяет handler для одного теста
+- Работает с любым HTTP-клиентом (fetch, axios, ky)

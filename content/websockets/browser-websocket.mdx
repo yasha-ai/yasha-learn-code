@@ -1,0 +1,255 @@
+# WebSocket в браузере
+
+Браузер предоставляет нативный `WebSocket` API — никаких библиотек не нужно.
+
+## Основы браузерного WebSocket
+
+```javascript
+// Создаём соединение
+const ws = new WebSocket('wss://example.com/ws');
+// Протоколы: ws:// (незащищённый), wss:// (через TLS, всегда в продакшене)
+
+// Состояния соединения
+console.log(ws.readyState);
+// 0 = CONNECTING  — устанавливается
+// 1 = OPEN        — открыто, можно отправлять
+// 2 = CLOSING     — закрывается
+// 3 = CLOSED      — закрыто
+
+// Четыре события
+ws.onopen = (event) => {
+  console.log('Соединение установлено');
+  ws.send('Привет, сервер!');
+};
+
+ws.onmessage = (event) => {
+  console.log('Получено:', event.data);
+  // event.data — строка, Blob или ArrayBuffer
+};
+
+ws.onerror = (event) => {
+  console.error('Ошибка WebSocket');
+  // Деталей ошибки нет из соображений безопасности
+};
+
+ws.onclose = (event) => {
+  console.log(`Закрыто: код=${event.code}, причина=${event.reason}`);
+  console.log('Чисто?', event.wasClean);
+};
+```
+
+## Отправка данных
+
+```javascript
+// Текст (строка)
+ws.send('Hello, world!');
+
+// JSON
+ws.send(JSON.stringify({ type: 'message', text: 'Привет!' }));
+
+// Бинарные данные — ArrayBuffer
+const buffer = new ArrayBuffer(8);
+const view = new DataView(buffer);
+view.setFloat64(0, 3.14159);
+ws.send(buffer);
+
+// Blob
+const blob = new Blob(['Hello'], { type: 'text/plain' });
+ws.send(blob);
+```
+
+## Получение бинарных данных
+
+```javascript
+// По умолчанию binaryType = 'blob'
+ws.binaryType = 'arraybuffer'; // Или 'blob'
+
+ws.onmessage = (event) => {
+  if (event.data instanceof ArrayBuffer) {
+    const view = new DataView(event.data);
+    console.log('Float64:', view.getFloat64(0));
+  } else if (event.data instanceof Blob) {
+    event.data.text().then(text => console.log('Blob text:', text));
+  } else {
+    console.log('Строка:', event.data);
+  }
+};
+```
+
+## Проверка перед отправкой
+
+```javascript
+function safeSend(ws, data) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(typeof data === 'string' ? data : JSON.stringify(data));
+  } else {
+    console.warn('Соединение не открыто:', ws.readyState);
+  }
+}
+
+// bufferedAmount — сколько байт в очереди на отправку
+console.log('В очереди:', ws.bufferedAmount, 'байт');
+```
+
+## Автопереподключение
+
+Браузерный WebSocket не переподключается автоматически — нужно реализовать самому:
+
+```javascript
+class ReconnectingWebSocket {
+  constructor(url, options = {}) {
+    this.url = url;
+    this.reconnectDelay = options.reconnectDelay || 1000;
+    this.maxDelay = options.maxDelay || 30000;
+    this.maxRetries = options.maxRetries || Infinity;
+    this.retries = 0;
+    this.ws = null;
+    
+    this.onopen = null;
+    this.onmessage = null;
+    this.onclose = null;
+    this.onerror = null;
+    
+    this._connect();
+  }
+
+  _connect() {
+    this.ws = new WebSocket(this.url);
+    
+    this.ws.onopen = (e) => {
+      console.log('Подключено');
+      this.retries = 0;
+      this.reconnectDelay = 1000; // сбрасываем задержку
+      if (this.onopen) this.onopen(e);
+    };
+
+    this.ws.onmessage = (e) => {
+      if (this.onmessage) this.onmessage(e);
+    };
+
+    this.ws.onerror = (e) => {
+      if (this.onerror) this.onerror(e);
+    };
+
+    this.ws.onclose = (e) => {
+      if (this.onclose) this.onclose(e);
+      
+      if (this.retries < this.maxRetries && !e.wasClean) {
+        console.log(`Переподключение через ${this.reconnectDelay}мс...`);
+        setTimeout(() => this._connect(), this.reconnectDelay);
+        
+        // Экспоненциальная задержка
+        this.reconnectDelay = Math.min(
+          this.reconnectDelay * 2,
+          this.maxDelay
+        );
+        this.retries++;
+      }
+    };
+  }
+
+  send(data) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(typeof data === 'object' ? JSON.stringify(data) : data);
+    }
+  }
+
+  close() {
+    this.maxRetries = 0; // Запрещаем переподключение
+    this.ws?.close(1000, 'Закрыто пользователем');
+  }
+}
+
+// Использование
+const ws = new ReconnectingWebSocket('wss://example.com/ws', {
+  reconnectDelay: 1000,
+  maxDelay: 30000,
+  maxRetries: 10,
+});
+
+ws.onopen = () => console.log('Открыто!');
+ws.onmessage = (e) => console.log('Данные:', e.data);
+ws.send({ type: 'subscribe', channel: 'updates' });
+```
+
+## Использование в React
+
+```jsx
+import { useEffect, useRef, useState, useCallback } from 'react';
+
+function useWebSocket(url) {
+  const ws = useRef(null);
+  const [status, setStatus] = useState('disconnected');
+  const [messages, setMessages] = useState([]);
+
+  useEffect(() => {
+    ws.current = new WebSocket(url);
+
+    ws.current.onopen = () => setStatus('connected');
+    ws.current.onclose = () => setStatus('disconnected');
+    ws.current.onerror = () => setStatus('error');
+    ws.current.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      setMessages((prev) => [...prev, data]);
+    };
+
+    return () => {
+      ws.current?.close(1000, 'Компонент размонтирован');
+    };
+  }, [url]);
+
+  const send = useCallback((data) => {
+    if (ws.current?.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify(data));
+    }
+  }, []);
+
+  return { status, messages, send };
+}
+
+// Компонент
+function Chat() {
+  const { status, messages, send } = useWebSocket('wss://example.com/chat');
+  const [input, setInput] = useState('');
+
+  const handleSend = () => {
+    if (input.trim()) {
+      send({ type: 'message', text: input });
+      setInput('');
+    }
+  };
+
+  return (
+    <div>
+      <div>Статус: {status}</div>
+      <div>
+        {messages.map((msg, i) => (
+          <div key={i}>{msg.text}</div>
+        ))}
+      </div>
+      <input value={input} onChange={(e) => setInput(e.target.value)} />
+      <button onClick={handleSend}>Отправить</button>
+    </div>
+  );
+}
+```
+
+## Отладка в DevTools
+
+В Chrome DevTools → Network → фильтр WS → можно видеть все фреймы:
+
+```
+↑ Отправлено клиентом (зелёный)
+↓ Получено от сервера (белый)
+```
+
+## Задания
+
+1. Реализуй `ReconnectingWebSocket` с экспоненциальной задержкой
+2. Добавь в хук `useWebSocket` поддержку переподключения
+3. Как отправить файл через WebSocket? Напиши пример
+4. Что будет, если вызвать `ws.send()` пока `readyState === CONNECTING`?
+
+## Итог
+
+Browser WebSocket API прост: создай соединение, слушай 4 события, отправляй данные через `send()`. Для продакшена нужно реализовать автопереподключение. В следующем уроке — Socket.io, который делает это за нас.

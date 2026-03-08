@@ -1,0 +1,274 @@
+# GraphQL: Урок 8. Resolvers
+
+![GraphQL Resolvers](/lessons/graphql-resolvers.png)
+
+Resolver — это функция, которая возвращает данные для конкретного поля в схеме. Каждое поле может иметь свой resolver.
+
+## Сигнатура resolver
+
+```javascript
+const resolver = (
+  parent,    // Объект родительского поля
+  args,      // Аргументы из запроса
+  context,   // Общий контекст (DB, auth, etc.)
+  info       // Мета-информация о запросе
+) => value;
+```
+
+## Default resolvers
+
+Если resolver не указан — GraphQL использует дефолтный:
+
+```javascript
+// Дефолтный resolver эквивалентен:
+(parent) => parent[fieldName]
+```
+
+Поэтому для простых полей resolver не нужен:
+
+```javascript
+const resolvers = {
+  Query: {
+    user: (_, { id }) => db.users.findById(id), // Явный resolver
+  },
+  User: {
+    // id, name, email — дефолтные, не нужны
+    // Но для вычисляемого поля нужен:
+    fullName: (parent) => `${parent.firstName} ${parent.lastName}`,
+    posts: (parent) => db.posts.findByAuthor(parent.id),
+  },
+};
+```
+
+## Context — общий контекст
+
+Context передаётся всем resolvers и содержит общие ресурсы:
+
+```javascript
+// Создание context на сервере:
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+});
+
+const { url } = await startStandaloneServer(server, {
+  context: async ({ req }) => {
+    // Извлекаем токен из заголовка
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    let user = null;
+
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        user = await db.users.findById(decoded.userId);
+      } catch (e) {
+        // Невалидный токен — user остаётся null
+      }
+    }
+
+    return {
+      db,           // Подключение к БД
+      user,         // Текущий пользователь (или null)
+      dataSources,  // DataSources (REST API, etc.)
+    };
+  },
+});
+```
+
+Использование в resolvers:
+```javascript
+const resolvers = {
+  Query: {
+    me: (_, __, { user }) => {
+      if (!user) throw new Error('Не авторизован');
+      return user;
+    },
+  },
+  Mutation: {
+    createPost: async (_, { input }, { db, user }) => {
+      if (!user) throw new Error('Не авторизован');
+      return db.posts.create({ ...input, authorId: user.id });
+    },
+  },
+};
+```
+
+## Resolver chains (цепочки)
+
+GraphQL выполняет resolvers по дереву запроса:
+
+```graphql
+query {
+  user(id: "1") {   # 1. Query.user resolver
+    name             # 2. User.name (дефолтный)
+    posts {          # 3. User.posts resolver
+      title          # 4. Post.title (дефолтный)
+      author {       # 5. Post.author resolver
+        name         # 6. User.name (дефолтный)
+      }
+    }
+  }
+}
+```
+
+```javascript
+const resolvers = {
+  Query: {
+    user: (_, { id }, { db }) => db.users.findById(id),
+  },
+  User: {
+    // parent — объект User из предыдущего resolver
+    posts: (parent, _, { db }) => db.posts.findByAuthor(parent.id),
+  },
+  Post: {
+    // parent — объект Post
+    author: (parent, _, { db }) => db.users.findById(parent.authorId),
+  },
+};
+```
+
+## Асинхронные resolvers
+
+Resolvers могут быть async и возвращать Promise:
+
+```javascript
+const resolvers = {
+  Query: {
+    user: async (_, { id }, { db }) => {
+      const user = await db.users.findById(id);
+      if (!user) throw new Error(`Пользователь ${id} не найден`);
+      return user;
+    },
+
+    // Параллельные запросы:
+    dashboard: async (_, __, { db, user }) => {
+      const [profile, posts, notifications] = await Promise.all([
+        db.users.findById(user.id),
+        db.posts.findByAuthor(user.id, { limit: 5 }),
+        db.notifications.findUnread(user.id),
+      ]);
+      return { profile, posts, notifications };
+    },
+  },
+};
+```
+
+## Обработка ошибок в resolvers
+
+```javascript
+import { GraphQLError } from 'graphql';
+
+const resolvers = {
+  Mutation: {
+    createPost: async (_, { input }, { db, user }) => {
+      // Проверка авторизации
+      if (!user) {
+        throw new GraphQLError('Необходима авторизация', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+
+      // Валидация
+      if (input.title.length < 3) {
+        throw new GraphQLError('Заголовок слишком короткий', {
+          extensions: {
+            code: 'BAD_USER_INPUT',
+            field: 'title',
+          },
+        });
+      }
+
+      // Бизнес-логика
+      try {
+        return await db.posts.create({ ...input, authorId: user.id });
+      } catch (err) {
+        if (err.code === '23505') { // PostgreSQL unique violation
+          throw new GraphQLError('Слаг уже существует', {
+            extensions: { code: 'CONFLICT', field: 'slug' },
+          });
+        }
+        throw err;
+      }
+    },
+  },
+};
+```
+
+## info — мета-информация о запросе
+
+`info` содержит AST запроса и может использоваться для оптимизации:
+
+```javascript
+import { parseResolveInfo } from 'graphql-parse-resolve-info';
+
+const resolvers = {
+  Query: {
+    users: async (_, args, { db }, info) => {
+      // Узнаём, какие поля запрошены
+      const resolveInfo = parseResolveInfo(info);
+      const requestedFields = Object.keys(resolveInfo.fields);
+
+      // Выбираем только нужные колонки из БД
+      const columns = ['id'];
+      if (requestedFields.includes('name')) columns.push('name');
+      if (requestedFields.includes('email')) columns.push('email');
+
+      return db.users.findAll({ columns });
+    },
+  },
+};
+```
+
+## Resolver middleware
+
+Паттерн для добавления сквозной логики (авторизация, логирование):
+
+```javascript
+// Обёртка для проверки авторизации
+const requireAuth = (resolver) => (parent, args, context, info) => {
+  if (!context.user) {
+    throw new GraphQLError('Необходима авторизация', {
+      extensions: { code: 'UNAUTHENTICATED' },
+    });
+  }
+  return resolver(parent, args, context, info);
+};
+
+// Обёртка для логирования
+const withLogging = (resolver, name) => async (parent, args, context, info) => {
+  console.time(name);
+  const result = await resolver(parent, args, context, info);
+  console.timeEnd(name);
+  return result;
+};
+
+const resolvers = {
+  Query: {
+    me: requireAuth(async (_, __, { db, user }) => {
+      return db.users.findById(user.id);
+    }),
+
+    expensiveQuery: withLogging(async (_, args, { db }) => {
+      return db.complexQuery(args);
+    }, 'expensiveQuery'),
+  },
+};
+```
+
+## Практика
+
+1. Создай resolver для `User.fullName` из `firstName` + `lastName`
+2. Реализуй `context` с текущим пользователем из JWT
+3. Создай middleware `requireAuth` и примени к мутациям
+4. Добавь логирование времени выполнения в resolver
+5. Реализуй resolver `Post.commentsCount` — возвращает число комментариев
+
+## Итого
+
+- Resolver — функция `(parent, args, context, info)` для каждого поля
+- Дефолтный resolver: `parent[fieldName]`
+- Context — общие ресурсы для всех resolvers (DB, текущий пользователь)
+- Resolvers могут быть асинхронными (Promise)
+- Обрабатывай ошибки через `GraphQLError` с кодами
+
+**Следующий урок** → [Apollo Server →](/graphql/apollo-server)

@@ -1,0 +1,316 @@
+import { Playground } from '../../components/Playground'
+
+# Critical Rendering Path
+
+Critical Rendering Path (CRP) — это **последовательность шагов**, которые браузер выполняет для превращения HTML/CSS/JS в пиксели на экране.
+
+## Как браузер рендерит страницу?
+
+```
+HTML → DOM → CSSOM → Render Tree → Layout → Paint → Composite
+```
+
+1. **HTML Parsing** → DOM (Document Object Model)
+2. **CSS Parsing** → CSSOM (CSS Object Model)
+3. **DOM + CSSOM** → Render Tree (только видимые элементы)
+4. **Layout** → вычисление позиций и размеров
+5. **Paint** → рисование пикселей
+6. **Composite** → наложение слоёв
+
+## Блокирующие ресурсы
+
+### CSS блокирует рендеринг
+
+Браузер НЕ будет рисовать страницу, пока не загрузит весь CSS.
+
+```html
+<!-- ❌ Блокирует рендеринг -->
+<link rel="stylesheet" href="styles.css">
+
+<!-- ✅ Critical CSS inline -->
+<style>
+  /* Только стили для первого экрана */
+  body { font-family: sans-serif; margin: 0; }
+  .hero { background: #000; color: #fff; padding: 40px; }
+</style>
+
+<!-- ✅ Non-critical CSS загружаем асинхронно -->
+<link rel="preload" href="full-styles.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="full-styles.css"></noscript>
+```
+
+### JavaScript блокирует парсинг HTML
+
+По умолчанию JS останавливает HTML-парсинг.
+
+```html
+<!-- ❌ Блокирует HTML парсинг -->
+<script src="app.js"></script>
+
+<!-- ✅ Defer — выполняется после парсинга HTML -->
+<script src="app.js" defer></script>
+
+<!-- ✅ Async — загружается параллельно, выполняется сразу -->
+<script src="analytics.js" async></script>
+
+<!-- ✅ Module — автоматически defer -->
+<script type="module" src="app.js"></script>
+```
+
+**Разница defer vs async:**
+- `defer` — сохраняет порядок, выполняется после DOM готов
+- `async` — не гарантирует порядок, для независимых скриптов
+
+## Preload, Prefetch, Preconnect
+
+```html
+<!-- Предзагрузка критических ресурсов -->
+<link rel="preload" href="/hero.webp" as="image" fetchpriority="high">
+<link rel="preload" href="/main.css" as="style">
+<link rel="preload" href="/font.woff2" as="font" type="font/woff2" crossorigin>
+
+<!-- Предподключение к внешним серверам -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://api.example.com" crossorigin>
+
+<!-- Предварительная загрузка следующей страницы -->
+<link rel="prefetch" href="/next-page.html">
+<link rel="prefetch" href="/next-page-image.jpg" as="image">
+```
+
+## Reflow и Repaint
+
+**Reflow (Layout)** — пересчёт размеров и позиций. Дорогая операция.  
+**Repaint** — перерисовка пикселей. Дешевле reflow.
+
+```javascript
+// ❌ Вызывает множественные reflow (thrashing)
+for (let i = 0; i < 100; i++) {
+  element.style.left = element.offsetLeft + 1 + 'px'; // read + write = reflow
+}
+
+// ✅ Читаем, потом пишем (batch)
+const positions = elements.map(el => el.offsetLeft); // все reads
+elements.forEach((el, i) => {
+  el.style.left = positions[i] + 1 + 'px'; // все writes
+});
+
+// ✅ Используем transform вместо left/top (не вызывает reflow!)
+element.style.transform = 'translateX(100px)';
+
+// ✅ Оффскрин манипуляции
+const fragment = document.createDocumentFragment();
+items.forEach(item => {
+  const li = document.createElement('li');
+  li.textContent = item;
+  fragment.appendChild(li);
+});
+list.appendChild(fragment); // один reflow
+```
+
+## Что вызывает Reflow?
+
+- Изменение `width`, `height`, `margin`, `padding`, `border`
+- Добавление/удаление элементов в DOM
+- Изменение текстового контента
+- Изменение класса элемента
+- Чтение layout-свойств: `offsetTop`, `scrollTop`, `getBoundingClientRect()`
+
+## Что НЕ вызывает Reflow?
+
+- `opacity` — только compositing
+- `transform` — только compositing
+- `filter` — только compositing
+- `will-change: transform` — выносит в отдельный GPU слой
+
+## Оптимизация CSS
+
+```css
+/* ✅ Используйте transform для анимаций */
+.animated {
+  transform: translateX(0);
+  transition: transform 0.3s ease;
+}
+.animated:hover {
+  transform: translateX(10px); /* Не вызывает reflow */
+}
+
+/* ✅ will-change для GPU слоёв (используйте осторожно!) */
+.hero-animation {
+  will-change: transform, opacity;
+}
+
+/* ❌ Не используйте will-change везде — жрёт память */
+.bad { will-change: all; }
+
+/* ✅ Containment — изолируйте область рендеринга */
+.widget {
+  contain: layout style paint;
+}
+```
+
+## Практический пример
+
+<Playground
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html>
+<head>
+  <title>Critical Rendering Path Demo</title>
+  <style>
+    body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+    h1 { color: #89b4fa; }
+    h2 { color: #cba6f7; margin: 20px 0 10px; font-size: 16px; }
+    .demo-box { background: #313244; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    button { background: #cba6f7; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin: 4px; }
+    .result { margin-top: 8px; padding: 8px; border-radius: 4px; background: #45475a; font-size: 14px; }
+    
+    /* Демо анимаций */
+    .box { 
+      width: 60px; height: 60px; border-radius: 8px;
+      display: inline-block; margin: 10px;
+    }
+    .box-bad { 
+      background: #f38ba8;
+      position: relative;
+      left: 0;
+      transition: left 0.5s;
+    }
+    .box-bad.moved { left: 150px; }
+    
+    .box-good { 
+      background: #a6e3a1;
+      transform: translateX(0);
+      transition: transform 0.5s;
+    }
+    .box-good.moved { transform: translateX(150px); }
+  </style>
+</head>
+<body>
+  <h1>Critical Rendering Path</h1>
+
+  <div class="demo-box">
+    <h2>1. Reflow vs Composite анимации</h2>
+    <div>
+      <span style="color: #f38ba8">❌ left: (вызывает Reflow):</span>
+      <div class="box box-bad" id="badBox"></div>
+    </div>
+    <div style="margin-top: 8px">
+      <span style="color: #a6e3a1">✅ transform: (только Composite):</span>
+      <div class="box box-good" id="goodBox"></div>
+    </div>
+    <button onclick="animateBoxes()">Анимировать оба</button>
+    <div class="result" id="anim-result">Нажмите кнопку — трансформация работает плавнее</div>
+  </div>
+
+  <div class="demo-box">
+    <h2>2. Layout Thrashing (чтение + запись в цикле)</h2>
+    <button onclick="badLayout()">❌ Плохо (thrashing)</button>
+    <button onclick="goodLayout()">✅ Хорошо (batch)</button>
+    <div class="result" id="layout-result">Нажмите кнопку для сравнения</div>
+    <div id="items-container"></div>
+  </div>
+
+  <div class="demo-box">
+    <h2>3. DOM Batch Update</h2>
+    <button onclick="slowUpdate()">❌ Медленно (по одному)</button>
+    <button onclick="fastUpdate()">✅ Быстро (DocumentFragment)</button>
+    <div class="result" id="batch-result">Нажмите для теста</div>
+    <ul id="list" style="margin-top: 8px; max-height: 100px; overflow: auto;"></ul>
+  </div>
+
+  <script>
+    // Анимации
+    let moved = false;
+    function animateBoxes() {
+      moved = !moved;
+      document.getElementById('badBox').classList.toggle('moved', moved);
+      document.getElementById('goodBox').classList.toggle('moved', moved);
+      document.getElementById('anim-result').textContent = moved ? '→ Оба переместились, но left вызвал Reflow' : '← Вернулись назад';
+    }
+
+    // Layout thrashing
+    function badLayout() {
+      const start = performance.now();
+      const items = Array.from({ length: 200 }, (_, i) => {
+        const div = document.createElement('div');
+        div.style.cssText = 'width: 10px; height: 10px; background: #f38ba8; display: inline-block; margin: 1px;';
+        document.getElementById('items-container').appendChild(div);
+        return div;
+      });
+      // ❌ Read + Write в цикле = thrashing
+      items.forEach(item => {
+        const w = item.offsetWidth; // чтение (вызывает reflow)
+        item.style.width = (w + 1) + 'px'; // запись (вызывает reflow)
+      });
+      const time = performance.now() - start;
+      document.getElementById('layout-result').textContent = \`❌ Layout Thrashing: \${time.toFixed(0)}ms (много reflow)\`;
+      document.getElementById('layout-result').style.color = '#f38ba8';
+    }
+
+    function goodLayout() {
+      document.getElementById('items-container').innerHTML = '';
+      const start = performance.now();
+      const items = Array.from({ length: 200 }, (_, i) => {
+        const div = document.createElement('div');
+        div.style.cssText = 'width: 10px; height: 10px; background: #a6e3a1; display: inline-block; margin: 1px;';
+        document.getElementById('items-container').appendChild(div);
+        return div;
+      });
+      // ✅ Читаем все, потом пишем все
+      const widths = items.map(item => item.offsetWidth); // все чтения
+      items.forEach((item, i) => { item.style.width = (widths[i] + 1) + 'px'; }); // все записи
+      const time = performance.now() - start;
+      document.getElementById('layout-result').textContent = \`✅ Batch: \${time.toFixed(0)}ms (один reflow)\`;
+      document.getElementById('layout-result').style.color = '#a6e3a1';
+    }
+
+    // DOM batch
+    function slowUpdate() {
+      const list = document.getElementById('list');
+      list.innerHTML = '';
+      const start = performance.now();
+      for (let i = 0; i < 100; i++) {
+        const li = document.createElement('li');
+        li.textContent = \`Item \${i}\`;
+        list.appendChild(li); // 100 reflow!
+      }
+      const time = performance.now() - start;
+      document.getElementById('batch-result').textContent = \`❌ По одному: \${time.toFixed(2)}ms\`;
+      document.getElementById('batch-result').style.color = '#f38ba8';
+    }
+
+    function fastUpdate() {
+      const list = document.getElementById('list');
+      list.innerHTML = '';
+      const start = performance.now();
+      const fragment = document.createDocumentFragment();
+      for (let i = 0; i < 100; i++) {
+        const li = document.createElement('li');
+        li.textContent = \`Item \${i}\`;
+        fragment.appendChild(li);
+      }
+      list.appendChild(fragment); // один reflow!
+      const time = performance.now() - start;
+      document.getElementById('batch-result').textContent = \`✅ Fragment: \${time.toFixed(2)}ms\`;
+      document.getElementById('batch-result').style.color = '#a6e3a1';
+    }
+  </script>
+</body>
+</html>`
+  }}
+/>
+
+## Практические задания
+
+1. Откройте DevTools → Performance → Record загрузку страницы. Найдите самый долгий Layout
+2. Проверьте ваш HTML — все ли `<script>` теги имеют `defer` или `async`?
+3. Найдите CSS, который можно инлайнить как critical CSS
+4. Замените анимации `left/top` на `transform` в вашем проекте
+
+## Ссылки
+
+- [MDN: Critical Rendering Path](https://developer.mozilla.org/en-US/docs/Web/Performance/Critical_rendering_path)
+- [web.dev: Render-Blocking Resources](https://developer.chrome.com/docs/lighthouse/performance/render-blocking-resources)
+- [CSS Triggers](https://csstriggers.com)

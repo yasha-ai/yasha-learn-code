@@ -1,0 +1,258 @@
+## Design Patterns. Урок: Microservices Architecture
+
+Микросервисная архитектура — подход к разработке приложений как набора маленьких, независимо развёртываемых сервисов, каждый из которых отвечает за конкретный бизнес-домен.
+
+---
+
+### Монолит vs Микросервисы
+
+**Монолит:**
+- Всё в одном процессе
+- Просто в разработке и тестировании
+- Один деплой для всего
+- При масштабировании — копируем всё целиком
+- Один язык и технологический стек
+
+**Микросервисы:**
+- Каждый сервис — отдельный процесс
+- Независимый деплой
+- Разные команды могут работать параллельно
+- Каждый сервис масштабируется отдельно
+- Разные технологии для разных задач
+
+---
+
+### Когда переходить на микросервисы?
+
+**Переходи, когда:**
+- Команда > 20-30 человек
+- Разные части системы имеют разные требования к масштабированию
+- Нужна независимость команд (Conway's Law)
+- Разные части деплоятся с разной частотой
+
+**НЕ переходи преждевременно:**
+- Стартапы с неопределёнными требованиями
+- Маленькие команды (1-5 человек)
+- Когда монолит прекрасно справляется
+> «Начни с монолита, разбей когда понял домены» — Martin Fowler
+
+---
+
+### Ключевые паттерны микросервисов
+
+#### 1. API Gateway
+
+Единая точка входа для всех клиентов:
+
+```typescript
+// API Gateway маршрутизирует запросы к нужным сервисам
+class ApiGateway {
+  private routes = new Map<string, string>([
+    ['/users', 'http://user-service:3001'],
+    ['/orders', 'http://order-service:3002'],
+    ['/products', 'http://product-service:3003'],
+    ['/payments', 'http://payment-service:3004'],
+  ]);
+
+  async handle(req: Request): Promise<Response> {
+    // 1. Аутентификация
+    const user = await this.authenticate(req);
+    
+    // 2. Rate limiting
+    await this.rateLimit(req.ip, user?.id);
+    
+    // 3. Маршрутизация
+    const serviceUrl = this.resolveService(req.path);
+    
+    // 4. Проксирование запроса
+    return await this.proxy(req, serviceUrl, user);
+  }
+
+  private resolveService(path: string): string {
+    for (const [prefix, url] of this.routes) {
+      if (path.startsWith(prefix)) return url;
+    }
+    throw new NotFoundError(`No service for path: ${path}`);
+  }
+}
+```
+
+#### 2. Service Discovery
+
+Сервисы регистрируют себя и находят друг друга:
+
+```typescript
+// Service Registry (например, Consul, etcd)
+class ServiceRegistry {
+  private services = new Map<string, ServiceInstance[]>();
+
+  register(name: string, instance: ServiceInstance): void {
+    const instances = this.services.get(name) ?? [];
+    instances.push(instance);
+    this.services.set(name, instances);
+    
+    // Heartbeat для health check
+    this.startHeartbeat(name, instance.id);
+  }
+
+  discover(name: string): ServiceInstance {
+    const instances = this.services.get(name);
+    if (!instances?.length) throw new Error(`Service ${name} not found`);
+    
+    // Round-robin load balancing
+    const instance = instances[Math.floor(Math.random() * instances.length)];
+    return instance;
+  }
+}
+```
+
+#### 3. Circuit Breaker
+
+Защита от каскадных сбоев:
+
+```typescript
+type CircuitState = 'closed' | 'open' | 'half-open';
+
+class CircuitBreaker {
+  private state: CircuitState = 'closed';
+  private failureCount = 0;
+  private lastFailureTime?: number;
+
+  constructor(
+    private readonly threshold: number = 5,  // Открываем после N ошибок
+    private readonly timeout: number = 60000, // Время до попытки восстановления
+  ) {}
+
+  async call<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.state === 'open') {
+      if (Date.now() - this.lastFailureTime! > this.timeout) {
+        this.state = 'half-open';
+      } else {
+        throw new Error('Circuit breaker is OPEN — service unavailable');
+      }
+    }
+
+    try {
+      const result = await fn();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  private onSuccess(): void {
+    this.failureCount = 0;
+    this.state = 'closed';
+  }
+
+  private onFailure(): void {
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+    if (this.failureCount >= this.threshold || this.state === 'half-open') {
+      this.state = 'open';
+    }
+  }
+}
+
+// Использование
+const orderServiceBreaker = new CircuitBreaker(5, 30000);
+
+async function getOrder(orderId: string): Promise<Order> {
+  return orderServiceBreaker.call(() =>
+    fetch(`http://order-service/orders/${orderId}`).then(r => r.json())
+  );
+}
+```
+
+#### 4. Saga Pattern (распределённые транзакции)
+
+```typescript
+// Оркестратор саги для создания заказа
+class CreateOrderSaga {
+  async execute(orderData: OrderData): Promise<string> {
+    let orderId: string | undefined;
+    let paymentId: string | undefined;
+    let inventoryReserved = false;
+
+    try {
+      // Шаг 1: Создать заказ
+      orderId = await orderService.createOrder(orderData);
+
+      // Шаг 2: Зарезервировать товар
+      await inventoryService.reserve(orderData.items);
+      inventoryReserved = true;
+
+      // Шаг 3: Обработать платёж
+      paymentId = await paymentService.charge(orderData.payment);
+
+      // Шаг 4: Подтвердить заказ
+      await orderService.confirm(orderId);
+
+      return orderId;
+
+    } catch (error) {
+      // Компенсирующие транзакции (rollback)
+      if (paymentId) await paymentService.refund(paymentId);
+      if (inventoryReserved) await inventoryService.release(orderData.items);
+      if (orderId) await orderService.cancel(orderId);
+      throw error;
+    }
+  }
+}
+```
+
+---
+
+### Коммуникация между сервисами
+
+**Синхронная (REST/gRPC)** — запрос-ответ:
+```
+OrderService → POST /payments → PaymentService
+```
+
+**Асинхронная (Message Queue)** — через очередь:
+```
+OrderService → publish "order.created" → RabbitMQ/Kafka → [EmailService, InventoryService, AnalyticsService]
+```
+
+```typescript
+// Event-driven коммуникация
+interface OrderCreatedEvent {
+  type: 'order.created';
+  orderId: string;
+  userId: string;
+  items: OrderItem[];
+  total: number;
+  timestamp: Date;
+}
+
+// OrderService публикует событие
+await messageBus.publish<OrderCreatedEvent>('order.created', {
+  orderId: order.id,
+  userId: order.userId,
+  items: order.items,
+  total: order.total,
+  timestamp: new Date(),
+});
+
+// EmailService подписывается
+messageBus.subscribe('order.created', async (event: OrderCreatedEvent) => {
+  await emailService.sendOrderConfirmation(event.userId, event.orderId);
+});
+```
+
+---
+
+### Практические задания
+
+1. Спроектируй микросервисную архитектуру для интернет-магазина: нарисуй диаграмму с сервисами и их взаимодействиями.
+
+2. Реализуй простой API Gateway на Express: маршрутизация, добавление заголовков, базовое логирование.
+
+3. Напиши `CircuitBreaker` с настраиваемыми параметрами и логированием переходов состояний.
+
+4. В чём разница между Orchestration и Choreography в Saga паттерне?
+
+5. Изучи Docker Compose для локального запуска нескольких сервисов.

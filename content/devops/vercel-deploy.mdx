@@ -1,0 +1,252 @@
+# DevOps & CI/CD: Урок 8: Деплой на Vercel
+
+![Иллюстрация к уроку](/lessons/devops-vercel.png)
+
+**Vercel** — идеальная платформа для Next.js и фронтенд проектов. Push в GitHub → автодеплой за секунды, preview для каждого PR, edge network по всему миру.
+
+## Почему Vercel
+
+```
+✅ Нативная поддержка Next.js (сами делают)
+✅ Автодеплой при push
+✅ Preview URL для каждого PR
+✅ Edge Functions и Serverless Functions
+✅ Бесплатный tier щедрый (Hobby)
+✅ Глобальная CDN сеть
+✅ Встроенный аналитика
+✅ Простой интерфейс
+```
+
+## Быстрый старт
+
+```bash
+# Установка Vercel CLI
+npm i -g vercel
+
+# Логин
+vercel login
+
+# Деплой из текущей директории
+vercel
+
+# Деплой в production
+vercel --prod
+```
+
+## Подключение GitHub репозитория
+
+1. **vercel.com → Add New Project**
+2. **Import Git Repository** — выбери GitHub repo
+3. **Configure Project**:
+   - Framework Preset: Next.js (автоопределение)
+   - Root Directory: `.` (или `apps/web` для monorepo)
+   - Build Command: `npm run build`
+   - Output Directory: `.next`
+4. **Add Environment Variables** (все нужные)
+5. **Deploy**
+
+Дальше — автоматически:
+- Push в main → Production деплой
+- Push в любую ветку → Preview деплой
+- PR создан → Preview URL в комментарии
+
+## vercel.json — конфигурация
+
+```json
+// vercel.json
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "installCommand": "npm ci",
+  "framework": "nextjs",
+
+  "redirects": [
+    {
+      "source": "/old-page",
+      "destination": "/new-page",
+      "permanent": true
+    },
+    {
+      "source": "/blog/:slug",
+      "destination": "/posts/:slug",
+      "permanent": false
+    }
+  ],
+
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET,POST,PUT,DELETE,OPTIONS" }
+      ]
+    }
+  ],
+
+  "rewrites": [
+    {
+      "source": "/api/v1/:path*",
+      "destination": "https://api.mybackend.com/v1/:path*"
+    }
+  ],
+
+  "regions": ["fra1", "cdg1"],   // Frankfurt, Paris
+
+  "crons": [
+    {
+      "path": "/api/cron/daily-cleanup",
+      "schedule": "0 0 * * *"
+    }
+  ]
+}
+```
+
+## Управление переменными окружения
+
+```bash
+# Через CLI
+vercel env add DATABASE_URL production
+vercel env add DATABASE_URL preview
+vercel env add DATABASE_URL development
+
+# Просмотр
+vercel env ls
+
+# Удаление
+vercel env rm DATABASE_URL production
+
+# Скачать для локальной разработки
+vercel env pull .env.local
+```
+
+Типы окружений в Vercel:
+- **Production** — деплои из main/master ветки
+- **Preview** — все остальные ветки и PR
+- **Development** — `vercel dev` локально
+
+## Vercel в GitHub Actions
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy to Vercel
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel Environment
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy
+        id: deploy
+        run: |
+          URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Comment PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 Deployed to: ${{ steps.deploy.outputs.url }}`
+            })
+```
+
+## Edge Functions vs Serverless Functions
+
+```typescript
+// app/api/fast/route.ts — Edge Function (быстрее, ограниченнее)
+export const runtime = 'edge';
+
+export async function GET(request: Request) {
+  const country = request.headers.get('x-vercel-ip-country');
+  return Response.json({ country, message: 'Hello from edge!' });
+}
+```
+
+```typescript
+// app/api/db/route.ts — Serverless Function (полный Node.js)
+import { db } from '@/lib/db';
+
+export async function GET() {
+  const users = await db.query('SELECT * FROM users LIMIT 10');
+  return Response.json(users.rows);
+}
+```
+
+## Домен и SSL
+
+```bash
+# Добавить домен через CLI
+vercel domains add myapp.com
+
+# Настройка DNS:
+# A запись: 76.76.21.21 (Vercel IP)
+# CNAME: cname.vercel-dns.com
+
+# SSL автоматически через Let's Encrypt
+# Настройки → Domains → myapp.com
+```
+
+## Monorepo с Vercel
+
+```json
+// vercel.json для monorepo
+{
+  "buildCommand": "cd ../.. && npm run build --workspace=apps/web",
+  "installCommand": "cd ../.. && npm install",
+  "outputDirectory": "apps/web/.next",
+  "framework": "nextjs"
+}
+```
+
+Или через Vercel Dashboard:
+- **Root Directory**: `apps/web`
+- Build настраивается автоматически
+
+## Analytics и Speed Insights
+
+```typescript
+// app/layout.tsx
+import { Analytics } from '@vercel/analytics/react';
+import { SpeedInsights } from '@vercel/speed-insights/next';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        {children}
+        <Analytics />
+        <SpeedInsights />
+      </body>
+    </html>
+  );
+}
+```
+
+## Ключевые моменты
+
+- Vercel — нативная платформа для Next.js
+- Push в main → production деплой автоматически
+- Preview URL для каждого PR — команда видит изменения до merge
+- `vercel.json` — конфигурация редиректов, headers, regions
+- Edge Functions — максимально быстрый ответ (V8 isolates)
+- Serverless Functions — полный Node.js, но холодный старт
+- `vercel env pull` — синхронизация env vars для локальной разработки

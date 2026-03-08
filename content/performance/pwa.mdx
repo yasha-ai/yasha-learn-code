@@ -1,0 +1,388 @@
+import { Playground } from '../../components/Playground'
+
+# Progressive Web Apps (PWA)
+
+PWA — это веб-приложения, которые ведут себя как нативные: работают офлайн, устанавливаются на устройство, получают push-уведомления.
+
+## Что делает PWA?
+
+```
+✅ Работает офлайн (Service Worker)
+✅ Устанавливается на домашний экран
+✅ Push-уведомления
+✅ Быстрая загрузка (кэш)
+✅ Работает как нативное приложение (без адресной строки)
+✅ App Shortcuts (ярлыки в иконке)
+```
+
+## Web App Manifest
+
+```json
+// public/manifest.json
+{
+  "name": "МагазинТехники",
+  "short_name": "МагТех",
+  "description": "Лучший магазин техники",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#89b4fa",
+  "background_color": "#1e1e2e",
+  "icons": [
+    { "src": "/icons/icon-72.png", "sizes": "72x72", "type": "image/png" },
+    { "src": "/icons/icon-96.png", "sizes": "96x96", "type": "image/png" },
+    { "src": "/icons/icon-128.png", "sizes": "128x128", "type": "image/png" },
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Каталог",
+      "url": "/catalog/",
+      "icons": [{ "src": "/icons/catalog.png", "sizes": "96x96" }]
+    },
+    {
+      "name": "Корзина",
+      "url": "/cart/",
+      "icons": [{ "src": "/icons/cart.png", "sizes": "96x96" }]
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshots/mobile.jpg",
+      "sizes": "390x844",
+      "type": "image/jpeg",
+      "form_factor": "narrow"
+    }
+  ]
+}
+```
+
+```html
+<!-- Подключаем в HTML -->
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#89b4fa">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+```
+
+## Service Worker
+
+```javascript
+// public/sw.js
+
+const CACHE_NAME = 'app-v1';
+const STATIC_CACHE = 'static-v1';
+
+// Ресурсы для предварительного кэширования
+const PRECACHE_ASSETS = [
+  '/',
+  '/styles.css',
+  '/app.js',
+  '/offline.html',
+  '/icons/icon-192.png',
+];
+
+// Установка — кэшируем статику
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(STATIC_CACHE)
+      .then(cache => cache.addAll(PRECACHE_ASSETS))
+      .then(() => self.skipWaiting()) // активируемся немедленно
+  );
+});
+
+// Активация — удаляем старые кэши
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(
+        keys.filter(key => key !== CACHE_NAME && key !== STATIC_CACHE)
+            .map(key => caches.delete(key))
+      ))
+      .then(() => self.clients.claim()) // захватываем все клиенты
+  );
+});
+
+// Перехват запросов
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+  
+  // Навигационные запросы — Network First
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request).catch(() => caches.match('/offline.html'))
+    );
+    return;
+  }
+  
+  // Изображения — Cache First
+  if (request.destination === 'image') {
+    event.respondWith(
+      caches.match(request).then(cached => {
+        return cached || fetch(request).then(response => {
+          caches.open(CACHE_NAME).then(cache => cache.put(request, response.clone()));
+          return response;
+        });
+      })
+    );
+    return;
+  }
+  
+  // API — Network First с fallback
+  if (request.url.includes('/api/')) {
+    event.respondWith(
+      fetch(request)
+        .then(response => {
+          caches.open(CACHE_NAME).then(cache => cache.put(request, response.clone()));
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+  
+  // Остальное — Cache First
+  event.respondWith(
+    caches.match(request).then(cached => cached || fetch(request))
+  );
+});
+```
+
+## Push-уведомления
+
+```javascript
+// Запрос разрешения
+async function subscribeToPush() {
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') return;
+  
+  const registration = await navigator.serviceWorker.ready;
+  
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+  });
+  
+  // Отправляем подписку на сервер
+  await fetch('/api/push/subscribe', {
+    method: 'POST',
+    body: JSON.stringify(subscription),
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+// В Service Worker
+self.addEventListener('push', (event) => {
+  const data = event.data.json();
+  
+  event.waitUntil(
+    self.registration.showNotification(data.title, {
+      body: data.body,
+      icon: '/icons/icon-192.png',
+      badge: '/icons/badge.png',
+      data: { url: data.url },
+      actions: [
+        { action: 'open', title: 'Открыть' },
+        { action: 'dismiss', title: 'Закрыть' },
+      ],
+    })
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  
+  if (event.action === 'open' || !event.action) {
+    event.waitUntil(clients.openWindow(event.notification.data.url));
+  }
+});
+```
+
+## Next.js PWA
+
+```bash
+npm install next-pwa
+```
+
+```javascript
+// next.config.js
+const withPWA = require('next-pwa')({
+  dest: 'public',
+  register: true,
+  skipWaiting: true,
+  disable: process.env.NODE_ENV === 'development',
+});
+
+module.exports = withPWA({
+  // ваши настройки Next.js
+});
+```
+
+## Background Sync
+
+```javascript
+// Синхронизация данных при восстановлении соединения
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'sync-orders') {
+    event.waitUntil(syncPendingOrders());
+  }
+});
+
+async function syncPendingOrders() {
+  const db = await openDB('offline-store', 1);
+  const pendingOrders = await db.getAll('pending-orders');
+  
+  for (const order of pendingOrders) {
+    try {
+      await fetch('/api/orders', {
+        method: 'POST',
+        body: JSON.stringify(order),
+      });
+      await db.delete('pending-orders', order.id);
+    } catch (error) {
+      console.error('Sync failed:', error);
+    }
+  }
+}
+
+// Регистрация синхронизации
+async function submitOrderOffline(order) {
+  const db = await openDB('offline-store', 1);
+  await db.put('pending-orders', order);
+  
+  const registration = await navigator.serviceWorker.ready;
+  await registration.sync.register('sync-orders');
+}
+```
+
+## Интерактивный пример
+
+<Playground
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html>
+<head>
+  <title>PWA Demo</title>
+  <style>
+    body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+    h1 { color: #89b4fa; }
+    h2 { color: #cba6f7; margin: 20px 0 10px; font-size: 16px; }
+    .demo { background: #313244; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin: 4px; }
+    .result { margin: 8px 0; padding: 8px; border-radius: 4px; background: #1e1e2e; font-size: 13px; }
+    .good { color: #a6e3a1; }
+    .bad { color: #f38ba8; }
+    .warn { color: #f9e2af; }
+    .feature-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .feature-card { background: #45475a; border-radius: 6px; padding: 12px; }
+    .feature-status { font-size: 20px; }
+    .feature-name { font-size: 13px; color: #cdd6f4; margin-top: 4px; }
+    .feature-support { font-size: 11px; color: #6c7086; }
+    .manifest-view { background: #1e1e2e; border-radius: 6px; padding: 12px; font-family: monospace; font-size: 12px; color: #a6e3a1; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Progressive Web App Demo</h1>
+
+  <div class="demo">
+    <h2>1. PWA Feature Detection</h2>
+    <div class="feature-grid" id="features"></div>
+  </div>
+
+  <div class="demo">
+    <h2>2. Онлайн/Офлайн статус</h2>
+    <div class="result" id="online-status"></div>
+    <button onclick="simulateOffline()">Симулировать офлайн</button>
+    <button onclick="simulateOnline()">Симулировать онлайн</button>
+  </div>
+
+  <div class="demo">
+    <h2>3. Manifest.json пример</h2>
+    <div class="manifest-view">{
+  "name": "МагазинТехники",
+  "short_name": "МагТех",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#89b4fa",
+  "background_color": "#1e1e2e",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512"
+    }
+  ]
+}</div>
+  </div>
+
+  <script>
+    // Feature detection
+    const features = [
+      { name: 'Service Worker', icon: '⚙️', supported: 'serviceWorker' in navigator },
+      { name: 'Push API', icon: '🔔', supported: 'PushManager' in window },
+      { name: 'Background Sync', icon: '🔄', supported: 'SyncManager' in window },
+      { name: 'Web App Manifest', icon: '📱', supported: 'onbeforeinstallprompt' in window || true },
+      { name: 'Cache API', icon: '💾', supported: 'caches' in window },
+      { name: 'IndexedDB', icon: '🗄️', supported: 'indexedDB' in window },
+      { name: 'Notifications API', icon: '📢', supported: 'Notification' in window },
+      { name: 'Share API', icon: '📤', supported: 'share' in navigator },
+    ];
+
+    document.getElementById('features').innerHTML = features.map(f => \`
+      <div class="feature-card">
+        <div class="feature-status">\${f.icon}</div>
+        <div class="feature-name">\${f.name}</div>
+        <div class="feature-support \${f.supported ? 'good' : 'bad'}">\${f.supported ? '✅ Поддерживается' : '❌ Нет поддержки'}</div>
+      </div>
+    \`).join('');
+
+    // Online/Offline
+    function updateOnlineStatus(isOnline) {
+      const el = document.getElementById('online-status');
+      if (isOnline) {
+        el.innerHTML = '<span class="good">🌐 ОНЛАЙН — приложение работает в полном режиме</span>';
+      } else {
+        el.innerHTML = '<span class="warn">📴 ОФЛАЙН — приложение работает из кэша Service Worker</span>';
+      }
+    }
+
+    updateOnlineStatus(navigator.onLine);
+    window.addEventListener('online', () => updateOnlineStatus(true));
+    window.addEventListener('offline', () => updateOnlineStatus(false));
+
+    let simOffline = false;
+    function simulateOffline() {
+      simOffline = true;
+      document.getElementById('online-status').innerHTML = 
+        '<span class="warn">📴 СИМУЛЯЦИЯ ОФЛАЙН — Service Worker отдаёт данные из кэша<br><small style="color: #6c7086">При реальном офлайн: пользователи видят закэшированные страницы</small></span>';
+    }
+    function simulateOnline() {
+      simOffline = false;
+      updateOnlineStatus(true);
+    }
+  </script>
+</body>
+</html>`
+  }}
+/>
+
+## Практические задания
+
+1. Создайте `manifest.json` и подключите его к вашему проекту
+2. Зарегистрируйте Service Worker с базовым кэшированием
+3. Добавьте страницу `/offline.html` для офлайн-режима
+4. Проверьте PWA в Lighthouse → PWA category
+
+## Ссылки
+
+- [web.dev: PWA](https://web.dev/progressive-web-apps/)
+- [next-pwa](https://github.com/shadowwalker/next-pwa)
+- [Workbox](https://developer.chrome.com/docs/workbox/)

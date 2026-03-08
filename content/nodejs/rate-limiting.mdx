@@ -1,0 +1,260 @@
+# Rate Limiting
+
+![Иллюстрация к уроку](/lessons/nodejs-ratelimit.png)
+
+**Rate Limiting** — ограничение числа запросов от одного клиента за период времени. Защита от DDoS, брутфорса, спама.
+
+## express-rate-limit — базовое решение
+
+```bash
+npm install express-rate-limit
+```
+
+```javascript
+const rateLimit = require('express-rate-limit');
+
+// Базовый лимит
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,  // 15 минут
+  max: 100,                   // максимум 100 запросов
+  standardHeaders: true,      // добавляет RateLimit-* заголовки
+  legacyHeaders: false,       // убирает старые X-RateLimit-* заголовки
+  
+  // Кастомное сообщение
+  message: {
+    error: 'Слишком много запросов',
+    retryAfter: 15 * 60,
+  },
+  
+  // Кастомный статус
+  statusCode: 429,
+  
+  // Ключ для идентификации клиента
+  keyGenerator: (req) => {
+    // По умолчанию — IP адрес
+    return req.ip;
+    // Для авторизованных — userId
+    // return req.user?.id || req.ip;
+  },
+  
+  // Пропускать некоторые запросы
+  skip: (req) => {
+    // Пропускаем внутренние запросы
+    return req.ip === '127.0.0.1';
+  },
+  
+  // Обработчик превышения лимита
+  handler: (req, res) => {
+    res.status(429).json({
+      error: {
+        message: 'Слишком много запросов',
+        code: 'RATE_LIMIT_EXCEEDED',
+        retryAfter: Math.ceil(res.getHeader('RateLimit-Reset')),
+      },
+    });
+  },
+});
+
+app.use('/api', limiter);
+```
+
+## Разные лимиты для разных роутов
+
+```javascript
+// Строгий лимит для авторизации (защита от брутфорса)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  skipSuccessfulRequests: true,  // успешные входы не считаем
+  message: { error: 'Слишком много попыток входа. Подождите 15 минут.' },
+});
+
+// Средний лимит для API
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,  // 1 минута
+  max: 60,              // 60 запросов в минуту
+});
+
+// Строгий лимит для загрузки файлов
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,  // 1 час
+  max: 20,
+  message: { error: 'Лимит загрузок: 20 файлов в час' },
+});
+
+// Мягкий лимит для чтения
+const readLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+});
+
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+app.use('/api/upload', uploadLimiter);
+app.use('/api', apiLimiter);
+```
+
+## Rate Limit с Redis (для кластера)
+
+```bash
+npm install rate-limit-redis ioredis
+```
+
+```javascript
+const rateLimit = require('express-rate-limit');
+const RedisStore = require('rate-limit-redis');
+const Redis = require('ioredis');
+
+const redis = new Redis(process.env.REDIS_URL);
+
+// Rate limiter на Redis — работает в кластере/нескольких нодах
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  
+  store: new RedisStore({
+    sendCommand: (...args) => redis.call(...args),
+    prefix: 'rl:',  // префикс ключей в Redis
+  }),
+});
+
+app.use('/api', limiter);
+```
+
+## Продвинутый Rate Limiting
+
+```javascript
+// Разные лимиты для авторизованных и анонимных
+const adaptiveLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  
+  max: (req) => {
+    if (req.user?.role === 'admin') return 10000;  // без ограничений
+    if (req.user) return 500;                       // залогинен
+    return 100;                                     // анонимный
+  },
+  
+  keyGenerator: (req) => {
+    // Авторизованные — по userId (не IP)
+    return req.user?.id ? `user:${req.user.id}` : `ip:${req.ip}`;
+  },
+});
+
+// Sliding window через middleware
+class SlidingWindowLimiter {
+  constructor(redis, windowMs, max) {
+    this.redis = redis;
+    this.windowMs = windowMs;
+    this.max = max;
+  }
+
+  middleware() {
+    return async (req, res, next) => {
+      const key = `sliding:${req.ip}`;
+      const now = Date.now();
+      const windowStart = now - this.windowMs;
+
+      // Удаляем старые записи
+      await this.redis.zremrangebyscore(key, '-inf', windowStart);
+      
+      // Считаем запросы в окне
+      const count = await this.redis.zcard(key);
+      
+      if (count >= this.max) {
+        return res.status(429).json({
+          error: 'Rate limit exceeded',
+          retryAfter: Math.ceil(this.windowMs / 1000),
+        });
+      }
+
+      // Добавляем текущий запрос
+      await this.redis.zadd(key, now, `${now}-${Math.random()}`);
+      await this.redis.pexpire(key, this.windowMs);
+
+      res.setHeader('X-RateLimit-Limit', this.max);
+      res.setHeader('X-RateLimit-Remaining', this.max - count - 1);
+      next();
+    };
+  }
+}
+```
+
+## Заголовки Rate Limit
+
+```
+HTTP/1.1 200 OK
+RateLimit-Limit: 100           — максимум запросов
+RateLimit-Remaining: 73        — осталось запросов
+RateLimit-Reset: 1705000000    — когда сбросится (Unix timestamp)
+
+HTTP/1.1 429 Too Many Requests
+Retry-After: 900               — сколько секунд ждать
+```
+
+```javascript
+// Клиент должен обрабатывать 429
+// fetch пример:
+async function apiRequest(url) {
+  const response = await fetch(url);
+  
+  if (response.status === 429) {
+    const retryAfter = response.headers.get('Retry-After') || '60';
+    console.log(`Rate limit! Ждём ${retryAfter} секунд`);
+    await new Promise(r => setTimeout(r, parseInt(retryAfter) * 1000));
+    return apiRequest(url);  // повтор
+  }
+  
+  return response.json();
+}
+```
+
+## Throttling на уровне очереди
+
+```javascript
+// Очередь задач с ограничением скорости
+class ThrottledQueue {
+  constructor(maxConcurrent = 5, delayMs = 100) {
+    this.queue = [];
+    this.running = 0;
+    this.maxConcurrent = maxConcurrent;
+    this.delayMs = delayMs;
+  }
+
+  async add(fn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ fn, resolve, reject });
+      this.process();
+    });
+  }
+
+  async process() {
+    if (this.running >= this.maxConcurrent || this.queue.length === 0) return;
+
+    const { fn, resolve, reject } = this.queue.shift();
+    this.running++;
+
+    try {
+      const result = await fn();
+      resolve(result);
+    } catch (err) {
+      reject(err);
+    } finally {
+      this.running--;
+      setTimeout(() => this.process(), this.delayMs);
+    }
+  }
+}
+
+// Использование для API с ограниченным бекендом
+const queue = new ThrottledQueue(3, 200);
+await queue.add(() => externalApi.request('/data'));
+```
+
+## Практика
+
+1. Настрой базовый rate limiter для всего API (100 req/15 min)
+2. Создай строгий limiter для `/auth/login` — 5 попыток за 15 минут, не считать успешные
+3. Реализуй адаптивный лимит: анонимные — 50, авторизованные — 500 req/min
+4. Подключи Redis store для работы в режиме нескольких процессов
+5. Добавь кастомный handler с полезным JSON ответом и заголовком `Retry-After`

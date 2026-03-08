@@ -1,0 +1,370 @@
+# GraphQL: Урок 17. Pagination
+
+![GraphQL Pagination](/lessons/graphql-pagination.png)
+
+Пагинация — обязательная часть любого API. В GraphQL есть два основных подхода: offset и cursor.
+
+## Offset пагинация
+
+Самый простой подход — `limit` и `offset`:
+
+```graphql
+type Query {
+  posts(limit: Int = 20, offset: Int = 0): PostsResult!
+}
+
+type PostsResult {
+  items: [Post!]!
+  total: Int!
+  limit: Int!
+  offset: Int!
+  hasMore: Boolean!
+}
+```
+
+```javascript
+const resolvers = {
+  Query: {
+    posts: async (_, { limit = 20, offset = 0 }, { db }) => {
+      const [items, total] = await Promise.all([
+        db.posts.findMany({
+          take: limit,
+          skip: offset,
+          orderBy: { createdAt: 'desc' },
+        }),
+        db.posts.count(),
+      ]);
+
+      return {
+        items,
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+      };
+    },
+  },
+};
+```
+
+```jsx
+// React компонент с offset пагинацией
+function PostList() {
+  const [offset, setOffset] = useState(0);
+  const limit = 10;
+
+  const { data, loading, fetchMore } = useQuery(GET_POSTS, {
+    variables: { limit, offset },
+  });
+
+  const loadMore = () => {
+    fetchMore({
+      variables: { offset: offset + limit },
+      updateQuery: (prev, { fetchMoreResult }) => ({
+        posts: {
+          ...fetchMoreResult.posts,
+          items: [...prev.posts.items, ...fetchMoreResult.posts.items],
+        },
+      }),
+    });
+    setOffset(o => o + limit);
+  };
+
+  return (
+    <div>
+      {data?.posts.items.map(post => <PostCard key={post.id} post={post} />)}
+      {data?.posts.hasMore && (
+        <button onClick={loadMore} disabled={loading}>
+          Загрузить ещё
+        </button>
+      )}
+      <p>{data?.posts.items.length} из {data?.posts.total}</p>
+    </div>
+  );
+}
+```
+
+**Минусы offset:**
+- Дубликаты при добавлении новых записей (пропустил элемент)
+- Медленно на больших таблицах (MySQL/PostgreSQL пересчитывает всё)
+
+## Cursor пагинация (Relay-style)
+
+Стандарт для больших данных. Использует непрозрачный курсор:
+
+```graphql
+type Query {
+  posts(
+    first: Int       # Сколько взять вперёд
+    after: String    # Курсор (после этого элемента)
+    last: Int        # Сколько взять назад
+    before: String   # Курсор (до этого элемента)
+  ): PostConnection!
+}
+
+type PostConnection {
+  edges: [PostEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type PostEdge {
+  node: Post!
+  cursor: String!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+```
+
+### Реализация
+
+```javascript
+function encodeCursor(id) {
+  return Buffer.from(`cursor:${id}`).toString('base64');
+}
+
+function decodeCursor(cursor) {
+  const decoded = Buffer.from(cursor, 'base64').toString('utf8');
+  return decoded.replace('cursor:', '');
+}
+
+const resolvers = {
+  Query: {
+    posts: async (_, { first = 20, after, last, before }, { db }) => {
+      let cursor = null;
+      let take = first;
+      let direction = 'forward';
+
+      if (after) {
+        cursor = { id: decodeCursor(after) };
+        direction = 'forward';
+      } else if (before) {
+        cursor = { id: decodeCursor(before) };
+        take = last || 20;
+        direction = 'backward';
+      }
+
+      const items = await db.posts.findMany({
+        take: take + 1,  // +1 для проверки hasNextPage
+        ...(cursor ? { cursor, skip: 1 } : {}),
+        orderBy: { createdAt: direction === 'forward' ? 'desc' : 'asc' },
+      });
+
+      const hasMore = items.length > take;
+      if (hasMore) items.pop();
+
+      if (direction === 'backward') items.reverse();
+
+      const edges = items.map(item => ({
+        node: item,
+        cursor: encodeCursor(item.id),
+      }));
+
+      return {
+        edges,
+        totalCount: await db.posts.count(),
+        pageInfo: {
+          hasNextPage: direction === 'forward' ? hasMore : !!after,
+          hasPreviousPage: direction === 'backward' ? hasMore : !!before,
+          startCursor: edges[0]?.cursor || null,
+          endCursor: edges[edges.length - 1]?.cursor || null,
+        },
+      };
+    },
+  },
+};
+```
+
+### Cursor пагинация в React
+
+```jsx
+const GET_POSTS = gql`
+  query GetPosts($first: Int, $after: String) {
+    posts(first: $first, after: $after) {
+      edges {
+        cursor
+        node {
+          id
+          title
+          author {
+            name
+          }
+          createdAt
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      totalCount
+    }
+  }
+`;
+
+function PostFeed() {
+  const { data, loading, fetchMore } = useQuery(GET_POSTS, {
+    variables: { first: 10 },
+  });
+
+  const loadMore = () => {
+    fetchMore({
+      variables: {
+        first: 10,
+        after: data.posts.pageInfo.endCursor,
+      },
+      updateQuery: (prev, { fetchMoreResult }) => {
+        if (!fetchMoreResult) return prev;
+        return {
+          posts: {
+            ...fetchMoreResult.posts,
+            edges: [
+              ...prev.posts.edges,
+              ...fetchMoreResult.posts.edges,
+            ],
+          },
+        };
+      },
+    });
+  };
+
+  return (
+    <div>
+      {data?.posts.edges.map(({ node: post, cursor }) => (
+        <PostCard key={cursor} post={post} />
+      ))}
+
+      {data?.posts.pageInfo.hasNextPage && (
+        <button onClick={loadMore} disabled={loading}>
+          {loading ? 'Загрузка...' : 'Ещё посты'}
+        </button>
+      )}
+
+      <p>Показано {data?.posts.edges.length} из {data?.posts.totalCount}</p>
+    </div>
+  );
+}
+```
+
+## Infinite Scroll
+
+```jsx
+import { useEffect, useRef } from 'react';
+
+function InfinitePostList() {
+  const { data, loading, fetchMore } = useQuery(GET_POSTS, {
+    variables: { first: 20 },
+  });
+
+  const loadMoreRef = useRef(null);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && data?.posts.pageInfo.hasNextPage) {
+          fetchMore({
+            variables: {
+              first: 20,
+              after: data.posts.pageInfo.endCursor,
+            },
+            updateQuery: (prev, { fetchMoreResult }) => ({
+              posts: {
+                ...fetchMoreResult.posts,
+                edges: [...prev.posts.edges, ...fetchMoreResult.posts.edges],
+              },
+            }),
+          });
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    if (loadMoreRef.current) {
+      observer.observe(loadMoreRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, [data, fetchMore]);
+
+  return (
+    <div>
+      {data?.posts.edges.map(({ node }) => (
+        <PostCard key={node.id} post={node} />
+      ))}
+      <div ref={loadMoreRef}>
+        {loading && <Spinner />}
+      </div>
+    </div>
+  );
+}
+```
+
+## Числовая пагинация (страницы)
+
+```graphql
+type PostsPage {
+  items: [Post!]!
+  currentPage: Int!
+  totalPages: Int!
+  totalItems: Int!
+  hasNextPage: Boolean!
+  hasPrevPage: Boolean!
+}
+
+type Query {
+  posts(page: Int = 1, perPage: Int = 20): PostsPage!
+}
+```
+
+```javascript
+const resolvers = {
+  Query: {
+    posts: async (_, { page = 1, perPage = 20 }, { db }) => {
+      const skip = (page - 1) * perPage;
+      const [items, total] = await Promise.all([
+        db.posts.findMany({ take: perPage, skip }),
+        db.posts.count(),
+      ]);
+      const totalPages = Math.ceil(total / perPage);
+
+      return {
+        items,
+        currentPage: page,
+        totalPages,
+        totalItems: total,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      };
+    },
+  },
+};
+```
+
+## Когда что использовать
+
+| Тип | Плюсы | Минусы | Когда |
+|-----|-------|--------|-------|
+| Offset | Простой, страничная навигация | Дубликаты, медленно | Небольшие данные |
+| Cursor | Стабильный, быстрый | Сложнее | Бесконечный скролл |
+| Страницы | Привычный UI | Те же что offset | Классические сайты |
+
+## Практика
+
+1. Реализуй offset пагинацию для списка продуктов
+2. Реализуй cursor пагинацию для ленты постов
+3. Добавь компонент с кнопкой "Загрузить ещё" через `fetchMore`
+4. Создай infinite scroll через IntersectionObserver
+5. Добавь фильтрацию и пагинацию одновременно
+
+## Итого
+
+- **Offset**: `limit` + `offset` — простой, для небольших данных
+- **Cursor**: `first` + `after` — стабильный, для infinite scroll
+- Relay connection spec — стандарт для cursor пагинации
+- `fetchMore` — Apollo Client хук для подгрузки данных
+
+**Следующий урок** → [GraphQL Codegen →](/graphql/codegen)

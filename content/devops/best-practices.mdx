@@ -1,0 +1,289 @@
+# DevOps & CI/CD: Урок 19: Best Practices DevOps
+
+![Иллюстрация к уроку](/lessons/devops-best.png)
+
+**Лучшие практики DevOps** — принципы и паттерны, которые отличают зрелую команду от хаоса. Здесь — концентрат опыта, чтобы не наступать на грабли.
+
+## 1. GitOps — Git как источник истины
+
+```
+Принцип: всё что относится к инфраструктуре — в Git.
+Никаких ручных изменений на серверах!
+
+В Git хранится:
+✅ Код приложения
+✅ Dockerfiles
+✅ docker-compose.yml
+✅ Nginx конфиги
+✅ CI/CD workflows
+✅ Infrastructure as Code (Terraform, Pulumi)
+
+Не в Git (в секретах):
+❌ Пароли и API ключи
+❌ .env.production
+```
+
+```bash
+# ❌ Плохо: руками правишь конфиг на сервере
+ssh server "nano /etc/nginx/sites-available/myapp.com"
+
+# ✅ Хорошо: правишь в Git, CI/CD применяет
+git commit -m "feat: add rate limiting to API endpoints"
+git push origin main
+# → CI/CD автоматически обновляет nginx.conf на сервере
+```
+
+## 2. Immutable Infrastructure
+
+```
+Принцип: серверы не патчатся — заменяются.
+
+❌ Плохо:
+ssh server
+apt update && apt upgrade
+nano config.file
+...
+(что теперь на сервере? никто не знает)
+
+✅ Хорошо:
+Изменение → новый Docker образ → деплой нового контейнера
+Старый контейнер удаляется
+Сервер всегда в известном состоянии
+```
+
+## 3. Маленькие частые деплои
+
+```
+❌ Плохо:
+1 большой деплой раз в месяц
+Несколько тысяч изменений за раз
+Половина из них от коллеги, которого нет
+"Тестируем в production"
+
+✅ Хорошо:
+Много маленьких деплоев каждый день
+Каждый деплой — одна фича или фикс
+Легко найти что сломалось
+Легко откатить
+```
+
+## 4. Trunk-Based Development
+
+```bash
+# ❌ GitFlow (для большинства команд избыточен):
+main
+└── develop
+    ├── feature/auth
+    ├── feature/payments
+    ├── release/v1.2
+    └── hotfix/critical-bug
+
+# ✅ Trunk-Based Development:
+main (trunk) ← единственная долгоживущая ветка
+├── feature/auth-2026-03-01      ← живёт 1-2 дня
+└── fix/payment-edge-case        ← живёт несколько часов
+
+Правила:
+- Ветки живут максимум 1-2 дня
+- Несколько раз в день merge в main
+- Feature flags для незаконченных фич
+```
+
+## 5. Принцип наименьших привилегий (Least Privilege)
+
+```bash
+# ❌ Плохо: всё под root
+sudo everything
+AWS: AdminAccess для всех
+
+# ✅ Хорошо: минимальные права
+
+# Пользователь для деплоя — только то что нужно
+sudo useradd -m -s /bin/bash deploy
+# deploy может перезапускать только myapp сервис
+echo "deploy ALL=(ALL) NOPASSWD: /bin/systemctl restart myapp" >> /etc/sudoers
+
+# IAM для GitHub Actions — только S3 конкретного bucket
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["s3:PutObject", "s3:DeleteObject"],
+    "Resource": "arn:aws:s3:::myapp-static/*"
+  }]
+}
+```
+
+## 6. Infrastructure as Code
+
+```hcl
+# terraform/main.tf — инфраструктура как код
+resource "aws_instance" "app_server" {
+  ami           = "ami-0c55b159cbfafe1f0"
+  instance_type = "t3.micro"
+  key_name      = aws_key_pair.deployer.key_name
+
+  vpc_security_group_ids = [aws_security_group.app.id]
+
+  tags = {
+    Name        = "myapp-production"
+    Environment = "production"
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_s3_bucket" "static" {
+  bucket = "myapp-static-files"
+  
+  tags = {
+    Environment = "production"
+  }
+}
+```
+
+## 7. Мониторинг и алертинг
+
+```
+Мониторинг трёх уровней:
+
+Infrastructure:
+  - CPU, RAM, Disk, Network
+  - Инструменты: CloudWatch, Grafana + Prometheus
+
+Application:
+  - Error rate, latency, throughput
+  - Инструменты: Sentry, Datadog, New Relic
+
+Business:
+  - Конверсия, оплаты, активные пользователи
+  - Инструменты: Custom dashboards, Mixpanel
+
+Алерты должны быть actionable:
+✅ "Error rate > 5% last 5 minutes" → кто-то должен посмотреть
+❌ "100 errors in production" → может это нормально?
+❌ Слишком много алертов → alert fatigue → игнорируют
+```
+
+## 8. Runbook для инцидентов
+
+```markdown
+# Runbook: Приложение не отвечает
+
+## Симптомы
+- Health check возвращает 5xx
+- Пользователи жалуются на ошибки
+
+## Диагностика
+
+1. Проверь статус контейнера:
+   docker ps | grep myapp
+
+2. Проверь логи:
+   docker logs myapp --tail 100
+
+3. Проверь ресурсы:
+   free -h
+   df -h
+   top
+
+4. Проверь БД:
+   docker exec myapp-db pg_isready
+
+## Решения
+
+### Нет памяти
+sudo systemctl restart myapp
+
+### БД недоступна
+1. Проверь статус: docker ps | grep postgres
+2. Перезапусти: docker restart postgres
+3. Если не помогло → rollback
+
+### Откатить версию
+./scripts/rollback.sh
+
+## Эскалация
+Если не решено за 15 минут → @lead-engineer в Slack
+```
+
+## 9. Post-mortem культура
+
+```markdown
+# Post-mortem: Инцидент 2026-03-08
+
+## Что случилось
+2026-03-08 01:30 UTC — сайт был недоступен 12 минут
+
+## Хронология
+01:28 - деплой версии 1.4.2
+01:30 - Sentry алерт: error rate 100%
+01:31 - on-call инженер получил уведомление
+01:38 - откат на 1.4.1
+01:42 - сервис восстановлен
+
+## Причина
+Database migration добавила index WITHOUT CONCURRENTLY
+→ table lock на 12 минут
+→ все запросы зависли
+
+## Что сделаем
+- [x] Добавить в runbook: мигрировать индексы CONCURRENTLY
+- [ ] Тестировать миграции на копии production БД перед деплоем
+- [ ] Добавить check в CI: запрещать CREATE INDEX без CONCURRENTLY
+
+## Что НЕ делаем
+❌ Не наказываем людей — виноват процесс, не человек
+❌ Не обвиняем — находим системные решения
+```
+
+## 10. Чеклист перед деплоем
+
+```bash
+#!/bin/bash
+# scripts/pre-deploy-checklist.sh
+
+echo "=== Pre-deploy Checklist ==="
+
+# 1. Все тесты прошли?
+echo "1. Checking CI status..."
+# GitHub API check
+
+# 2. Бэкап БД
+echo "2. Creating database backup..."
+pg_dump $DATABASE_URL > /backups/pre-deploy-$(date +%Y%m%d_%H%M%S).sql
+
+# 3. Текущие метрики нормальны?
+echo "3. Checking current metrics..."
+ERRORS=$(curl -s "https://sentry.io/api/metrics/..." | jq .error_rate)
+if [ "$ERRORS" -gt "1" ]; then
+    echo "❌ High error rate before deploy! Aborting."
+    exit 1
+fi
+
+# 4. Нет активных инцидентов?
+echo "4. Check no active incidents"
+# Статус-страница проверка
+
+# 5. Время деплоя OK?
+HOUR=$(date +%H)
+if [ "$HOUR" -ge "22" ] || [ "$HOUR" -le "7" ]; then
+    echo "⚠️  Warning: Deploying outside business hours"
+    read -p "Continue? [y/N] " confirm
+    [ "$confirm" != "y" ] && exit 1
+fi
+
+echo "✅ All checks passed. Proceeding with deploy..."
+```
+
+## Ключевые моменты
+
+- GitOps: всё в Git, никаких ручных изменений на серверах
+- Immutable infrastructure: заменяй, не патчи
+- Маленькие частые деплои лучше редких больших
+- Trunk-Based Development — ветки живут 1-2 дня
+- Least privilege — минимальные права для всех компонентов
+- Infrastructure as Code — Terraform/Pulumi
+- Три уровня мониторинга: infrastructure, application, business
+- Post-mortem без обвинений — ищи системные решения
+- Runbook — задокументированные процедуры восстановления
+- Мониторинг + алерты + быстрый rollback = спокойные ночи

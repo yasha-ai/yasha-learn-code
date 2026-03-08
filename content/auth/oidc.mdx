@@ -1,0 +1,260 @@
+# OpenID Connect (OIDC)
+
+## Что такое OpenID Connect?
+
+**OpenID Connect (OIDC)** — слой идентификации поверх OAuth 2.0. OAuth 2.0 отвечает за **авторизацию** ("что ты можешь делать"), OIDC добавляет **аутентификацию** ("кто ты такой").
+
+```
+OAuth 2.0: "Дай доступ к моим файлам"
+OIDC:      "Войди как [пользователь]"
+
+OIDC = OAuth 2.0 + Identity Layer (ID Token + UserInfo)
+```
+
+## ID Token
+
+OIDC вводит новый тип токена — **ID Token** (JWT).
+
+```json
+// Декодированный ID Token
+{
+  "iss": "https://accounts.google.com",   // Issuer
+  "sub": "110169484474386276334",          // Subject (Google user ID)
+  "aud": "your-client-id",                // Audience (твой client_id)
+  "exp": 1311281970,                      // Expires
+  "iat": 1311280970,                      // Issued At
+  "email": "user@example.com",
+  "email_verified": true,
+  "name": "John Doe",
+  "picture": "https://lh3.googleusercontent.com/...",
+  "locale": "ru",
+  "nonce": "abc123"                       // Защита от replay атак
+}
+```
+
+## OIDC vs OAuth 2.0
+
+| | OAuth 2.0 | OIDC |
+|--|-----------|------|
+| Цель | Авторизация | Аутентификация |
+| Токен | Access Token | Access Token + ID Token |
+| Данные о пользователе | Через UserInfo endpoint | В ID Token |
+| Стандарт | RFC 6749 | OpenID Foundation |
+| Scope | Произвольные | Включает `openid` |
+
+## Основные OIDC Flows
+
+### Authorization Code Flow (для веб-приложений)
+
+```javascript
+const params = new URLSearchParams({
+  response_type: 'code',
+  client_id: process.env.GOOGLE_CLIENT_ID,
+  redirect_uri: 'https://myapp.com/auth/callback',
+  scope: 'openid email profile', // openid scope активирует OIDC
+  state: generateState(),
+  nonce: generateNonce(), // для ID Token валидации
+});
+
+res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+```
+
+### Implicit Flow (устарел, не используй)
+
+Возвращает токены напрямую в URL fragment. Небезопасен.
+
+### Hybrid Flow
+
+Комбинация code и token в одном ответе. Редко используется.
+
+## Верификация ID Token
+
+**Обязательно верифицируй ID Token!**
+
+```javascript
+import { createRemoteJWKSet, jwtVerify } from 'jose';
+
+// Получаем JWKS (публичные ключи) от Google
+const JWKS = createRemoteJWKSet(
+  new URL('https://www.googleapis.com/oauth2/v3/certs')
+);
+
+async function verifyIdToken(idToken, nonce) {
+  const { payload } = await jwtVerify(idToken, JWKS, {
+    issuer: 'https://accounts.google.com',
+    audience: process.env.GOOGLE_CLIENT_ID,
+  });
+  
+  // Проверяем nonce (защита от replay)
+  if (payload.nonce !== nonce) {
+    throw new Error('Invalid nonce');
+  }
+  
+  // Проверяем время
+  if (payload.exp < Math.floor(Date.now() / 1000)) {
+    throw new Error('Token expired');
+  }
+  
+  return payload;
+}
+```
+
+## OIDC Discovery
+
+OIDC провайдеры публикуют метаданные по стандартному URL:
+
+```javascript
+// https://accounts.google.com/.well-known/openid-configuration
+const config = await fetch(
+  'https://accounts.google.com/.well-known/openid-configuration'
+).then(r => r.json());
+
+console.log(config);
+// {
+//   "issuer": "https://accounts.google.com",
+//   "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+//   "token_endpoint": "https://oauth2.googleapis.com/token",
+//   "userinfo_endpoint": "https://openidconnect.googleapis.com/v1/userinfo",
+//   "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+//   "scopes_supported": ["openid", "email", "profile", ...],
+//   ...
+// }
+```
+
+## Полная реализация OIDC
+
+```javascript
+import express from 'express';
+import session from 'express-session';
+import { randomBytes, createHash } from 'crypto';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
+
+const app = express();
+app.use(session({ secret: process.env.SESSION_SECRET }));
+
+// OIDC конфигурация (из Discovery)
+const OIDC_CONFIG = {
+  authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+  tokenEndpoint: 'https://oauth2.googleapis.com/token',
+  userinfoEndpoint: 'https://openidconnect.googleapis.com/v1/userinfo',
+  jwksUri: 'https://www.googleapis.com/oauth2/v3/certs',
+  issuer: 'https://accounts.google.com',
+};
+
+const JWKS = createRemoteJWKSet(new URL(OIDC_CONFIG.jwksUri));
+
+// Шаг 1: Login redirect
+app.get('/auth/login', (req, res) => {
+  const state = randomBytes(16).toString('hex');
+  const nonce = randomBytes(16).toString('hex');
+  
+  // PKCE
+  const verifier = randomBytes(32).toString('base64url');
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  
+  // Сохраняем для callback
+  req.session.oauthState = state;
+  req.session.nonce = nonce;
+  req.session.codeVerifier = verifier;
+  
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    redirect_uri: `${process.env.BASE_URL}/auth/callback`,
+    scope: 'openid email profile',
+    state,
+    nonce,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+  });
+  
+  res.redirect(`${OIDC_CONFIG.authorizationEndpoint}?${params}`);
+});
+
+// Шаг 2: Callback
+app.get('/auth/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  
+  if (error) return res.redirect(`/login?error=${error}`);
+  if (state !== req.session.oauthState) {
+    return res.status(400).send('Invalid state');
+  }
+  
+  // Обмениваем code на токены
+  const tokenResponse = await fetch(OIDC_CONFIG.tokenEndpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: `${process.env.BASE_URL}/auth/callback`,
+      code_verifier: req.session.codeVerifier,
+    }),
+  });
+  
+  const { access_token, id_token } = await tokenResponse.json();
+  
+  // Верифицируем ID Token
+  const { payload } = await jwtVerify(id_token, JWKS, {
+    issuer: OIDC_CONFIG.issuer,
+    audience: process.env.GOOGLE_CLIENT_ID,
+  });
+  
+  if (payload.nonce !== req.session.nonce) {
+    return res.status(400).send('Invalid nonce');
+  }
+  
+  // Находим или создаём пользователя
+  const user = await db.users.upsert({
+    where: { googleId: payload.sub },
+    create: {
+      googleId: payload.sub,
+      email: payload.email,
+      name: payload.name,
+      avatar: payload.picture,
+    },
+    update: {
+      email: payload.email,
+      name: payload.name,
+    },
+  });
+  
+  req.session.userId = user.id;
+  res.redirect('/dashboard');
+});
+```
+
+## Популярные OIDC провайдеры
+
+| Провайдер | Discovery URL |
+|-----------|---------------|
+| Google | `https://accounts.google.com/.well-known/openid-configuration` |
+| Microsoft | `https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration` |
+| GitHub | `https://token.actions.githubusercontent.com/.well-known/openid-configuration` |
+| Auth0 | `https://{domain}/.well-known/openid-configuration` |
+| Keycloak | `https://{host}/realms/{realm}/.well-known/openid-configuration` |
+
+## Self-hosted OIDC: Keycloak
+
+```bash
+# Docker Compose
+version: '3'
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+```
+
+## Практические задания
+
+1. Настрой Google OIDC с полной верификацией ID Token
+2. Используй OIDC Discovery для автоматической конфигурации
+3. Реализуй nonce для защиты от replay атак
+4. Попробуй self-hosted Keycloak локально

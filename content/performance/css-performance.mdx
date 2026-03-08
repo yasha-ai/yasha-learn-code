@@ -1,0 +1,392 @@
+import { Playground } from '../../components/Playground'
+
+# CSS Performance
+
+CSS может серьёзно влиять на производительность. Неправильные анимации вызывают Layout Reflow, тяжёлые селекторы замедляют рендеринг.
+
+## Содержание CSS файлов
+
+### Critical CSS — Inline на странице
+
+```html
+<!-- Стили первого экрана встроены — нет блокировки! -->
+<style>
+  /* Только то, что видно без скролла */
+  body { margin: 0; font-family: sans-serif; }
+  .header { background: #000; color: #fff; padding: 16px; }
+  .hero { min-height: 100vh; display: flex; align-items: center; }
+</style>
+
+<!-- Остальные стили загружаем асинхронно -->
+<link rel="preload" href="/styles.css" as="style" onload="this.rel='stylesheet'">
+```
+
+### Минификация
+
+```bash
+# lightningcss (быстрее, чем PostCSS)
+npx lightningcss-cli --minify input.css -o output.min.css
+
+# cssnano через PostCSS
+npm install cssnano postcss-cli
+npx postcss input.css --use cssnano -o output.min.css
+```
+
+## Анимации — Только GPU-свойства
+
+```css
+/* ❌ Анимируем свойства, вызывающие Reflow */
+.bad-animation {
+  transition: width 0.3s, height 0.3s, margin 0.3s;
+}
+.bad-animation:hover {
+  width: 200px; /* REFLOW! */
+  margin-top: 20px; /* REFLOW! */
+}
+
+/* ✅ Анимируем только transform и opacity (GPU!) */
+.good-animation {
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+.good-animation:hover {
+  transform: scale(1.05) translateY(-4px); /* только Composite */
+  opacity: 0.9; /* только Composite */
+}
+
+/* ✅ will-change для сложных анимаций */
+.animated-card {
+  will-change: transform; /* GPU слой заранее */
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.animated-card:hover {
+  transform: translateY(-8px) scale(1.02);
+}
+/* ВАЖНО: убирайте will-change когда анимация не активна */
+.animated-card.animation-done {
+  will-change: auto;
+}
+```
+
+## CSS Containment
+
+```css
+/* Изолируем область рендеринга */
+.widget {
+  contain: layout; /* layout не распространяется наружу */
+}
+
+.card {
+  contain: style layout; /* полная изоляция стилей и layout */
+}
+
+.sidebar {
+  contain: paint; /* paint ограничен этим элементом */
+}
+
+/* contain: strict = layout + style + paint + size */
+.isolated-component {
+  contain: strict;
+}
+
+/* content-visibility — ленивый рендеринг */
+.off-screen-section {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 400px; /* резервируем место
+}
+```
+
+## Эффективные селекторы
+
+```css
+/* CSS читает селекторы справа налево! */
+
+/* ❌ Медленно — проходит по ВСЕМ span на странице */
+.container .wrapper .list .item span { color: red; }
+
+/* ✅ Быстро — сразу находим нужный класс */
+.item-text { color: red; }
+
+/* ❌ Универсальный селектор */
+* { box-sizing: border-box; } /* читает каждый элемент */
+
+/* ✅ Лучше через :where для нулевой специфичности */
+:where(*, *::before, *::after) { box-sizing: border-box; }
+
+/* ❌ Attribute selectors — медленнее класса */
+[data-theme="dark"] .button { ... }
+
+/* ✅ Класс быстрее */
+.button-dark { ... }
+```
+
+## CSS Custom Properties (Variables) для производительности
+
+```css
+/* Меняем переменную → браузер не пересчитывает весь layout */
+:root {
+  --primary: #89b4fa;
+  --spacing: 16px;
+  --radius: 8px;
+  --transition: 0.2s ease;
+}
+
+/* Тема через CSS переменные — без JS! */
+[data-theme="dark"] {
+  --bg: #1e1e2e;
+  --text: #cdd6f4;
+}
+
+[data-theme="light"] {
+  --bg: #ffffff;
+  --text: #333333;
+}
+
+.button {
+  background: var(--primary);
+  padding: var(--spacing);
+  border-radius: var(--radius);
+  transition: transform var(--transition);
+}
+```
+
+## Font Loading Strategy
+
+```css
+/* ✅ font-display: swap — показываем fallback сразу */
+@font-face {
+  font-family: 'MyFont';
+  src: url('/fonts/MyFont.woff2') format('woff2');
+  font-display: swap;
+  font-weight: 400 700; /* Variable font диапазон */
+}
+
+/* ✅ Системные шрифты как fallback */
+body {
+  font-family: 'MyFont', -apple-system, BlinkMacSystemFont, 
+               'Segoe UI', Roboto, sans-serif;
+}
+
+/* ✅ size-adjust — убираем Layout Shift при загрузке шрифта */
+@font-face {
+  font-family: 'MyFont-fallback';
+  src: local('Arial');
+  size-adjust: 105%;
+  ascent-override: 95%;
+}
+```
+
+## Оптимизация Media Queries
+
+```css
+/* ✅ Mobile-first → добавляем для большего экрана */
+.container {
+  padding: 16px; /* mobile */
+}
+@media (min-width: 768px) {
+  .container {
+    padding: 32px; /* tablet+ */
+  }
+}
+@media (min-width: 1280px) {
+  .container {
+    padding: 48px; /* desktop+ */
+  }
+}
+
+/* ✅ Загружаем CSS только для нужного медиа */
+<link rel="stylesheet" href="print.css" media="print">
+<link rel="stylesheet" href="large-screen.css" media="(min-width: 1280px)">
+```
+
+## Интерактивный пример
+
+<Playground
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html>
+<head>
+  <title>CSS Performance Demo</title>
+  <style>
+    body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+    h1 { color: #89b4fa; }
+    h2 { color: #cba6f7; margin: 20px 0 10px; font-size: 16px; }
+    .demo { background: #313244; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    .btn-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+    
+    /* ❌ BAD: анимирует layout-свойства */
+    .card-bad {
+      background: #f38ba8;
+      color: #1e1e2e;
+      padding: 12px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: width 0.3s, margin 0.3s, padding 0.3s;
+      display: inline-block;
+    }
+    .card-bad:hover {
+      width: 200px;
+      padding: 20px 32px;
+      margin-top: 10px;
+    }
+    
+    /* ✅ GOOD: только transform */
+    .card-good {
+      background: #a6e3a1;
+      color: #1e1e2e;
+      padding: 12px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+      display: inline-block;
+    }
+    .card-good:hover {
+      transform: scale(1.15) translateY(-4px);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    }
+    
+    /* Containment demo */
+    .contained {
+      contain: layout style;
+      background: #45475a;
+      padding: 16px;
+      border-radius: 8px;
+      margin: 8px 0;
+    }
+    
+    /* content-visibility demo */
+    .lazy-section {
+      content-visibility: auto;
+      contain-intrinsic-size: 0 100px;
+      background: #45475a;
+      padding: 16px;
+      border-radius: 8px;
+      margin: 8px 0;
+    }
+    
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin: 4px; }
+    .tip { background: #1e1e2e; border-left: 3px solid #89b4fa; padding: 8px 12px; margin: 8px 0; font-size: 13px; }
+    :root {
+      --demo-color: #89b4fa;
+      --demo-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <h1>CSS Performance Demo</h1>
+
+  <div class="demo">
+    <h2>1. Анимации: Reflow vs GPU-Only</h2>
+    <div class="btn-row">
+      <div class="card-bad">❌ width + margin (Reflow)</div>
+      <div class="card-good">✅ transform (GPU Only)</div>
+    </div>
+    <div class="tip">💡 Наведите на кнопки — правая анимируется плавнее (только GPU слой)</div>
+    <div class="tip">💡 В DevTools → Performance → Enable paint flashing — увидите разницу</div>
+  </div>
+
+  <div class="demo">
+    <h2>2. CSS Custom Properties (Variables)</h2>
+    <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
+      <button onclick="changeTheme('blue')">Синяя тема</button>
+      <button onclick="changeTheme('green')">Зелёная тема</button>
+      <button onclick="changeTheme('purple')">Фиолетовая тема</button>
+    </div>
+    <div id="theme-demo" style="margin-top: 12px; padding: 16px; background: var(--demo-color); border-radius: 8px; color: #1e1e2e; transition: background 0.3s, font-size 0.3s; font-size: var(--demo-size); font-weight: bold;">
+      Этот блок управляется через CSS переменные!<br>
+      Смена темы = только изменение :root переменных, без перезагрузки стилей
+    </div>
+  </div>
+
+  <div class="demo">
+    <h2>3. CSS Containment</h2>
+    <div class="contained">
+      <strong>contain: layout style</strong><br>
+      <small style="color: #6c7086">Изменения внутри не вызывают reflow снаружи</small>
+    </div>
+    <button onclick="addContent()">Добавить контент внутрь</button>
+    <div id="outside-element" style="margin-top: 8px; font-size: 14px; color: #6c7086">Этот элемент снаружи — НЕ сдвинется при добавлении контента выше (containment!)</div>
+  </div>
+
+  <div class="demo">
+    <h2>4. Производительность селекторов</h2>
+    <button onclick="testSelectors()">Запустить бенчмарк</button>
+    <div id="selector-result" style="margin-top: 8px; font-size: 14px;"></div>
+  </div>
+
+  <script>
+    function changeTheme(color) {
+      const colors = {
+        blue: ['#89b4fa', '16px'],
+        green: ['#a6e3a1', '18px'],
+        purple: ['#cba6f7', '20px'],
+      };
+      const [c, s] = colors[color];
+      document.documentElement.style.setProperty('--demo-color', c);
+      document.documentElement.style.setProperty('--demo-size', s);
+    }
+
+    let contentAdded = 0;
+    function addContent() {
+      const contained = document.querySelector('.contained');
+      contentAdded++;
+      const div = document.createElement('div');
+      div.style.cssText = 'margin-top: 8px; padding: 8px; background: #6c7086; border-radius: 4px; font-size: 13px;';
+      div.textContent = \`Добавлен элемент \${contentAdded} — содержится внутри блока\`;
+      contained.appendChild(div);
+    }
+
+    function testSelectors() {
+      const count = 1000;
+      const container = document.createElement('div');
+      container.id = 'test-container';
+      for (let i = 0; i < count; i++) {
+        const el = document.createElement('div');
+        el.className = 'test-item';
+        el.innerHTML = \`<span class="test-text">Item \${i}</span>\`;
+        container.appendChild(el);
+      }
+      document.body.appendChild(container);
+
+      // Тест 1: Простой класс
+      const start1 = performance.now();
+      for (let i = 0; i < 100; i++) {
+        document.querySelectorAll('.test-text').length;
+      }
+      const t1 = performance.now() - start1;
+
+      // Тест 2: Сложный селектор
+      const start2 = performance.now();
+      for (let i = 0; i < 100; i++) {
+        document.querySelectorAll('#test-container .test-item span').length;
+      }
+      const t2 = performance.now() - start2;
+
+      document.body.removeChild(container);
+
+      document.getElementById('selector-result').innerHTML = \`
+        <div style="color: #a6e3a1">✅ .test-text (простой класс): \${t1.toFixed(2)}ms</div>
+        <div style="color: #f9e2af">⚠️ #test-container .test-item span (сложный): \${t2.toFixed(2)}ms</div>
+        <div style="color: #6c7086">Разница: \${(t2/t1).toFixed(1)}x</div>
+      \`;
+    }
+  </script>
+</body>
+</html>`
+  }}
+/>
+
+## Практические задания
+
+1. Аудитуйте все CSS анимации — замените `width/height/margin` на `transform`
+2. Добавьте `contain: layout` к независимым виджетам (sidebar, modal)
+3. Внедрите Critical CSS для главной страницы
+4. Проверьте `font-display: swap` для кастомных шрифтов
+
+## Ссылки
+
+- [CSS Triggers](https://csstriggers.com) — что вызывает Reflow/Repaint/Composite
+- [MDN: CSS containment](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_containment)
+- [web.dev: Font best practices](https://web.dev/font-best-practices)

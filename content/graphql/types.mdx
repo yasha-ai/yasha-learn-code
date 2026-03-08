@@ -1,0 +1,438 @@
+# GraphQL: Урок 4. Типы GraphQL
+
+![GraphQL Types](/lessons/graphql-types.png)
+
+GraphQL — строго типизированная система. Каждый кусок данных имеет тип. Разберём все виды типов.
+
+## Обзор системы типов
+
+```
+Типы GraphQL
+├── Скалярные (Scalar) — листовые узлы
+│   ├── String, Int, Float, Boolean, ID
+│   └── Кастомные: Date, JSON, Upload...
+├── Объектные (Object) — основа схемы
+├── Input — только для аргументов
+├── Enum — перечисления
+├── Interface — абстракции
+├── Union — объединения
+└── Модификаторы: ! (non-null), [] (list)
+```
+
+## Кастомные скаляры
+
+Встроенных скаляров не хватает? Создай свой:
+
+```graphql
+# В схеме:
+scalar Date
+scalar JSON
+scalar Upload
+scalar Email
+
+type User {
+  id: ID!
+  email: Email!
+  birthDate: Date
+  metadata: JSON
+}
+```
+
+Реализация на сервере (Apollo):
+
+```javascript
+import { GraphQLScalarType, Kind } from 'graphql';
+
+const DateScalar = new GraphQLScalarType({
+  name: 'Date',
+  description: 'Дата в формате ISO 8601',
+
+  // Из GraphQL значения в JS
+  parseValue(value) {
+    return new Date(value);
+  },
+
+  // Из JS значения в JSON (ответ клиенту)
+  serialize(value) {
+    return value instanceof Date
+      ? value.toISOString()
+      : new Date(value).toISOString();
+  },
+
+  // Для inline значений в запросе
+  parseLiteral(ast) {
+    if (ast.kind === Kind.STRING) {
+      return new Date(ast.value);
+    }
+    return null;
+  },
+});
+
+// Добавить в resolvers:
+const resolvers = {
+  Date: DateScalar,
+  // ...остальные resolvers
+};
+```
+
+Или использовать готовую библиотеку:
+```bash
+npm install graphql-scalars
+```
+
+```javascript
+import { DateTimeResolver, EmailAddressResolver } from 'graphql-scalars';
+
+const resolvers = {
+  DateTime: DateTimeResolver,
+  EmailAddress: EmailAddressResolver,
+};
+```
+
+## Объектные типы (Object Types)
+
+Самые распространённые — описывают сущности с полями:
+
+```graphql
+type Product {
+  id: ID!
+  name: String!
+  price: Float!
+  inStock: Boolean!
+  category: Category!      # Связь с другим типом
+  variants: [Variant!]!    # Массив объектов
+}
+
+type Category {
+  id: ID!
+  name: String!
+  products: [Product!]!
+}
+```
+
+## Interface
+
+Интерфейс — абстрактный тип с набором полей, которые должны реализовать все типы:
+
+```graphql
+interface Node {
+  id: ID!
+}
+
+interface Timestamped {
+  createdAt: String!
+  updatedAt: String!
+}
+
+type User implements Node & Timestamped {
+  id: ID!
+  createdAt: String!
+  updatedAt: String!
+  name: String!
+  email: String!
+}
+
+type Post implements Node & Timestamped {
+  id: ID!
+  createdAt: String!
+  updatedAt: String!
+  title: String!
+  body: String!
+}
+```
+
+### Запрос с интерфейсом
+
+```graphql
+query {
+  node(id: "123") {
+    id
+    # Специфичные поля через inline fragments:
+    ... on User {
+      name
+      email
+    }
+    ... on Post {
+      title
+    }
+  }
+}
+```
+
+### Resolver для интерфейса
+
+```javascript
+const resolvers = {
+  Node: {
+    // GraphQL нужно знать, какой конкретный тип
+    __resolveType(obj) {
+      if (obj.email) return 'User';
+      if (obj.title) return 'Post';
+      return null;
+    },
+  },
+};
+```
+
+## Union типы
+
+Union объединяет несколько типов — но без общих полей:
+
+```graphql
+type Cat {
+  name: String!
+  meows: Boolean!
+}
+
+type Dog {
+  name: String!
+  barks: Boolean!
+}
+
+union Pet = Cat | Dog
+
+type Query {
+  pet(id: ID!): Pet
+  allPets: [Pet!]!
+}
+```
+
+### Запрос с union
+
+```graphql
+query {
+  allPets {
+    # Для Union нужны inline fragments на ВСЕ поля:
+    ... on Cat {
+      name
+      meows
+    }
+    ... on Dog {
+      name
+      barks
+    }
+  }
+}
+```
+
+### Практический пример: Search результаты
+
+```graphql
+union SearchResult = User | Post | Product | Category
+
+type Query {
+  search(query: String!): [SearchResult!]!
+}
+```
+
+```graphql
+query Search($q: String!) {
+  search(query: $q) {
+    ... on User {
+      name
+      email
+    }
+    ... on Post {
+      title
+      excerpt
+    }
+    ... on Product {
+      name
+      price
+    }
+    ... on Category {
+      name
+    }
+  }
+}
+```
+
+## Enum типы
+
+```graphql
+enum Direction {
+  NORTH
+  SOUTH
+  EAST
+  WEST
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum SortOrder {
+  ASC
+  DESC
+}
+
+type Query {
+  products(sortBy: String, order: SortOrder = DESC): [Product!]!
+}
+```
+
+На сервере enum приходит как строка:
+```javascript
+const resolvers = {
+  Query: {
+    products: (_, { sortBy, order }) => {
+      // order будет строкой: 'ASC' или 'DESC'
+      return db.products.findAll({ order: [[sortBy, order]] });
+    },
+  },
+};
+```
+
+## Input типы
+
+Специальные типы ТОЛЬКО для входных данных:
+
+```graphql
+input CreateProductInput {
+  name: String!
+  price: Float!
+  categoryId: ID!
+  description: String
+  inStock: Boolean = true
+}
+
+input ProductFilters {
+  minPrice: Float
+  maxPrice: Float
+  inStock: Boolean
+  categoryId: ID
+}
+
+input PaginationInput {
+  limit: Int = 20
+  offset: Int = 0
+}
+
+type Mutation {
+  createProduct(input: CreateProductInput!): Product!
+}
+
+type Query {
+  products(
+    filters: ProductFilters
+    pagination: PaginationInput
+  ): [Product!]!
+}
+```
+
+**Важно:** `input` типы:
+- НЕ могут содержать поля других объектных типов (только input или скаляры)
+- НЕ могут использоваться как возвращаемые значения
+
+## Полная система типов: пример E-commerce
+
+```graphql
+# Скаляры
+scalar DateTime
+scalar Money
+
+# Перечисления
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CARD
+  PAYPAL
+  CRYPTO
+}
+
+# Интерфейсы
+interface Node {
+  id: ID!
+}
+
+interface Auditable {
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+# Объекты
+type User implements Node & Auditable {
+  id: ID!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  name: String!
+  email: String!
+  orders: [Order!]!
+}
+
+type Product implements Node & Auditable {
+  id: ID!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  name: String!
+  price: Money!
+  category: Category!
+  inStock: Boolean!
+}
+
+type Category implements Node {
+  id: ID!
+  name: String!
+  products: [Product!]!
+}
+
+type OrderItem {
+  product: Product!
+  quantity: Int!
+  price: Money!
+}
+
+type Order implements Node & Auditable {
+  id: ID!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  status: OrderStatus!
+  items: [OrderItem!]!
+  total: Money!
+  customer: User!
+}
+
+# Union для поиска
+union SearchResult = Product | Category | User
+
+# Input типы
+input CreateOrderInput {
+  items: [OrderItemInput!]!
+  paymentMethod: PaymentMethod!
+}
+
+input OrderItemInput {
+  productId: ID!
+  quantity: Int!
+}
+```
+
+## Практика
+
+1. Создай `interface Searchable` с полями `id` и `searchText`
+2. Реализуй его в типах `Book`, `Author`, `Publisher`
+3. Создай `union SearchResult = Book | Author | Publisher`
+4. Добавь кастомный скаляр `ISBN` для книг
+5. Создай `input` типы для создания и фильтрации книг с пагинацией
+
+## Итого
+
+- **Scalar** — атомарные значения (String, Int, Float, Boolean, ID + кастомные)
+- **Object** — основные сущности с полями
+- **Interface** — абстрактный тип с обязательными полями
+- **Union** — объединение типов без общих полей
+- **Enum** — перечисления
+- **Input** — только для аргументов мутаций/запросов
+
+**Следующий урок** → [Queries →](/graphql/queries)

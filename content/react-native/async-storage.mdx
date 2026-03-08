@@ -1,0 +1,213 @@
+import { Playground } from '../../components/Playground'
+
+# AsyncStorage и хранение данных
+
+Для локального хранения данных в React Native есть несколько опций — от простого AsyncStorage до зашифрованного Secure Store.
+
+## AsyncStorage
+
+Простое key-value хранилище (как localStorage, но асинхронное):
+
+```bash
+npx expo install @react-native-async-storage/async-storage
+```
+
+```tsx
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Сохранить
+await AsyncStorage.setItem('user', JSON.stringify({ name: 'Яша', age: 1 }));
+
+// Получить
+const raw = await AsyncStorage.getItem('user');
+const user = raw ? JSON.parse(raw) : null;
+
+// Удалить
+await AsyncStorage.removeItem('user');
+
+// Все ключи
+const keys = await AsyncStorage.getAllKeys();
+
+// Очистить всё
+await AsyncStorage.clear();
+
+// Batch операции
+await AsyncStorage.multiSet([['key1', 'val1'], ['key2', 'val2']]);
+```
+
+## MMKV — быстрее AsyncStorage в 30x
+
+```bash
+npx expo install react-native-mmkv
+```
+
+```tsx
+import { MMKV } from 'react-native-mmkv';
+
+const storage = new MMKV();
+
+// Синхронное API (не нужен await!)
+storage.set('user.name', 'Яша');
+storage.set('count', 42);
+storage.set('active', true);
+
+const name = storage.getString('user.name');  // 'Яша'
+const count = storage.getNumber('count');      // 42
+storage.delete('user.name');
+```
+
+## Expo SecureStore — зашифрованное хранилище
+
+Для токенов, паролей, ключей. iOS Keychain / Android Keystore:
+
+```bash
+npx expo install expo-secure-store
+```
+
+```tsx
+import * as SecureStore from 'expo-secure-store';
+
+await SecureStore.setItemAsync('token', 'eyJhbGciOiJIUzI1NiJ9...');
+const token = await SecureStore.getItemAsync('token');
+await SecureStore.deleteItemAsync('token');
+```
+
+## Zustand + AsyncStorage (персистентный стейт)
+
+```tsx
+import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const useUserStore = create(
+  persist(
+    (set) => ({
+      user: null,
+      setUser: (user) => set({ user }),
+      logout: () => set({ user: null }),
+    }),
+    {
+      name: 'user-storage',
+      storage: createJSONStorage(() => AsyncStorage),
+    }
+  )
+);
+```
+
+## Custom hook для хранения
+
+```tsx
+function useStorage<T>(key: string, defaultValue: T) {
+  const [value, setValue] = useState<T>(defaultValue);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    AsyncStorage.getItem(key).then(raw => {
+      if (raw) setValue(JSON.parse(raw));
+      setLoading(false);
+    });
+  }, [key]);
+
+  const save = async (newValue: T) => {
+    setValue(newValue);
+    await AsyncStorage.setItem(key, JSON.stringify(newValue));
+  };
+
+  return { value, save, loading };
+}
+
+// Использование
+const { value: theme, save: saveTheme } = useStorage('theme', 'dark');
+```
+
+<Playground
+  template="react"
+  files={{
+    "/App.js": `import { useState } from 'react';
+
+const COLORS = { bg: '#1e1e2e', surface: '#313244', purple: '#cba6f7', text: '#cdd6f4', sub: '#6c7086', green: '#a6e3a1', blue: '#89b4fa', red: '#f38ba8' };
+
+const mockStorage = {};
+
+export default function App() {
+  const [name, setName] = useState('');
+  const [theme, setTheme] = useState('dark');
+  const [notes, setNotes] = useState([]);
+  const [newNote, setNewNote] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+
+  const addNote = () => {
+    if (!newNote.trim()) return;
+    const updated = [...notes, { id: Date.now(), text: newNote.trim() }];
+    setNotes(updated);
+    mockStorage['notes'] = JSON.stringify(updated);
+    setNewNote('');
+  };
+
+  const removeNote = (id) => {
+    const updated = notes.filter(n => n.id !== id);
+    setNotes(updated);
+    mockStorage['notes'] = JSON.stringify(updated);
+  };
+
+  const saveName = (v) => { setName(v); mockStorage['user.name'] = JSON.stringify(v); };
+  const saveTheme = (v) => { setTheme(v); mockStorage['theme'] = JSON.stringify(v); };
+
+  return (
+    <div style={{ background: COLORS.bg, minHeight: '100vh', padding: 20, fontFamily: 'sans-serif', color: COLORS.text }}>
+      <div style={{ color: COLORS.purple, fontWeight: 'bold', fontSize: 18, marginBottom: 20 }}>AsyncStorage симуляция</div>
+
+      <div style={{ background: COLORS.surface, borderRadius: 12, padding: 16, marginBottom: 12 }}>
+        <div style={{ color: COLORS.sub, fontSize: 12, marginBottom: 8 }}>key: "user.name"</div>
+        <input value={name} onChange={e => saveName(e.target.value)} placeholder="Введи имя..."
+          style={{ width: '100%', boxSizing: 'border-box', background: '#11111b', border: '1px solid #45475a', borderRadius: 8, padding: '10px', color: COLORS.text, fontSize: 14, outline: 'none' }} />
+        {name && <div style={{ color: COLORS.green, fontSize: 12, marginTop: 6 }}>✅ Сохранено: "{name}"</div>}
+      </div>
+
+      <div style={{ background: COLORS.surface, borderRadius: 12, padding: 16, marginBottom: 12 }}>
+        <div style={{ color: COLORS.sub, fontSize: 12, marginBottom: 8 }}>key: "theme"</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {['dark', 'light', 'auto'].map(t => (
+            <button key={t} onClick={() => saveTheme(t)}
+              style={{ flex: 1, padding: '8px', background: theme === t ? COLORS.purple : '#11111b', color: theme === t ? '#1e1e2e' : COLORS.text, border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 'bold', fontSize: 12 }}>
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ background: COLORS.surface, borderRadius: 12, padding: 16, marginBottom: 12 }}>
+        <div style={{ color: COLORS.sub, fontSize: 12, marginBottom: 8 }}>key: "notes" (массив)</div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+          <input value={newNote} onChange={e => setNewNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && addNote()} placeholder="Новая заметка..."
+            style={{ flex: 1, background: '#11111b', border: '1px solid #45475a', borderRadius: 8, padding: '8px 10px', color: COLORS.text, fontSize: 13, outline: 'none' }} />
+          <button onClick={addNote} style={{ padding: '8px 14px', background: COLORS.purple, color: '#1e1e2e', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 'bold' }}>+</button>
+        </div>
+        {notes.map(n => (
+          <div key={n.id} style={{ display: 'flex', justifyContent: 'space-between', background: '#11111b', borderRadius: 8, padding: '8px 12px', marginBottom: 6 }}>
+            <span style={{ fontSize: 13 }}>{n.text}</span>
+            <button onClick={() => removeNote(n.id)} style={{ background: 'none', border: 'none', color: COLORS.red, cursor: 'pointer' }}>×</button>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ background: '#11111b', borderRadius: 8, padding: 12, fontFamily: 'monospace', fontSize: 11, color: COLORS.green }}>
+        <div style={{ color: COLORS.sub, marginBottom: 4 }}>// mockStorage state</div>
+        {Object.entries(mockStorage).map(([k, v]) => (
+          <div key={k}>"{k}": {v?.toString().slice(0, 50)}</div>
+        ))}
+        {Object.keys(mockStorage).length === 0 && <div style={{ color: COLORS.sub }}>пусто — начни вводить данные</div>}
+      </div>
+    </div>
+  );
+}`,
+  }}
+/>
+
+## Итоги
+
+- `AsyncStorage` — key-value, асинхронный, для простых данных
+- `MMKV` — в 30x быстрее, синхронный API
+- `expo-secure-store` — зашифрованное хранение (токены, пароли)
+- `Zustand + persist` — автоматическое сохранение стейта
+- Всегда `JSON.stringify/parse` для объектов

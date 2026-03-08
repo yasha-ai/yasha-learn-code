@@ -1,0 +1,261 @@
+# PM2 и деплой
+
+![Иллюстрация к уроку](/lessons/nodejs-pm2.png)
+
+**PM2** — production process manager для Node.js. Следит за процессом, перезапускает при сбоях, кластеризация, логи.
+
+## Установка и запуск
+
+```bash
+npm install -g pm2
+
+# Запуск приложения
+pm2 start src/index.js --name "my-api"
+
+# С параметрами
+pm2 start src/index.js \
+  --name "my-api" \
+  --instances 4 \         # 4 процесса (кластер)
+  --max-memory-restart 500M  # перезапуск при 500 МБ
+
+# Из package.json
+pm2 start npm --name "my-api" -- start
+```
+
+## Основные команды
+
+```bash
+# Управление
+pm2 start app              # запустить
+pm2 stop app               # остановить
+pm2 restart app            # перезапустить
+pm2 reload app             # zero-downtime перезапуск
+pm2 delete app             # удалить из PM2
+pm2 delete all             # удалить все процессы
+
+# Мониторинг
+pm2 list                   # список процессов
+pm2 status                 # статус (синоним list)
+pm2 monit                  # интерактивный мониторинг
+pm2 show app               # детальная информация
+
+# Логи
+pm2 logs                   # логи всех процессов
+pm2 logs app               # логи конкретного
+pm2 logs --lines 100       # последние 100 строк
+pm2 flush                  # очистить логи
+
+# Системные
+pm2 save                   # сохранить текущий список
+pm2 startup                # автозапуск при перезагрузке
+pm2 unstartup              # отключить автозапуск
+```
+
+## ecosystem.config.js — конфигурация
+
+```javascript
+// ecosystem.config.js
+module.exports = {
+  apps: [
+    {
+      name: 'my-api',
+      script: './src/index.js',
+      
+      // Кластер
+      instances: 'max',        // число ядер CPU
+      exec_mode: 'cluster',   // cluster mode
+      
+      // Переменные окружения
+      env: {
+        NODE_ENV: 'development',
+        PORT: 3000,
+      },
+      env_production: {
+        NODE_ENV: 'production',
+        PORT: 3000,
+      },
+      
+      // Мониторинг и перезапуск
+      max_memory_restart: '500M',
+      min_uptime: '10s',         // min время работы (иначе — ошибка старта)
+      max_restarts: 10,          // макс. перезапусков подряд
+      restart_delay: 4000,       // задержка между перезапусками
+      
+      // Наблюдение за файлами (для dev)
+      watch: false,
+      ignore_watch: ['node_modules', 'logs', '.git'],
+      
+      // Логи
+      log_file: './logs/combined.log',
+      out_file: './logs/out.log',
+      error_file: './logs/error.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      merge_logs: true,          // один файл для кластера
+      
+      // Graceful shutdown
+      kill_timeout: 5000,        // время на завершение (мс)
+      listen_timeout: 10000,     // время на запуск
+      
+      // Cron перезапуск (каждый день в 3:00)
+      cron_restart: '0 3 * * *',
+    },
+  ],
+};
+```
+
+```bash
+# Запуск из конфига
+pm2 start ecosystem.config.js
+pm2 start ecosystem.config.js --env production
+pm2 reload ecosystem.config.js --env production  # zero-downtime
+```
+
+## Cluster Mode — кластеризация
+
+```javascript
+// PM2 в cluster mode запускает несколько копий
+// Каждая на своём ядре CPU → параллельная обработка
+
+// ecosystem.config.js
+{
+  instances: 'max',        // = количество ядер CPU
+  exec_mode: 'cluster',   // кластер mode
+}
+
+// Или через CLI
+pm2 start app.js -i max   // -i = instances
+pm2 start app.js -i 4     // 4 процесса
+
+// Масштабирование на лету
+pm2 scale app +2           // добавить 2 процесса
+pm2 scale app 4            // установить 4 процесса
+pm2 scale app -1           // убрать 1 процесс
+```
+
+```javascript
+// Внимание: в кластере каждый процесс отдельный!
+// Общий state (in-memory) НЕ шарится!
+
+// ❌ Не работает в кластере
+let users = [];  // у каждого процесса свой массив
+let requestCount = 0;  // у каждого свой счётчик
+
+// ✅ Используй Redis для общего состояния
+const redis = require('ioredis');
+const client = new Redis(process.env.REDIS_URL);
+```
+
+## Деплой на VPS
+
+```bash
+# 1. Подготовка сервера
+ssh user@server
+sudo apt update && sudo apt upgrade -y
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs nginx
+sudo npm install -g pm2
+
+# 2. Клонируем проект
+git clone https://github.com/user/my-api.git /var/www/my-api
+cd /var/www/my-api
+npm ci --production
+
+# 3. Настраиваем .env
+cp .env.example .env
+nano .env  # заполняем реальные значения
+
+# 4. Запускаем через PM2
+pm2 start ecosystem.config.js --env production
+pm2 save     # сохранить для автозапуска
+pm2 startup  # автозапуск при перезагрузке ОС
+```
+
+## Nginx как reverse proxy
+
+```nginx
+# /etc/nginx/sites-available/my-api
+server {
+    listen 80;
+    server_name api.example.com;
+
+    # Перенаправление на HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.example.com;
+
+    # SSL сертификат (Let's Encrypt)
+    ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+
+    # Безопасность
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Лимит размера тела запроса
+    client_max_body_size 10M;
+
+    # Proxy к Node.js
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+```bash
+# Включаем сайт
+sudo ln -s /etc/nginx/sites-available/my-api /etc/nginx/sites-enabled/
+sudo nginx -t           # проверка конфига
+sudo systemctl reload nginx
+
+# SSL через Certbot
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d api.example.com
+```
+
+## CI/CD: автодеплой через GitHub Actions
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd /var/www/my-api
+            git pull origin main
+            npm ci --production
+            npx prisma migrate deploy
+            pm2 reload ecosystem.config.js --env production
+```
+
+## Практика
+
+1. Установи PM2 и запусти приложение с `--name my-api`
+2. Создай `ecosystem.config.js` с настройками кластера, логов и перезапуска
+3. Настрой автозапуск через `pm2 startup` и `pm2 save`
+4. Настрой Nginx как reverse proxy с SSL
+5. Реализуй автодеплой через GitHub Actions (ssh + pm2 reload)

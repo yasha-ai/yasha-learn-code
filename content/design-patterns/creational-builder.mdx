@@ -1,0 +1,285 @@
+## Design Patterns. Урок: Builder (Строитель)
+
+**Builder** — порождающий паттерн, позволяющий создавать сложные объекты пошагово. Builder даёт возможность использовать один и тот же строительный код для получения разных представлений объектов.
+
+---
+
+### Проблема: конструктор-монстр
+
+```typescript
+// ❌ Телескопический конструктор — настоящий ужас
+class QueryBuilder {
+  constructor(
+    table: string,
+    select: string[],
+    where?: string,
+    orderBy?: string,
+    orderDir?: 'ASC' | 'DESC',
+    limit?: number,
+    offset?: number,
+    joins?: string[],
+    groupBy?: string,
+    having?: string,
+  ) { ... }
+}
+
+// Использование — вообще непонятно что к чему
+const query = new QueryBuilder(
+  'users',
+  ['id', 'name', 'email'],
+  'age > 18',
+  'name',
+  'ASC',
+  10,
+  0,
+  [],
+  undefined,
+  undefined,
+);
+```
+
+---
+
+### Builder Pattern
+
+```typescript
+// ✅ Пошаговое строительство объекта
+class SqlQueryBuilder {
+  private query: {
+    table: string;
+    select: string[];
+    conditions: string[];
+    orderBy?: { column: string; direction: 'ASC' | 'DESC' };
+    limit?: number;
+    offset?: number;
+    joins: string[];
+    groupBy?: string;
+  } = {
+    table: '',
+    select: ['*'],
+    conditions: [],
+    joins: [],
+  };
+
+  from(table: string): this {
+    this.query.table = table;
+    return this;
+  }
+
+  select(...columns: string[]): this {
+    this.query.select = columns;
+    return this;
+  }
+
+  where(condition: string): this {
+    this.query.conditions.push(condition);
+    return this;
+  }
+
+  orderBy(column: string, direction: 'ASC' | 'DESC' = 'ASC'): this {
+    this.query.orderBy = { column, direction };
+    return this;
+  }
+
+  limit(count: number): this {
+    this.query.limit = count;
+    return this;
+  }
+
+  offset(count: number): this {
+    this.query.offset = count;
+    return this;
+  }
+
+  join(joinClause: string): this {
+    this.query.joins.push(joinClause);
+    return this;
+  }
+
+  groupBy(column: string): this {
+    this.query.groupBy = column;
+    return this;
+  }
+
+  build(): string {
+    const parts = [`SELECT ${this.query.select.join(', ')} FROM ${this.query.table}`];
+    
+    if (this.query.joins.length > 0) {
+      parts.push(this.query.joins.join(' '));
+    }
+    if (this.query.conditions.length > 0) {
+      parts.push(`WHERE ${this.query.conditions.join(' AND ')}`);
+    }
+    if (this.query.groupBy) {
+      parts.push(`GROUP BY ${this.query.groupBy}`);
+    }
+    if (this.query.orderBy) {
+      parts.push(`ORDER BY ${this.query.orderBy.column} ${this.query.orderBy.direction}`);
+    }
+    if (this.query.limit !== undefined) {
+      parts.push(`LIMIT ${this.query.limit}`);
+    }
+    if (this.query.offset !== undefined) {
+      parts.push(`OFFSET ${this.query.offset}`);
+    }
+
+    return parts.join('\n');
+  }
+}
+
+// Использование — читаемо и понятно!
+const query = new SqlQueryBuilder()
+  .from('users')
+  .select('id', 'name', 'email')
+  .join('LEFT JOIN orders ON users.id = orders.user_id')
+  .where('users.age > 18')
+  .where('users.active = true')
+  .orderBy('name', 'ASC')
+  .limit(10)
+  .offset(20)
+  .build();
+
+console.log(query);
+// SELECT id, name, email FROM users
+// LEFT JOIN orders ON users.id = orders.user_id
+// WHERE users.age > 18 AND users.active = true
+// ORDER BY name ASC
+// LIMIT 10
+// OFFSET 20
+```
+
+---
+
+### Builder с Director
+
+Director управляет порядком строительства:
+
+```typescript
+// Строительство конфигурации HTTP запроса
+class HttpRequestBuilder {
+  private config: RequestInit & { url: string } = { url: '', method: 'GET', headers: {} };
+
+  url(url: string): this { this.config.url = url; return this; }
+  method(method: string): this { this.config.method = method; return this; }
+  header(name: string, value: string): this {
+    (this.config.headers as Record<string, string>)[name] = value;
+    return this;
+  }
+  body(data: any): this { this.config.body = JSON.stringify(data); return this; }
+  auth(token: string): this { return this.header('Authorization', `Bearer ${token}`); }
+  json(): this { return this.header('Content-Type', 'application/json'); }
+
+  build(): { url: string; options: RequestInit } {
+    const { url, ...options } = this.config;
+    return { url, options };
+  }
+}
+
+// Director — знает как собрать типичные конфигурации
+class ApiRequestDirector {
+  constructor(private baseUrl: string, private authToken: string) {}
+
+  buildGetRequest(endpoint: string): HttpRequestBuilder {
+    return new HttpRequestBuilder()
+      .url(`${this.baseUrl}${endpoint}`)
+      .method('GET')
+      .auth(this.authToken)
+      .json();
+  }
+
+  buildPostRequest(endpoint: string, data: any): HttpRequestBuilder {
+    return new HttpRequestBuilder()
+      .url(`${this.baseUrl}${endpoint}`)
+      .method('POST')
+      .auth(this.authToken)
+      .json()
+      .body(data);
+  }
+}
+
+// Использование
+const director = new ApiRequestDirector('https://api.example.com', 'my-token');
+const { url, options } = director.buildPostRequest('/users', { name: 'Alice' }).build();
+const response = await fetch(url, options);
+```
+
+---
+
+### Builder в TypeScript: Fluent Interface
+
+Часто Builder реализуют как Fluent Interface (цепочка вызовов):
+
+```typescript
+// Построение конфигурации Email
+class EmailBuilder {
+  private email: Email = {
+    to: [],
+    cc: [],
+    bcc: [],
+    subject: '',
+    body: '',
+    isHtml: false,
+    attachments: [],
+  };
+
+  to(...addresses: string[]): this {
+    this.email.to.push(...addresses);
+    return this;
+  }
+
+  cc(...addresses: string[]): this {
+    this.email.cc.push(...addresses);
+    return this;
+  }
+
+  subject(subject: string): this {
+    this.email.subject = subject;
+    return this;
+  }
+
+  htmlBody(html: string): this {
+    this.email.body = html;
+    this.email.isHtml = true;
+    return this;
+  }
+
+  textBody(text: string): this {
+    this.email.body = text;
+    this.email.isHtml = false;
+    return this;
+  }
+
+  attach(filename: string, content: Buffer): this {
+    this.email.attachments.push({ filename, content });
+    return this;
+  }
+
+  build(): Email {
+    if (!this.email.to.length) throw new Error('Email must have at least one recipient');
+    if (!this.email.subject) throw new Error('Email must have a subject');
+    return { ...this.email };
+  }
+}
+
+// Чистое, читаемое использование
+const email = new EmailBuilder()
+  .to('alice@example.com', 'bob@example.com')
+  .cc('manager@example.com')
+  .subject('Monthly Report')
+  .htmlBody('<h1>Hello!</h1><p>Here is the report...</p>')
+  .build();
+```
+
+---
+
+### Практические задания
+
+1. Создай `UserBuilder` для построения объекта пользователя с полями: `name`, `email`, `age`, `role`, `permissions[]`, `address`. Добавь валидацию в `build()`.
+
+2. Реализуй `HttpClientBuilder` для конфигурации axios/fetch клиента с baseURL, таймаутом, retry-логикой и interceptors.
+
+3. Напиши Builder для построения конфигурации Next.js страницы: metadata, open graph теги, canonical URL.
+
+4. Чем Builder отличается от конструктора с объектом параметров (`new User({ name, email })`)?
+
+5. Найди использование паттерна Builder в популярных TypeScript библиотеках (hint: Prisma query builder).

@@ -1,0 +1,307 @@
+# JWT токены
+
+## Что такое JWT?
+
+**JWT (JSON Web Token)** — стандарт (RFC 7519) для безопасной передачи информации между сторонами в виде JSON объекта.
+
+JWT позволяет:
+- Аутентифицировать пользователей без хранения состояния на сервере
+- Передавать информацию о пользователе (claims) внутри токена
+- Верифицировать токен без обращения к базе данных
+
+## Структура JWT
+
+JWT состоит из трёх частей, разделённых точкой: `header.payload.signature`
+
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+.
+eyJ1c2VySWQiOiIxMjMiLCJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJpYXQiOjE2OTAwMDAwMDAsImV4cCI6MTY5MDg2NDAwMH0
+.
+SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+```
+
+### 1. Header (заголовок)
+
+```json
+{
+  "alg": "HS256",  // алгоритм подписи
+  "typ": "JWT"     // тип токена
+}
+```
+
+### 2. Payload (нагрузка)
+
+```json
+{
+  "sub": "123",              // subject (userId)
+  "email": "user@example.com",
+  "role": "admin",
+  "iat": 1690000000,         // issued at (когда создан)
+  "exp": 1690864000          // expires (когда истекает)
+}
+```
+
+**Стандартные claims:**
+- `iss` — Issuer (кто выдал)
+- `sub` — Subject (о ком)
+- `aud` — Audience (для кого)
+- `exp` — Expiration Time
+- `nbf` — Not Before
+- `iat` — Issued At
+- `jti` — JWT ID (уникальный идентификатор)
+
+### 3. Signature (подпись)
+
+```
+HMACSHA256(
+  base64UrlEncode(header) + "." + base64UrlEncode(payload),
+  secret
+)
+```
+
+Подпись гарантирует, что payload не был изменён.
+
+## Работа с JWT в Node.js
+
+```bash
+npm install jsonwebtoken
+```
+
+### Создание токена
+
+```javascript
+import jwt from 'jsonwebtoken';
+
+const JWT_SECRET = process.env.JWT_SECRET; // длинная случайная строка
+
+function createToken(user) {
+  const payload = {
+    sub: user.id,
+    email: user.email,
+    role: user.role,
+  };
+  
+  return jwt.sign(payload, JWT_SECRET, {
+    expiresIn: '15m',  // access token — короткий срок
+    algorithm: 'HS256',
+  });
+}
+
+// Использование
+const token = createToken({ id: '123', email: 'user@example.com', role: 'user' });
+console.log(token); // eyJhbG...
+```
+
+### Верификация токена
+
+```javascript
+function verifyToken(token) {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    return { valid: true, payload: decoded };
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return { valid: false, error: 'Token expired' };
+    }
+    if (err.name === 'JsonWebTokenError') {
+      return { valid: false, error: 'Invalid token' };
+    }
+    return { valid: false, error: 'Token verification failed' };
+  }
+}
+```
+
+### Middleware для Express
+
+```javascript
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  
+  const token = authHeader.split(' ')[1];
+  const { valid, payload, error } = verifyToken(token);
+  
+  if (!valid) {
+    return res.status(401).json({ error });
+  }
+  
+  req.user = payload;
+  next();
+}
+
+// Использование
+app.get('/protected', authMiddleware, (req, res) => {
+  res.json({ user: req.user });
+});
+```
+
+## Access и Refresh токены
+
+Access token — короткоживущий (15 минут). Refresh token — долгоживущий (30 дней).
+
+```javascript
+// Создание пары токенов
+function createTokenPair(user) {
+  const accessToken = jwt.sign(
+    { sub: user.id, email: user.email },
+    process.env.JWT_SECRET,
+    { expiresIn: '15m' }
+  );
+  
+  const refreshToken = jwt.sign(
+    { sub: user.id },
+    process.env.REFRESH_SECRET, // отдельный секрет!
+    { expiresIn: '30d' }
+  );
+  
+  return { accessToken, refreshToken };
+}
+
+// Login
+app.post('/login', async (req, res) => {
+  const user = await authenticateUser(req.body.email, req.body.password);
+  const { accessToken, refreshToken } = createTokenPair(user);
+  
+  // Refresh token в httpOnly cookie
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Strict',
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 дней
+  });
+  
+  // Access token возвращаем в body
+  res.json({ accessToken });
+});
+
+// Обновление access token
+app.post('/refresh', async (req, res) => {
+  const refreshToken = req.cookies.refreshToken;
+  
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'No refresh token' });
+  }
+  
+  try {
+    const payload = jwt.verify(refreshToken, process.env.REFRESH_SECRET);
+    
+    // Проверяем, не отозван ли refresh token
+    const isRevoked = await checkIfRevoked(refreshToken);
+    if (isRevoked) {
+      return res.status(401).json({ error: 'Token revoked' });
+    }
+    
+    const user = await db.users.findById(payload.sub);
+    const { accessToken } = createTokenPair(user);
+    
+    res.json({ accessToken });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid refresh token' });
+  }
+});
+```
+
+## Отзыв JWT (Revocation)
+
+JWT stateless по природе — нет хранилища. Отозвать нельзя напрямую.
+
+### Blacklist отозванных токенов
+
+```javascript
+// В Redis храним JTI (JWT ID) отозванных токенов
+async function revokeToken(jti, expiresAt) {
+  const ttl = expiresAt - Math.floor(Date.now() / 1000);
+  await redis.setex(`revoked:${jti}`, ttl, '1');
+}
+
+async function isRevoked(jti) {
+  return await redis.exists(`revoked:${jti}`);
+}
+
+function createToken(user) {
+  const jti = crypto.randomUUID(); // уникальный ID токена
+  
+  return jwt.sign(
+    { sub: user.id, email: user.email, jti },
+    JWT_SECRET,
+    { expiresIn: '15m' }
+  );
+}
+
+// При logout
+app.post('/logout', authMiddleware, async (req, res) => {
+  const { jti, exp } = req.user;
+  await revokeToken(jti, exp);
+  res.json({ success: true });
+});
+```
+
+## Алгоритмы подписи
+
+| Алгоритм | Тип | Ключ | Использование |
+|----------|-----|------|---------------|
+| HS256 | Симметричный | Один секрет | Монолит, один сервис |
+| HS512 | Симметричный | Один секрет | Более безопасный |
+| RS256 | Асимметричный | Публичный/приватный | Микросервисы |
+| ES256 | Асимметричный (ECDSA) | Публичный/приватный | Компактнее RSA |
+
+### RS256 для микросервисов
+
+```javascript
+import { readFileSync } from 'fs';
+import jwt from 'jsonwebtoken';
+
+// Auth service — подписывает приватным ключом
+const privateKey = readFileSync('./keys/private.pem');
+const token = jwt.sign({ sub: user.id }, privateKey, { 
+  algorithm: 'RS256',
+  expiresIn: '15m'
+});
+
+// Другие сервисы — верифицируют публичным ключом
+const publicKey = readFileSync('./keys/public.pem');
+const payload = jwt.verify(token, publicKey, { algorithms: ['RS256'] });
+```
+
+## Распространённые ошибки
+
+### Хранение в localStorage
+
+```javascript
+// ПЛОХО: XSS может украсть токен
+localStorage.setItem('token', accessToken);
+
+// ЛУЧШЕ: httpOnly cookie (защита от XSS)
+// Или: в памяти (state) + refresh token в cookie
+```
+
+### Чувствительные данные в payload
+
+```javascript
+// ПЛОХО: payload виден всем (base64 ≠ шифрование!)
+jwt.sign({ password: user.password, ssn: '123-45-6789' }, secret);
+
+// ХОРОШО: только публичные данные
+jwt.sign({ sub: user.id, email: user.email, role: user.role }, secret);
+```
+
+### Отсутствие exp
+
+```javascript
+// ПЛОХО: токен никогда не истекает
+jwt.sign({ sub: user.id }, secret);
+
+// ХОРОШО: всегда устанавливай срок действия
+jwt.sign({ sub: user.id }, secret, { expiresIn: '15m' });
+```
+
+## Практические задания
+
+1. Реализуй login endpoint, возвращающий access + refresh токены
+2. Напиши middleware верификации JWT для Express
+3. Реализуй endpoint обновления access token по refresh token
+4. Добавь blacklist отозванных токенов в Redis

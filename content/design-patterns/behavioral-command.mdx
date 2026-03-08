@@ -1,0 +1,261 @@
+## Design Patterns. Урок: Command (Команда)
+
+**Command** — поведенческий паттерн, превращающий запросы в объекты, что позволяет передавать их как аргументы, ставить в очередь, логировать и поддерживать отмену операций.
+
+---
+
+### Принцип работы
+
+Действие инкапсулируется в объект-команду. Вместо прямого вызова `receiver.doSomething()` создаём `new DoSomethingCommand(receiver)` и вызываем `command.execute()`.
+
+---
+
+### Базовая реализация
+
+```typescript
+// Интерфейс команды
+interface Command {
+  execute(): void;
+  undo(): void;
+}
+
+// Ресивер — объект с реальной бизнес-логикой
+class TextEditor {
+  private text = '';
+
+  insertText(position: number, text: string): void {
+    this.text = this.text.slice(0, position) + text + this.text.slice(position);
+  }
+
+  deleteText(position: number, length: number): void {
+    this.text = this.text.slice(0, position) + this.text.slice(position + length);
+  }
+
+  getText(): string {
+    return this.text;
+  }
+}
+
+// Конкретные команды
+class InsertTextCommand implements Command {
+  constructor(
+    private editor: TextEditor,
+    private position: number,
+    private text: string,
+  ) {}
+
+  execute(): void {
+    this.editor.insertText(this.position, this.text);
+  }
+
+  undo(): void {
+    this.editor.deleteText(this.position, this.text.length);
+  }
+}
+
+class DeleteTextCommand implements Command {
+  private deletedText = '';
+
+  constructor(
+    private editor: TextEditor,
+    private position: number,
+    private length: number,
+  ) {}
+
+  execute(): void {
+    this.deletedText = this.editor.getText().slice(this.position, this.position + this.length);
+    this.editor.deleteText(this.position, this.length);
+  }
+
+  undo(): void {
+    this.editor.insertText(this.position, this.deletedText);
+  }
+}
+
+// Invoker — управляет командами
+class CommandHistory {
+  private history: Command[] = [];
+  private currentIndex = -1;
+
+  execute(command: Command): void {
+    // Убираем redo-историю при новой команде
+    this.history = this.history.slice(0, this.currentIndex + 1);
+    this.history.push(command);
+    this.currentIndex++;
+    command.execute();
+  }
+
+  undo(): void {
+    if (this.currentIndex < 0) return;
+    this.history[this.currentIndex].undo();
+    this.currentIndex--;
+  }
+
+  redo(): void {
+    if (this.currentIndex >= this.history.length - 1) return;
+    this.currentIndex++;
+    this.history[this.currentIndex].execute();
+  }
+
+  canUndo(): boolean { return this.currentIndex >= 0; }
+  canRedo(): boolean { return this.currentIndex < this.history.length - 1; }
+}
+
+// Использование
+const editor = new TextEditor();
+const history = new CommandHistory();
+
+history.execute(new InsertTextCommand(editor, 0, 'Hello'));
+history.execute(new InsertTextCommand(editor, 5, ' World'));
+console.log(editor.getText()); // "Hello World"
+
+history.undo();
+console.log(editor.getText()); // "Hello"
+
+history.redo();
+console.log(editor.getText()); // "Hello World"
+```
+
+---
+
+### Command для очереди задач
+
+```typescript
+// Async Command с очередью
+interface AsyncCommand {
+  execute(): Promise<void>;
+  toString(): string;
+}
+
+class EmailCommand implements AsyncCommand {
+  constructor(
+    private to: string,
+    private subject: string,
+    private body: string,
+  ) {}
+
+  async execute(): Promise<void> {
+    await emailService.send(this.to, this.subject, this.body);
+  }
+
+  toString(): string {
+    return `EmailCommand(to=${this.to}, subject="${this.subject}")`;
+  }
+}
+
+class ResizeImageCommand implements AsyncCommand {
+  constructor(
+    private imagePath: string,
+    private width: number,
+    private height: number,
+  ) {}
+
+  async execute(): Promise<void> {
+    await imageProcessor.resize(this.imagePath, this.width, this.height);
+  }
+
+  toString(): string {
+    return `ResizeImageCommand(${this.imagePath}, ${this.width}x${this.height})`;
+  }
+}
+
+// Очередь задач
+class CommandQueue {
+  private queue: AsyncCommand[] = [];
+  private isProcessing = false;
+
+  enqueue(command: AsyncCommand): void {
+    this.queue.push(command);
+    if (!this.isProcessing) {
+      this.processNext();
+    }
+  }
+
+  private async processNext(): Promise<void> {
+    if (this.queue.length === 0) {
+      this.isProcessing = false;
+      return;
+    }
+
+    this.isProcessing = true;
+    const command = this.queue.shift()!;
+    
+    try {
+      console.log(`Executing: ${command}`);
+      await command.execute();
+      console.log(`Done: ${command}`);
+    } catch (error) {
+      console.error(`Failed: ${command}`, error);
+    }
+
+    await this.processNext();
+  }
+}
+
+// Использование
+const queue = new CommandQueue();
+queue.enqueue(new EmailCommand('user@example.com', 'Welcome!', 'Hello!'));
+queue.enqueue(new ResizeImageCommand('./uploads/photo.jpg', 800, 600));
+```
+
+---
+
+### Command в CQRS
+
+Command паттерн лежит в основе CQRS (Command Query Responsibility Segregation):
+
+```typescript
+// CQRS: команды изменяют состояние, запросы читают
+interface CreateUserCommand {
+  type: 'CREATE_USER';
+  payload: { name: string; email: string; role: UserRole };
+}
+
+interface UpdateUserCommand {
+  type: 'UPDATE_USER';
+  payload: { userId: string; name?: string; email?: string };
+}
+
+type UserCommand = CreateUserCommand | UpdateUserCommand;
+
+// Command Handler
+class UserCommandHandler {
+  async handle(command: UserCommand): Promise<void> {
+    switch (command.type) {
+      case 'CREATE_USER':
+        await this.handleCreate(command.payload);
+        break;
+      case 'UPDATE_USER':
+        await this.handleUpdate(command.payload);
+        break;
+    }
+  }
+
+  private async handleCreate(payload: CreateUserCommand['payload']): Promise<void> {
+    const user = new User(payload.name, payload.email, payload.role);
+    await userRepository.save(user);
+    eventBus.emit('user:created', { user });
+  }
+
+  private async handleUpdate(payload: UpdateUserCommand['payload']): Promise<void> {
+    const user = await userRepository.findById(payload.userId);
+    if (payload.name) user.name = payload.name;
+    if (payload.email) user.email = payload.email;
+    await userRepository.update(user);
+  }
+}
+```
+
+---
+
+### Практические задания
+
+1. Реализуй систему undo/redo для Kanban-доски: команды `MoveTaskCommand`, `CreateTaskCommand`, `DeleteTaskCommand`.
+
+2. Создай `MacroCommand` — команду которая содержит несколько команд и выполняет их последовательно.
+
+3. Добавь персистентность в `CommandHistory` — сохраняй историю в localStorage.
+
+4. Реализуй `RetryCommand` — обёртку которая повторяет команду при ошибке до N раз.
+
+5. Изучи как Redux использует паттерн Command (actions и reducers).

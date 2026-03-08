@@ -1,0 +1,283 @@
+# GraphQL: Урок 14. Directives
+
+![GraphQL Directives](/lessons/graphql-directives.png)
+
+Directives — аннотации, которые меняют поведение запроса или схемы. Начинаются с `@`.
+
+## Встроенные директивы
+
+### @include
+
+Включает поле только если условие истинно:
+
+```graphql
+query GetUser($id: ID!, $withPosts: Boolean!) {
+  user(id: $id) {
+    id
+    name
+    email
+    # Запрашиваем посты только если нужно
+    posts @include(if: $withPosts) {
+      id
+      title
+    }
+  }
+}
+```
+
+```javascript
+useQuery(GET_USER, {
+  variables: {
+    id: userId,
+    withPosts: true,  // Управляем что загружать
+  },
+});
+```
+
+### @skip
+
+Пропускает поле если условие истинно (обратное к @include):
+
+```graphql
+query GetProduct($id: ID!, $preview: Boolean!) {
+  product(id: $id) {
+    id
+    name
+    price
+    # Скрываем служебные поля на превью
+    internalNotes @skip(if: $preview)
+    costPrice @skip(if: $preview)
+  }
+}
+```
+
+### @deprecated
+
+Помечает поле как устаревшее:
+
+```graphql
+type User {
+  id: ID!
+  name: String!
+
+  # Устаревшее поле
+  username: String @deprecated(reason: "Use 'name' instead")
+
+  # Устаревший тип соединения
+  friendsList: [User] @deprecated(reason: "Use 'friends' connection instead")
+  friends: FriendsConnection!
+}
+```
+
+В GraphiQL и Apollo Studio эти поля помечаются визуально.
+
+### @specifiedBy
+
+Для кастомных скаляров — указывает спецификацию:
+
+```graphql
+scalar URL @specifiedBy(url: "https://url.spec.whatwg.org/")
+scalar Date @specifiedBy(url: "https://scalars.graphql.org/andimarek/date")
+```
+
+## Кастомные директивы
+
+### @auth — авторизация
+
+```graphql
+directive @auth(
+  requires: Role = READER
+) on FIELD_DEFINITION | OBJECT
+
+enum Role {
+  ADMIN
+  EDITOR
+  READER
+}
+
+type Query {
+  publicPosts: [Post!]!
+  adminPanel: AdminData! @auth(requires: ADMIN)
+}
+
+type Post {
+  id: ID!
+  title: String!
+  body: String!
+  # Только для авторов и выше:
+  editHistory: [Edit!]! @auth(requires: EDITOR)
+}
+```
+
+Реализация:
+```javascript
+import { mapSchema, getDirective, MapperKind } from '@graphql-tools/utils';
+
+function authDirectiveTransformer(schema, directiveName = 'auth') {
+  return mapSchema(schema, {
+    [MapperKind.OBJECT_FIELD]: (fieldConfig) => {
+      const authDirective = getDirective(schema, fieldConfig, directiveName)?.[0];
+
+      if (authDirective) {
+        const { requires } = authDirective;
+        const { resolve = defaultFieldResolver } = fieldConfig;
+
+        fieldConfig.resolve = async function (source, args, context, info) {
+          const { user } = context;
+
+          if (!user) {
+            throw new GraphQLError('Необходима авторизация', {
+              extensions: { code: 'UNAUTHENTICATED' },
+            });
+          }
+
+          const roleHierarchy = { ADMIN: 3, EDITOR: 2, READER: 1 };
+          if (roleHierarchy[user.role] < roleHierarchy[requires]) {
+            throw new GraphQLError('Недостаточно прав', {
+              extensions: { code: 'FORBIDDEN' },
+            });
+          }
+
+          return resolve(source, args, context, info);
+        };
+      }
+
+      return fieldConfig;
+    },
+  });
+}
+
+// Применяем трансформер к схеме
+let schema = makeExecutableSchema({ typeDefs, resolvers });
+schema = authDirectiveTransformer(schema);
+```
+
+### @rateLimit — ограничение запросов
+
+```graphql
+directive @rateLimit(
+  max: Int!
+  window: String!
+) on FIELD_DEFINITION
+
+type Query {
+  search(query: String!): [SearchResult!]!
+    @rateLimit(max: 10, window: "1m")  # Максимум 10 запросов в минуту
+
+  sendEmail(to: String!, body: String!): Boolean!
+    @rateLimit(max: 5, window: "1h")   # 5 писем в час
+}
+```
+
+### @cache — кэширование
+
+```graphql
+directive @cache(
+  maxAge: Int!
+  scope: CacheScope = PUBLIC
+) on FIELD_DEFINITION
+
+enum CacheScope {
+  PUBLIC
+  PRIVATE
+}
+
+type Query {
+  # Публичный кэш на 1 час
+  popularProducts: [Product!]! @cache(maxAge: 3600, scope: PUBLIC)
+
+  # Приватный кэш на 5 минут (специфичен для пользователя)
+  myOrders: [Order!]! @cache(maxAge: 300, scope: PRIVATE)
+}
+```
+
+### @log — логирование
+
+```graphql
+directive @log(level: String = "info") on FIELD_DEFINITION
+
+type Query {
+  deleteAllData: Boolean! @log(level: "warn")
+  sensitiveData: String! @log(level: "error")
+}
+```
+
+## Директивы на стороне клиента
+
+Apollo Client поддерживает клиентские директивы:
+
+### @client — локальные данные
+
+```graphql
+query GetDashboard {
+  me {
+    id
+    name
+    # Поле только в кэше клиента, не на сервере
+    isAdmin @client
+    theme @client
+  }
+}
+```
+
+```javascript
+// Локальные поля (field policies)
+const client = new ApolloClient({
+  cache: new InMemoryCache({
+    typePolicies: {
+      User: {
+        fields: {
+          isAdmin: {
+            read(_, { variables }) {
+              return localStorage.getItem('userRole') === 'admin';
+            },
+          },
+          theme: {
+            read() {
+              return localStorage.getItem('theme') || 'dark';
+            },
+          },
+        },
+      },
+    },
+  }),
+});
+```
+
+### @connection — именованные соединения пагинации
+
+```graphql
+query GetPostsByTag($tag: String!, $cursor: String) {
+  posts(tag: $tag, after: $cursor)
+    @connection(key: "postsByTag", filter: ["tag"]) {
+    edges {
+      node {
+        id
+        title
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+```
+
+## Практика
+
+1. Добавь `@include` чтобы загружать детали заказа только на странице деталей
+2. Реализуй директиву `@auth` с проверкой роли
+3. Пометь 3 поля в схеме как `@deprecated` с описанием альтернативы
+4. Создай кастомную директиву `@sanitize` для очистки HTML в строках
+5. Используй `@client` для хранения темы (dark/light) в Apollo кэше
+
+## Итого
+
+- `@include(if: $bool)` — включить поле по условию
+- `@skip(if: $bool)` — пропустить поле по условию
+- `@deprecated` — пометить поле устаревшим
+- Кастомные директивы — для авторизации, кэширования, логирования
+- `@client` — поля только в локальном кэше клиента
+
+**Следующий урок** → [DataLoader (N+1) →](/graphql/dataloader)

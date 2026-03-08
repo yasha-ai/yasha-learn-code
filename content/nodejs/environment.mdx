@@ -1,0 +1,219 @@
+# process, env, аргументы
+
+![Иллюстрация к уроку](/lessons/nodejs-env.png)
+
+`process` — глобальный объект в Node.js. Содержит информацию о текущем процессе и позволяет управлять им.
+
+## Переменные окружения (.env)
+
+```bash
+# .env файл — НЕ коммить в git!
+PORT=3000
+NODE_ENV=development
+DATABASE_URL=postgresql://user:password@localhost:5432/mydb
+JWT_SECRET=super-secret-key-change-in-production
+API_KEY=abc123xyz
+```
+
+```javascript
+// Загрузка .env через dotenv
+require('dotenv').config();
+// или в ESM: import 'dotenv/config';
+
+// Теперь переменные доступны в process.env
+const port = process.env.PORT || 3000;
+const env = process.env.NODE_ENV || 'development';
+const dbUrl = process.env.DATABASE_URL;
+
+console.log(`Запуск в режиме: ${env}`);
+console.log(`Порт: ${port}`);
+```
+
+## Конфиг-модуль (лучшая практика)
+
+```javascript
+// src/config.js — централизованная конфигурация
+require('dotenv').config();
+
+function requireEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Переменная окружения ${name} не установлена!`);
+  }
+  return value;
+}
+
+const config = {
+  // Сервер
+  port: parseInt(process.env.PORT || '3000', 10),
+  host: process.env.HOST || '0.0.0.0',
+  env: process.env.NODE_ENV || 'development',
+  
+  // База данных
+  db: {
+    url: requireEnv('DATABASE_URL'),
+    poolSize: parseInt(process.env.DB_POOL_SIZE || '10', 10),
+  },
+  
+  // JWT
+  jwt: {
+    secret: requireEnv('JWT_SECRET'),
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  },
+  
+  // Вычисляемые свойства
+  get isDev() { return this.env === 'development'; },
+  get isProd() { return this.env === 'production'; },
+  get isTest() { return this.env === 'test'; },
+};
+
+module.exports = config;
+```
+
+```javascript
+// Использование
+const config = require('./config');
+
+const app = express();
+app.listen(config.port, () => {
+  console.log(`Сервер на порту ${config.port} (${config.env})`);
+});
+```
+
+## Аргументы командной строки
+
+```javascript
+// process.argv — массив аргументов
+// process.argv[0] — путь к node
+// process.argv[1] — путь к скрипту
+// process.argv[2+] — пользовательские аргументы
+
+// node script.js --port=3000 --env=production
+console.log(process.argv);
+// ['node', 'script.js', '--port=3000', '--env=production']
+
+// Разбор аргументов вручную
+const args = process.argv.slice(2);
+const options = {};
+for (const arg of args) {
+  const [key, value] = arg.replace('--', '').split('=');
+  options[key] = value;
+}
+console.log(options); // { port: '3000', env: 'production' }
+
+// Лучше использовать пакет minimist или yargs
+const minimist = require('minimist');
+const argv = minimist(process.argv.slice(2));
+console.log(argv.port);  // 3000
+console.log(argv.env);   // production
+```
+
+## Информация о процессе
+
+```javascript
+// Версия Node.js
+console.log(process.version);         // v20.11.0
+console.log(process.versions.node);   // 20.11.0
+console.log(process.versions.v8);     // 11.3.244.8
+
+// Платформа и архитектура
+console.log(process.platform);  // linux / darwin / win32
+console.log(process.arch);      // x64 / arm64
+
+// Рабочая директория
+console.log(process.cwd());     // /home/user/project
+
+// ID процесса
+console.log(process.pid);       // 12345
+
+// Время работы в секундах
+console.log(process.uptime());  // 10.234
+
+// Использование памяти
+const mem = process.memoryUsage();
+console.log(`Heap: ${Math.round(mem.heapUsed / 1024 / 1024)} МБ`);
+console.log(`RSS: ${Math.round(mem.rss / 1024 / 1024)} МБ`);
+
+// Время CPU
+const cpu = process.cpuUsage();
+console.log('CPU user:', cpu.user, 'микросекунд');
+```
+
+## Управление процессом
+
+```javascript
+// Завершение процесса
+process.exit(0);   // успешное завершение
+process.exit(1);   // с ошибкой
+
+// Обработка сигналов ОС
+process.on('SIGTERM', () => {
+  console.log('Получен SIGTERM (docker stop, kill)');
+  gracefulShutdown();
+});
+
+process.on('SIGINT', () => {
+  console.log('Получен SIGINT (Ctrl+C)');
+  gracefulShutdown();
+});
+
+async function gracefulShutdown() {
+  console.log('Завершение работы...');
+  // Закрываем соединения, заканчиваем запросы
+  await server.close();
+  await database.disconnect();
+  console.log('Завершено!');
+  process.exit(0);
+}
+
+// Необработанные исключения
+process.on('uncaughtException', (err) => {
+  console.error('Необработанное исключение:', err);
+  process.exit(1);  // обязательно завершаем!
+});
+
+// Необработанные rejected Promise
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Необработанный rejection:', reason);
+  process.exit(1);
+});
+```
+
+## Разные .env для окружений
+
+```bash
+.env               # базовые значения (коммить)
+.env.local         # локальные переопределения (НЕ коммить)
+.env.development   # для development
+.env.production    # для production
+.env.test          # для тестов
+.env.example       # шаблон для команды (коммить!)
+```
+
+```javascript
+// Загрузка нужного файла
+const envFile = `.env.${process.env.NODE_ENV || 'development'}`;
+require('dotenv').config({ path: envFile });
+// Потом перезаписываем .env.local
+require('dotenv').config({ path: '.env.local', override: true });
+```
+
+## .env.example — для команды
+
+```bash
+# .env.example — коммить в git, реальные значения не писать!
+PORT=3000
+NODE_ENV=development
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DB_NAME
+JWT_SECRET=your-secret-here
+API_KEY=your-api-key-here
+REDIS_URL=redis://localhost:6379
+```
+
+## Практика
+
+1. Создай `.env` файл с переменными PORT, NODE_ENV, DB_URL
+2. Напиши `config.js` модуль, который читает env и выбрасывает ошибку если обязательная переменная не задана
+3. Добавь `process.on('uncaughtException', ...)` обработчик
+4. Создай скрипт, принимающий аргумент `--port=XXXX` и запускающий сервер на этом порту
+5. Выведи информацию о памяти процесса через `process.memoryUsage()`

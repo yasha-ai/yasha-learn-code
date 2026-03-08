@@ -1,0 +1,212 @@
+import { Playground } from '../../components/Playground'
+
+# Производительность
+
+React Native по умолчанию быстрый, но для больших приложений нужны оптимизации.
+
+## Hermes Engine
+
+JavaScript движок Meta для мобильных. AOT компиляция в байткод:
+
+```json
+{ "expo": { "jsEngine": "hermes" } }
+```
+
+- Время запуска **-40-60%**
+- Меньше потребление памяти
+- Включён по умолчанию в новых проектах
+
+## FlashList — замена FlatList
+
+```bash
+npx expo install @shopify/flash-list
+```
+
+```tsx
+import { FlashList } from "@shopify/flash-list";
+
+// В 10x быстрее FlatList
+<FlashList
+  data={data}
+  renderItem={({ item }) => <Item item={item} />}
+  estimatedItemSize={80}  // Примерная высота — важно!
+  keyExtractor={(item) => item.id}
+/>
+```
+
+## React.memo и useCallback
+
+```tsx
+// Без memo: перерендер при КАЖДОМ изменении родителя
+const Item = ({ data, onPress }) => <View>...</View>;
+
+// С memo: только при изменении props
+const Item = React.memo(({ data, onPress }) => <View>...</View>);
+
+// useCallback — стабильная ссылка на функцию
+const handlePress = useCallback((id) => {
+  navigation.navigate('Details', { id });
+}, [navigation]);
+
+// useMemo — мемоизация вычислений
+const sortedData = useMemo(
+  () => data.sort((a, b) => a.title.localeCompare(b.title)),
+  [data]
+);
+```
+
+## InteractionManager
+
+```tsx
+import { InteractionManager } from 'react-native';
+
+// Выполнить ПОСЛЕ анимации перехода
+InteractionManager.runAfterInteractions(() => {
+  fetchData();           // Тяжёлая операция
+  buildExpensiveList();  // Не мешает анимации
+});
+```
+
+## Image оптимизация
+
+```tsx
+import { Image } from 'expo-image';
+
+<Image
+  source={imageUrl}
+  contentFit="cover"
+  cachePolicy="memory-disk"
+  placeholder={{ blurhash: 'LKO2:N%2Tw=w]...' }}
+  transition={200}
+/>
+```
+
+## Антипаттерны
+
+```tsx
+// ❌ Анонимная функция в JSX (новый объект каждый рендер)
+<FlatList renderItem={({ item }) => <Item item={item} />} />
+
+// ✅ Вынести renderItem
+const renderItem = useCallback(({ item }) => <Item item={item} />, []);
+<FlatList renderItem={renderItem} />
+
+// ❌ Inline style объект
+<View style={{ backgroundColor: '#1e1e2e', padding: 16 }} />
+
+// ✅ StyleSheet.create
+<View style={styles.container} />
+
+// ❌ setState в цикле
+items.forEach(item => setState(s => [...s, item]));
+
+// ✅ Batch update
+setState(prev => [...prev, ...items]);
+```
+
+## Профилирование
+
+```bash
+# React DevTools → Profiler → Record
+
+# Console timing
+console.time('render');
+// ...
+console.timeEnd('render');
+
+# Perf Monitor (встроенный)
+# Shake устройство → Performance Monitor
+```
+
+<Playground
+  template="react"
+  files={{
+    "/App.js": `import { useState, useCallback, memo } from 'react';
+
+const COLORS = { bg: '#1e1e2e', surface: '#313244', purple: '#cba6f7', text: '#cdd6f4', sub: '#6c7086', green: '#a6e3a1', blue: '#89b4fa', red: '#f38ba8' };
+
+const SlowItem = memo(({ item, onPress, optimized }) => {
+  const start = Date.now();
+  while (Date.now() - start < (optimized ? 0 : 3)) {}
+  return (
+    <div onClick={() => onPress(item.id)}
+      style={{ background: COLORS.surface, borderRadius: 8, padding: '10px 14px', marginBottom: 6, display: 'flex', justifyContent: 'space-between', cursor: 'pointer' }}>
+      <span style={{ fontSize: 13, color: COLORS.text }}>{item.title}</span>
+      <span style={{ color: COLORS.sub, fontSize: 11 }}>#{item.id}</span>
+    </div>
+  );
+});
+
+const ITEMS = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, title: \`Элемент \${i + 1}\` }));
+
+export default function App() {
+  const [count, setCount] = useState(0);
+  const [optimized, setOptimized] = useState(true);
+  const [renderTime, setRenderTime] = useState(null);
+
+  const badHandler = (id) => {};
+  const goodHandler = useCallback((id) => {}, []);
+
+  const update = () => {
+    const start = performance.now();
+    setCount(c => c + 1);
+    requestAnimationFrame(() => setRenderTime(Math.round(performance.now() - start)));
+  };
+
+  return (
+    <div style={{ background: COLORS.bg, minHeight: '100vh', padding: 16, fontFamily: 'sans-serif', color: COLORS.text }}>
+      <div style={{ color: COLORS.purple, fontWeight: 'bold', fontSize: 16, marginBottom: 16 }}>Performance</div>
+
+      <div style={{ background: COLORS.surface, borderRadius: 12, padding: 14, marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontWeight: 'bold' }}>React.memo + useCallback</div>
+            <div style={{ color: COLORS.sub, fontSize: 12 }}>Отключи чтобы увидеть разницу</div>
+          </div>
+          <div onClick={() => setOptimized(o => !o)}
+            style={{ width: 50, height: 28, borderRadius: 14, background: optimized ? COLORS.green : '#585b70', position: 'relative', cursor: 'pointer' }}>
+            <div style={{ position: 'absolute', top: 3, left: optimized ? 22 : 3, width: 22, height: 22, background: '#fff', borderRadius: '50%', transition: 'left 0.2s' }} />
+          </div>
+        </div>
+        <button onClick={update}
+          style={{ width: '100%', padding: '10px', background: COLORS.purple, color: '#1e1e2e', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 'bold' }}>
+          Обновить родителя ({count})
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <div style={{ flex: 1, background: COLORS.surface, borderRadius: 10, padding: 10, textAlign: 'center' }}>
+          <div style={{ color: COLORS.blue, fontWeight: 'bold', fontSize: 20 }}>{count}</div>
+          <div style={{ color: COLORS.sub, fontSize: 11 }}>Рендеров</div>
+        </div>
+        <div style={{ flex: 1, background: COLORS.surface, borderRadius: 10, padding: 10, textAlign: 'center' }}>
+          <div style={{ color: renderTime > 50 ? COLORS.red : COLORS.green, fontWeight: 'bold', fontSize: 20 }}>{renderTime ?? '—'}</div>
+          <div style={{ color: COLORS.sub, fontSize: 11 }}>мс</div>
+        </div>
+      </div>
+
+      <div style={{ background: optimized ? '#0a2010' : '#2d0f0f', border: \`1px solid \${optimized ? COLORS.green : COLORS.red}\`, borderRadius: 10, padding: 10, marginBottom: 12, fontSize: 12 }}>
+        {optimized
+          ? <span style={{ color: COLORS.green }}>✅ memo + useCallback: только изменённые перерендерятся</span>
+          : <span style={{ color: COLORS.red }}>❌ Без оптимизаций: все 20 элементов перерендерятся</span>}
+      </div>
+
+      <div style={{ maxHeight: 300, overflow: 'auto' }}>
+        {ITEMS.map(item => (
+          <SlowItem key={item.id} item={item} onPress={optimized ? goodHandler : badHandler} optimized={optimized} />
+        ))}
+      </div>
+    </div>
+  );
+}`,
+  }}
+/>
+
+## Итоги
+
+- **Hermes** — AOT компиляция, быстрый старт
+- **FlashList** — замена FlatList (10x быстрее)
+- **React.memo** — пропуск ререндера при одинаковых props
+- **useCallback/useMemo** — стабильные ссылки
+- **InteractionManager** — тяжёлые операции после анимаций
+- **expo-image** — кеширование и blurhash placeholder

@@ -1,0 +1,327 @@
+# GraphQL: Урок 9. Apollo Server
+
+![Apollo Server](/lessons/graphql-apollo-server.png)
+
+Apollo Server — самый популярный GraphQL сервер для Node.js. Поддерживает Express, Fastify, Koa, AWS Lambda и многие другие.
+
+## Версии Apollo Server
+
+| Версия | Статус | Рекомендация |
+|--------|--------|-------------|
+| Apollo Server 4 | Актуальная | ✅ Использовать |
+| Apollo Server 3 | Устаревшая | ❌ Не рекомендуется |
+
+## Минимальный сервер
+
+```bash
+npm install @apollo/server graphql
+```
+
+```javascript
+import { ApolloServer } from '@apollo/server';
+import { startStandaloneServer } from '@apollo/server/standalone';
+
+const typeDefs = `#graphql
+  type Query {
+    hello: String!
+  }
+`;
+
+const resolvers = {
+  Query: {
+    hello: () => 'Hello, GraphQL!',
+  },
+};
+
+const server = new ApolloServer({ typeDefs, resolvers });
+
+const { url } = await startStandaloneServer(server, {
+  listen: { port: 4000 },
+});
+
+console.log(`🚀 Server ready at: ${url}`);
+```
+
+## Express интеграция (рекомендуется)
+
+```bash
+npm install @apollo/server express cors body-parser
+```
+
+```javascript
+import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import { ApolloServerPluginDrainHttpServer } from '@apollo/server/plugin/drainHttpServer';
+import express from 'express';
+import http from 'http';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+
+const app = express();
+const httpServer = http.createServer(app);
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [
+    ApolloServerPluginDrainHttpServer({ httpServer }),
+  ],
+});
+
+await server.start();
+
+app.use(
+  '/graphql',
+  cors({
+    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    credentials: true,
+  }),
+  bodyParser.json({ limit: '50mb' }),
+  expressMiddleware(server, {
+    context: async ({ req }) => ({
+      db,
+      user: await getUserFromRequest(req),
+    }),
+  }),
+);
+
+await new Promise((resolve) => httpServer.listen({ port: 4000 }, resolve));
+console.log(`🚀 Server ready at http://localhost:4000/graphql`);
+```
+
+## Plugins (плагины)
+
+Плагины расширяют поведение сервера:
+
+```javascript
+import { ApolloServer } from '@apollo/server';
+import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin/landingPage/default';
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [
+    // Apollo Sandbox в development
+    ApolloServerPluginLandingPageLocalDefault({ embed: true }),
+
+    // Свой плагин для логирования
+    {
+      async requestDidStart() {
+        return {
+          async willSendResponse({ response }) {
+            console.log('Ответ отправлен');
+          },
+
+          async didEncounterErrors({ errors }) {
+            errors.forEach(error => {
+              console.error('GraphQL ошибка:', error.message);
+            });
+          },
+        };
+      },
+    },
+  ],
+});
+```
+
+## Форматирование ошибок
+
+```javascript
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  formatError: (formattedError, error) => {
+    // Скрываем внутренние ошибки в production
+    if (process.env.NODE_ENV === 'production') {
+      if (!formattedError.extensions?.code) {
+        return {
+          message: 'Internal server error',
+          extensions: { code: 'INTERNAL_SERVER_ERROR' },
+        };
+      }
+    }
+
+    // Логируем всё в development
+    if (process.env.NODE_ENV === 'development') {
+      console.error(error);
+    }
+
+    return formattedError;
+  },
+});
+```
+
+## Introspection и Playground
+
+```javascript
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  // Отключаем introspection в production (безопасность)
+  introspection: process.env.NODE_ENV !== 'production',
+});
+```
+
+## Schema из файлов
+
+Для больших проектов — разбивай схему на файлы:
+
+```
+server/
+├── schema/
+│   ├── index.js       # Объединяет всё
+│   ├── user.js
+│   ├── post.js
+│   └── comment.js
+└── resolvers/
+    ├── index.js
+    ├── user.js
+    ├── post.js
+    └── comment.js
+```
+
+```javascript
+// schema/user.js
+export const userTypeDefs = `#graphql
+  type User {
+    id: ID!
+    name: String!
+    email: String!
+    posts: [Post!]!
+  }
+
+  extend type Query {
+    user(id: ID!): User
+    users: [User!]!
+    me: User
+  }
+
+  extend type Mutation {
+    updateProfile(name: String, email: String): User!
+  }
+`;
+```
+
+```javascript
+// schema/index.js
+import { userTypeDefs } from './user.js';
+import { postTypeDefs } from './post.js';
+
+const rootTypeDefs = `#graphql
+  type Query
+  type Mutation
+  type Subscription
+`;
+
+export const typeDefs = [rootTypeDefs, userTypeDefs, postTypeDefs];
+```
+
+```javascript
+// resolvers/index.js
+import { userResolvers } from './user.js';
+import { postResolvers } from './post.js';
+
+export const resolvers = [userResolvers, postResolvers];
+```
+
+## Apollo Server с TypeScript
+
+```bash
+npm install typescript @types/node -D
+```
+
+```typescript
+// src/types.ts
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+export interface Context {
+  db: Database;
+  user: User | null;
+}
+```
+
+```typescript
+// src/index.ts
+import { ApolloServer } from '@apollo/server';
+import { startStandaloneServer } from '@apollo/server/standalone';
+import { Context } from './types.js';
+
+const server = new ApolloServer<Context>({
+  typeDefs,
+  resolvers,
+});
+
+const { url } = await startStandaloneServer(server, {
+  context: async ({ req }): Promise<Context> => ({
+    db,
+    user: await getUserFromToken(req.headers.authorization),
+  }),
+  listen: { port: 4000 },
+});
+```
+
+## Performance: Depth limiting и Query complexity
+
+```bash
+npm install graphql-depth-limit graphql-validation-complexity
+```
+
+```javascript
+import depthLimit from 'graphql-depth-limit';
+import { createComplexityRule } from 'graphql-validation-complexity';
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  validationRules: [
+    // Максимальная глубина запроса
+    depthLimit(5),
+    // Максимальная сложность
+    createComplexityRule({ maximumComplexity: 1000 }),
+  ],
+});
+```
+
+## Мониторинг с Apollo Studio
+
+```javascript
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  // Подключение к Apollo Studio для мониторинга
+});
+
+// В environment variables:
+// APOLLO_KEY=service:my-service:xxxx
+// APOLLO_GRAPH_REF=my-graph@current
+```
+
+## Health check endpoint
+
+```javascript
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+```
+
+## Практика
+
+1. Создай Apollo Server с Express и CORS для фронтенда
+2. Раздели схему на файлы (user, post, comment)
+3. Добавь логирование запросов через plugin
+4. Настрой `formatError` — скрывай внутренние ошибки в production
+5. Добавь `depthLimit(4)` для защиты от сложных запросов
+
+## Итого
+
+- Apollo Server 4 — актуальная версия
+- `startStandaloneServer` — для быстрого старта
+- `expressMiddleware` — для production с кастомными middleware
+- Plugins — расширяют функциональность сервера
+- Разбивай схему на файлы для больших проектов
+
+**Следующий урок** → [Apollo Client →](/graphql/apollo-client)

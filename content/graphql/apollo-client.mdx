@@ -1,0 +1,273 @@
+# GraphQL: Урок 10. Apollo Client
+
+![Apollo Client](/lessons/graphql-apollo-client.png)
+
+Apollo Client — мощный GraphQL клиент для JavaScript. Управляет запросами, кэшированием, состоянием и обновлением UI.
+
+## Установка
+
+```bash
+npm install @apollo/client graphql
+```
+
+## Конфигурация
+
+```javascript
+// src/apolloClient.js
+import { ApolloClient, InMemoryCache, createHttpLink } from '@apollo/client';
+import { setContext } from '@apollo/client/link/context';
+
+// HTTP link — подключение к серверу
+const httpLink = createHttpLink({
+  uri: 'http://localhost:4000/graphql',
+});
+
+// Auth link — добавляем токен в заголовки
+const authLink = setContext((_, { headers }) => {
+  const token = localStorage.getItem('token');
+  return {
+    headers: {
+      ...headers,
+      authorization: token ? `Bearer ${token}` : '',
+    },
+  };
+});
+
+export const client = new ApolloClient({
+  link: authLink.concat(httpLink),
+  cache: new InMemoryCache(),
+  defaultOptions: {
+    watchQuery: {
+      fetchPolicy: 'cache-and-network', // Сначала кэш, потом сеть
+    },
+  },
+});
+```
+
+```jsx
+// src/main.jsx
+import { ApolloProvider } from '@apollo/client';
+import { client } from './apolloClient';
+
+root.render(
+  <ApolloProvider client={client}>
+    <App />
+  </ApolloProvider>
+);
+```
+
+## InMemoryCache — кэш
+
+Apollo Client автоматически кэширует ответы по нормализованной структуре:
+
+```javascript
+const client = new ApolloClient({
+  cache: new InMemoryCache({
+    typePolicies: {
+      User: {
+        // Уникальный ключ для кэша (по умолчанию id)
+        keyFields: ['id'],
+      },
+      Post: {
+        keyFields: ['id'],
+        fields: {
+          // Кастомная политика слияния для поля comments
+          comments: {
+            merge(existing = [], incoming) {
+              return [...existing, ...incoming];
+            },
+          },
+        },
+      },
+    },
+  }),
+});
+```
+
+## Fetch Policies — политики кэширования
+
+```javascript
+useQuery(GET_USERS, {
+  fetchPolicy: 'cache-first',       // Из кэша, запрос только если нет
+  fetchPolicy: 'network-only',      // Всегда запрос, кэш только для записи
+  fetchPolicy: 'cache-and-network', // Кэш + запрос (обновляет UI дважды)
+  fetchPolicy: 'no-cache',          // Без кэша
+  fetchPolicy: 'standby',           // Не выполняет запрос
+  nextFetchPolicy: 'cache-first',   // После первого запроса
+});
+```
+
+## Error Handling на уровне клиента
+
+```javascript
+import { from, HttpLink } from '@apollo/client';
+import { onError } from '@apollo/client/link/error';
+
+const errorLink = onError(({ graphQLErrors, networkError }) => {
+  if (graphQLErrors) {
+    graphQLErrors.forEach(({ message, extensions }) => {
+      if (extensions?.code === 'UNAUTHENTICATED') {
+        localStorage.removeItem('token');
+        window.location.href = '/login';
+      }
+      console.error(`GraphQL ошибка: ${message}`);
+    });
+  }
+
+  if (networkError) {
+    console.error(`Сетевая ошибка: ${networkError}`);
+  }
+});
+
+const client = new ApolloClient({
+  link: from([errorLink, authLink, httpLink]),
+  cache: new InMemoryCache(),
+});
+```
+
+## Ручное управление кэшем
+
+### Обновление после мутации
+
+```javascript
+const [createPost] = useMutation(CREATE_POST, {
+  update(cache, { data: { createPost } }) {
+    // Вариант 1: writeQuery — записываем готовые данные
+    const existing = cache.readQuery({ query: GET_POSTS });
+    cache.writeQuery({
+      query: GET_POSTS,
+      data: {
+        posts: {
+          ...existing.posts,
+          items: [createPost, ...existing.posts.items],
+        },
+      },
+    });
+
+    // Вариант 2: modify — точечное обновление
+    cache.modify({
+      fields: {
+        posts(existingPosts, { readField }) {
+          const newPostRef = cache.writeFragment({
+            data: createPost,
+            fragment: gql`
+              fragment NewPost on Post {
+                id
+                title
+                createdAt
+              }
+            `,
+          });
+          return {
+            ...existingPosts,
+            items: [newPostRef, ...existingPosts.items],
+            total: existingPosts.total + 1,
+          };
+        },
+      },
+    });
+  },
+});
+```
+
+### refetchQueries — перезапрос после мутации
+
+```javascript
+const [deletePost] = useMutation(DELETE_POST, {
+  // Простой вариант — указываем query для перезапроса
+  refetchQueries: [{ query: GET_POSTS }],
+  awaitRefetchQueries: true, // Ждём завершения refetch
+});
+
+// Или динамически:
+const [deletePost] = useMutation(DELETE_POST, {
+  refetchQueries: (result) => {
+    if (result.data.deletePost.success) {
+      return [{ query: GET_POSTS }];
+    }
+    return [];
+  },
+});
+```
+
+## Apollo Client DevTools
+
+Установи расширение [Apollo Client Devtools](https://chrome.google.com/webstore/detail/apollo-client-devtools/) для Chrome:
+- Просмотр кэша в реальном времени
+- Выполнение запросов прямо из браузера
+- Мониторинг всех операций
+
+## Чтение/запись в кэш напрямую
+
+```javascript
+// Читаем из кэша
+const data = client.readQuery({
+  query: GET_USER,
+  variables: { id: '123' },
+});
+
+// Пишем в кэш
+client.writeQuery({
+  query: GET_USER,
+  variables: { id: '123' },
+  data: { user: updatedUser },
+});
+
+// Читаем фрагмент (конкретный объект)
+const user = client.readFragment({
+  id: 'User:123', // Normalized cache key
+  fragment: gql`
+    fragment UserBasic on User {
+      id
+      name
+      email
+    }
+  `,
+});
+
+// Инвалидируем кэш (принуждаем refetch)
+client.cache.evict({ id: 'User:123' });
+client.cache.gc(); // Garbage collection
+```
+
+## Reactive Variables — локальное состояние
+
+Apollo Client может заменить Redux для простых случаев:
+
+```javascript
+// Объявление
+import { makeVar } from '@apollo/client';
+
+export const cartItemsVar = makeVar([]);
+export const isLoggedInVar = makeVar(false);
+
+// Использование в компоненте
+import { useReactiveVar } from '@apollo/client';
+
+function CartIcon() {
+  const cartItems = useReactiveVar(cartItemsVar);
+  return <span>🛒 {cartItems.length}</span>;
+}
+
+function addToCart(item) {
+  cartItemsVar([...cartItemsVar(), item]);
+}
+```
+
+## Практика
+
+1. Настрой Apollo Client с authLink для передачи JWT
+2. Добавь errorLink для редиректа на /login при 401
+3. Настрой InMemoryCache с keyFields для кастомного ключа
+4. Обнови кэш после добавления нового поста (без refetch)
+5. Создай reactive variable для корзины покупок
+
+## Итого
+
+- Apollo Client = умный кэш + fetch + state management
+- `InMemoryCache` нормализует данные по `id`
+- `fetchPolicy` управляет стратегией кэширования
+- `update` / `refetchQueries` — обновление кэша после мутаций
+- `makeVar` — реактивные переменные для локального состояния
+
+**Следующий урок** → [React Hooks для GraphQL →](/graphql/hooks)
