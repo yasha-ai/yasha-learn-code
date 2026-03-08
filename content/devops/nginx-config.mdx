@@ -1,0 +1,292 @@
+# DevOps & CI/CD: Урок 11: Nginx конфигурация
+
+![Иллюстрация к уроку](/lessons/devops-nginx.png)
+
+**Nginx** — высокопроизводительный веб-сервер и reverse proxy. Принимает входящие запросы и распределяет их на твои приложения.
+
+## Зачем Nginx
+
+```
+Без Nginx:
+Клиент → Node.js (порт 3000) — плохо
+Port 80/443 → Node.js — проблемы с правами
+
+С Nginx:
+Клиент → Nginx (80/443) → Node.js (3000) — правильно
+
+Nginx:
+✅ Reverse proxy к нескольким приложениям
+✅ SSL/TLS терминация
+✅ Статические файлы (быстрее Node.js)
+✅ Gzip сжатие
+✅ Rate limiting
+✅ Load balancing
+✅ Caching
+```
+
+## Установка
+
+```bash
+# Ubuntu/Debian
+sudo apt update
+sudo apt install nginx -y
+sudo systemctl enable nginx
+sudo systemctl start nginx
+
+# Статус
+sudo systemctl status nginx
+
+# Проверка конфига
+sudo nginx -t
+
+# Перезагрузка (без даунтайма)
+sudo systemctl reload nginx
+```
+
+## Структура конфигурации
+
+```
+/etc/nginx/
+├── nginx.conf              # главный конфиг
+├── sites-available/        # доступные виртуальные хосты
+│   ├── default
+│   └── myapp.com
+└── sites-enabled/          # включённые (символические ссылки)
+    └── myapp.com -> ../sites-available/myapp.com
+```
+
+## Базовый reverse proxy
+
+```nginx
+# /etc/nginx/sites-available/myapp.com
+server {
+    listen 80;
+    server_name myapp.com www.myapp.com;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+```bash
+# Включить конфиг
+sudo ln -s /etc/nginx/sites-available/myapp.com /etc/nginx/sites-enabled/
+
+# Проверить и перезагрузить
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+## HTTPS с SSL (Certbot)
+
+```bash
+# Установка Certbot
+sudo apt install certbot python3-certbot-nginx -y
+
+# Получение сертификата (автоматически настраивает Nginx)
+sudo certbot --nginx -d myapp.com -d www.myapp.com
+
+# Автообновление (уже настроено, проверить)
+sudo certbot renew --dry-run
+
+# Cron для обновления (systemd timer уже есть)
+sudo systemctl status certbot.timer
+```
+
+После Certbot конфиг выглядит так:
+
+```nginx
+server {
+    listen 80;
+    server_name myapp.com www.myapp.com;
+    return 301 https://$server_name$request_uri;    # redirect HTTP → HTTPS
+}
+
+server {
+    listen 443 ssl;
+    server_name myapp.com www.myapp.com;
+
+    ssl_certificate /etc/letsencrypt/live/myapp.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/myapp.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+## Nginx с несколькими приложениями
+
+```nginx
+# API бекенд на порту 3001
+server {
+    listen 443 ssl;
+    server_name api.myapp.com;
+
+    ssl_certificate /etc/letsencrypt/live/api.myapp.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.myapp.com/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:3001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Фронтенд на порту 3000
+server {
+    listen 443 ssl;
+    server_name myapp.com www.myapp.com;
+
+    ssl_certificate /etc/letsencrypt/live/myapp.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/myapp.com/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Статические файлы — отдаём напрямую
+    location /static/ {
+        alias /var/www/myapp/static/;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+}
+```
+
+## Gzip сжатие
+
+```nginx
+# /etc/nginx/nginx.conf (в секции http {})
+gzip on;
+gzip_vary on;
+gzip_proxied any;
+gzip_comp_level 6;
+gzip_types
+    text/plain
+    text/css
+    text/javascript
+    application/javascript
+    application/json
+    application/xml
+    image/svg+xml;
+```
+
+## Rate limiting
+
+```nginx
+# /etc/nginx/nginx.conf — определить зону
+http {
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
+}
+
+# В server блоке
+location /api/ {
+    limit_req zone=api burst=20 nodelay;
+    proxy_pass http://localhost:3001;
+}
+
+location /api/auth/login {
+    limit_req zone=login burst=3 nodelay;
+    proxy_pass http://localhost:3001;
+}
+```
+
+## Кэширование статики
+
+```nginx
+server {
+    # Статические файлы — кэш на 1 год
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;    # не логировать статику
+    }
+
+    # HTML — без кэша
+    location ~* \.html$ {
+        expires -1;
+        add_header Cache-Control "no-store, no-cache, must-revalidate";
+    }
+}
+```
+
+## Load Balancing
+
+```nginx
+upstream app_servers {
+    least_conn;    # алгоритм: наименьшее кол-во соединений
+    server localhost:3001 weight=3;
+    server localhost:3002 weight=1;
+    server localhost:3003;
+    
+    # keepalive соединения к upstream
+    keepalive 32;
+}
+
+server {
+    listen 443 ssl;
+    
+    location / {
+        proxy_pass http://app_servers;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";    # для keepalive
+    }
+}
+```
+
+## Полезные команды
+
+```bash
+# Проверить конфигурацию
+sudo nginx -t
+
+# Перезагрузить (без рестарта)
+sudo systemctl reload nginx
+
+# Рестарт
+sudo systemctl restart nginx
+
+# Логи
+sudo tail -f /var/log/nginx/access.log
+sudo tail -f /var/log/nginx/error.log
+
+# Статус
+sudo systemctl status nginx
+
+# Открытые соединения
+sudo ss -tlnp | grep nginx
+```
+
+## Ключевые моменты
+
+- Nginx — reverse proxy перед Node.js приложением
+- `proxy_set_header X-Forwarded-For` — передаёт реальный IP клиента
+- Certbot — автоматический SSL от Let's Encrypt
+- `return 301 https://` — всегда редиректим HTTP на HTTPS
+- `sudo nginx -t` — всегда проверяй конфиг перед перезагрузкой
+- `systemctl reload` — мягкая перезагрузка без даунтайма
+- Rate limiting защищает от brute force и DDoS

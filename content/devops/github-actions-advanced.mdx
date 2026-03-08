@@ -1,0 +1,322 @@
+# DevOps & CI/CD: Урок 3: GitHub Actions — продвинутый
+
+![Иллюстрация к уроку](/lessons/devops-gha-advanced.png)
+
+**Продвинутые возможности GitHub Actions**: переиспользование, кэширование, создание своих actions и сложные пайплайны.
+
+## Reusable Workflows
+
+Переиспользуемые workflows — DRY принцип для CI/CD:
+
+```yaml
+# .github/workflows/reusable-test.yml
+name: Reusable Test Workflow
+
+on:
+  workflow_call:            # делает workflow переиспользуемым
+    inputs:
+      node-version:
+        required: false
+        type: string
+        default: '20'
+    secrets:
+      npm-token:
+        required: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - run: npm ci
+      - run: npm test
+```
+
+```yaml
+# .github/workflows/ci.yml — использует reusable
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test-node-18:
+    uses: ./.github/workflows/reusable-test.yml
+    with:
+      node-version: '18'
+
+  test-node-20:
+    uses: ./.github/workflows/reusable-test.yml
+    with:
+      node-version: '20'
+```
+
+## Composite Actions
+
+Создавай свои actions:
+
+```yaml
+# .github/actions/setup-project/action.yml
+name: 'Setup Project'
+description: 'Install deps and cache'
+
+inputs:
+  node-version:
+    description: 'Node.js version'
+    required: false
+    default: '20'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'npm'
+
+    - name: Install
+      shell: bash
+      run: npm ci
+
+    - name: Cache Next.js
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.next/cache
+        key: ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json') }}
+```
+
+```yaml
+# Использование
+steps:
+  - uses: actions/checkout@v4
+  - uses: ./.github/actions/setup-project
+    with:
+      node-version: '20'
+  - run: npm run build
+```
+
+## Продвинутое кэширование
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Кэш для npm
+      - name: Cache npm
+        id: cache-npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      # Кэш для Next.js build
+      - name: Cache Next.js
+        uses: actions/cache@v4
+        with:
+          path: |
+            .next/cache
+            .next/static
+          key: ${{ runner.os }}-next-${{ hashFiles('**/*.tsx', '**/*.ts', '**/*.js') }}
+          restore-keys: |
+            ${{ runner.os }}-next-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install (from cache if possible)
+        if: steps.cache-npm.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - run: npm run build
+```
+
+## Environments и Approvals
+
+```yaml
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment:
+      name: production           # создай environment в Settings
+      url: https://myapp.com    # URL деплоя
+
+    steps:
+      - run: echo "Deploying to production..."
+```
+
+В Settings → Environments можно:
+- Добавить required reviewers (кто должен апрувнуть деплой)
+- Установить wait timer (задержка перед деплоем)
+- Ограничить deployment branches
+
+## Параллельные Jobs с Fan-out/Fan-in
+
+```yaml
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: get-version
+        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+  test-unit:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run test:unit
+
+  test-e2e:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run test:e2e
+
+  test-types:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run typecheck
+
+  deploy:
+    needs: [test-unit, test-e2e, test-types]   # Fan-in: ждёт всех
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploying version ${{ needs.prepare.outputs.version }}"
+```
+
+## Outputs между jobs
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.build.outputs.tag }}
+      
+    steps:
+      - id: build
+        run: |
+          TAG=$(git rev-parse --short HEAD)
+          docker build -t myapp:$TAG .
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy image
+        run: |
+          kubectl set image deployment/myapp \
+            app=myapp:${{ needs.build.outputs.image-tag }}
+```
+
+## Динамические матрицы
+
+```yaml
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          # Генерируем матрицу динамически
+          MATRIX='{"include":[{"env":"staging"},{"env":"production"}]}'
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - run: echo "Deploying to ${{ matrix.env }}"
+```
+
+## Работа с GitHub API
+
+```yaml
+steps:
+  - name: Create release
+    uses: actions/github-script@v7
+    with:
+      script: |
+        const { data: release } = await github.rest.repos.createRelease({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          tag_name: `v${process.env.VERSION}`,
+          name: `Release v${process.env.VERSION}`,
+          body: 'Automated release',
+          draft: false,
+          prerelease: false
+        });
+        console.log('Created release:', release.html_url);
+    env:
+      VERSION: ${{ env.VERSION }}
+
+  - name: Comment on PR
+    if: github.event_name == 'pull_request'
+    uses: actions/github-script@v7
+    with:
+      script: |
+        github.rest.issues.createComment({
+          issue_number: context.issue.number,
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          body: '✅ Deployment preview ready at https://pr-${{ github.event.number }}.preview.myapp.com'
+        })
+```
+
+## Self-hosted Runners
+
+```yaml
+jobs:
+  build-arm:
+    runs-on: self-hosted    # твой сервер
+    # или
+    runs-on: [self-hosted, linux, ARM64]
+```
+
+Установка runner:
+```bash
+# На своём сервере
+mkdir actions-runner && cd actions-runner
+curl -o actions-runner-linux-x64-2.319.1.tar.gz -L \
+  https://github.com/actions/runner/releases/download/v2.319.1/actions-runner-linux-x64-2.319.1.tar.gz
+tar xzf ./actions-runner-linux-x64-2.319.1.tar.gz
+
+# Настройка (токен из Settings → Actions → Runners)
+./config.sh --url https://github.com/OWNER/REPO --token TOKEN
+
+# Запуск как сервис
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+## Ключевые моменты
+
+- Reusable workflows — DRY принцип для CI/CD
+- Composite actions — создавай переиспользуемые шаги
+- `$GITHUB_OUTPUT` — передавай данные между шагами
+- `needs:` + `outputs:` — передавай данные между jobs
+- Environments с required reviewers — контроль деплоя в production
+- Self-hosted runners — для специфичного железа или экономии минут
+- `actions/github-script` — работа с GitHub API прямо из workflow

@@ -1,0 +1,264 @@
+# DevOps & CI/CD: Урок 6: Управление переменными окружения
+
+![Иллюстрация к уроку](/lessons/devops-env.png)
+
+**Environment variables** — способ конфигурировать приложение без хардкода секретов в коде. Разные значения для dev, staging, production — без изменения кода.
+
+## Зачем это нужно
+
+```
+❌ Плохо (хардкод):
+const db = new Pool({ connectionString: 'postgresql://admin:secret123@prod-db.company.com:5432/mydb' });
+
+✅ Хорошо (env vars):
+const db = new Pool({ connectionString: process.env.DATABASE_URL });
+```
+
+Преимущества:
+- Секреты не попадают в git
+- Легко менять конфигурацию без деплоя кода
+- Один код — разное поведение на разных окружениях
+
+## .env файлы
+
+```bash
+# .env.local (не коммитить!)
+DATABASE_URL=postgresql://localhost:5432/mydb_dev
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=dev-secret-key-change-in-prod
+SMTP_HOST=localhost
+SMTP_PORT=1025
+
+# .env.example (коммитить — документация)
+DATABASE_URL=postgresql://localhost:5432/mydb
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=your-secret-key-here
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+```
+
+## .gitignore для secrets
+
+```gitignore
+# .gitignore
+.env
+.env.local
+.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Разрешаем коммитить
+!.env.example
+!.env.test
+```
+
+## Node.js: работа с env vars
+
+```javascript
+// Базовое использование
+const port = process.env.PORT || 3000;
+const dbUrl = process.env.DATABASE_URL;
+
+if (!dbUrl) {
+  throw new Error('DATABASE_URL is required');
+}
+
+// Типизация и валидация с zod
+import { z } from 'zod';
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  PORT: z.coerce.number().default(3000),
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+  SMTP_HOST: z.string(),
+  SMTP_PORT: z.coerce.number().default(587),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+});
+
+export const env = envSchema.parse(process.env);
+
+// Теперь используем
+import { env } from './env.js';
+const server = express().listen(env.PORT);
+```
+
+## Next.js: переменные окружения
+
+```bash
+# .env.local
+# Серверные (не доступны в браузере)
+DATABASE_URL=postgresql://localhost:5432/mydb
+JWT_SECRET=supersecret
+
+# Публичные (доступны в браузере через process.env)
+NEXT_PUBLIC_API_URL=https://api.myapp.com
+NEXT_PUBLIC_ANALYTICS_ID=UA-XXXXX
+```
+
+```typescript
+// В server компонентах/API routes
+const db = createClient({ url: process.env.DATABASE_URL });  // ✅
+
+// В client компонентах
+const apiUrl = process.env.NEXT_PUBLIC_API_URL;  // ✅
+const secret = process.env.JWT_SECRET;  // ❌ undefined в браузере!
+```
+
+## Иерархия .env файлов в Next.js
+
+```
+.env                  — базовые значения (коммитить можно)
+.env.local            — локальные (не коммитить)
+.env.development      — для npm run dev
+.env.production       — для npm run build/start
+.env.test             — для тестов
+.env.development.local — локальное переопределение dev
+.env.production.local  — локальное переопределение prod
+```
+
+Приоритет: `.env.*.local` > `.env.*` > `.env.local` > `.env`
+
+## dotenv для Node.js
+
+```javascript
+// Ручная загрузка .env
+import 'dotenv/config';
+
+// Или с опциями
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+dotenv.config({ path: '.env' });  // fallback
+
+// Проверка обязательных переменных
+const required = ['DATABASE_URL', 'JWT_SECRET', 'SMTP_HOST'];
+const missing = required.filter(key => !process.env[key]);
+if (missing.length) {
+  console.error('Missing env vars:', missing.join(', '));
+  process.exit(1);
+}
+```
+
+## Переменные для разных окружений
+
+```bash
+# .env (база — коммитить)
+NODE_ENV=development
+LOG_LEVEL=debug
+API_TIMEOUT=30000
+```
+
+```bash
+# .env.staging
+NODE_ENV=staging
+LOG_LEVEL=info
+DATABASE_URL=postgresql://staging-db.example.com:5432/mydb_staging
+API_URL=https://api.staging.myapp.com
+```
+
+```bash
+# .env.production  (осторожно — не коммитить с реальными значениями!)
+NODE_ENV=production
+LOG_LEVEL=warn
+DATABASE_URL=postgresql://prod-db.example.com:5432/mydb
+API_URL=https://api.myapp.com
+```
+
+## Secrets в GitHub Actions
+
+```yaml
+# В Settings → Secrets and variables → Actions
+# Добавляем: DATABASE_URL, JWT_SECRET и т.д.
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          # Переменные доступны в run
+          echo "Deploying with DB: ${DATABASE_URL%%@*}@..."
+
+      - name: Set env from secret
+        run: echo "API_KEY=${{ secrets.API_KEY }}" >> $GITHUB_ENV
+
+      - name: Use env from previous step
+        run: echo "API Key set: ${API_KEY:0:4}****"
+```
+
+## Vercel и Railway: управление env vars
+
+```bash
+# Vercel CLI
+vercel env add DATABASE_URL production
+vercel env add JWT_SECRET production
+vercel env pull .env.local   # скачать текущие
+
+# Railway CLI
+railway variables set DATABASE_URL="postgresql://..."
+railway variables list
+```
+
+## Ротация секретов
+
+```bash
+# При компрометации ключа:
+# 1. Сгенерировать новый
+openssl rand -hex 32
+
+# 2. Обновить в всех местах:
+#    - GitHub Secrets
+#    - Vercel/Railway/etc
+#    - .env.production (зашифрованный)
+#    - Kubernetes secrets (если используется)
+
+# 3. Деплоить новую конфигурацию
+
+# 4. Отозвать старый ключ (если применимо)
+```
+
+## Проверочный список при деплое
+
+```bash
+#!/bin/bash
+# scripts/check-env.sh
+
+REQUIRED_VARS=(
+  "DATABASE_URL"
+  "REDIS_URL"
+  "JWT_SECRET"
+  "SMTP_HOST"
+)
+
+MISSING=()
+for var in "${REQUIRED_VARS[@]}"; do
+  if [ -z "${!var}" ]; then
+    MISSING+=("$var")
+  fi
+done
+
+if [ ${#MISSING[@]} -ne 0 ]; then
+  echo "❌ Missing required environment variables:"
+  for var in "${MISSING[@]}"; do
+    echo "  - $var"
+  done
+  exit 1
+fi
+
+echo "✅ All required environment variables are set"
+```
+
+## Ключевые моменты
+
+- Никогда не хардкоди секреты в коде
+- `.env.local` и `.env.production` — добавляй в `.gitignore`
+- `.env.example` — коммить как документацию
+- Валидируй env vars при старте приложения (zod отлично подходит)
+- `NEXT_PUBLIC_` префикс — только для не-секретных публичных значений
+- GitHub Secrets — для CI/CD
+- Храни production секреты в менеджерах секретов (следующий урок)

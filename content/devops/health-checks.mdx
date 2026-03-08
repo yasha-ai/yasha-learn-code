@@ -1,0 +1,312 @@
+# DevOps & CI/CD: Урок 15: Health checks и uptime
+
+![Иллюстрация к уроку](/lessons/devops-health.png)
+
+**Health checks** — эндпоинты которые сообщают о состоянии приложения. Без них оркестраторы (Docker, Kubernetes, Railway) не знают — работает ли твой сервис.
+
+## Зачем health checks
+
+```
+Без health checks:
+- Контейнер запущен, но приложение крашнулось
+- Nginx шлёт запросы на мёртвый сервер
+- Kubernetes не перезапускает упавший pod
+- Пользователи видят 502 Bad Gateway
+
+С health checks:
+- Оркестратор знает что сервис жив
+- Автоматический перезапуск при падении
+- Load balancer убирает больной инстанс
+- Деплой не завершается пока не будет healthy
+```
+
+## Базовый /health эндпоинт
+
+```typescript
+// Express
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// Next.js App Router
+// app/api/health/route.ts
+export async function GET() {
+  return Response.json({ status: 'ok' });
+}
+```
+
+## Детальный health check
+
+```typescript
+// lib/health.ts
+import { db } from './db';
+import { redis } from './redis';
+
+interface HealthStatus {
+  status: 'ok' | 'degraded' | 'unhealthy';
+  timestamp: string;
+  uptime: number;
+  version: string;
+  checks: Record<string, CheckResult>;
+}
+
+interface CheckResult {
+  status: 'ok' | 'error';
+  latency?: number;
+  error?: string;
+}
+
+async function checkDatabase(): Promise<CheckResult> {
+  const start = Date.now();
+  try {
+    await db.query('SELECT 1');
+    return { status: 'ok', latency: Date.now() - start };
+  } catch (error) {
+    return { status: 'error', error: (error as Error).message };
+  }
+}
+
+async function checkRedis(): Promise<CheckResult> {
+  const start = Date.now();
+  try {
+    await redis.ping();
+    return { status: 'ok', latency: Date.now() - start };
+  } catch (error) {
+    return { status: 'error', error: (error as Error).message };
+  }
+}
+
+export async function getHealthStatus(): Promise<HealthStatus> {
+  const [database, cache] = await Promise.allSettled([
+    checkDatabase(),
+    checkRedis(),
+  ]);
+
+  const checks = {
+    database: database.status === 'fulfilled' ? database.value : { status: 'error' as const, error: 'Check failed' },
+    cache: cache.status === 'fulfilled' ? cache.value : { status: 'error' as const, error: 'Check failed' },
+  };
+
+  const hasErrors = Object.values(checks).some(c => c.status === 'error');
+
+  return {
+    status: hasErrors ? 'unhealthy' : 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    version: process.env.npm_package_version || '0.0.0',
+    checks,
+  };
+}
+```
+
+```typescript
+// app/api/health/route.ts
+import { getHealthStatus } from '@/lib/health';
+
+export async function GET() {
+  try {
+    const health = await getHealthStatus();
+    const statusCode = health.status === 'ok' ? 200 : 503;
+    return Response.json(health, { status: statusCode });
+  } catch (error) {
+    return Response.json(
+      { status: 'unhealthy', error: 'Health check failed' },
+      { status: 503 }
+    );
+  }
+}
+```
+
+Ответ при здоровом сервисе:
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-03-08T01:30:00.000Z",
+  "uptime": 86400,
+  "version": "1.2.3",
+  "checks": {
+    "database": { "status": "ok", "latency": 12 },
+    "cache": { "status": "ok", "latency": 1 }
+  }
+}
+```
+
+## Liveness vs Readiness
+
+```typescript
+// Liveness — жив ли процесс?
+// Если нет — перезапустить контейнер
+app.get('/health/live', (req, res) => {
+  res.status(200).json({ status: 'alive' });
+});
+
+// Readiness — готов ли принимать трафик?
+// Если нет — убрать из load balancer, но не перезапускать
+app.get('/health/ready', async (req, res) => {
+  try {
+    // Проверяем БД — без неё не можем работать
+    await db.query('SELECT 1');
+    res.status(200).json({ status: 'ready' });
+  } catch {
+    res.status(503).json({ status: 'not ready', reason: 'database unavailable' });
+  }
+});
+
+// Startup — стартовал ли сервис?
+// Даём больше времени на инициализацию
+app.get('/health/startup', (req, res) => {
+  if (isInitialized) {
+    res.status(200).json({ status: 'started' });
+  } else {
+    res.status(503).json({ status: 'starting' });
+  }
+});
+```
+
+## Docker healthcheck
+
+```dockerfile
+# Dockerfile
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+```
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    image: myapp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s   # время на старт
+
+  nginx:
+    depends_on:
+      app:
+        condition: service_healthy   # дождаться healthy app
+```
+
+## Nginx — убираем нездоровые upstream
+
+```nginx
+upstream app {
+    server localhost:3001;
+    server localhost:3002;
+    
+    # Health check (Nginx Plus или OpenResty)
+    # В open source — пассивный health check
+}
+
+server {
+    location / {
+        proxy_pass http://app;
+        proxy_next_upstream error timeout http_503;
+        proxy_next_upstream_tries 2;
+    }
+    
+    # Не логировать health checks
+    location /health {
+        proxy_pass http://app;
+        access_log off;
+        proxy_read_timeout 5s;
+    }
+}
+```
+
+## Uptime мониторинг (внешний)
+
+### Better Uptime / UptimeRobot
+
+```bash
+# UptimeRobot — бесплатный, проверяет каждые 5 минут
+# https://uptimerobot.com
+
+# Настройка:
+# Monitor Type: HTTP(s)
+# URL: https://myapp.com/health
+# Monitoring Interval: 5 minutes
+# Alert Contacts: Email, Telegram, Slack
+```
+
+### Свой мониторинг через cron
+
+```typescript
+// scripts/monitor.ts
+const ENDPOINTS = [
+  'https://myapp.com/health',
+  'https://api.myapp.com/health',
+];
+
+const WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL!;
+
+async function checkEndpoint(url: string) {
+  const start = Date.now();
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    return {
+      url,
+      ok: response.ok,
+      status: response.status,
+      latency: Date.now() - start,
+    };
+  } catch (error) {
+    return { url, ok: false, error: (error as Error).message, latency: Date.now() - start };
+  }
+}
+
+async function main() {
+  const results = await Promise.all(ENDPOINTS.map(checkEndpoint));
+  const failures = results.filter(r => !r.ok);
+  
+  if (failures.length > 0) {
+    await fetch(WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: `🚨 Health check failures:\n${failures.map(f => `• ${f.url}: ${f.status || f.error}`).join('\n')}`,
+      }),
+    });
+  }
+}
+
+main();
+```
+
+## GitHub Actions: scheduled health check
+
+```yaml
+# .github/workflows/health-check.yml
+name: Scheduled Health Check
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # каждые 15 минут
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check production health
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://myapp.com/health)
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed with status: $STATUS"
+            curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+              -H 'Content-type: application/json' \
+              -d '{"text":"🚨 Production health check failed!"}'
+            exit 1
+          fi
+          echo "Health check passed: $STATUS"
+```
+
+## Ключевые моменты
+
+- `/health` — минимальный эндпоинт, `/health/ready` и `/health/live` — для Kubernetes
+- 200 — здоров, 503 — нездоров (важно вернуть правильный код)
+- Docker `HEALTHCHECK` — оркестратор перезапустит контейнер при失败
+- Проверяй зависимости (БД, Redis, внешние API) в health check
+- Внешний мониторинг (UptimeRobot) — защита от полного падения сервера
+- Не логируй health check запросы — замусоривают логи

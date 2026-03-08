@@ -1,0 +1,289 @@
+# DevOps & CI/CD: Урок 17: Стратегии отката
+
+![Иллюстрация к уроку](/lessons/devops-rollback.png)
+
+**Rollback** — откат к предыдущей рабочей версии при проблемах после деплоя. Должен занимать минуты, не часы.
+
+## Признаки что нужен rollback
+
+```
+🚨 Триггеры для rollback:
+- Error rate > 5% (Sentry алерт)
+- P95 latency > 2x baseline
+- Health check падает
+- Critical бизнес-метрика упала (конверсия, оплаты)
+- Жалобы пользователей в Telegram/Support
+- Ты сам видишь что что-то не так
+```
+
+## Rule of thumb
+
+```
+Если сломал → откатывай быстро, чини потом.
+Не пытайся чинить сломанный production в панике.
+Откатил → всё работает → разобрался что не так → исправил → задеплоил снова.
+```
+
+## Rollback кода
+
+### Git-based rollback
+
+```bash
+# Посмотреть историю деплоев
+git log --oneline -10
+
+# Вернуться к предыдущему коммиту (новый коммит)
+git revert HEAD --no-edit
+git push origin main   # → CI/CD задеплоит откат
+
+# Или хардкод к конкретному коммиту
+git revert abc1234 --no-edit
+git push origin main
+
+# Откатить несколько коммитов
+git revert HEAD~3..HEAD --no-edit
+git push origin main
+```
+
+### Docker image rollback
+
+```bash
+#!/bin/bash
+# scripts/rollback-docker.sh
+
+# Предыдущий тег хранится в файле
+PREVIOUS_VERSION=$(cat /tmp/previous-version)
+CURRENT_VERSION=$(cat /tmp/current-version)
+
+echo "🔄 Rolling back from $CURRENT_VERSION to $PREVIOUS_VERSION..."
+
+# Останавливаем текущую версию
+docker stop myapp
+docker rm myapp
+
+# Запускаем предыдущую
+docker run -d \
+    --name myapp \
+    -p 3000:3000 \
+    --env-file .env.production \
+    --restart unless-stopped \
+    ghcr.io/myorg/myapp:$PREVIOUS_VERSION
+
+# Проверяем
+sleep 10
+if curl -sf http://localhost:3000/health; then
+    echo "✅ Rollback successful to $PREVIOUS_VERSION"
+else
+    echo "❌ Rollback failed!"
+    exit 1
+fi
+```
+
+### Vercel Instant Rollback
+
+```bash
+# Через CLI
+vercel rollback [deployment-url]
+
+# Через Dashboard:
+# Deployments → выбрать предыдущий → "Promote to Production"
+# Занимает ~10 секунд
+```
+
+### Railway Rollback
+
+```bash
+# Через CLI
+railway rollback
+
+# Или через Dashboard → Deployments → выбрать предыдущий → Rollback
+```
+
+## Rollback базы данных
+
+Это самая сложная часть. Код откатить легко — данные изменить обратно сложно.
+
+### Стратегия 1: Backwards-compatible миграции
+
+```typescript
+// ✅ Хорошая практика — миграция совместима с обеими версиями кода
+
+// Миграция: добавить новую колонку (nullable, с дефолтом)
+// Старый код: игнорирует новую колонку — OK
+// Новый код: использует новую колонку — OK
+await db.schema.alterTable('users', table => {
+  table.string('phone').nullable().defaultTo(null);
+});
+
+// Не делай RENAME или DROP в первом деплое!
+// Сначала добавь, задеплой, потом через N деплоев — убери старое
+```
+
+### Стратегия 2: Бэкап перед миграцией
+
+```bash
+#!/bin/bash
+# scripts/pre-deploy.sh
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="/backups/db_backup_$TIMESTAMP.sql"
+
+echo "Creating database backup..."
+pg_dump $DATABASE_URL > $BACKUP_FILE
+gzip $BACKUP_FILE
+echo "✅ Backup saved to $BACKUP_FILE.gz"
+
+# Запустить миграции
+npm run migrate
+
+echo "✅ Migrations complete"
+```
+
+```bash
+#!/bin/bash
+# scripts/restore-db.sh
+
+BACKUP_FILE=$1
+
+echo "⚠️  Restoring database from $BACKUP_FILE..."
+echo "This will OVERWRITE current data. Are you sure? [y/N]"
+read -r confirm
+
+if [ "$confirm" != "y" ]; then
+    echo "Aborted."
+    exit 1
+fi
+
+gunzip -c $BACKUP_FILE | psql $DATABASE_URL
+echo "✅ Database restored"
+```
+
+### Стратегия 3: Миграция в два этапа (expand/contract)
+
+```
+Деплой 1 (Expand):
+- Добавляем новую колонку new_field
+- Пишем в обе колонки: old_field и new_field
+- Старый код читает old_field, новый — new_field
+
+После успешного Деплоя 1 (несколько дней/недель):
+
+Деплой 2 (Contract):
+- Убираем запись в old_field
+- Убираем саму колонку old_field
+```
+
+## CI/CD: автоматический rollback
+
+```yaml
+# .github/workflows/deploy-with-rollback.yml
+name: Deploy with Auto-rollback
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Save current version
+        run: |
+          CURRENT=$(ssh deploy@${{ secrets.SERVER_HOST }} 'cat /tmp/current-version')
+          echo "PREVIOUS_VERSION=$CURRENT" >> $GITHUB_ENV
+
+      - name: Deploy
+        id: deploy
+        run: |
+          ssh deploy@${{ secrets.SERVER_HOST }} \
+            "/home/deploy/scripts/deploy.sh ${{ github.sha }}"
+
+      - name: Health check (30 seconds after deploy)
+        id: health
+        run: |
+          sleep 30
+          for i in {1..5}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://myapp.com/health)
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: Status $STATUS, retrying..."
+            sleep 10
+          done
+          echo "❌ Health check failed"
+          exit 1
+
+      - name: Rollback on failure
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          echo "🔄 Deployment failed, rolling back to ${{ env.PREVIOUS_VERSION }}..."
+          ssh deploy@${{ secrets.SERVER_HOST }} \
+            "/home/deploy/scripts/rollback.sh ${{ env.PREVIOUS_VERSION }}"
+          
+          # Notify
+          curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            -d '{"text":"⚠️ Auto-rollback triggered for ${{ github.sha }}"}'
+
+      - name: Notify success
+        if: success()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            -d '{"text":"✅ Deployed ${{ github.sha }} to production"}'
+```
+
+## Feature flags — мягкий rollback
+
+```typescript
+// Без деплоя — выключить фичу через фичефлаг
+import { getFeatureFlag } from '@/lib/flags';
+
+export async function createOrder(data: OrderData) {
+  const useNewPaymentFlow = await getFeatureFlag('new-payment-flow', userId);
+  
+  if (useNewPaymentFlow) {
+    return newPaymentService.charge(data);
+  } else {
+    return legacyPaymentService.charge(data);   // fallback
+  }
+}
+```
+
+```typescript
+// Простой feature flags на Redis
+import { redis } from './redis';
+
+export async function getFeatureFlag(flag: string, userId?: string): Promise<boolean> {
+  // Глобальное отключение
+  const global = await redis.get(`flag:${flag}`);
+  if (global === 'false') return false;
+  if (global === 'true') return true;
+  
+  // Rollout по % пользователей
+  const rollout = await redis.get(`flag:${flag}:rollout`);
+  if (rollout && userId) {
+    const percent = parseInt(rollout);
+    const hash = userId.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+    return (hash % 100) < percent;
+  }
+  
+  return false;
+}
+
+// Выключить фичу без деплоя:
+await redis.set('flag:new-payment-flow', 'false');
+```
+
+## Ключевые моменты
+
+- Rollback должен занимать минуты — готовься заранее
+- `git revert` — безопасный откат через новый коммит (не force push!)
+- Vercel / Railway — Instant Rollback из Dashboard
+- Бэкап БД перед деплоем — обязателен при миграциях
+- Backwards-compatible миграции — добавляй, не удаляй сразу
+- Feature flags — выключить проблемную фичу без деплоя
+- Автоматический rollback в CI/CD — при неудачном health check

@@ -1,0 +1,286 @@
+# DevOps & CI/CD: Урок 4: Docker — контейнеры
+
+![Иллюстрация к уроку](/lessons/devops-docker.png)
+
+**Docker** — контейнеризация приложений. Упаковываешь код со всеми зависимостями в изолированный контейнер, который одинаково работает везде.
+
+## Зачем Docker?
+
+```
+Без Docker:                     С Docker:
+─────────────────────           ─────────────────────
+"У меня работает!"              Работает везде одинаково
+Разные версии Node              Версия зафиксирована в Dockerfile
+Ручная установка deps           Deps внутри образа
+"Обнови Python на сервере"      Просто поменяй образ
+```
+
+## Основные концепции
+
+```
+Image (образ)    — шаблон, blueprint
+Container        — запущенный экземпляр образа
+Dockerfile       — инструкции для создания образа
+Registry         — хранилище образов (Docker Hub, GHCR)
+Layer            — слой кэширования в образе
+Volume           — персистентное хранилище данных
+Network          — сеть между контейнерами
+```
+
+## Dockerfile: базовый
+
+```dockerfile
+# Dockerfile
+FROM node:20-alpine              # базовый образ
+
+WORKDIR /app                     # рабочая директория
+
+# Копируем package файлы (кэширование слоёв)
+COPY package.json package-lock.json ./
+
+# Устанавливаем зависимости
+RUN npm ci --only=production
+
+# Копируем исходный код
+COPY . .
+
+# Переменные окружения
+ENV NODE_ENV=production
+ENV PORT=3000
+
+# Открываем порт
+EXPOSE 3000
+
+# Команда запуска
+CMD ["node", "src/index.js"]
+```
+
+## Dockerfile для Next.js (оптимизированный)
+
+```dockerfile
+# Dockerfile
+# Stage 1: Dependencies
+FROM node:20-alpine AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Stage 2: Builder
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+ENV NEXT_TELEMETRY_DISABLED 1
+
+RUN npm run build
+
+# Stage 3: Runner
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV production
+ENV NEXT_TELEMETRY_DISABLED 1
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+
+EXPOSE 3000
+ENV PORT 3000
+
+CMD ["node", "server.js"]
+```
+
+## Multi-stage builds: зачем?
+
+```
+Без multi-stage:
+Образ = code + node_modules (dev) + build tools
+Размер: ~800MB
+
+С multi-stage:
+Финальный образ = только production файлы
+Размер: ~100MB
+
+Плюсы:
+✅ Меньший размер
+✅ Меньше поверхность атаки
+✅ Быстрее деплой
+```
+
+## .dockerignore
+
+```
+# .dockerignore
+node_modules
+.next
+.git
+.gitignore
+*.md
+.env*
+!.env.example
+npm-debug.log
+Dockerfile
+docker-compose*.yml
+coverage/
+.nyc_output/
+```
+
+## Основные команды Docker
+
+```bash
+# Сборка образа
+docker build -t myapp:latest .
+docker build -t myapp:v1.2.3 .
+docker build --no-cache -t myapp:latest .    # без кэша
+
+# Запуск контейнера
+docker run myapp:latest                       # в foreground
+docker run -d myapp:latest                    # в фоне (detached)
+docker run -p 3000:3000 myapp:latest         # с маппингом портов
+docker run -e NODE_ENV=production myapp       # с env vars
+docker run -v /data:/app/data myapp           # с volume
+docker run --name mycontainer myapp           # с именем
+
+# Просмотр контейнеров
+docker ps                  # запущенные
+docker ps -a               # все включая остановленные
+docker stats               # метрики в реальном времени
+
+# Работа с контейнером
+docker exec -it CONTAINER_ID bash   # войти в контейнер
+docker logs CONTAINER_ID            # логи
+docker logs -f CONTAINER_ID         # логи в реальном времени
+docker stop CONTAINER_ID            # остановить
+docker rm CONTAINER_ID              # удалить
+
+# Образы
+docker images              # список образов
+docker rmi IMAGE_ID        # удалить образ
+docker pull nginx:alpine   # скачать образ
+docker push myapp:latest   # запушить в registry
+
+# Очистка
+docker system prune        # удалить неиспользуемое
+docker system prune -a     # удалить всё неиспользуемое
+```
+
+## Volumes — персистентные данные
+
+```bash
+# Создание volume
+docker volume create mydata
+
+# Использование
+docker run -v mydata:/app/data myapp
+docker run -v $(pwd)/data:/app/data myapp  # bind mount
+
+# Просмотр
+docker volume ls
+docker volume inspect mydata
+```
+
+## Networks
+
+```bash
+# Создание сети
+docker network create mynet
+
+# Запуск в сети
+docker run --network mynet --name api myapp
+docker run --network mynet --name db postgres
+
+# Теперь контейнеры видят друг друга по имени:
+# api может подключиться к db через hostname "db"
+```
+
+## Публикация в Docker Hub
+
+```bash
+# Логин
+docker login
+
+# Тег для Docker Hub
+docker tag myapp:latest username/myapp:latest
+docker tag myapp:latest username/myapp:v1.0.0
+
+# Push
+docker push username/myapp:latest
+docker push username/myapp:v1.0.0
+```
+
+## GitHub Container Registry (GHCR)
+
+```bash
+# Логин через GitHub token
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+
+# Тег
+docker tag myapp:latest ghcr.io/username/myapp:latest
+
+# Push
+docker push ghcr.io/username/myapp:latest
+```
+
+## Автоматическая сборка в GitHub Actions
+
+```yaml
+# .github/workflows/docker.yml
+name: Build and Push Docker
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+## Ключевые моменты
+
+- Docker упаковывает приложение со всеми зависимостями
+- Dockerfile — инструкции сборки образа
+- Multi-stage builds уменьшают размер финального образа
+- `.dockerignore` исключает ненужные файлы из контекста
+- Volumes — для персистентных данных (БД и т.д.)
+- Networks — для коммуникации между контейнерами
+- GHCR — бесплатный registry для GitHub проектов

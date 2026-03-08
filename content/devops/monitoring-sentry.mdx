@@ -1,0 +1,296 @@
+# DevOps & CI/CD: Урок 13: Мониторинг с Sentry
+
+![Иллюстрация к уроку](/lessons/devops-sentry.png)
+
+**Sentry** — платформа мониторинга ошибок. Ловит исключения, трассировки запросов и проблемы производительности в реальном времени.
+
+## Зачем мониторинг
+
+```
+Без мониторинга:
+- Узнаёшь о баге от пользователя через Telegram
+- "Всё упало ночью, мы не знаем когда"
+- Нет контекста — что случилось перед ошибкой?
+- Stack trace потерян
+
+С Sentry:
+- Алерт приходит раньше пользователя
+- Точное время, частота, окружение
+- Полный stack trace с контекстом
+- Какой пользователь, какой браузер, какой запрос
+```
+
+## Установка Sentry в Next.js
+
+```bash
+npx @sentry/wizard@latest -i nextjs
+```
+
+Wizard автоматически:
+- Установит `@sentry/nextjs`
+- Создаст `sentry.client.config.ts`, `sentry.server.config.ts`
+- Настроит `next.config.js`
+
+```bash
+# Или вручную
+npm install @sentry/nextjs
+```
+
+## Конфигурация
+
+```typescript
+// sentry.client.config.ts
+import * as Sentry from '@sentry/nextjs';
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  
+  environment: process.env.NODE_ENV,
+  
+  // % транзакций для performance monitoring
+  tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 1.0,
+  
+  // % сессий для session replay
+  replaysSessionSampleRate: 0.1,
+  replaysOnErrorSampleRate: 1.0,   // 100% при ошибках
+  
+  integrations: [
+    Sentry.replayIntegration(),
+  ],
+  
+  // Игнорировать известные не-ошибки
+  ignoreErrors: [
+    'ResizeObserver loop limit exceeded',
+    'Network request failed',
+    /^Non-Error promise rejection/,
+  ],
+  
+  beforeSend(event) {
+    // Убрать чувствительные данные
+    if (event.request?.headers) {
+      delete event.request.headers['Authorization'];
+      delete event.request.headers['Cookie'];
+    }
+    return event;
+  },
+});
+```
+
+```typescript
+// sentry.server.config.ts
+import * as Sentry from '@sentry/nextjs';
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+  tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 1.0,
+});
+```
+
+## Ручная обработка ошибок
+
+```typescript
+import * as Sentry from '@sentry/nextjs';
+
+// Захват ошибки
+try {
+  await riskyOperation();
+} catch (error) {
+  Sentry.captureException(error, {
+    extra: {
+      userId: user.id,
+      operation: 'riskyOperation',
+      data: JSON.stringify(requestData),
+    },
+    tags: {
+      feature: 'payments',
+      severity: 'critical',
+    },
+  });
+  throw error;
+}
+
+// Захват сообщения (не ошибки)
+Sentry.captureMessage('Payment webhook received', {
+  level: 'info',
+  extra: { webhookId: id },
+});
+
+// Breadcrumb — хлебные крошки для контекста
+Sentry.addBreadcrumb({
+  category: 'auth',
+  message: 'User logged in',
+  level: 'info',
+  data: { userId: user.id },
+});
+
+// Идентификация пользователя
+Sentry.setUser({
+  id: user.id,
+  email: user.email,
+  username: user.name,
+});
+
+// Очистить пользователя при logout
+Sentry.setUser(null);
+```
+
+## Error Boundary в React
+
+```tsx
+// components/error-boundary.tsx
+'use client';
+
+import * as Sentry from '@sentry/nextjs';
+import { Component, ErrorInfo, ReactNode } from 'react';
+
+interface Props {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface State {
+  hasError: boolean;
+  eventId?: string;
+}
+
+export class ErrorBoundary extends Component<Props, State> {
+  state: State = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    const eventId = Sentry.captureException(error, {
+      extra: { componentStack: info.componentStack },
+    });
+    this.setState({ eventId });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="error-boundary">
+          <h2>Что-то пошло не так</h2>
+          <button onClick={() => Sentry.showReportDialog({ eventId: this.state.eventId })}>
+            Сообщить об ошибке
+          </button>
+          <button onClick={() => this.setState({ hasError: false })}>
+            Попробовать снова
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+```
+
+## Performance Monitoring
+
+```typescript
+// Отслеживание производительности кастомных операций
+import * as Sentry from '@sentry/nextjs';
+
+async function processOrder(orderId: string) {
+  return Sentry.startSpan(
+    {
+      name: 'processOrder',
+      op: 'business.order',
+      attributes: { orderId },
+    },
+    async (span) => {
+      // Вложенные spans
+      const order = await Sentry.startSpan(
+        { name: 'fetchOrder', op: 'db.query' },
+        () => db.orders.findById(orderId)
+      );
+
+      span.setAttribute('order.amount', order.total);
+      
+      const result = await Sentry.startSpan(
+        { name: 'chargeCard', op: 'http.client' },
+        () => stripe.charges.create({ amount: order.total })
+      );
+
+      return result;
+    }
+  );
+}
+```
+
+## Source Maps — читаемые stack traces
+
+```javascript
+// next.config.js
+const { withSentryConfig } = require('@sentry/nextjs');
+
+module.exports = withSentryConfig(
+  {
+    // твой next.config.js
+  },
+  {
+    org: 'my-org',
+    project: 'myapp',
+    
+    // Загружать source maps только в production
+    silent: !process.env.CI,
+    
+    // Скрыть source maps от пользователей
+    hideSourceMaps: true,
+    
+    // Автоматически загружать source maps после сборки
+    widenClientFileUpload: true,
+  }
+);
+```
+
+## Alerts и Notifications
+
+В Sentry Dashboard → Alerts:
+
+```yaml
+# Пример правил алертов:
+
+Новая ошибка впервые:
+  - Trigger: First seen issue
+  - Action: Email + Slack
+
+Рост ошибок:
+  - Trigger: Number of events > 100/hour
+  - Action: PagerDuty + Slack
+
+Деградация производительности:
+  - Trigger: p95 latency > 2000ms
+  - Action: Email
+
+Critical severity:
+  - Trigger: tags["severity"] == "critical"
+  - Action: SMS + PagerDuty
+```
+
+## Интеграция с GitHub Actions
+
+```yaml
+# .github/workflows/release.yml
+- name: Create Sentry release
+  uses: getsentry/action-release@v1
+  env:
+    SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+    SENTRY_ORG: my-org
+    SENTRY_PROJECT: myapp
+  with:
+    environment: production
+    version: ${{ github.sha }}
+```
+
+## Ключевые моменты
+
+- Sentry ловит ошибки в реальном времени с полным контекстом
+- DSN — ключ проекта, `NEXT_PUBLIC_` для клиента, без префикса для сервера
+- `tracesSampleRate` — не ставь 1.0 в production, нагружает базу
+- `beforeSend` — фильтруй чувствительные данные перед отправкой
+- `Sentry.setUser()` — идентифицируй пользователей для фильтрации ошибок
+- Source maps — критичны для читаемых stack traces в минифицированном коде
+- Alerts — настрой уведомления в Slack/Telegram до того как узнают пользователи

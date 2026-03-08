@@ -1,0 +1,377 @@
+# DevOps & CI/CD: Урок 18: Полный CI/CD пайплайн
+
+![Иллюстрация к уроку](/lessons/devops-pipeline.png)
+
+**Полный CI/CD пайплайн** — от коммита до production без ручного вмешательства. Автоматический тест, сборка, деплой на staging, апрув, деплой в production.
+
+## Идеальный пайплайн
+
+```
+Developer push
+      │
+      ▼
+  [CI: Lint]
+      │ fail → notify developer
+      ▼
+  [CI: Tests]
+      │ fail → notify developer
+      ▼
+  [CI: Build]
+      │ fail → notify developer
+      ▼
+  [Deploy to Staging]
+      │
+      ▼
+  [E2E Tests on Staging]
+      │ fail → notify developer
+      ▼
+  [Manual Approval] ← Product Manager/Lead reviews
+      │
+      ▼
+  [Deploy to Production]
+      │
+      ▼
+  [Health Check]
+      │ fail → Auto Rollback
+      ▼
+  [Notify: Success ✅]
+```
+
+## Полный workflow для Next.js + Railway
+
+```yaml
+# .github/workflows/full-pipeline.yml
+name: Full CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: '20'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────
+  # LINT & TYPE CHECK
+  # ─────────────────────────────────────────
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: TypeScript check
+        run: npm run typecheck
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier
+        run: npm run format:check
+
+  # ─────────────────────────────────────────
+  # TESTS
+  # ─────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: quality
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/testdb
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run migrations
+        run: npm run db:migrate
+
+      - name: Unit tests
+        run: npm run test:unit -- --coverage
+
+      - name: Integration tests
+        run: npm run test:integration
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ─────────────────────────────────────────
+  # BUILD DOCKER IMAGE
+  # ─────────────────────────────────────────
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+
+      - name: Login to Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_COMMIT=${{ github.sha }}
+
+  # ─────────────────────────────────────────
+  # DEPLOY TO STAGING
+  # ─────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+
+    environment:
+      name: staging
+      url: https://staging.myapp.com
+
+    steps:
+      - name: Deploy to staging
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            docker stop myapp-staging || true
+            docker rm myapp-staging || true
+            docker run -d \
+              --name myapp-staging \
+              -p 3001:3000 \
+              --env-file /home/deploy/.env.staging \
+              --restart unless-stopped \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+
+      - name: Run migrations on staging
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            docker exec myapp-staging npm run db:migrate
+
+      - name: Health check staging
+        run: |
+          sleep 15
+          for i in {1..10}; do
+            if curl -sf https://staging.myapp.com/health; then
+              echo "✅ Staging is healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+
+  # ─────────────────────────────────────────
+  # E2E TESTS ON STAGING
+  # ─────────────────────────────────────────
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npx playwright install --with-deps
+
+      - name: Run E2E tests
+        run: npm run test:e2e
+        env:
+          BASE_URL: https://staging.myapp.com
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  # ─────────────────────────────────────────
+  # DEPLOY TO PRODUCTION
+  # ─────────────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: e2e
+    if: github.ref == 'refs/heads/main'
+
+    environment:
+      name: production        # требует апрув в GitHub Settings
+      url: https://myapp.com
+
+    steps:
+      - name: Save current version for rollback
+        id: current
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: cat /tmp/current-version || echo "none"
+
+      - name: Deploy to production
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            
+            docker pull $IMAGE
+            docker stop myapp || true
+            docker rm myapp || true
+            docker run -d \
+              --name myapp \
+              -p 3000:3000 \
+              --env-file /home/deploy/.env.production \
+              --restart unless-stopped \
+              $IMAGE
+            
+            sleep 5
+            docker exec myapp npm run db:migrate
+            
+            echo "sha-${{ github.sha }}" > /tmp/current-version
+
+      - name: Production health check
+        run: |
+          sleep 20
+          for i in {1..15}; do
+            if curl -sf https://myapp.com/health; then
+              echo "✅ Production is healthy!"
+              exit 0
+            fi
+            echo "Attempt $i, retrying..."
+            sleep 5
+          done
+          echo "❌ Production health check failed!"
+          exit 1
+
+      - name: Notify success
+        if: success()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            -d "{\"text\":\"✅ Production deployed: ${{ github.sha }}\nBy: ${{ github.actor }}\nURL: https://myapp.com\"}"
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            PREVIOUS=$(cat /tmp/previous-version || echo "")
+            if [ -n "$PREVIOUS" ]; then
+              echo "Rolling back to $PREVIOUS..."
+              /home/deploy/scripts/rollback.sh $PREVIOUS
+            fi
+```
+
+## Secrets для пайплайна
+
+```bash
+# GitHub Settings → Secrets and variables → Actions
+
+# SSH доступ к серверам
+SSH_PRIVATE_KEY     # приватный ключ для SSH
+STAGING_HOST        # IP/hostname staging сервера
+PROD_HOST           # IP/hostname production сервера
+
+# Уведомления
+SLACK_WEBHOOK       # Slack Incoming Webhook URL
+
+# Тесты
+TEST_USER_EMAIL     # тестовый пользователь для E2E
+TEST_USER_PASSWORD
+
+# Codecov
+CODECOV_TOKEN       # для репортов покрытия
+```
+
+## Ключевые моменты
+
+- quality → test → build → staging → e2e → [апрув] → production
+- Services в GitHub Actions — PostgreSQL, Redis для интеграционных тестов
+- Docker meta action — автоматические теги для образов
+- Environment с required reviewers — ручной апрув перед production
+- Health check после деплоя + автоматический rollback при неудаче
+- Notify в Slack/Telegram — команда всегда в курсе
+- Collect artifacts (test reports, coverage) — для дебага
