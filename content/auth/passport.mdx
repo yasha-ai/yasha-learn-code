@@ -1,0 +1,330 @@
+# Passport.js
+
+## Что такое Passport.js?
+
+**Passport.js** — middleware аутентификации для Node.js/Express. Модульная система стратегий: каждая стратегия — отдельный npm-пакет.
+
+**500+ стратегий**: Local, Google, GitHub, JWT, SAML, LDAP и многие другие.
+
+```bash
+npm install passport
+npm install passport-local          # email+password
+npm install passport-google-oauth20 # Google OAuth
+npm install passport-github2        # GitHub OAuth
+npm install passport-jwt            # JWT
+```
+
+## Базовая настройка
+
+```javascript
+import express from 'express';
+import session from 'express-session';
+import passport from 'passport';
+
+const app = express();
+
+app.use(express.json());
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+}));
+
+// Инициализация Passport
+app.use(passport.initialize());
+app.use(passport.session()); // поддержка сессий
+```
+
+## Серializация/Десериализация
+
+Passport сохраняет userId в сессию и загружает пользователя при каждом запросе.
+
+```javascript
+// Сохраняем userId в сессию
+passport.serializeUser((user, done) => {
+  done(null, user.id);
+});
+
+// Загружаем пользователя из БД по userId
+passport.deserializeUser(async (id, done) => {
+  try {
+    const user = await db.users.findById(id);
+    done(null, user);
+  } catch (err) {
+    done(err);
+  }
+});
+```
+
+## Local Strategy (email + password)
+
+```javascript
+import { Strategy as LocalStrategy } from 'passport-local';
+import bcrypt from 'bcryptjs';
+
+passport.use(new LocalStrategy(
+  {
+    usernameField: 'email',    // имя поля email
+    passwordField: 'password', // имя поля password
+  },
+  async (email, password, done) => {
+    try {
+      const user = await db.users.findOne({ email });
+      
+      if (!user) {
+        return done(null, false, { message: 'Invalid credentials' });
+      }
+      
+      const isValid = await bcrypt.compare(password, user.password);
+      
+      if (!isValid) {
+        return done(null, false, { message: 'Invalid credentials' });
+      }
+      
+      return done(null, user);
+    } catch (err) {
+      return done(err);
+    }
+  }
+));
+
+// Роуты
+app.post('/login', passport.authenticate('local', {
+  successRedirect: '/dashboard',
+  failureRedirect: '/login?error=1',
+  failureFlash: true, // нужен connect-flash
+}));
+
+// Или с кастомным ответом
+app.post('/api/login', (req, res, next) => {
+  passport.authenticate('local', (err, user, info) => {
+    if (err) return next(err);
+    if (!user) return res.status(401).json({ error: info.message });
+    
+    req.logIn(user, (err) => {
+      if (err) return next(err);
+      res.json({ success: true, user: { id: user.id, email: user.email } });
+    });
+  })(req, res, next);
+});
+
+app.post('/logout', (req, res) => {
+  req.logout((err) => {
+    if (err) return next(err);
+    res.redirect('/');
+  });
+});
+```
+
+## Google OAuth Strategy
+
+```javascript
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+
+passport.use(new GoogleStrategy(
+  {
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: '/auth/google/callback',
+    scope: ['email', 'profile'],
+  },
+  async (accessToken, refreshToken, profile, done) => {
+    try {
+      // Ищем существующего пользователя
+      let user = await db.users.findOne({ googleId: profile.id });
+      
+      if (!user) {
+        // Создаём нового пользователя
+        user = await db.users.create({
+          googleId: profile.id,
+          email: profile.emails[0].value,
+          name: profile.displayName,
+          avatar: profile.photos[0].value,
+        });
+      } else {
+        // Обновляем данные
+        user = await db.users.update(user.id, {
+          name: profile.displayName,
+          avatar: profile.photos[0].value,
+        });
+      }
+      
+      return done(null, user);
+    } catch (err) {
+      return done(err);
+    }
+  }
+));
+
+// Роуты
+app.get('/auth/google', passport.authenticate('google'));
+
+app.get('/auth/google/callback', 
+  passport.authenticate('google', { failureRedirect: '/login' }),
+  (req, res) => {
+    res.redirect('/dashboard');
+  }
+);
+```
+
+## GitHub Strategy
+
+```javascript
+import { Strategy as GitHubStrategy } from 'passport-github2';
+
+passport.use(new GitHubStrategy(
+  {
+    clientID: process.env.GITHUB_CLIENT_ID,
+    clientSecret: process.env.GITHUB_CLIENT_SECRET,
+    callbackURL: '/auth/github/callback',
+    scope: ['user:email'],
+  },
+  async (accessToken, refreshToken, profile, done) => {
+    try {
+      const email = profile.emails?.[0]?.value;
+      
+      let user = await db.users.findOne({ githubId: profile.id });
+      
+      if (!user) {
+        user = await db.users.create({
+          githubId: profile.id,
+          email,
+          name: profile.displayName || profile.username,
+          avatar: profile.photos?.[0]?.value,
+        });
+      }
+      
+      return done(null, user);
+    } catch (err) {
+      return done(err);
+    }
+  }
+));
+
+app.get('/auth/github', passport.authenticate('github'));
+
+app.get('/auth/github/callback',
+  passport.authenticate('github', { failureRedirect: '/login' }),
+  (req, res) => res.redirect('/dashboard')
+);
+```
+
+## JWT Strategy
+
+Для API без сессий:
+
+```javascript
+import { Strategy as JwtStrategy, ExtractJwt } from 'passport-jwt';
+
+passport.use(new JwtStrategy(
+  {
+    jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+    secretOrKey: process.env.JWT_SECRET,
+    algorithms: ['HS256'],
+  },
+  async (payload, done) => {
+    try {
+      const user = await db.users.findById(payload.sub);
+      
+      if (!user) return done(null, false);
+      
+      return done(null, user);
+    } catch (err) {
+      return done(err);
+    }
+  }
+));
+
+// Защищённый роут
+app.get('/api/profile',
+  passport.authenticate('jwt', { session: false }),
+  (req, res) => {
+    res.json({ user: req.user });
+  }
+);
+```
+
+## Middleware для проверки авторизации
+
+```javascript
+// Проверка аутентификации
+function requireAuth(req, res, next) {
+  if (req.isAuthenticated()) {
+    return next();
+  }
+  
+  // Для API
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  // Для страниц
+  res.redirect(`/login?next=${req.path}`);
+}
+
+// Проверка роли
+function requireRole(role) {
+  return (req, res, next) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    if (req.user.role !== role) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    
+    next();
+  };
+}
+
+// Использование
+app.get('/dashboard', requireAuth, (req, res) => {
+  res.render('dashboard', { user: req.user });
+});
+
+app.get('/admin', requireAuth, requireRole('admin'), (req, res) => {
+  res.render('admin');
+});
+```
+
+## Несколько стратегий для одного пользователя
+
+```javascript
+// Связываем OAuth аккаунт с существующим пользователем
+
+// Модель User может иметь несколько providers
+// { id, email, googleId, githubId, password }
+
+async function findOrCreateUser(profile, provider) {
+  const providerIdField = `${provider}Id`;
+  
+  // Ищем по provider ID
+  let user = await db.users.findOne({ [providerIdField]: profile.id });
+  if (user) return user;
+  
+  // Ищем по email (объединяем аккаунты)
+  const email = profile.emails?.[0]?.value;
+  if (email) {
+    user = await db.users.findOne({ email });
+    if (user) {
+      // Привязываем OAuth к существующему аккаунту
+      await db.users.update(user.id, { [providerIdField]: profile.id });
+      return user;
+    }
+  }
+  
+  // Создаём нового пользователя
+  return db.users.create({
+    [providerIdField]: profile.id,
+    email,
+    name: profile.displayName,
+  });
+}
+```
+
+## Практические задания
+
+1. Настрой Passport.js с Local Strategy в Express приложении
+2. Добавь Google OAuth через passport-google-oauth20
+3. Реализуй защиту роутов через `requireAuth` middleware
+4. Добавь JWT стратегию для REST API
