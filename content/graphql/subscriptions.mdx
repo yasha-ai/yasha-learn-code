@@ -1,0 +1,399 @@
+# GraphQL: Урок 7. Subscriptions — real-time данные
+
+![GraphQL Subscriptions](/lessons/graphql-subscriptions.png)
+
+Subscriptions — third мощная операция в GraphQL. Позволяет клиентам подписаться на события и получать данные в реальном времени через WebSocket.
+
+## Когда использовать
+
+- Чат (новые сообщения)
+- Уведомления
+- Live-обновления (курсы акций, спортивные результаты)
+- Совместное редактирование (Google Docs-style)
+- Статус онлайн пользователей
+- Real-time дашборды
+
+## Как работает
+
+```
+Клиент → WebSocket → GraphQL сервер
+                          ↓
+                     PubSub система
+                    (Redis, EventEmitter)
+                          ↑
+                    Mutation/Event
+```
+
+1. Клиент устанавливает WebSocket-соединение
+2. Отправляет subscription query
+3. Сервер подписывает клиента на события (через PubSub)
+4. Когда событие происходит — сервер пушит данные клиенту
+
+## Схема для subscriptions
+
+```graphql
+type Subscription {
+  # Новые сообщения в чате
+  messageAdded(chatId: ID!): Message!
+
+  # Онлайн-статус пользователей
+  userStatusChanged: UserStatus!
+
+  # Изменения заказа
+  orderUpdated(orderId: ID!): Order!
+
+  # Новые уведомления для текущего пользователя
+  notificationAdded: Notification!
+
+  # Live показатели
+  metricsUpdated: Metrics!
+}
+
+type UserStatus {
+  userId: ID!
+  online: Boolean!
+  lastSeen: String
+}
+```
+
+## Настройка сервера с WebSocket
+
+```bash
+npm install graphql-ws ws @graphql-tools/schema
+```
+
+```javascript
+// server/index.js
+import { createServer } from 'http';
+import { ApolloServer } from '@apollo/server';
+import { expressMiddleware } from '@apollo/server/express4';
+import { makeExecutableSchema } from '@graphql-tools/schema';
+import { WebSocketServer } from 'ws';
+import { useServer } from 'graphql-ws/lib/use/ws';
+import { PubSub } from 'graphql-subscriptions';
+import express from 'express';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+
+export const pubsub = new PubSub();
+
+const typeDefs = `
+  type Message {
+    id: ID!
+    text: String!
+    author: String!
+    createdAt: String!
+  }
+
+  type Query {
+    messages: [Message!]!
+  }
+
+  type Mutation {
+    sendMessage(text: String!, author: String!): Message!
+  }
+
+  type Subscription {
+    messageAdded: Message!
+  }
+`;
+
+const resolvers = {
+  Mutation: {
+    sendMessage: async (_, { text, author }) => {
+      const message = {
+        id: String(Date.now()),
+        text,
+        author,
+        createdAt: new Date().toISOString(),
+      };
+
+      // Публикуем событие — все подписчики получат его
+      pubsub.publish('MESSAGE_ADDED', { messageAdded: message });
+      return message;
+    },
+  },
+
+  Subscription: {
+    messageAdded: {
+      // asyncIterator — поток событий
+      subscribe: () => pubsub.asyncIterator(['MESSAGE_ADDED']),
+    },
+  },
+};
+
+const schema = makeExecutableSchema({ typeDefs, resolvers });
+const app = express();
+const httpServer = createServer(app);
+
+// WebSocket сервер для subscriptions
+const wsServer = new WebSocketServer({
+  server: httpServer,
+  path: '/graphql',
+});
+
+const serverCleanup = useServer({ schema }, wsServer);
+
+const server = new ApolloServer({
+  schema,
+  plugins: [
+    {
+      async serverWillStart() {
+        return {
+          async drainServer() {
+            await serverCleanup.dispose();
+          },
+        };
+      },
+    },
+  ],
+});
+
+await server.start();
+
+app.use('/graphql', cors(), bodyParser.json(), expressMiddleware(server));
+
+httpServer.listen(4000, () => {
+  console.log('🚀 HTTP Server: http://localhost:4000/graphql');
+  console.log('🔌 WebSocket: ws://localhost:4000/graphql');
+});
+```
+
+## Subscription с фильтрацией
+
+Подписка только на нужные события:
+
+```javascript
+import { withFilter } from 'graphql-subscriptions';
+
+const resolvers = {
+  Subscription: {
+    messageAdded: {
+      // withFilter — фильтруем события для конкретного подписчика
+      subscribe: withFilter(
+        () => pubsub.asyncIterator(['MESSAGE_ADDED']),
+        (payload, variables) => {
+          // Отправляем только если chatId совпадает
+          return payload.messageAdded.chatId === variables.chatId;
+        }
+      ),
+    },
+  },
+};
+```
+
+Схема:
+```graphql
+type Subscription {
+  messageAdded(chatId: ID!): Message!
+}
+```
+
+## Apollo Client с subscriptions
+
+```bash
+npm install @apollo/client graphql graphql-ws
+```
+
+```javascript
+// src/apolloClient.js
+import {
+  ApolloClient,
+  InMemoryCache,
+  HttpLink,
+  split,
+} from '@apollo/client';
+import { GraphQLWsLink } from '@apollo/client/link/subscriptions';
+import { createClient } from 'graphql-ws';
+import { getMainDefinition } from '@apollo/client/utilities';
+
+// HTTP link для queries и mutations
+const httpLink = new HttpLink({
+  uri: 'http://localhost:4000/graphql',
+});
+
+// WebSocket link для subscriptions
+const wsLink = new GraphQLWsLink(
+  createClient({
+    url: 'ws://localhost:4000/graphql',
+    connectionParams: {
+      // Можно передать токен авторизации
+      authToken: localStorage.getItem('token'),
+    },
+  })
+);
+
+// Routing: queries/mutations → HTTP, subscriptions → WebSocket
+const splitLink = split(
+  ({ query }) => {
+    const definition = getMainDefinition(query);
+    return (
+      definition.kind === 'OperationDefinition' &&
+      definition.operation === 'subscription'
+    );
+  },
+  wsLink,
+  httpLink
+);
+
+export const client = new ApolloClient({
+  link: splitLink,
+  cache: new InMemoryCache(),
+});
+```
+
+## useSubscription в React
+
+```jsx
+import { useSubscription, useMutation, gql } from '@apollo/client';
+
+const MESSAGE_ADDED = gql`
+  subscription MessageAdded($chatId: ID!) {
+    messageAdded(chatId: $chatId) {
+      id
+      text
+      author
+      createdAt
+    }
+  }
+`;
+
+const SEND_MESSAGE = gql`
+  mutation SendMessage($chatId: ID!, $text: String!, $author: String!) {
+    sendMessage(chatId: $chatId, text: $text, author: $author) {
+      id
+      text
+    }
+  }
+`;
+
+function Chat({ chatId, currentUser }) {
+  const [messages, setMessages] = useState([]);
+  const [text, setText] = useState('');
+
+  // Подписываемся на новые сообщения
+  useSubscription(MESSAGE_ADDED, {
+    variables: { chatId },
+    onData: ({ data: { data } }) => {
+      setMessages(prev => [...prev, data.messageAdded]);
+    },
+  });
+
+  const [sendMessage] = useMutation(SEND_MESSAGE);
+
+  const handleSend = () => {
+    sendMessage({
+      variables: { chatId, text, author: currentUser },
+    });
+    setText('');
+  };
+
+  return (
+    <div className="chat">
+      <div className="messages">
+        {messages.map(msg => (
+          <div key={msg.id} className="message">
+            <strong>{msg.author}:</strong> {msg.text}
+          </div>
+        ))}
+      </div>
+      <div className="input">
+        <input
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyPress={e => e.key === 'Enter' && handleSend()}
+          placeholder="Сообщение..."
+        />
+        <button onClick={handleSend}>Отправить</button>
+      </div>
+    </div>
+  );
+}
+```
+
+## subscribeToMore — обновление query через subscription
+
+```jsx
+const GET_MESSAGES = gql`
+  query GetMessages($chatId: ID!) {
+    messages(chatId: $chatId) {
+      id
+      text
+      author
+    }
+  }
+`;
+
+function Chat({ chatId }) {
+  const { data, subscribeToMore } = useQuery(GET_MESSAGES, {
+    variables: { chatId },
+  });
+
+  useEffect(() => {
+    const unsubscribe = subscribeToMore({
+      document: MESSAGE_ADDED,
+      variables: { chatId },
+      updateQuery: (prev, { subscriptionData }) => {
+        if (!subscriptionData.data) return prev;
+        const newMessage = subscriptionData.data.messageAdded;
+
+        return {
+          messages: [...prev.messages, newMessage],
+        };
+      },
+    });
+
+    return () => unsubscribe();
+  }, [chatId]);
+
+  return (
+    <div>
+      {data?.messages.map(msg => (
+        <div key={msg.id}>{msg.author}: {msg.text}</div>
+      ))}
+    </div>
+  );
+}
+```
+
+## PubSub с Redis (для production)
+
+В production используй Redis для масштабирования:
+
+```bash
+npm install graphql-redis-subscriptions ioredis
+```
+
+```javascript
+import { RedisPubSub } from 'graphql-redis-subscriptions';
+import Redis from 'ioredis';
+
+const options = {
+  host: process.env.REDIS_HOST,
+  port: parseInt(process.env.REDIS_PORT),
+  retryStrategy: times => Math.min(times * 50, 2000),
+};
+
+export const pubsub = new RedisPubSub({
+  publisher: new Redis(options),
+  subscriber: new Redis(options),
+});
+```
+
+## Практика
+
+1. Создай чат с subscription для новых сообщений
+2. Добавь фильтрацию — subscription только для конкретного chatId
+3. Реализуй subscription для онлайн-статуса пользователей
+4. Настрой `subscribeToMore` чтобы новые сообщения добавлялись в список
+5. Добавь индикатор "печатает..." через subscription
+
+## Итого
+
+- Subscription — real-time операция через WebSocket
+- PubSub — система публикации/подписки (EventEmitter или Redis)
+- Фильтрация через `withFilter`
+- Apollo Client: `wsLink` для WebSocket + `split` для routing
+- `useSubscription` или `subscribeToMore` для получения событий
+
+**Следующий урок** → [Resolvers →](/graphql/resolvers)

@@ -1,0 +1,221 @@
+# GraphQL: Урок 19. GraphQL vs REST
+
+![GraphQL vs REST](/lessons/graphql-vs-rest.png)
+
+Финальный урок. Когда выбирать GraphQL, а когда REST? Честный разбор плюсов и минусов обоих подходов.
+
+## Сравнение подходов
+
+| Параметр | REST | GraphQL |
+|----------|------|---------|
+| Endpoints | Много (`/users`, `/posts`, ...) | Один (`/graphql`) |
+| Overfetching | Частая проблема | Нет — берёшь только нужное |
+| Underfetching | N+1 запросов | Один запрос |
+| Типизация | Нет (нужен OpenAPI) | Встроена в схему |
+| Документация | Нужен Swagger | Встроена (introspection) |
+| Кэширование | HTTP кэш (CDN) | Сложнее (один URL) |
+| Загрузка файлов | Просто | Сложнее |
+| Real-time | WebSocket отдельно | Subscriptions встроены |
+| Порог входа | Низкий | Средний |
+| Производительность | Просто оптимизировать | N+1, нужен DataLoader |
+
+## Когда выбирать REST
+
+### 1. Простое CRUD API
+
+```
+POST   /products       → создать
+GET    /products       → список
+GET    /products/:id   → получить
+PUT    /products/:id   → обновить
+DELETE /products/:id   → удалить
+```
+
+Это идеально ложится в REST. GraphQL здесь — избыточность.
+
+### 2. Публичный API для сторонних разработчиков
+
+- Разработчики привыкли к REST
+- Легче документировать через OpenAPI/Swagger
+- HTTP кэш работает из коробки
+- Простые curl запросы для тестирования
+
+### 3. Загрузка файлов
+
+```bash
+# REST — просто
+curl -X POST /upload -F "file=@photo.jpg"
+
+# GraphQL — сложнее, нужен multipart
+```
+
+### 4. Микросервисы с простыми контрактами
+
+Если каждый сервис возвращает свою структуру — REST проще.
+
+### 5. Команда без опыта GraphQL
+
+Кривая обучения GraphQL реальна. Если дедлайн завтра — REST.
+
+## Когда выбирать GraphQL
+
+### 1. Разные клиенты с разными потребностями
+
+```
+Mobile (медленный интернет) → нужно минимум данных
+Web                         → нужно больше
+Desktop                     → нужно всё
+
+REST: три разных endpoint или overfetching для всех
+GraphQL: каждый клиент запрашивает именно своё
+```
+
+### 2. Сложные связанные данные
+
+```graphql
+# Один запрос вместо 5 HTTP вызовов:
+query Dashboard {
+  me { name, avatar }
+  recentOrders(limit: 3) {
+    id, status, total
+    items { product { name } }
+  }
+  notifications(unread: true) { message }
+  stats { revenue, orders, users }
+}
+```
+
+### 3. Быстро меняющийся продукт
+
+В REST: смена структуры → новая версия API (`/v2/...`).
+В GraphQL: добавляешь поля — старые клиенты не ломаются.
+
+### 4. Команда использует TypeScript
+
+GraphQL Codegen + TypeScript = полная типобезопасность от схемы до компонента.
+
+### 5. Real-time функциональность
+
+Subscriptions встроены. Не нужно отдельно настраивать WebSocket сервер.
+
+## Реальные кейсы
+
+### Twitter → REST (правильный выбор)
+
+Twitter API v2 — чистый REST. Почему? Простые операции с твитами, очень публичный API, огромные нагрузки (HTTP кэш критичен).
+
+### GitHub → GraphQL (правильный выбор)
+
+GitHub API v4 — GraphQL. Почему? Огромная схема связанных данных (repos, commits, PRs, issues, users, orgs...), разные клиенты (веб, CI/CD, IDE плагины), каждому нужны разные поля.
+
+### Shopify → GraphQL (правильный выбор)
+
+E-commerce: продукты связаны с вариантами, ценами, инвентарём, категориями. Один запрос для страницы продукта вместо 10.
+
+## GraphQL на BFF (Backend for Frontend) паттерн
+
+Не обязательно выбирать одно или другое:
+
+```
+React App → GraphQL BFF → REST API 1
+                        → REST API 2
+                        → gRPC Service
+                        → Database
+```
+
+GraphQL слой (BFF) агрегирует данные из разных источников, предоставляет единый API для фронтенда.
+
+```javascript
+const resolvers = {
+  Query: {
+    // BFF агрегирует данные из разных источников
+    productPage: async (_, { slug }) => {
+      const [product, reviews, inventory, related] = await Promise.all([
+        restApi.get(`/products/${slug}`),           // REST API
+        reviewsService.getByProduct(slug),           // gRPC
+        inventoryDb.getStock(slug),                  // Database
+        elasticSearch.getSimilar(slug, { limit: 4 }), // Elasticsearch
+      ]);
+
+      return { product, reviews, inventory, related };
+    },
+  },
+};
+```
+
+## Гибридный подход
+
+Многие компании используют оба:
+
+- REST для: файлов, авторизации (OAuth), webhooks, публичного API
+- GraphQL для: основного клиентского API, сложных запросов
+
+```
+/auth/*         → REST (OAuth, cookies, logout)
+/upload         → REST (multipart)
+/webhooks/*     → REST (события от сторонних сервисов)
+/graphql        → GraphQL (всё остальное)
+```
+
+## Производительность: мифы и реальность
+
+### Миф: "GraphQL медленнее REST"
+
+Нет. GraphQL может быть быстрее за счёт:
+- Меньше данных передаётся по сети
+- Меньше HTTP запросов
+- DataLoader батчит запросы к БД
+
+### Реальная проблема: N+1
+
+Да, без DataLoader N+1 может убить производительность. Но это решаемо.
+
+### HTTP кэширование
+
+В REST: `GET /users/123` можно кэшировать на CDN.
+В GraphQL: все запросы — POST на один URL. Кэш сложнее.
+
+Решения: Apollo Persisted Queries, HTTP GET для queries, CDN по ID.
+
+## Чеклист выбора
+
+Выбирай **GraphQL** если:
+- [ ] Несколько типов клиентов (web, mobile, desktop, TV)
+- [ ] Сложные связанные данные
+- [ ] TypeScript на фронте
+- [ ] Нужен real-time
+- [ ] Быстро меняющийся продукт
+- [ ] Команда готова учиться
+
+Выбирай **REST** если:
+- [ ] Простое CRUD API
+- [ ] Публичный API для сторонних разработчиков
+- [ ] Критично HTTP кэширование (CDN)
+- [ ] Загрузка файлов — основная функция
+- [ ] Маленькая команда без времени на изучение
+
+## Итого курса
+
+За эти 19 уроков ты изучил:
+
+1. **Основы** — что такое GraphQL и зачем
+2. **Стек** — Apollo Server + Apollo Client
+3. **Схема** — SDL, типы, интерфейсы, union, enum
+4. **Операции** — Query, Mutation, Subscription
+5. **Resolvers** — логика получения данных
+6. **React** — useQuery, useMutation, useSubscription
+7. **Оптимизация** — DataLoader (N+1), пагинация, фрагменты
+8. **Production** — Auth, Codegen, директивы
+
+**GraphQL — это инструмент, не религия.** Используй его там, где он решает реальные проблемы.
+
+## Ресурсы для дальнейшего изучения
+
+- [Официальная документация GraphQL](https://graphql.org/learn/)
+- [Apollo Documentation](https://www.apollographql.com/docs/)
+- [The Guild Blog](https://the-guild.dev/blog) — лучший блог об экосистеме GraphQL
+- [GraphQL Best Practices](https://graphql.org/learn/best-practices/)
+- [Principled GraphQL](https://principledgraphql.com/) — принципы от Apollo
+- [GraphQL Conf](https://graphql.org/conf/) — ежегодная конференция
+
+Ты готов к production! 🚀

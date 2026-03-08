@@ -1,0 +1,342 @@
+# GraphQL: Урок 15. DataLoader — решение проблемы N+1
+
+![GraphQL DataLoader](/lessons/graphql-dataloader.png)
+
+N+1 — главная проблема производительности в GraphQL. DataLoader — стандартное решение через батчинг и кэширование.
+
+## Проблема N+1
+
+Допустим, есть запрос:
+
+```graphql
+query {
+  posts {        # 1 запрос → 10 постов
+    id
+    title
+    author {     # 10 запросов (по одному для каждого поста!)
+      name
+    }
+  }
+}
+```
+
+Без DataLoader resolver `Post.author` вызывается для каждого поста отдельно:
+
+```javascript
+// ❌ Проблема N+1
+const resolvers = {
+  Post: {
+    author: async (post) => {
+      // Этот запрос выполняется для КАЖДОГО поста!
+      // Если 100 постов → 100 запросов к БД
+      return db.users.findById(post.authorId);
+    },
+  },
+};
+```
+
+В логах БД видишь:
+```
+SELECT * FROM posts -- 1 запрос
+SELECT * FROM users WHERE id = '1'  -- N запросов...
+SELECT * FROM users WHERE id = '2'
+SELECT * FROM users WHERE id = '3'
+...
+SELECT * FROM users WHERE id = '100'  -- итого 101 запрос!
+```
+
+## Решение: DataLoader
+
+DataLoader батчит (объединяет) отдельные запросы в один:
+
+```bash
+npm install dataloader
+```
+
+```javascript
+import DataLoader from 'dataloader';
+
+// Функция батчинга — принимает массив ключей, возвращает массив значений
+const userLoader = new DataLoader(async (userIds) => {
+  // Один запрос для всех ID сразу!
+  const users = await db.users.findMany({
+    where: { id: { in: userIds } },
+  });
+
+  // ВАЖНО: порядок должен совпадать с порядком входных ключей
+  return userIds.map(id => users.find(u => u.id === id) || null);
+});
+
+// Использование в resolver
+const resolvers = {
+  Post: {
+    // ✅ Вместо N запросов — 1 батчевый запрос
+    author: (post) => userLoader.load(post.authorId),
+  },
+};
+```
+
+Теперь в логах:
+```
+SELECT * FROM posts        -- 1 запрос
+SELECT * FROM users WHERE id IN ('1','2','3',...,'100')  -- 1 батчевый запрос
+-- Итого: 2 запроса вместо 101!
+```
+
+## Как работает DataLoader
+
+```
+tick 1: post1.authorId = '1' → load('1')
+tick 1: post2.authorId = '2' → load('2')
+tick 1: post3.authorId = '1' → load('1')  ← кэш!
+tick 1: post4.authorId = '3' → load('3')
+            ↓  (конец event loop tick)
+        batch(['1', '2', '3'])  ← батч из уникальных ключей
+        → SQL: WHERE id IN ('1','2','3')
+        → Результат раздаётся по promises
+```
+
+**Два механизма:**
+1. **Batching** — объединяет все `load()` за один event loop тик
+2. **Caching** — повторный `load('1')` возвращает кэшированный результат
+
+## DataLoader в context
+
+Создавай DataLoader в context, чтобы каждый запрос имел свой экземпляр:
+
+```javascript
+// Фабрика DataLoader для каждого запроса
+function createLoaders(db) {
+  return {
+    user: new DataLoader(async (ids) => {
+      const users = await db.users.findMany({
+        where: { id: { in: ids } },
+      });
+      return ids.map(id => users.find(u => u.id === id) || null);
+    }),
+
+    postsByAuthor: new DataLoader(async (authorIds) => {
+      const posts = await db.posts.findMany({
+        where: { authorId: { in: authorIds } },
+      });
+      // Группируем по authorId
+      return authorIds.map(authorId =>
+        posts.filter(p => p.authorId === authorId)
+      );
+    }),
+
+    commentsByPost: new DataLoader(async (postIds) => {
+      const comments = await db.comments.findMany({
+        where: { postId: { in: postIds } },
+      });
+      return postIds.map(postId =>
+        comments.filter(c => c.postId === postId)
+      );
+    }),
+  };
+}
+
+// В Apollo Server context:
+const server = new ApolloServer({ typeDefs, resolvers });
+
+const { url } = await startStandaloneServer(server, {
+  context: async ({ req }) => ({
+    db,
+    user: await getUserFromRequest(req),
+    loaders: createLoaders(db),  // Новые loaders для каждого запроса!
+  }),
+});
+```
+
+```javascript
+// Resolvers используют loaders из context
+const resolvers = {
+  Post: {
+    author: (post, _, { loaders }) =>
+      loaders.user.load(post.authorId),
+
+    comments: (post, _, { loaders }) =>
+      loaders.commentsByPost.load(post.id),
+  },
+  User: {
+    posts: (user, _, { loaders }) =>
+      loaders.postsByAuthor.load(user.id),
+  },
+};
+```
+
+## Кастомные ключи
+
+По умолчанию DataLoader использует строки как ключи. Для объектных ключей:
+
+```javascript
+const postsByTagAndStatus = new DataLoader(
+  async (keys) => {
+    // keys — массив объектов { tag, status }
+    const results = await Promise.all(
+      keys.map(({ tag, status }) =>
+        db.posts.findMany({ where: { tags: { has: tag }, status } })
+      )
+    );
+    return results;
+  },
+  {
+    // Кастомная функция кэш-ключа
+    cacheKeyFn: ({ tag, status }) => `${tag}:${status}`,
+  }
+);
+```
+
+## Опции DataLoader
+
+```javascript
+const loader = new DataLoader(batchFn, {
+  // Максимальный размер батча (по умолчанию Infinity)
+  maxBatchSize: 100,
+
+  // Отключить кэш (каждый load() = новый запрос в батч)
+  cache: false,
+
+  // Время ожидания перед отправкой батча (по умолчанию: следующий tick)
+  batchScheduleFn: (callback) => setTimeout(callback, 5),
+
+  // Кастомный кэш (например, LRU)
+  cacheMap: new LRUMap(1000),
+});
+```
+
+## DataLoader для REST API
+
+DataLoader полезен не только для БД:
+
+```javascript
+const githubUserLoader = new DataLoader(async (usernames) => {
+  // Батчевый запрос к GitHub API
+  const users = await Promise.all(
+    usernames.map(username =>
+      fetch(`https://api.github.com/users/${username}`)
+        .then(r => r.json())
+    )
+  );
+  return users;
+}, {
+  // GitHub API нет батч-эндпоинта, поэтому cache важен
+  cache: true,
+  maxBatchSize: 10, // Не перегружаем API
+});
+```
+
+## Пример: полный E-commerce с DataLoader
+
+```javascript
+// loaders.js
+export function createLoaders(db) {
+  return {
+    // Базовые лоадеры
+    product: new DataLoader(async (ids) => {
+      const products = await db.products.findMany({
+        where: { id: { in: ids } },
+      });
+      return ids.map(id => products.find(p => p.id === id));
+    }),
+
+    category: new DataLoader(async (ids) => {
+      const categories = await db.categories.findMany({
+        where: { id: { in: ids } },
+      });
+      return ids.map(id => categories.find(c => c.id === id));
+    }),
+
+    // Связи один-ко-многим
+    productsByCategory: new DataLoader(async (categoryIds) => {
+      const products = await db.products.findMany({
+        where: { categoryId: { in: categoryIds } },
+      });
+      return categoryIds.map(id =>
+        products.filter(p => p.categoryId === id)
+      );
+    }),
+
+    ordersByUser: new DataLoader(async (userIds) => {
+      const orders = await db.orders.findMany({
+        where: { userId: { in: userIds } },
+        orderBy: { createdAt: 'desc' },
+      });
+      return userIds.map(id =>
+        orders.filter(o => o.userId === id)
+      );
+    }),
+
+    // Агрегации
+    reviewCountByProduct: new DataLoader(async (productIds) => {
+      const counts = await db.reviews.groupBy({
+        by: ['productId'],
+        where: { productId: { in: productIds } },
+        _count: { id: true },
+      });
+      return productIds.map(id => {
+        const found = counts.find(c => c.productId === id);
+        return found?._count.id || 0;
+      });
+    }),
+  };
+}
+```
+
+## Диагностика проблемы N+1
+
+Как обнаружить N+1 в проекте:
+
+```javascript
+// Логируем количество запросов к БД
+let queryCount = 0;
+
+const db = new PrismaClient({
+  log: [
+    {
+      emit: 'event',
+      level: 'query',
+    },
+  ],
+});
+
+db.$on('query', () => {
+  queryCount++;
+});
+
+// Плагин Apollo для мониторинга
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  plugins: [{
+    async requestDidStart() {
+      queryCount = 0;
+      return {
+        async willSendResponse({ response }) {
+          response.http.headers.set('X-DB-Query-Count', queryCount);
+          if (queryCount > 10) {
+            console.warn(`⚠️ Много запросов: ${queryCount}`);
+          }
+        },
+      };
+    },
+  }],
+});
+```
+
+## Практика
+
+1. Найди N+1 проблему в своём коде (добавь логирование запросов)
+2. Создай DataLoader для пользователей и примени в resolver Post.author
+3. Создай DataLoader для один-ко-многим: Post.comments
+4. Добавь DataLoader в context сервера
+5. Измерь: сколько запросов к БД было до и после DataLoader
+
+## Итого
+
+- N+1 — классическая проблема GraphQL: 1 запрос списка + N запросов для каждого элемента
+- DataLoader решает через **batching** (один SQL) и **caching** (повторные ключи)
+- Создавай DataLoader в context для каждого HTTP запроса (не глобально!)
+- Функция батчинга: `(ids) => Promise<values[]>` — порядок важен!
+
+**Следующий урок** → [Authentication →](/graphql/authentication)

@@ -1,0 +1,326 @@
+# GraphQL: Урок 11. React Hooks для GraphQL
+
+![GraphQL Hooks](/lessons/graphql-hooks.png)
+
+Apollo Client предоставляет мощные хуки для работы с GraphQL в React: useQuery, useMutation, useSubscription, useLazyQuery.
+
+## useQuery
+
+```jsx
+import { useQuery, gql } from '@apollo/client';
+
+const GET_USER = gql`
+  query GetUser($id: ID!) {
+    user(id: $id) {
+      id
+      name
+      email
+      avatar
+    }
+  }
+`;
+
+function UserProfile({ userId }) {
+  const { loading, error, data, refetch, networkStatus } = useQuery(GET_USER, {
+    variables: { id: userId },
+    // Пропустить запрос если userId не задан
+    skip: !userId,
+    // Политика кэша
+    fetchPolicy: 'cache-and-network',
+    // Polling — автообновление каждые 5 секунд
+    pollInterval: 5000,
+    // Callbacks
+    onCompleted: (data) => console.log('Данные получены', data),
+    onError: (error) => console.error('Ошибка', error),
+  });
+
+  if (networkStatus === 1) return <p>Первая загрузка...</p>;
+  if (loading) return <p>Обновление...</p>;
+  if (error) return <p>Ошибка: {error.message}</p>;
+
+  return (
+    <div>
+      <img src={data.user.avatar} alt={data.user.name} />
+      <h1>{data.user.name}</h1>
+      <p>{data.user.email}</p>
+      <button onClick={() => refetch()}>Обновить</button>
+    </div>
+  );
+}
+```
+
+### Network Status коды
+
+```javascript
+import { NetworkStatus } from '@apollo/client';
+
+// NetworkStatus.loading = 1       (первая загрузка)
+// NetworkStatus.setVariables = 2  (изменились переменные)
+// NetworkStatus.fetchMore = 3     (loadMore)
+// NetworkStatus.refetch = 4       (refetch)
+// NetworkStatus.poll = 6          (polling)
+// NetworkStatus.ready = 7         (готово)
+// NetworkStatus.error = 8         (ошибка)
+```
+
+## useLazyQuery — запрос по требованию
+
+```jsx
+import { useLazyQuery, gql } from '@apollo/client';
+
+const SEARCH_USERS = gql`
+  query SearchUsers($query: String!) {
+    searchUsers(query: $query) {
+      id
+      name
+      email
+    }
+  }
+`;
+
+function UserSearch() {
+  const [query, setQuery] = useState('');
+  const [search, { loading, data }] = useLazyQuery(SEARCH_USERS);
+
+  const handleSearch = () => {
+    if (query.trim()) {
+      search({ variables: { query } });
+    }
+  };
+
+  return (
+    <div>
+      <input
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        onKeyPress={e => e.key === 'Enter' && handleSearch()}
+        placeholder="Поиск пользователей..."
+      />
+      <button onClick={handleSearch}>Найти</button>
+
+      {loading && <p>Поиск...</p>}
+      {data?.searchUsers.map(user => (
+        <div key={user.id}>{user.name} — {user.email}</div>
+      ))}
+    </div>
+  );
+}
+```
+
+## useMutation
+
+```jsx
+import { useMutation, gql } from '@apollo/client';
+
+const UPDATE_PROFILE = gql`
+  mutation UpdateProfile($name: String, $bio: String) {
+    updateProfile(name: $name, bio: $bio) {
+      id
+      name
+      bio
+    }
+  }
+`;
+
+function ProfileEditor({ user }) {
+  const [name, setName] = useState(user.name);
+  const [bio, setBio] = useState(user.bio || '');
+
+  const [updateProfile, { loading, error }] = useMutation(UPDATE_PROFILE, {
+    // Optimistic UI
+    optimisticResponse: {
+      updateProfile: {
+        __typename: 'User',
+        id: user.id,
+        name,
+        bio,
+      },
+    },
+    onCompleted: () => alert('Профиль обновлён!'),
+  });
+
+  const handleSave = () => {
+    updateProfile({
+      variables: { name, bio },
+    });
+  };
+
+  return (
+    <div>
+      <input value={name} onChange={e => setName(e.target.value)} />
+      <textarea value={bio} onChange={e => setBio(e.target.value)} />
+      <button onClick={handleSave} disabled={loading}>
+        {loading ? 'Сохранение...' : 'Сохранить'}
+      </button>
+      {error && <p style={{ color: 'red' }}>{error.message}</p>}
+    </div>
+  );
+}
+```
+
+## useSubscription
+
+```jsx
+import { useSubscription, gql } from '@apollo/client';
+
+const MESSAGE_ADDED = gql`
+  subscription OnMessageAdded($chatId: ID!) {
+    messageAdded(chatId: $chatId) {
+      id
+      text
+      author {
+        name
+        avatar
+      }
+      createdAt
+    }
+  }
+`;
+
+function ChatMessages({ chatId }) {
+  const [messages, setMessages] = useState([]);
+  const messagesEndRef = useRef(null);
+
+  const { loading } = useSubscription(MESSAGE_ADDED, {
+    variables: { chatId },
+    onData: ({ data: { data } }) => {
+      setMessages(prev => [...prev, data.messageAdded]);
+      // Автоскролл вниз
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    },
+    onError: (err) => console.error('Subscription error:', err),
+  });
+
+  if (loading) return <p>Подключение...</p>;
+
+  return (
+    <div className="messages">
+      {messages.map(msg => (
+        <div key={msg.id} className="message">
+          <img src={msg.author.avatar} alt={msg.author.name} />
+          <div>
+            <strong>{msg.author.name}</strong>
+            <p>{msg.text}</p>
+          </div>
+        </div>
+      ))}
+      <div ref={messagesEndRef} />
+    </div>
+  );
+}
+```
+
+## Кастомные хуки для GraphQL
+
+```javascript
+// hooks/useUser.js
+export function useUser(userId) {
+  const { loading, error, data } = useQuery(GET_USER, {
+    variables: { id: userId },
+    skip: !userId,
+  });
+
+  return {
+    user: data?.user,
+    loading,
+    error,
+  };
+}
+
+// hooks/useCurrentUser.js
+export function useCurrentUser() {
+  const { loading, error, data } = useQuery(GET_ME, {
+    fetchPolicy: 'cache-first',
+  });
+
+  return {
+    currentUser: data?.me,
+    loading,
+    isAuthenticated: !!data?.me,
+    error,
+  };
+}
+
+// hooks/usePosts.js
+export function usePosts({ limit = 20, offset = 0 } = {}) {
+  const { loading, error, data, fetchMore } = useQuery(GET_POSTS, {
+    variables: { limit, offset },
+  });
+
+  const loadMore = useCallback(() => {
+    fetchMore({
+      variables: { offset: data?.posts.items.length || 0 },
+      updateQuery: (prev, { fetchMoreResult }) => ({
+        posts: {
+          ...fetchMoreResult.posts,
+          items: [...prev.posts.items, ...fetchMoreResult.posts.items],
+        },
+      }),
+    });
+  }, [fetchMore, data]);
+
+  return {
+    posts: data?.posts.items || [],
+    total: data?.posts.total || 0,
+    hasMore: data?.posts.hasMore || false,
+    loading,
+    error,
+    loadMore,
+  };
+}
+```
+
+Использование:
+```jsx
+function PostList() {
+  const { posts, loading, hasMore, loadMore } = usePosts({ limit: 10 });
+
+  if (loading) return <Spinner />;
+
+  return (
+    <div>
+      {posts.map(post => <PostCard key={post.id} post={post} />)}
+      {hasMore && <button onClick={loadMore}>Ещё</button>}
+    </div>
+  );
+}
+```
+
+## useApolloClient — прямой доступ к клиенту
+
+```javascript
+import { useApolloClient } from '@apollo/client';
+
+function LogoutButton() {
+  const client = useApolloClient();
+
+  const handleLogout = async () => {
+    localStorage.removeItem('token');
+    // Очищаем весь кэш
+    await client.clearStore();
+    // Или сбрасываем без очистки store
+    // await client.resetStore();
+  };
+
+  return <button onClick={handleLogout}>Выйти</button>;
+}
+```
+
+## Практика
+
+1. Создай хук `useProfile(userId)` на основе `useQuery`
+2. Реализуй поиск с `useLazyQuery` и debounce (ждём 300ms после ввода)
+3. Создай форму редактирования с `useMutation` и optimistic update
+4. Подключи `useSubscription` для уведомлений в шапке сайта
+5. Сделай кастомный хук `useInfiniteScroll` для автопагинации
+
+## Итого
+
+- `useQuery` — основной хук для получения данных
+- `useLazyQuery` — запрос по событию (кнопка, поиск)
+- `useMutation` — изменение данных
+- `useSubscription` — real-time данные
+- `useApolloClient` — прямой доступ к клиенту
+- Извлекай логику в кастомные хуки
+
+**Следующий урок** → [Fragments →](/graphql/fragments)
