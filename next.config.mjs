@@ -18,14 +18,12 @@ export default withNextra({
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
   
-  // Build optimizations for large sites
-  swcMinify: true,
-  optimizeFonts: false,
-  
   experimental: {
-    // Speed up builds with package import optimization
     optimizePackageImports: ['@codesandbox/sandpack-react'],
+    webpackMemoryOptimizations: true,
+    cpus: 1,
   },
+
 
   async headers() {
     return [
