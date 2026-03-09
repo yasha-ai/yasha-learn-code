@@ -1,0 +1,263 @@
+# 🔐 Redis для хранения сессий
+
+Session storage — одна из популярнейших задач для Redis благодаря высокой скорости и автоматическому истечению через TTL.
+
+## Почему Redis для сессий?
+
+✅ **Преимущества:**
+- Быстрый доступ (in-memory)
+- Автоматическое истечение (TTL)
+- Shared storage (для нескольких серверов)
+- Atomic операции
+
+## Express Session с Redis
+
+```typescript
+import express from 'express';
+import session from 'express-session';
+import RedisStore from 'connect-redis';
+import { createClient } from 'redis';
+
+const app = express();
+
+const redisClient = createClient({ url: 'redis://localhost:6379' });
+await redisClient.connect();
+
+app.use(
+  session({
+    store: new RedisStore({ client: redisClient }),
+    secret: 'your-secret-key',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000  // 24 часа
+    }
+  })
+);
+
+// Использование сессии
+app.get('/profile', (req, res) => {
+  if (!req.session.userId) {
+    return res.status(401).send('Not authenticated');
+  }
+  res.send(`User ID: ${req.session.userId}`);
+});
+
+app.post('/login', (req, res) => {
+  req.session.userId = '123';
+  req.session.username = 'john_doe';
+  res.send('Logged in');
+});
+
+app.post('/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) return res.status(500).send('Logout failed');
+    res.send('Logged out');
+  });
+});
+```
+
+## Custom Session Manager
+
+```typescript
+import { createClient } from 'redis';
+import { randomBytes } from 'crypto';
+
+class SessionManager {
+  private redis = createClient();
+  private ttl = 24 * 60 * 60;  // 24 часа
+  
+  async connect() {
+    await this.redis.connect();
+  }
+  
+  // Создание сессии
+  async create(userId: string, data: Record<string, any> = {}) {
+    const sessionId = randomBytes(32).toString('hex');
+    const sessionKey = `session:${sessionId}`;
+    
+    await this.redis.hSet(sessionKey, {
+      userId,
+      createdAt: Date.now().toString(),
+      ...data
+    });
+    
+    await this.redis.expire(sessionKey, this.ttl);
+    
+    return sessionId;
+  }
+  
+  // Получение сессии
+  async get(sessionId: string) {
+    const sessionKey = `session:${sessionId}`;
+    const data = await this.redis.hGetAll(sessionKey);
+    
+    if (Object.keys(data).length === 0) {
+      return null;
+    }
+    
+    // Продление TTL при каждом доступе (sliding expiration)
+    await this.redis.expire(sessionKey, this.ttl);
+    
+    return data;
+  }
+  
+  // Обновление сессии
+  async update(sessionId: string, data: Record<string, any>) {
+    const sessionKey = `session:${sessionId}`;
+    await this.redis.hSet(sessionKey, data);
+    await this.redis.expire(sessionKey, this.ttl);
+  }
+  
+  // Удаление сессии
+  async destroy(sessionId: string) {
+    await this.redis.del(`session:${sessionId}`);
+  }
+  
+  // Получение всех сессий пользователя
+  async getUserSessions(userId: string) {
+    const pattern = 'session:*';
+    const sessions = [];
+    
+    for await (const key of this.redis.scanIterator({ MATCH: pattern })) {
+      const data = await this.redis.hGetAll(key);
+      if (data.userId === userId) {
+        sessions.push({
+          sessionId: key.replace('session:', ''),
+          ...data
+        });
+      }
+    }
+    
+    return sessions;
+  }
+  
+  // Logout из всех устройств
+  async destroyAllUserSessions(userId: string) {
+    const sessions = await this.getUserSessions(userId);
+    
+    for (const session of sessions) {
+      await this.destroy(session.sessionId);
+    }
+  }
+}
+
+// Использование
+const sessionManager = new SessionManager();
+await sessionManager.connect();
+
+// Login
+const sessionId = await sessionManager.create('user123', {
+  username: 'john_doe',
+  role: 'admin'
+});
+
+// Middleware
+async function authMiddleware(req, res, next) {
+  const sessionId = req.cookies.sessionId;
+  
+  if (!sessionId) {
+    return res.status(401).send('Not authenticated');
+  }
+  
+  const session = await sessionManager.get(sessionId);
+  
+  if (!session) {
+    return res.status(401).send('Session expired');
+  }
+  
+  req.session = session;
+  next();
+}
+```
+
+## JWT + Redis для токенов
+
+```typescript
+import jwt from 'jsonwebtoken';
+
+const JWT_SECRET = 'your-jwt-secret';
+const ACCESS_TOKEN_TTL = 15 * 60;  // 15 минут
+const REFRESH_TOKEN_TTL = 7 * 24 * 60 * 60;  // 7 дней
+
+// Login: генерация токенов
+async function login(userId: string) {
+  const accessToken = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '15m' });
+  const refreshToken = randomBytes(32).toString('hex');
+  
+  // Сохраняем refresh token в Redis
+  await redis.setEx(
+    `refresh:${refreshToken}`,
+    REFRESH_TOKEN_TTL,
+    userId
+  );
+  
+  return { accessToken, refreshToken };
+}
+
+// Refresh: обновление access token
+async function refresh(refreshToken: string) {
+  const userId = await redis.get(`refresh:${refreshToken}`);
+  
+  if (!userId) {
+    throw new Error('Invalid refresh token');
+  }
+  
+  const accessToken = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '15m' });
+  
+  return { accessToken };
+}
+
+// Logout: удаление refresh token
+async function logout(refreshToken: string) {
+  await redis.del(`refresh:${refreshToken}`);
+}
+
+// Token Blacklist (для logout из access token до истечения)
+async function blacklistToken(token: string) {
+  const decoded = jwt.decode(token);
+  const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+  
+  if (ttl > 0) {
+    await redis.setEx(`blacklist:${token}`, ttl, '1');
+  }
+}
+
+async function isTokenBlacklisted(token: string) {
+  return await redis.exists(`blacklist:${token}`) === 1;
+}
+```
+
+## Rate Limiting по сессиям
+
+```typescript
+async function checkSessionRateLimit(sessionId: string, maxRequests = 100, windowSec = 60) {
+  const key = `rate:session:${sessionId}`;
+  
+  const count = await redis.incr(key);
+  
+  if (count === 1) {
+    await redis.expire(key, windowSec);
+  }
+  
+  if (count > maxRequests) {
+    throw new Error('Rate limit exceeded');
+  }
+  
+  return { remaining: maxRequests - count };
+}
+```
+
+## 💡 Best Practices
+
+1. **Используйте sliding expiration** (продление TTL при доступе)
+2. **Храните минимум данных** в сессии
+3. **Secure cookies** (httpOnly, secure, sameSite)
+4. **Logout из всех устройств** при смене пароля
+5. **Мониторьте активные сессии**
+
+---
+
+**Следующий урок:** [Pub/Sub в Redis](/databases/redis-pubsub) →
