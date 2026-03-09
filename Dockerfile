@@ -10,8 +10,8 @@ RUN pnpm install --frozen-lockfile
 
 COPY . .
 
-# Increase memory limit for build
-ENV NODE_OPTIONS="--max-old-space-size=8192"
+# Increase memory limit for build (16GB for 1100+ pages)
+ENV NODE_OPTIONS="--max-old-space-size=16384"
 RUN pnpm run build
 
 EXPOSE 4010
