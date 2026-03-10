@@ -1,0 +1,253 @@
+---
+title: "5. Валидация с Zod"
+sidebar:
+  order: 5
+---
+import { Playground } from '@components/Playground'
+
+
+Валидация входных данных — критически важная часть любого API. tRPC нативно интегрируется с Zod — мощной библиотекой для декларативной валидации и вывода TypeScript-типов.
+
+## Что такое Zod?
+
+Zod — это TypeScript-first библиотека для валидации данных. Вы описываете схему данных, а Zod автоматически выводит TypeScript-тип из неё. Это означает: одна схема — и для валидации, и для типизации.
+
+## Метод .input()
+
+Метод `.input()` принимает Zod-схему и делает две вещи: первое — валидирует входные данные при каждом запросе (если данные невалидны, tRPC автоматически вернёт ошибку `BAD_REQUEST`); второе — TypeScript автоматически типизирует `input` в обработчике процедуры.
+
+## Общие паттерны валидации
+
+Наиболее часто используемые Zod-валидаторы: `z.string()`, `z.number()`, `z.boolean()`, `z.object()`, `z.array()`, `z.enum()`. Каждый из них поддерживает уточнения: `.min()`, `.max()`, `.email()`, `.optional()`, `.default()`.
+
+## Сложные схемы
+
+Zod поддерживает вложенные объекты, массивы, объединения типов (`z.union()`) и пересечения (`z.intersection()`). Для создания опциональных полей используйте `.optional()`, для полей со значением по умолчанию — `.default()`.
+
+## Вывод TypeScript-типа из схемы
+
+Используйте `z.infer<typeof schema>` для получения TypeScript-типа из Zod-схемы. Это позволяет переиспользовать тип в других местах кода без дублирования.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const RED = '#ef4444';
+
+type FieldType = 'string' | 'number' | 'boolean' | 'email' | 'url';
+type FieldExtra = 'required' | 'optional' | 'default';
+
+interface SchemaField {
+  id: number;
+  name: string;
+  type: FieldType;
+  modifier: FieldExtra;
+  defaultValue?: string;
+  minLength?: string;
+  maxLength?: string;
+}
+
+let nextId = 3;
+
+const zodMap: Record<FieldType, string> = {
+  string: 'z.string()',
+  number: 'z.number()',
+  boolean: 'z.boolean()',
+  email: 'z.string().email()',
+  url: 'z.string().url()',
+};
+
+const tsTypeMap: Record<FieldType, string> = {
+  string: 'string',
+  number: 'number',
+  boolean: 'boolean',
+  email: 'string',
+  url: 'string',
+};
+
+export default function App() {
+  const [fields, setFields] = useState<SchemaField[]>([
+    { id: 1, name: 'name', type: 'string', modifier: 'required', minLength: '2', maxLength: '50' },
+    { id: 2, name: 'email', type: 'email', modifier: 'required' },
+  ]);
+  const [schemaName, setSchemaName] = useState('CreateUserInput');
+  const [testInput, setTestInput] = useState('');
+  const [validationResult, setValidationResult] = useState<{ valid: boolean; message: string } | null>(null);
+
+  const addField = () => {
+    setFields(f => [...f, { id: nextId++, name: 'field' + nextId, type: 'string', modifier: 'required' }]);
+  };
+
+  const removeField = (id: number) => setFields(f => f.filter(x => x.id !== id));
+
+  const updateField = (id: number, changes: Partial<SchemaField>) => {
+    setFields(f => f.map(x => x.id === id ? { ...x, ...changes } : x));
+  };
+
+  const buildZodField = (field: SchemaField): string => {
+    let z = zodMap[field.type];
+    if (field.type === 'string' || field.type === 'email' || field.type === 'url') {
+      if (field.minLength) z += '.min(' + field.minLength + ')';
+      if (field.maxLength) z += '.max(' + field.maxLength + ')';
+    }
+    if (field.modifier === 'optional') z += '.optional()';
+    if (field.modifier === 'default') z += '.default(' + (field.defaultValue ? '"' + field.defaultValue + '"' : '""') + ')';
+    return z;
+  };
+
+  const buildTsType = (field: SchemaField): string => {
+    const base = tsTypeMap[field.type];
+    if (field.modifier === 'optional') return base + ' | undefined';
+    return base;
+  };
+
+  const zodSchema =
+    'const ' + schemaName.charAt(0).toLowerCase() + schemaName.slice(1) + 'Schema = z.object({\n' +
+    fields.map(f => '  ' + f.name + ': ' + buildZodField(f) + ',').join('\n') +
+    '\n});\n\n' +
+    'type ' + schemaName + ' = z.infer<typeof ' + schemaName.charAt(0).toLowerCase() + schemaName.slice(1) + 'Schema>;';
+
+  const tsType =
+    'type ' + schemaName + ' = {\n' +
+    fields.map(f => '  ' + f.name + ': ' + buildTsType(f) + ';').join('\n') +
+    '\n};';
+
+  const procedureCode =
+    'export const create = publicProcedure\n' +
+    '  .input(' + schemaName.charAt(0).toLowerCase() + schemaName.slice(1) + 'Schema)\n' +
+    '  .mutation(async ({ input }) => {\n' +
+    '    // input полностью типизирован!\n' +
+    fields.map(f => '    // input.' + f.name + ': ' + buildTsType(f)).join('\n') +
+    '\n    return db.create(input);\n  });';
+
+  const runValidation = () => {
+    try {
+      const parsed = JSON.parse(testInput || '{}');
+      const errors: string[] = [];
+      fields.forEach(field => {
+        const val = parsed[field.name];
+        if (field.modifier === 'required' && (val === undefined || val === null || val === '')) {
+          errors.push(field.name + ': обязательное поле отсутствует');
+        } else if (val !== undefined) {
+          if ((field.type === 'string' || field.type === 'email') && typeof val !== 'string') {
+            errors.push(field.name + ': ожидается string');
+          }
+          if (field.type === 'number' && typeof val !== 'number') {
+            errors.push(field.name + ': ожидается number');
+          }
+          if (field.type === 'email' && typeof val === 'string' && !val.includes('@')) {
+            errors.push(field.name + ': невалидный email');
+          }
+          if (field.minLength && typeof val === 'string' && val.length < Number(field.minLength)) {
+            errors.push(field.name + ': минимум ' + field.minLength + ' символов');
+          }
+        }
+      });
+      if (errors.length === 0) {
+        setValidationResult({ valid: true, message: 'Валидация пройдена успешно!' });
+      } else {
+        setValidationResult({ valid: false, message: errors.join('; ') });
+      }
+    } catch {
+      setValidationResult({ valid: false, message: 'Невалидный JSON' });
+    }
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        Конструктор Zod-схем
+      </h2>
+
+      <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+        <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '16px', minWidth: '280px', flex: '0 0 auto' }}>
+          <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '13px', marginBottom: '12px' }}>⚙️ Поля схемы</div>
+
+          <div style={{ marginBottom: '10px' }}>
+            <label style={{ color: TEXT, opacity: 0.7, fontSize: '11px', display: 'block', marginBottom: '3px' }}>Имя схемы</label>
+            <input value={schemaName} onChange={e => setSchemaName(e.target.value)} style={{
+              width: '100%', background: BG, border: '1px solid #334155', borderRadius: '5px',
+              padding: '5px 8px', color: YELLOW, fontSize: '12px', boxSizing: 'border-box',
+            }} />
+          </div>
+
+          {fields.map(field => (
+            <div key={field.id} style={{ background: BG, borderRadius: '8px', padding: '10px', marginBottom: '8px', border: '1px solid #334155' }}>
+              <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+                <input value={field.name} onChange={e => updateField(field.id, { name: e.target.value })}
+                  style={{ flex: 1, background: CARD, border: '1px solid #334155', borderRadius: '4px', padding: '4px 6px', color: TEXT, fontSize: '11px' }} />
+                <button onClick={() => removeField(field.id)} style={{ background: 'transparent', border: '1px solid ' + RED, borderRadius: '4px', color: RED, padding: '4px 7px', cursor: 'pointer', fontSize: '10px' }}>✕</button>
+              </div>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <select value={field.type} onChange={e => updateField(field.id, { type: e.target.value as FieldType })}
+                  style={{ flex: 1, background: CARD, border: '1px solid #334155', borderRadius: '4px', padding: '3px', color: TRPC, fontSize: '10px' }}>
+                  <option value="string">string</option>
+                  <option value="number">number</option>
+                  <option value="boolean">boolean</option>
+                  <option value="email">email</option>
+                  <option value="url">url</option>
+                </select>
+                <select value={field.modifier} onChange={e => updateField(field.id, { modifier: e.target.value as FieldExtra })}
+                  style={{ flex: 1, background: CARD, border: '1px solid #334155', borderRadius: '4px', padding: '3px', color: YELLOW, fontSize: '10px' }}>
+                  <option value="required">required</option>
+                  <option value="optional">optional</option>
+                  <option value="default">default</option>
+                </select>
+              </div>
+              {(field.type === 'string' || field.type === 'email') && (
+                <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
+                  <input value={field.minLength || ''} onChange={e => updateField(field.id, { minLength: e.target.value })}
+                    placeholder="min" style={{ flex: 1, background: CARD, border: '1px solid #334155', borderRadius: '4px', padding: '3px 5px', color: TEXT, fontSize: '10px' }} />
+                  <input value={field.maxLength || ''} onChange={e => updateField(field.id, { maxLength: e.target.value })}
+                    placeholder="max" style={{ flex: 1, background: CARD, border: '1px solid #334155', borderRadius: '4px', padding: '3px 5px', color: TEXT, fontSize: '10px' }} />
+                </div>
+              )}
+            </div>
+          ))}
+
+          <button onClick={addField} style={{ width: '100%', background: 'rgba(57,140,203,0.1)', border: '1px dashed ' + TRPC, borderRadius: '6px', color: TRPC, padding: '6px', cursor: 'pointer', fontSize: '11px' }}>
+            + Добавить поле
+          </button>
+
+          <div style={{ marginTop: '14px' }}>
+            <div style={{ color: TEXT, opacity: 0.7, fontSize: '11px', marginBottom: '4px' }}>Тестировать JSON:</div>
+            <textarea
+              value={testInput}
+              onChange={e => setTestInput(e.target.value)}
+              placeholder={'{\n  "name": "Alice",\n  "email": "a@b.com"\n}'}
+              style={{ width: '100%', background: BG, border: '1px solid #334155', borderRadius: '5px', padding: '6px 8px', color: TEXT, fontSize: '10px', height: '80px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'monospace' }}
+            />
+            <button onClick={runValidation} style={{ width: '100%', background: TRPC, color: '#fff', border: 'none', borderRadius: '6px', padding: '6px', cursor: 'pointer', fontSize: '12px', marginTop: '4px' }}>
+              Проверить валидацию
+            </button>
+            {validationResult && (
+              <div style={{ marginTop: '6px', background: validationResult.valid ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', border: '1px solid ' + (validationResult.valid ? GREEN : RED), borderRadius: '6px', padding: '8px', fontSize: '11px', color: validationResult.valid ? GREEN : RED }}>
+                {validationResult.valid ? '✅ ' : '❌ '}{validationResult.message}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minWidth: '250px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ background: CARD, border: '1px solid ' + TRPC, borderRadius: '10px', padding: '14px' }}>
+            <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>📋 Zod схема</div>
+            <pre style={{ margin: 0, fontSize: '10px', color: TEXT, lineHeight: '1.7', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>{zodSchema}</pre>
+          </div>
+          <div style={{ background: CARD, border: '1px solid ' + YELLOW, borderRadius: '10px', padding: '14px' }}>
+            <div style={{ color: YELLOW, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>🔷 TypeScript тип</div>
+            <pre style={{ margin: 0, fontSize: '10px', color: TEXT, lineHeight: '1.7', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>{tsType}</pre>
+          </div>
+          <div style={{ background: CARD, border: '1px solid ' + GREEN, borderRadius: '10px', padding: '14px' }}>
+            <div style={{ color: GREEN, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>🖥 tRPC процедура</div>
+            <pre style={{ margin: 0, fontSize: '10px', color: TEXT, lineHeight: '1.7', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>{procedureCode}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

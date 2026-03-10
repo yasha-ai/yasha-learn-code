@@ -1,0 +1,305 @@
+---
+title: "15. Batching запросов"
+sidebar:
+  order: 15
+---
+import { Playground } from '@components/Playground'
+
+
+Батчинг (batching) запросов — одна из ключевых оптимизаций производительности в tRPC. Вместо того чтобы отправлять каждый вызов как отдельный HTTP-запрос, tRPC объединяет несколько вызовов в один пакетный запрос.
+
+## Как работает httpBatchLink?
+
+Когда несколько компонентов вызывают tRPC запросы одновременно (или в пределах одного рендер-цикла), `httpBatchLink` ждёт короткое время (по умолчанию — до следующего тика event loop) и объединяет все накопившиеся запросы в один HTTP POST-запрос к серверу.
+
+## Формат батч-запроса
+
+Батч-запрос отправляется как POST на `/api/trpc/procedure1,procedure2,procedure3`. Тело содержит массив входных данных для каждой процедуры. Ответ — массив результатов в том же порядке.
+
+## Настройка httpBatchLink
+
+`httpBatchLink` принимает параметр `maxURLLength` для ограничения длины URL в GET-запросах. Параметр `maxBatchSize` ограничивает максимальное количество запросов в одном батче. Можно также отключить батчинг для конкретного запроса.
+
+## Когда батчинг не работает
+
+Батчинг не применяется к subscription-запросам (они используют WebSocket). Также батчинг обходится, если явно указать `httpLink` вместо `httpBatchLink`, или если запросы отправляются в разное время (например, при пользовательском взаимодействии).
+
+## Преимущества батчинга
+
+Основное преимущество — снижение количества HTTP-соединений и уменьшение латентности при загрузке страницы. Вместо 10 последовательных запросов — один батчевый запрос с параллельной обработкой на сервере.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const ORANGE = '#f97316';
+const PURPLE = '#a855f7';
+const RED = '#ef4444';
+
+interface CallItem {
+  id: number;
+  procedure: string;
+  status: 'pending' | 'batching' | 'sent' | 'done';
+  batchId?: number;
+  color: string;
+}
+
+interface BatchGroup {
+  id: number;
+  calls: number[];
+  status: 'forming' | 'sent' | 'done';
+  requestUrl: string;
+}
+
+let callIdCounter = 0;
+let batchIdCounter = 0;
+
+const procedures = [
+  { name: 'user.getAll', color: TRPC },
+  { name: 'post.getAll', color: GREEN },
+  { name: 'user.getById(1)', color: YELLOW },
+  { name: 'comment.getAll', color: PURPLE },
+  { name: 'user.getById(2)', color: ORANGE },
+  { name: 'post.getById(1)', color: '#06b6d4' },
+];
+
+const batchLinkCode =
+  'import { httpBatchLink } from "@trpc/client";\n\n' +
+  'export const trpc = createTRPCReact<AppRouter>();\n\n' +
+  'const client = trpc.createClient({\n' +
+  '  links: [\n' +
+  '    httpBatchLink({\n' +
+  '      url: "/api/trpc",\n' +
+  '      // Опционально:\n' +
+  '      maxBatchSize: 10,\n' +
+  '      headers: () => ({\n' +
+  '        Authorization: "Bearer " + token,\n' +
+  '      }),\n' +
+  '    }),\n' +
+  '  ],\n' +
+  '});';
+
+const splitLinkCode =
+  '// Разделение: HTTP для query/mutation,\n' +
+  '// WS для subscriptions\n' +
+  'import { splitLink, wsLink } from "@trpc/client";\n\n' +
+  'const client = trpc.createClient({\n' +
+  '  links: [\n' +
+  '    splitLink({\n' +
+  '      condition: (op) =>\n' +
+  '        op.type === "subscription",\n' +
+  '      true: wsLink({ client: wsClient }),\n' +
+  '      false: httpBatchLink({ url: "/api/trpc" }),\n' +
+  '    }),\n' +
+  '  ],\n' +
+  '});';
+
+export default function App() {
+  const [calls, setCalls] = useState<CallItem[]>([]);
+  const [batches, setBatches] = useState<BatchGroup[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
+  const [mode, setMode] = useState<'batch' | 'individual'>('batch');
+  const [stats, setStats] = useState<{ httpRequests: number; calls: number; saved: number } | null>(null);
+  const [codeTab, setCodeTab] = useState<'batch' | 'split'>('batch');
+
+  const runDemo = async () => {
+    if (isRunning) return;
+    setIsRunning(true);
+    setCalls([]);
+    setBatches([]);
+    setStats(null);
+
+    const selectedProcs = procedures.slice(0, 5 + Math.floor(Math.random() * 2));
+
+    // Create all calls as pending
+    const newCalls: CallItem[] = selectedProcs.map(p => ({
+      id: ++callIdCounter,
+      procedure: p.name,
+      status: 'pending',
+      color: p.color,
+    }));
+    setCalls(newCalls);
+
+    await new Promise(r => setTimeout(r, 500));
+
+    if (mode === 'batch') {
+      // Group into batches
+      const batchSize = 3;
+      const batchGroups: BatchGroup[] = [];
+      for (let i = 0; i < newCalls.length; i += batchSize) {
+        const chunk = newCalls.slice(i, i + batchSize);
+        const bid = ++batchIdCounter;
+        batchGroups.push({
+          id: bid,
+          calls: chunk.map(c => c.id),
+          status: 'forming',
+          requestUrl: '/api/trpc/' + chunk.map(c => c.procedure.replace(/[^a-z.]/gi, '')).join(','),
+        });
+      }
+      setBatches(batchGroups);
+
+      // Animate calls going to batching state
+      setCalls(prev => prev.map(c => {
+        const bGroup = batchGroups.find(bg => bg.calls.includes(c.id));
+        return bGroup ? { ...c, status: 'batching', batchId: bGroup.id } : c;
+      }));
+
+      await new Promise(r => setTimeout(r, 600));
+
+      // Send each batch
+      for (const batch of batchGroups) {
+        setBatches(prev => prev.map(b => b.id === batch.id ? { ...b, status: 'sent' } : b));
+        setCalls(prev => prev.map(c => batch.calls.includes(c.id) ? { ...c, status: 'sent' } : c));
+        await new Promise(r => setTimeout(r, 300));
+        setBatches(prev => prev.map(b => b.id === batch.id ? { ...b, status: 'done' } : b));
+        setCalls(prev => prev.map(c => batch.calls.includes(c.id) ? { ...c, status: 'done' } : c));
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      setStats({
+        httpRequests: batchGroups.length,
+        calls: newCalls.length,
+        saved: newCalls.length - batchGroups.length,
+      });
+    } else {
+      // Individual mode
+      for (const call of newCalls) {
+        setCalls(prev => prev.map(c => c.id === call.id ? { ...c, status: 'sent' } : c));
+        await new Promise(r => setTimeout(r, 350));
+        setCalls(prev => prev.map(c => c.id === call.id ? { ...c, status: 'done' } : c));
+        await new Promise(r => setTimeout(r, 150));
+      }
+      setStats({
+        httpRequests: newCalls.length,
+        calls: newCalls.length,
+        saved: 0,
+      });
+    }
+
+    setIsRunning(false);
+  };
+
+  const statusColors: Record<string, string> = {
+    pending: '#475569',
+    batching: YELLOW,
+    sent: TRPC,
+    done: GREEN,
+  };
+
+  const statusLabels: Record<string, string> = {
+    pending: '○ ожидание',
+    batching: '⬡ батчинг',
+    sent: '→ отправлен',
+    done: '✓ получен',
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        Батчинг запросов tRPC
+      </h2>
+
+      <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+        {(['batch', 'individual'] as const).map(m => (
+          <button key={m} onClick={() => setMode(m)} style={{
+            background: mode === m ? TRPC : CARD,
+            color: mode === m ? '#fff' : TEXT,
+            border: '1px solid ' + (mode === m ? TRPC : '#334155'),
+            borderRadius: '6px', padding: '7px 16px', cursor: 'pointer', fontSize: '12px',
+          }}>
+            {m === 'batch' ? '⚡ httpBatchLink' : '📡 httpLink (отдельные)'}
+          </button>
+        ))}
+        <button onClick={runDemo} disabled={isRunning} style={{ background: isRunning ? '#334155' : GREEN, color: '#fff', border: 'none', borderRadius: '6px', padding: '7px 18px', cursor: isRunning ? 'not-allowed' : 'pointer', fontSize: '12px' }}>
+          {isRunning ? '⏳ Симуляция...' : '▶ Запустить'}
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1', minWidth: '240px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+            <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '12px', marginBottom: '10px' }}>📡 tRPC вызовы</div>
+            {calls.length === 0 ? (
+              <div style={{ color: TEXT, opacity: 0.4, fontSize: '11px', textAlign: 'center', padding: '20px' }}>Нажмите "Запустить"</div>
+            ) : calls.map(call => (
+              <div key={call.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: BG, borderRadius: '5px', padding: '6px 10px', marginBottom: '4px', border: '1px solid ' + statusColors[call.status] + '44', transition: 'all 0.3s' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: call.color }} />
+                  <span style={{ color: TEXT, fontSize: '11px' }}>{call.procedure}</span>
+                </div>
+                <span style={{ color: statusColors[call.status], fontSize: '10px' }}>{statusLabels[call.status]}</span>
+              </div>
+            ))}
+          </div>
+
+          {mode === 'batch' && batches.length > 0 && (
+            <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+              <div style={{ color: YELLOW, fontWeight: 'bold', fontSize: '12px', marginBottom: '10px' }}>📦 HTTP Батчи</div>
+              {batches.map(batch => (
+                <div key={batch.id} style={{ background: BG, borderRadius: '6px', padding: '8px 10px', marginBottom: '6px', border: '1px solid ' + (batch.status === 'done' ? GREEN : batch.status === 'sent' ? TRPC : YELLOW) + '55', transition: 'all 0.3s' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: YELLOW, fontSize: '11px' }}>Батч #{batch.id}</span>
+                    <span style={{ color: batch.status === 'done' ? GREEN : batch.status === 'sent' ? TRPC : YELLOW, fontSize: '10px' }}>
+                      {batch.status === 'done' ? '✓ done' : batch.status === 'sent' ? '→ sent' : '⬡ forming'}
+                    </span>
+                  </div>
+                  <div style={{ color: TEXT, opacity: 0.5, fontSize: '9px', marginTop: '3px', wordBreak: 'break-all' }}>{batch.requestUrl}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {stats && (
+            <div style={{ background: CARD, border: '1px solid ' + (stats.saved > 0 ? GREEN : ORANGE), borderRadius: '10px', padding: '14px' }}>
+              <div style={{ color: GREEN, fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>📊 Результат</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155' }}>
+                <span style={{ color: TEXT, opacity: 0.7, fontSize: '11px' }}>Всего вызовов</span>
+                <span style={{ color: TEXT, fontSize: '11px' }}>{stats.calls}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155' }}>
+                <span style={{ color: TEXT, opacity: 0.7, fontSize: '11px' }}>HTTP запросов</span>
+                <span style={{ color: TRPC, fontSize: '11px', fontWeight: 'bold' }}>{stats.httpRequests}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                <span style={{ color: TEXT, opacity: 0.7, fontSize: '11px' }}>Сэкономлено</span>
+                <span style={{ color: stats.saved > 0 ? GREEN : ORANGE, fontSize: '11px', fontWeight: 'bold' }}>
+                  {stats.saved > 0 ? '-' + stats.saved + ' запросов!' : 'без оптимизации'}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ minWidth: '240px', flex: '0 0 auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '6px', marginBottom: '2px' }}>
+            {(['batch', 'split'] as const).map(tab => (
+              <button key={tab} onClick={() => setCodeTab(tab)} style={{ flex: 1, background: codeTab === tab ? TRPC : CARD, color: codeTab === tab ? '#fff' : TEXT, border: '1px solid ' + (codeTab === tab ? TRPC : '#334155'), borderRadius: '5px', padding: '5px', cursor: 'pointer', fontSize: '10px' }}>
+                {tab === 'batch' ? 'httpBatchLink' : 'splitLink'}
+              </button>
+            ))}
+          </div>
+          <div style={{ background: CARD, border: '1px solid ' + TRPC, borderRadius: '10px', padding: '14px' }}>
+            <pre style={{ margin: 0, fontSize: '9px', color: TEXT, lineHeight: '1.6', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+              {codeTab === 'batch' ? batchLinkCode : splitLinkCode}
+            </pre>
+          </div>
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+            <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '11px', marginBottom: '8px' }}>Легенда статусов</div>
+            {Object.entries(statusColors).map(([status, color]) => (
+              <div key={status} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '3px 0' }}>
+                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: color }} />
+                <span style={{ color, fontSize: '11px' }}>{statusLabels[status]}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,348 @@
+---
+title: "5. Plugins: расширение функций"
+sidebar:
+  order: 5
+---
+import { Playground } from '@components/Playground'
+
+
+Если **Loaders** трансформируют отдельные файлы, то **Plugins** работают на уровне всего процесса сборки. Они могут вмешиваться в любую фазу работы Webpack: от инициализации до записи файлов. Плагины делают Webpack по-настоящему мощным инструментом.
+
+## Как работают плагины
+
+Плагин — это объект с методом `apply(compiler)`, который принимает компилятор и подписывается на его хуки:
+
+```js
+class MyPlugin {
+  apply(compiler) {
+    compiler.hooks.done.tap('MyPlugin', (stats) => {
+      console.log('Build complete!', stats.toJson().time, 'ms');
+    });
+  }
+}
+```
+
+В конфиге плагины передаются как **инстансы**:
+```js
+plugins: [
+  new HtmlWebpackPlugin({ template: './public/index.html' }),
+  new MiniCssExtractPlugin({ filename: '[name].[contenthash].css' }),
+  new webpack.DefinePlugin({ 'process.env.NODE_ENV': JSON.stringify('production') }),
+]
+```
+
+## Популярные плагины
+
+### HtmlWebpackPlugin
+Автоматически создаёт HTML файл и вставляет теги `<script>` и `<link>` для бандлов:
+
+```bash
+npm install --save-dev html-webpack-plugin
+```
+
+```js
+new HtmlWebpackPlugin({
+  template: './public/index.html',  // Шаблон
+  filename: 'index.html',           // Имя выходного файла
+  title: 'My App',                  // Переменная для EJS шаблона
+  minify: {
+    collapseWhitespace: true,
+    removeComments: true,
+  },
+  chunks: ['main'],                 // Только определённые чанки
+})
+```
+
+### MiniCssExtractPlugin
+Выносит CSS в отдельные файлы вместо инжекции через `<style>`:
+
+```bash
+npm install --save-dev mini-css-extract-plugin
+```
+
+```js
+const MiniCssExtractPlugin = require('mini-css-extract-plugin');
+
+// В плагинах:
+new MiniCssExtractPlugin({ filename: '[name].[contenthash:8].css' })
+
+// В лоадерах — заменяет style-loader:
+{ test: /\\.css$/, use: [MiniCssExtractPlugin.loader, 'css-loader'] }
+```
+
+### DefinePlugin (встроен в Webpack)
+Подставляет глобальные константы на этапе сборки:
+
+```js
+new webpack.DefinePlugin({
+  'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV),
+  'process.env.API_URL': JSON.stringify('https://api.example.com'),
+  __DEV__: process.env.NODE_ENV !== 'production',
+  BUILD_TIMESTAMP: Date.now(),
+})
+// В коде:
+if (__DEV__) { console.log('development mode'); }
+// После сборки:
+if (false) { console.log('development mode'); } // удалится при tree shaking
+```
+
+### CopyWebpackPlugin
+Копирует статические файлы в dist/:
+
+```bash
+npm install --save-dev copy-webpack-plugin
+```
+
+```js
+new CopyWebpackPlugin({
+  patterns: [
+    { from: 'public/robots.txt', to: 'robots.txt' },
+    { from: 'public/icons', to: 'icons' },
+    { from: 'src/locales', to: 'locales' },
+  ],
+})
+```
+
+### BundleAnalyzerPlugin
+Визуализирует размеры бандлов:
+
+```bash
+npm install --save-dev webpack-bundle-analyzer
+```
+
+```js
+const { BundleAnalyzerPlugin } = require('webpack-bundle-analyzer');
+
+new BundleAnalyzerPlugin({
+  analyzerMode: 'static',    // 'server' | 'static' | 'json' | 'disabled'
+  openAnalyzer: false,
+  reportFilename: 'bundle-report.html',
+})
+```
+
+### ProvidePlugin (встроен в Webpack)
+Автоматически загружает модули без явного импорта:
+
+```js
+new webpack.ProvidePlugin({
+  React: 'react',       // import React from 'react' везде автоматически
+  $: 'jquery',          // jQuery доступен глобально
+  _: ['lodash', 'fp'],  // Конкретный экспорт
+})
+```
+
+## Порядок выполнения плагинов
+
+Плагины выполняются на основе хуков компилятора, а не в порядке объявления. Однако некоторые плагины важно порядка придерживаться:
+
+```js
+plugins: [
+  new MiniCssExtractPlugin(),    // Должен быть раньше HtmlWebpackPlugin
+  new HtmlWebpackPlugin(),        // Использует результат MiniCssExtractPlugin
+  new CopyWebpackPlugin({}),
+]
+```
+
+Ниже — интерактивная демонстрация эффекта каждого плагина на результат сборки.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const PURPLE = '#a78bfa';
+const PINK = '#f472b6';
+
+interface Plugin {
+  id: string;
+  name: string;
+  package: string;
+  description: string;
+  color: string;
+  effect: string;
+  distFiles: { name: string; color: string; content: string }[];
+  configCode: string;
+}
+
+const PLUGINS: Plugin[] = [
+  {
+    id: 'html',
+    name: 'HtmlWebpackPlugin',
+    package: 'html-webpack-plugin',
+    description: 'Генерирует HTML файл с автоматическим внедрением ссылок на бандлы',
+    color: WEBPACK_COLOR,
+    effect: 'Создаёт dist/index.html со всеми <script> и <link> тегами',
+    distFiles: [
+      { name: 'index.html', color: ACCENT, content: '<!DOCTYPE html>\\n<html>\\n<head>\\n  <link href="/main.abc123.css" rel="stylesheet">\\n</head>\\n<body>\\n  <div id="root"></div>\\n  <script src="/main.abc123.js"></script>\\n</body>\\n</html>' },
+      { name: 'main.abc123.js', color: WEBPACK_COLOR, content: '(bundle JS...)' },
+    ],
+    configCode: "new HtmlWebpackPlugin({\\n  template: './public/index.html',\\n  minify: { collapseWhitespace: true },\\n})",
+  },
+  {
+    id: 'miniCss',
+    name: 'MiniCssExtractPlugin',
+    package: 'mini-css-extract-plugin',
+    description: 'Выносит CSS в отдельные .css файлы вместо инжекции через <style>',
+    color: PURPLE,
+    effect: 'CSS больше не инжектируется JS, а загружается как отдельный файл (параллельная загрузка)',
+    distFiles: [
+      { name: 'main.abc123.css', color: PURPLE, content: '.app{background:#0f172a}.button{color:#8dd6f9}' },
+      { name: 'main.def456.js', color: WEBPACK_COLOR, content: '(bundle JS без CSS...)' },
+    ],
+    configCode: "new MiniCssExtractPlugin({\\n  filename: '[name].[contenthash:8].css',\\n  chunkFilename: '[id].[contenthash:8].css',\\n})",
+  },
+  {
+    id: 'define',
+    name: 'DefinePlugin',
+    package: 'webpack (built-in)',
+    description: 'Заменяет глобальные константы в коде на реальные значения во время сборки',
+    color: ACCENT,
+    effect: 'process.env.NODE_ENV и другие переменные инлайнятся прямо в код',
+    distFiles: [
+      { name: 'main.js (до DefinePlugin)', color: MUTED, content: 'if(process.env.NODE_ENV === "production") {\\n  // production code\\n}' },
+      { name: 'main.js (после DefinePlugin)', color: SUCCESS, content: 'if(true) {\\n  // production code\\n}\\n// ↑ tree-shaking удалит условие' },
+    ],
+    configCode: "new webpack.DefinePlugin({\\n  'process.env.NODE_ENV': JSON.stringify('production'),\\n  'process.env.API_URL': JSON.stringify('https://api.example.com'),\\n  __DEV__: false,\\n})",
+  },
+  {
+    id: 'copy',
+    name: 'CopyWebpackPlugin',
+    package: 'copy-webpack-plugin',
+    description: 'Копирует статические файлы напрямую в папку dist/ без обработки Webpack',
+    color: SUCCESS,
+    effect: 'Файлы из public/ (robots.txt, icons, манифест) копируются в dist/',
+    distFiles: [
+      { name: 'robots.txt', color: SUCCESS, content: 'User-agent: *\\nDisallow: /admin/' },
+      { name: 'favicon.ico', color: SUCCESS, content: '[Binary ICO data]' },
+      { name: 'manifest.json', color: SUCCESS, content: '{"name":"My App","icons":[...]}' },
+    ],
+    configCode: "new CopyWebpackPlugin({\\n  patterns: [\\n    { from: 'public/robots.txt' },\\n    { from: 'public/icons', to: 'icons' },\\n    { from: 'public/manifest.json' },\\n  ],\\n})",
+  },
+  {
+    id: 'analyzer',
+    name: 'BundleAnalyzerPlugin',
+    package: 'webpack-bundle-analyzer',
+    description: 'Создаёт интерактивную treemap-визуализацию содержимого бандлов',
+    color: PINK,
+    effect: 'Открывает browser с интерактивной картой модулей — видно какие пакеты занимают больше места',
+    distFiles: [
+      { name: 'bundle-report.html', color: PINK, content: '[Интерактивный HTML отчёт]\\n\\nМодули по размеру:\\n  react-dom: 120 KB (39%)\\n  lodash: 70 KB (23%)\\n  src/: 55 KB (18%)\\n  moment: 35 KB (11%)\\n  other: 28 KB (9%)' },
+    ],
+    configCode: "new BundleAnalyzerPlugin({\\n  analyzerMode: 'static',\\n  reportFilename: 'bundle-report.html',\\n  openAnalyzer: false,\\n})",
+  },
+];
+
+export default function App() {
+  const [selected, setSelected] = useState<string>('html');
+  const [enabled, setEnabled] = useState<Set<string>>(new Set(['html']));
+
+  const plugin = PLUGINS.find(p => p.id === selected)!;
+
+  const togglePlugin = (id: string) => {
+    const next = new Set(enabled);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setEnabled(next);
+  };
+
+  const enabledPlugins = PLUGINS.filter(p => enabled.has(p.id));
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>
+            🔌 Plugin Effects Demo
+          </div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Включайте плагины и смотрите их эффект на сборку</div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 24 }}>
+          {/* Plugin list */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {PLUGINS.map(p => (
+              <div
+                key={p.id}
+                onClick={() => setSelected(p.id)}
+                style={{
+                  background: selected === p.id ? '#0f2744' : CARD,
+                  border: \`2px solid \${selected === p.id ? p.color : 'transparent'}\`,
+                  borderRadius: 10, padding: '14px 16px', cursor: 'pointer', transition: 'all 0.2s',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                  <div
+                    onClick={e => { e.stopPropagation(); togglePlugin(p.id); }}
+                    style={{
+                      width: 18, height: 18, borderRadius: 4, border: \`2px solid \${p.color}\`,
+                      background: enabled.has(p.id) ? p.color : 'transparent', flexShrink: 0,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+                    }}
+                  >
+                    {enabled.has(p.id) && <span style={{ fontSize: 10, color: BG, fontWeight: 900 }}>✓</span>}
+                  </div>
+                  <span style={{ fontSize: 13, color: selected === p.id ? p.color : TEXT, fontWeight: 700 }}>{p.name}</span>
+                </div>
+                <div style={{ fontSize: 10, color: MUTED, paddingLeft: 28 }}>{p.package}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Plugin details */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                <div style={{ width: 10, height: 10, borderRadius: '50%', background: plugin.color }} />
+                <div style={{ fontSize: 16, color: plugin.color, fontWeight: 700 }}>{plugin.name}</div>
+                <div style={{ fontSize: 11, color: MUTED, background: '#0a0f1e', padding: '2px 8px', borderRadius: 4 }}>{plugin.package}</div>
+              </div>
+              <div style={{ fontSize: 13, color: TEXT, marginBottom: 12 }}>{plugin.description}</div>
+              <div style={{ background: '#0a0f1e', borderRadius: 8, padding: '8px 12px', fontSize: 12, color: ACCENT, marginBottom: 16 }}>
+                💡 {plugin.effect}
+              </div>
+
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: 'uppercase' }}>Конфигурация</div>
+              <pre style={{ margin: 0, background: '#0a0f1e', borderRadius: 8, padding: '12px', fontSize: 12, color: TEXT, lineHeight: 1.5, overflow: 'auto' }}>
+                <code>{plugin.configCode}</code>
+              </pre>
+            </div>
+
+            {/* Dist files */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 12, textTransform: 'uppercase' }}>
+                Результат в dist/ (при включённом {plugin.name})
+              </div>
+              {plugin.distFiles.map((file, i) => (
+                <div key={i} style={{ background: '#0a0f1e', borderRadius: 8, padding: 12, marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, color: file.color, fontWeight: 700, marginBottom: 6 }}>📄 {file.name}</div>
+                  <pre style={{ margin: 0, fontSize: 11, color: MUTED, lineHeight: 1.4, overflow: 'auto', maxHeight: 120 }}>
+                    {file.content}
+                  </pre>
+                </div>
+              ))}
+            </div>
+
+            {/* Enabled plugins config summary */}
+            {enabledPlugins.length > 0 && (
+              <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+                <div style={{ fontSize: 11, color: MUTED, marginBottom: 12, textTransform: 'uppercase' }}>Итоговый webpack.config.js (plugins)</div>
+                <pre style={{ margin: 0, background: '#0a0f1e', borderRadius: 8, padding: 12, fontSize: 11, color: TEXT, lineHeight: 1.5, overflow: 'auto', maxHeight: 200 }}>
+{[
+  'plugins: [',
+  ...enabledPlugins.map(p => \`  \${p.configCode.split('\\n')[0].trim()},\`),
+  '],'
+].join('\\n')}
+                </pre>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

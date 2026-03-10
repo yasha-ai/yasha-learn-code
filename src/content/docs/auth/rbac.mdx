@@ -1,0 +1,393 @@
+---
+title: "10. RBAC: ролевая модель"
+sidebar:
+  order: 9
+---
+import { Playground } from '@components/Playground'
+
+## Что такое RBAC?
+
+**RBAC (Role-Based Access Control)** — управление доступом на основе ролей. Пользователям назначаются роли, ролям — разрешения.
+
+```
+Пользователь → Роль → Разрешения → Ресурс
+   Alice    →  Admin →  all ops  → Everything
+   Bob      →  Editor → read/write → Articles
+   Carol    →  Viewer →  read only → Articles
+```
+
+**Преимущества:**
+- Простота управления: меняешь роль, а не каждое разрешение
+- Понятность: "Иван — Менеджер" понятнее чем список из 50 прав
+- Масштабируемость: легко добавлять новые роли
+
+## Простая реализация RBAC
+
+### Модель данных (Prisma)
+
+```prisma
+model User {
+  id    String @id @default(cuid())
+  email String @unique
+  role  Role   @default(USER)
+}
+
+enum Role {
+  USER
+  EDITOR
+  MODERATOR
+  ADMIN
+}
+```
+
+### Middleware проверки роли
+
+```javascript
+// Простая проверка роли
+function hasRole(requiredRole) {
+  const roleHierarchy = {
+    USER: 1,
+    EDITOR: 2,
+    MODERATOR: 3,
+    ADMIN: 4,
+  };
+  
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    const userLevel = roleHierarchy[req.user.role] || 0;
+    const requiredLevel = roleHierarchy[requiredRole] || 0;
+    
+    if (userLevel < requiredLevel) {
+      return res.status(403).json({ 
+        error: `Required role: ${requiredRole}` 
+      });
+    }
+    
+    next();
+  };
+}
+
+// Использование
+app.delete('/api/posts/:id', authMiddleware, hasRole('MODERATOR'), async (req, res) => {
+  await db.posts.delete(req.params.id);
+  res.json({ success: true });
+});
+```
+
+## Продвинутый RBAC с Permissions
+
+Роли + явные разрешения:
+
+### Модель данных
+
+```prisma
+model Permission {
+  id    String @id @default(cuid())
+  name  String @unique  // "posts:create", "users:delete"
+  roles RolePermission[]
+}
+
+model Role {
+  id          String @id @default(cuid())
+  name        String @unique  // "admin", "editor", "viewer"
+  permissions RolePermission[]
+  users       UserRole[]
+}
+
+model RolePermission {
+  role         Role       @relation(fields: [roleId], references: [id])
+  roleId       String
+  permission   Permission @relation(fields: [permissionId], references: [id])
+  permissionId String
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  user   User   @relation(fields: [userId], references: [id])
+  userId String
+  role   Role   @relation(fields: [roleId], references: [id])
+  roleId String
+  @@id([userId, roleId])
+}
+```
+
+### Сид начальных данных
+
+```javascript
+async function seedRBAC() {
+  // Создаём permissions
+  const permissions = await Promise.all([
+    db.permission.upsert({ where: { name: 'posts:read' }, create: { name: 'posts:read' }, update: {} }),
+    db.permission.upsert({ where: { name: 'posts:create' }, create: { name: 'posts:create' }, update: {} }),
+    db.permission.upsert({ where: { name: 'posts:update' }, create: { name: 'posts:update' }, update: {} }),
+    db.permission.upsert({ where: { name: 'posts:delete' }, create: { name: 'posts:delete' }, update: {} }),
+    db.permission.upsert({ where: { name: 'users:manage' }, create: { name: 'users:manage' }, update: {} }),
+  ]);
+  
+  // Создаём роли с правами
+  const viewer = await db.role.upsert({
+    where: { name: 'viewer' },
+    create: {
+      name: 'viewer',
+      permissions: { create: [{ permissionId: permissions[0].id }] },
+    },
+    update: {},
+  });
+  
+  const editor = await db.role.upsert({
+    where: { name: 'editor' },
+    create: {
+      name: 'editor',
+      permissions: {
+        create: [0, 1, 2].map(i => ({ permissionId: permissions[i].id })),
+      },
+    },
+    update: {},
+  });
+  
+  const admin = await db.role.upsert({
+    where: { name: 'admin' },
+    create: {
+      name: 'admin',
+      permissions: {
+        create: permissions.map(p => ({ permissionId: p.id })),
+      },
+    },
+    update: {},
+  });
+  
+  console.log('RBAC seeded!');
+}
+```
+
+### Проверка разрешений
+
+```javascript
+// Загружаем разрешения пользователя при логине
+async function getUserPermissions(userId) {
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    include: {
+      roles: {
+        include: {
+          role: {
+            include: {
+              permissions: {
+                include: { permission: true },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  
+  // Собираем все разрешения из всех ролей
+  const permissions = new Set(
+    user.roles.flatMap(ur =>
+      ur.role.permissions.map(rp => rp.permission.name)
+    )
+  );
+  
+  return Array.from(permissions);
+}
+
+// Middleware для проверки разрешения
+function can(permission) {
+  return async (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    // Можно кешировать в Redis
+    const permissions = await getUserPermissions(req.user.id);
+    
+    if (!permissions.includes(permission)) {
+      return res.status(403).json({ 
+        error: `Permission required: ${permission}` 
+      });
+    }
+    
+    next();
+  };
+}
+
+// Использование
+app.post('/api/posts', authMiddleware, can('posts:create'), createPost);
+app.put('/api/posts/:id', authMiddleware, can('posts:update'), updatePost);
+app.delete('/api/posts/:id', authMiddleware, can('posts:delete'), deletePost);
+app.get('/api/users', authMiddleware, can('users:manage'), getUsers);
+```
+
+## RBAC в Next.js
+
+### Middleware защита роутов
+
+```typescript
+// middleware.ts
+import { auth } from '@/auth';
+
+const routePermissions: Record<string, string[]> = {
+  '/admin': ['admin'],
+  '/editor': ['admin', 'editor'],
+  '/dashboard': ['admin', 'editor', 'viewer'],
+};
+
+export default auth((req) => {
+  const session = req.auth;
+  const pathname = req.nextUrl.pathname;
+  
+  // Находим требуемые роли для пути
+  const requiredRoles = Object.entries(routePermissions)
+    .find(([path]) => pathname.startsWith(path))?.[1];
+  
+  if (!requiredRoles) return; // путь не защищён
+  
+  if (!session?.user) {
+    return Response.redirect(new URL('/login', req.url));
+  }
+  
+  if (!requiredRoles.includes(session.user.role)) {
+    return Response.redirect(new URL('/403', req.url));
+  }
+});
+```
+
+### Server Component guard
+
+```typescript
+// lib/rbac.ts
+import { auth } from '@/auth';
+import { redirect } from 'next/navigation';
+
+export async function requirePermission(permission: string) {
+  const session = await auth();
+  
+  if (!session?.user) redirect('/login');
+  
+  const permissions = await getUserPermissions(session.user.id);
+  
+  if (!permissions.includes(permission)) {
+    redirect('/403');
+  }
+  
+  return session;
+}
+
+// app/admin/page.tsx
+import { requirePermission } from '@/lib/rbac';
+
+export default async function AdminPage() {
+  await requirePermission('users:manage');
+  
+  return <div>Admin Dashboard</div>;
+}
+```
+
+### UI на основе разрешений
+
+```typescript
+'use client';
+
+import { useSession } from 'next-auth/react';
+
+function AdminButton() {
+  const { data: session } = useSession();
+  
+  if (session?.user?.role !== 'admin') return null;
+  
+  return <button>Admin Action</button>;
+}
+
+// Или универсальный компонент
+function Can({ permission, children }: { 
+  permission: string;
+  children: React.ReactNode 
+}) {
+  const { data: session } = useSession();
+  
+  if (!session?.user?.permissions?.includes(permission)) return null;
+  
+  return <>{children}</>;
+}
+
+// Использование
+<Can permission="posts:delete">
+  <DeleteButton />
+</Can>
+```
+
+## Практические задания
+
+1. Реализуй простую RBAC систему с ролями USER/EDITOR/ADMIN
+2. Создай таблицы Role + Permission + UserRole в Prisma
+3. Напиши middleware `can('permission:name')` для Express
+4. Добавь UI компонент `<Can permission="...">` для условного рендеринга
+
+## Попробуй: RBAC проверка прав
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    '/App.js': `import { useState } from 'react';
+
+const roles = {
+  USER: { level: 1, perms: ['posts:read'] },
+  EDITOR: { level: 2, perms: ['posts:read', 'posts:create', 'posts:update'] },
+  MODERATOR: { level: 3, perms: ['posts:read', 'posts:create', 'posts:update', 'posts:delete'] },
+  ADMIN: { level: 4, perms: ['posts:read', 'posts:create', 'posts:update', 'posts:delete', 'users:manage'] },
+};
+
+const actions = [
+  { perm: 'posts:read', label: 'Читать посты', icon: '📖' },
+  { perm: 'posts:create', label: 'Создать пост', icon: '✏️' },
+  { perm: 'posts:update', label: 'Редактировать пост', icon: '🔄' },
+  { perm: 'posts:delete', label: 'Удалить пост', icon: '🗑️' },
+  { perm: 'users:manage', label: 'Управлять юзерами', icon: '👥' },
+];
+
+export default function App() {
+  const [role, setRole] = useState('USER');
+  const perms = roles[role].perms;
+
+  return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff' }}>
+      <h2>RBAC: Проверка разрешений</h2>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+        {Object.keys(roles).map(r => (
+          <button key={r} onClick={() => setRole(r)} style={{
+            padding: '8px 16px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 13,
+            background: role === r ? '#3b82f6' : '#1e293b', color: '#fff',
+          }}>{r} (lvl {roles[r].level})</button>
+        ))}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {actions.map(a => {
+          const allowed = perms.includes(a.perm);
+          return (
+            <div key={a.perm} style={{
+              padding: '10px 14px', borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              background: allowed ? '#22c55e11' : '#ef444411',
+              border: '1px solid ' + (allowed ? '#22c55e44' : '#ef444444'),
+            }}>
+              <span>{a.icon} {a.label} <code style={{ fontSize: 11, color: '#64748b' }}>{a.perm}</code></span>
+              <span style={{ color: allowed ? '#22c55e' : '#ef4444', fontWeight: 600, fontSize: 13 }}>
+                {allowed ? 'ALLOWED' : 'DENIED'}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: 16, background: '#0f0f23', padding: 12, borderRadius: 8, fontFamily: 'monospace', fontSize: 12, color: '#94a3b8' }}>
+        user.role = "{role}"<br/>
+        can("posts:delete") → {perms.includes('posts:delete') ? 'true' : 'false'}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

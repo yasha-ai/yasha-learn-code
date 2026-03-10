@@ -1,0 +1,760 @@
+---
+title: "12. Middleware"
+sidebar:
+  order: 13
+---
+import { Playground } from '@components/Playground'
+
+
+## 🛡️ Middleware: страж у ворот Next.js
+
+Middleware — это функция, которая запускается **перед** обработкой каждого запроса. Представь вахтёра 💂 на входе в здание: он проверяет пропуск, записывает всех посетителей и может перенаправить в другую дверь, даже не пуская внутрь. Middleware живёт в файле `middleware.ts` в корне проекта (рядом с `app/`).
+
+---
+
+### 📁 Где живёт Middleware
+
+```
+├── app/
+│   ├── page.tsx
+│   └── dashboard/
+│       └── page.tsx
+├── middleware.ts          ← здесь! Один файл на всё приложение
+├── next.config.mjs
+└── package.json
+```
+
+Middleware запускается на Edge Runtime — сверхбыстрая среда исполнения, которая работает ближе к пользователю 🌍
+
+---
+
+### 🔧 Базовый синтаксис
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  // Читаем информацию о запросе
+  console.log('Запрос:', request.method, request.url);
+
+  // Просто пропускаем дальше
+  return NextResponse.next();
+}
+
+// Конфигурация: к каким путям применять
+export const config = {
+  matcher: [
+    // Применять к /dashboard и всему под ним
+    '/dashboard/:path*',
+    // К API, кроме /api/public
+    '/api/((?!public/).*)',
+  ],
+};
+```
+
+---
+
+### 🎯 matcher: точная настройка
+
+`matcher` — это ключевой параметр конфигурации. Он определяет, для каких путей запускать middleware:
+
+```typescript
+export const config = {
+  matcher: [
+    // ✅ Строка — точное совпадение
+    '/about',
+
+    // ✅ Wildcard — любой путь под /dashboard
+    '/dashboard/:path*',
+
+    // ✅ Regex — исключаем статику и _next
+    '/((?!_next/static|_next/image|favicon.ico|api/public).*)',
+
+    // ✅ Массив условий с сопоставлением
+    {
+      source: '/((?!_next/static|_next/image|favicon.ico).*)',
+      // Только если нет предзагрузки страницы
+      missing: [
+        { type: 'header', key: 'next-router-prefetch' },
+        { type: 'header', key: 'purpose', value: 'prefetch' },
+      ],
+    },
+  ],
+};
+
+// Применять ко ВСЕМ путям (не рекомендуется для продакшена):
+export const config = {
+  matcher: '/:path*',
+};
+```
+
+---
+
+### 🔀 Redirect: перенаправление запросов
+
+Redirect меняет URL в браузере — пользователь видит новый адрес:
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // 1. Редирект старых URL на новые
+  if (pathname.startsWith('/old-blog/')) {
+    const newPath = pathname.replace('/old-blog/', '/blog/');
+    return NextResponse.redirect(new URL(newPath, request.url), {
+      status: 301, // Permanent redirect
+    });
+  }
+
+  // 2. Редирект с www на без www
+  const hostname = request.headers.get('host') ?? '';
+  if (hostname.startsWith('www.')) {
+    const newHostname = hostname.slice(4);
+    return NextResponse.redirect(
+      new URL(request.url.replace(hostname, newHostname)),
+      { status: 301 }
+    );
+  }
+
+  // 3. Редирект HTTP на HTTPS
+  if (
+    process.env.NODE_ENV === 'production' &&
+    !request.headers.get('x-forwarded-proto')?.includes('https')
+  ) {
+    return NextResponse.redirect(
+      new URL(request.url.replace('http://', 'https://')),
+      { status: 301 }
+    );
+  }
+
+  return NextResponse.next();
+}
+```
+
+---
+
+### 🔄 Rewrite: внутреннее перенаправление
+
+Rewrite изменяет URL внутренне, но браузер видит **исходный** URL. Как телепортация для запроса 🌀
+
+```typescript
+import { NextRequest, NextResponse } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // 1. Мультиязычность без изменения URL
+  // /products → /en/products (внутренне)
+  const lang = request.cookies.get('NEXT_LOCALE')?.value ?? 'ru';
+  if (!pathname.startsWith('/ru') && !pathname.startsWith('/en')) {
+    return NextResponse.rewrite(
+      new URL(`/${lang}${pathname}`, request.url)
+    );
+  }
+
+  // 2. Feature flags: новая версия страницы
+  const beta = request.cookies.get('beta-user')?.value === 'true';
+  if (pathname === '/pricing' && beta) {
+    return NextResponse.rewrite(new URL('/pricing-v2', request.url));
+  }
+
+  // 3. Прокси к внешнему API (скрываем URL)
+  // /api/legacy/* → https://old-api.example.com/*
+  if (pathname.startsWith('/api/legacy/')) {
+    const apiPath = pathname.replace('/api/legacy', '');
+    return NextResponse.rewrite(
+      new URL(apiPath, 'https://old-api.example.com')
+    );
+  }
+
+  return NextResponse.next();
+}
+```
+
+---
+
+### 🔐 Auth Guard: защита маршрутов
+
+Самый популярный сценарий использования middleware — проверка аутентификации:
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { jwtVerify } from 'jose';
+
+const PUBLIC_PATHS = [
+  '/',
+  '/login',
+  '/register',
+  '/about',
+  '/api/auth',
+];
+
+const ADMIN_PATHS = ['/admin'];
+
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_PATHS.some(path =>
+    pathname === path || pathname.startsWith(path + '/')
+  );
+}
+
+async function verifyToken(token: string) {
+  try {
+    const secret = new TextEncoder().encode(process.env.JWT_SECRET);
+    const { payload } = await jwtVerify(token, secret);
+    return payload as { userId: string; role: string };
+  } catch {
+    return null;
+  }
+}
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // Пропускаем публичные пути
+  if (isPublicPath(pathname)) {
+    return NextResponse.next();
+  }
+
+  // Получаем токен из куки или заголовка
+  const token = request.cookies.get('auth-token')?.value
+    ?? request.headers.get('authorization')?.replace('Bearer ', '');
+
+  // Нет токена — редирект на логин
+  if (!token) {
+    const loginUrl = new URL('/login', request.url);
+    loginUrl.searchParams.set('from', pathname); // сохраняем куда хотели попасть
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // Проверяем токен
+  const payload = await verifyToken(token);
+
+  if (!payload) {
+    // Невалидный токен — очищаем и редиректим
+    const response = NextResponse.redirect(new URL('/login', request.url));
+    response.cookies.delete('auth-token');
+    return response;
+  }
+
+  // Проверяем права для admin-путей
+  if (ADMIN_PATHS.some(p => pathname.startsWith(p))) {
+    if (payload.role !== 'admin') {
+      return NextResponse.redirect(new URL('/403', request.url));
+    }
+  }
+
+  // Добавляем данные пользователя в заголовки для Server Components
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set('x-user-id', payload.userId);
+  requestHeaders.set('x-user-role', payload.role);
+
+  return NextResponse.next({
+    request: { headers: requestHeaders },
+  });
+}
+
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+};
+```
+
+---
+
+### 🧪 A/B Testing с Middleware
+
+Middleware идеален для A/B тестирования — разделяем пользователей на группы:
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+const AB_COOKIE = 'ab-variant';
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // A/B тест только для главной страницы
+  if (pathname !== '/') return NextResponse.next();
+
+  // Получаем или назначаем вариант
+  let variant = request.cookies.get(AB_COOKIE)?.value;
+
+  if (!variant) {
+    // 50/50 разделение
+    variant = Math.random() < 0.5 ? 'a' : 'b';
+  }
+
+  // Показываем разный контент
+  const url = request.nextUrl.clone();
+  url.pathname = variant === 'b' ? '/home-v2' : '/home-v1';
+
+  const response = NextResponse.rewrite(url);
+
+  // Сохраняем вариант в куке
+  if (!request.cookies.has(AB_COOKIE)) {
+    response.cookies.set(AB_COOKIE, variant, {
+      maxAge: 60 * 60 * 24 * 30, // 30 дней
+      httpOnly: false, // доступно из JS для аналитики
+    });
+  }
+
+  // Передаём вариант для аналитики
+  response.headers.set('x-ab-variant', variant);
+
+  return response;
+}
+```
+
+---
+
+### 🌍 Геолокация: разный контент для разных стран
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { geolocation } from '@vercel/functions'; // только на Vercel
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // Vercel автоматически добавляет геолокацию в заголовки
+  const country = request.geo?.country
+    ?? request.headers.get('x-vercel-ip-country')
+    ?? 'US';
+
+  const city = request.geo?.city ?? 'Unknown';
+  const region = request.geo?.region ?? 'Unknown';
+
+  // Блокируем страны по закону (пример)
+  const BLOCKED_COUNTRIES = ['XX', 'YY'];
+  if (BLOCKED_COUNTRIES.includes(country)) {
+    return NextResponse.redirect(new URL('/geo-blocked', request.url));
+  }
+
+  // Разный контент для разных регионов
+  if (pathname === '/pricing') {
+    const EUROPEAN_COUNTRIES = ['DE', 'FR', 'IT', 'ES', 'NL', 'BE', 'AT'];
+    if (EUROPEAN_COUNTRIES.includes(country)) {
+      return NextResponse.rewrite(new URL('/pricing-eu', request.url));
+    }
+    if (country === 'US') {
+      return NextResponse.rewrite(new URL('/pricing-us', request.url));
+    }
+  }
+
+  // Добавляем геоданные в заголовки
+  const response = NextResponse.next();
+  response.headers.set('x-country', country);
+  response.headers.set('x-city', city);
+
+  return response;
+}
+```
+
+---
+
+### ⏱️ Rate Limiting: концепция ограничения запросов
+
+На Edge Runtime нет памяти между запросами, поэтому rate limiting требует внешнего хранилища:
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { Ratelimit } from '@upstash/ratelimit';
+import { Redis } from '@upstash/redis';
+
+// Создаём rate limiter: 10 запросов в 10 секунд
+const ratelimit = new Ratelimit({
+  redis: Redis.fromEnv(),
+  limiter: Ratelimit.slidingWindow(10, '10 s'),
+  analytics: true,
+});
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // Rate limiting только для API
+  if (!pathname.startsWith('/api/')) {
+    return NextResponse.next();
+  }
+
+  // Идентифицируем пользователя по IP
+  const ip = request.ip
+    ?? request.headers.get('x-forwarded-for')?.split(',')[0]
+    ?? 'anonymous';
+
+  // Проверяем лимит
+  const { success, limit, reset, remaining } = await ratelimit.limit(
+    `ratelimit_${ip}`
+  );
+
+  if (!success) {
+    return NextResponse.json(
+      {
+        error: 'Too Many Requests',
+        message: `Превышен лимит запросов. Попробуйте через ${Math.ceil((reset - Date.now()) / 1000)} секунд`,
+      },
+      {
+        status: 429,
+        headers: {
+          'X-RateLimit-Limit': limit.toString(),
+          'X-RateLimit-Remaining': remaining.toString(),
+          'X-RateLimit-Reset': new Date(reset).toISOString(),
+          'Retry-After': Math.ceil((reset - Date.now()) / 1000).toString(),
+        },
+      }
+    );
+  }
+
+  // Добавляем заголовки с информацией о лимитах
+  const response = NextResponse.next();
+  response.headers.set('X-RateLimit-Limit', limit.toString());
+  response.headers.set('X-RateLimit-Remaining', remaining.toString());
+
+  return response;
+}
+```
+
+---
+
+### 🍪 Работа с Cookies и Headers в Middleware
+
+```typescript
+// middleware.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const response = NextResponse.next();
+
+  // === ЧТЕНИЕ ===
+
+  // Куки из запроса
+  const theme = request.cookies.get('theme')?.value ?? 'dark';
+  const locale = request.cookies.get('NEXT_LOCALE')?.value ?? 'ru';
+  const allCookies = request.cookies.getAll();
+
+  // Заголовки запроса
+  const userAgent = request.headers.get('user-agent') ?? '';
+  const referer = request.headers.get('referer') ?? '';
+  const isMobile = /Mobile|Android|iPhone|iPad/.test(userAgent);
+
+  // === ЗАПИСЬ ===
+
+  // Устанавливаем куки в ответе
+  response.cookies.set('theme', theme, {
+    path: '/',
+    maxAge: 60 * 60 * 24 * 365,
+  });
+
+  // Добавляем заголовки к ответу
+  response.headers.set('x-theme', theme);
+  response.headers.set('x-locale', locale);
+  response.headers.set('x-is-mobile', isMobile.toString());
+
+  // Удаляем куки
+  // response.cookies.delete('old-session');
+
+  return response;
+}
+```
+
+---
+
+### 🔗 Читаем данные Middleware в Server Components
+
+```typescript
+// app/dashboard/page.tsx — Server Component
+import { headers } from 'next/headers';
+
+export default async function DashboardPage() {
+  // Читаем заголовки, которые добавил Middleware
+  const headersList = await headers();
+  const userId = headersList.get('x-user-id');
+  const userRole = headersList.get('x-user-role');
+  const country = headersList.get('x-country');
+  const isMobile = headersList.get('x-is-mobile') === 'true';
+
+  // Используем для персонализации
+  const user = await db.user.findUnique({ where: { id: userId! } });
+
+  return (
+    <div>
+      <h1>Привет, {user?.name}!</h1>
+      <p>Страна: {country}</p>
+      <p>Роль: {userRole}</p>
+    </div>
+  );
+}
+```
+
+---
+
+<Playground client:visible
+  template="react"
+  files={{
+    'App.tsx': `import { useState } from 'react';
+
+type MiddlewareAction = 'pass' | 'redirect' | 'rewrite' | 'block';
+
+interface Request {
+  id: number;
+  path: string;
+  method: string;
+  cookies: Record<string, string>;
+  headers: Record<string, string>;
+}
+
+interface MiddlewareResult {
+  action: MiddlewareAction;
+  message: string;
+  targetPath?: string;
+  addedHeaders?: Record<string, string>;
+  setCookies?: Record<string, string>;
+}
+
+const ROUTES = [
+  { path: '/', label: 'Главная', public: true },
+  { path: '/about', label: 'О нас', public: true },
+  { path: '/login', label: 'Логин', public: true },
+  { path: '/dashboard', label: 'Dashboard', public: false },
+  { path: '/admin', label: 'Admin Panel', public: false, adminOnly: true },
+  { path: '/api/users', label: 'API Users', public: false },
+  { path: '/old-page', label: 'Старая страница', public: true, redirect: '/new-page' },
+  { path: '/pricing', label: 'Цены', public: true, abTest: true },
+];
+
+let reqId = 0;
+
+export default function App() {
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [country, setCountry] = useState('RU');
+  const [abVariant, setAbVariant] = useState<'a' | 'b' | null>(null);
+  const [logs, setLogs] = useState<Array<{ req: Request; result: MiddlewareResult }>>([]);
+
+  const runMiddleware = (path: string): MiddlewareResult => {
+    const route = ROUTES.find(r => r.path === path);
+
+    // Редирект старых URL
+    if (route?.redirect) {
+      return { action: 'redirect', message: \`301 Redirect → \${route.redirect}\`, targetPath: route.redirect };
+    }
+
+    // A/B тест
+    if (route?.abTest) {
+      const variant = abVariant ?? (Math.random() > 0.5 ? 'b' : 'a');
+      if (!abVariant) setAbVariant(variant);
+      const target = variant === 'b' ? '/pricing-v2' : '/pricing-v1';
+      return {
+        action: 'rewrite',
+        message: \`A/B Test: вариант "\${variant}" → Rewrite к \${target}\`,
+        targetPath: target,
+        setCookies: { 'ab-variant': variant },
+      };
+    }
+
+    // Auth guard
+    if (route && !route.public) {
+      if (!isLoggedIn) {
+        return {
+          action: 'redirect',
+          message: \`Auth Guard: не авторизован → Redirect /login?from=\${path}\`,
+          targetPath: \`/login?from=\${path}\`,
+        };
+      }
+
+      if (route.adminOnly && !isAdmin) {
+        return {
+          action: 'redirect',
+          message: 'Auth Guard: недостаточно прав → Redirect /403',
+          targetPath: '/403',
+        };
+      }
+    }
+
+    // Геолокация
+    if (path === '/' && country === 'US') {
+      return {
+        action: 'rewrite',
+        message: 'Geo: страна US → Rewrite к /en (английская версия)',
+        targetPath: '/en',
+        addedHeaders: { 'x-country': country, 'x-locale': 'en' },
+      };
+    }
+
+    // Блокировка запрещённых стран
+    if (country === 'XX') {
+      return { action: 'block', message: 'Geo: страна заблокирована → 403 Forbidden' };
+    }
+
+    return {
+      action: 'pass',
+      message: 'NextResponse.next() — запрос пропущен',
+      addedHeaders: { 'x-user-id': isLoggedIn ? '42' : '', 'x-country': country },
+    };
+  };
+
+  const handleNavigate = (path: string) => {
+    const req: Request = {
+      id: ++reqId,
+      path,
+      method: 'GET',
+      cookies: { 'auth-token': isLoggedIn ? 'jwt...' : '', 'ab-variant': abVariant ?? '' },
+      headers: { 'x-forwarded-for': '1.2.3.4', 'x-vercel-ip-country': country },
+    };
+
+    const result = runMiddleware(path);
+    setLogs(prev => [{ req, result }, ...prev].slice(0, 8));
+  };
+
+  const actionColors: Record<MiddlewareAction, string> = {
+    pass: '#4ade80',
+    redirect: '#fbbf24',
+    rewrite: '#60a5fa',
+    block: '#f87171',
+  };
+
+  const actionLabels: Record<MiddlewareAction, string> = {
+    pass: '✅ PASS',
+    redirect: '↩️ REDIRECT',
+    rewrite: '🔄 REWRITE',
+    block: '🚫 BLOCK',
+  };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ background: '#020617', borderBottom: '1px solid #1e293b', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ color: '#171717', background: 'white', borderRadius: 4, padding: '2px 8px', fontWeight: 900, fontSize: 13 }}>N</span>
+        <span style={{ fontWeight: 700 }}>Middleware Demo</span>
+        <span style={{ color: '#64748b', fontSize: 12 }}>middleware.ts</span>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, padding: 16 }}>
+        <div>
+          <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, marginBottom: 12 }}>
+            <div style={{ color: '#94a3b8', fontWeight: 700, fontSize: 12, marginBottom: 10 }}>⚙️ Конфигурация</div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={isLoggedIn}
+                  onChange={e => setIsLoggedIn(e.target.checked)}
+                  style={{ accentColor: '#4ade80' }}
+                />
+                <span>🔑 Авторизован (auth-token кука)</span>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={isAdmin}
+                  onChange={e => setIsAdmin(e.target.checked)}
+                  disabled={!isLoggedIn}
+                  style={{ accentColor: '#fbbf24', opacity: isLoggedIn ? 1 : 0.4 }}
+                />
+                <span style={{ opacity: isLoggedIn ? 1 : 0.4 }}>👑 Администратор (role=admin)</span>
+              </label>
+
+              <div style={{ marginTop: 4 }}>
+                <div style={{ color: '#64748b', fontSize: 11, marginBottom: 6 }}>🌍 Страна (x-vercel-ip-country):</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {[['RU', '🇷🇺'], ['US', '🇺🇸'], ['DE', '🇩🇪'], ['XX', '🚫']].map(([c, flag]) => (
+                    <button
+                      key={c}
+                      onClick={() => setCountry(c)}
+                      style={{
+                        padding: '4px 10px', border: \`1px solid \${country === c ? '#4ade80' : '#334155'}\`,
+                        borderRadius: 4, cursor: 'pointer', fontSize: 12,
+                        background: country === c ? '#166534' : '#0f172a',
+                        color: country === c ? '#4ade80' : '#64748b',
+                      }}
+                    >
+                      {flag} {c}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {abVariant && (
+                <div style={{ fontSize: 11, color: '#fbbf24', background: '#0f172a', padding: '6px 10px', borderRadius: 4 }}>
+                  A/B вариант: <strong>{abVariant}</strong>
+                  <button onClick={() => setAbVariant(null)} style={{ marginLeft: 8, color: '#64748b', background: 'none', border: 'none', cursor: 'pointer', fontSize: 10 }}>сбросить</button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ background: '#1e293b', borderRadius: 8, padding: 14 }}>
+            <div style={{ color: '#94a3b8', fontWeight: 700, fontSize: 12, marginBottom: 10 }}>🗺️ Маршруты (нажми для симуляции)</div>
+            <div style={{ display: 'grid', gap: 6 }}>
+              {ROUTES.map(route => (
+                <button
+                  key={route.path}
+                  onClick={() => handleNavigate(route.path)}
+                  style={{
+                    padding: '8px 12px', background: '#0f172a', border: '1px solid #334155',
+                    borderRadius: 6, cursor: 'pointer', color: '#e2e8f0', fontSize: 12,
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    textAlign: 'left',
+                  }}
+                >
+                  <span>{route.label}</span>
+                  <span style={{ color: '#64748b', fontSize: 11 }}>{route.path}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div style={{ color: '#94a3b8', fontWeight: 700, fontSize: 12, marginBottom: 10 }}>📋 Лог Middleware</div>
+          {logs.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#64748b', padding: '40px 0', fontSize: 13 }}>
+              Нажми на маршрут, чтобы увидеть Middleware в действии
+            </div>
+          ) : (
+            logs.map(({ req, result }) => (
+              <div key={req.id} style={{ background: '#1e293b', borderRadius: 8, padding: 12, marginBottom: 8, borderLeft: \`3px solid \${actionColors[result.action]}\` }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span style={{ color: '#64748b', fontSize: 10 }}>#{req.id}</span>
+                  <span style={{ color: '#4ade80', fontSize: 11 }}>GET</span>
+                  <span style={{ color: '#e2e8f0', fontWeight: 700, fontSize: 12 }}>{req.path}</span>
+                  <span style={{ marginLeft: 'auto', color: actionColors[result.action], fontWeight: 700, fontSize: 11 }}>
+                    {actionLabels[result.action]}
+                  </span>
+                </div>
+                <div style={{ color: '#94a3b8', fontSize: 11, marginBottom: result.targetPath ? 4 : 0 }}>
+                  {result.message}
+                </div>
+                {result.targetPath && (
+                  <div style={{ color: '#60a5fa', fontSize: 11 }}>
+                    → {result.targetPath}
+                  </div>
+                )}
+                {result.addedHeaders && Object.keys(result.addedHeaders).filter(k => result.addedHeaders![k]).length > 0 && (
+                  <div style={{ marginTop: 4, fontSize: 10, color: '#64748b' }}>
+                    Headers: {Object.entries(result.addedHeaders).filter(([,v]) => v).map(([k, v]) => \`\${k}: \${v}\`).join(', ')}
+                  </div>
+                )}
+                {result.setCookies && (
+                  <div style={{ marginTop: 4, fontSize: 10, color: '#c084fc' }}>
+                    Set-Cookie: {Object.entries(result.setCookies).map(([k, v]) => \`\${k}=\${v}\`).join(', ')}
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

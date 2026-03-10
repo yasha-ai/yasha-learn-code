@@ -1,0 +1,499 @@
+---
+title: "9. Lifecycle: onMount, onCleanup"
+sidebar:
+  order: 9
+---
+import { Playground } from '@components/Playground'
+
+
+Solid принципиально отличается от React отсутствием «жизненного цикла компонента». Компоненты в Solid — это просто функции, которые вызываются **один раз**. Вся реактивность — через примитивы: `createEffect`, `onMount`, `onCleanup`.
+
+## Нет componentDidUpdate — всё через эффекты
+
+В React есть методы жизненного цикла: `componentDidMount`, `componentDidUpdate`, `componentWillUnmount`. В Solid их нет. Вместо них — три примитива:
+
+```tsx
+import { createEffect, onMount, onCleanup } from 'solid-js';
+
+function MyComponent() {
+  // 1. onMount — аналог componentDidMount, запускается ОДИН РАЗ
+  onMount(() => {
+    console.log('DOM смонтирован');
+  });
+
+  // 2. createEffect — аналог useEffect, запускается при изменении зависимостей
+  createEffect(() => {
+    console.log('Реактивное обновление');
+  });
+
+  // 3. onCleanup — аналог componentWillUnmount (или cleanup в useEffect)
+  onCleanup(() => {
+    console.log('Компонент удалён из DOM');
+  });
+
+  return <div>Компонент</div>;
+}
+```
+
+## onMount — однократное выполнение
+
+`onMount` — это просто `createEffect` без зависимостей, который запускается после вставки в DOM:
+
+```tsx
+import { onMount, createSignal } from 'solid-js';
+
+function Canvas() {
+  let canvasRef: HTMLCanvasElement;
+  const [ctx, setCtx] = createSignal<CanvasRenderingContext2D | null>(null);
+
+  onMount(() => {
+    // DOM гарантированно доступен
+    const context = canvasRef.getContext('2d')!;
+    setCtx(context);
+
+    // Начальная отрисовка
+    context.fillStyle = '#2c67d5';
+    context.fillRect(0, 0, 300, 150);
+  });
+
+  return <canvas ref={canvasRef!} width={300} height={150} />;
+}
+```
+
+**Важно**: `onMount` синхронен. Если нужна асинхронная загрузка — используй `createResource` или `createEffect` с async IIFE.
+
+## onCleanup — очистка ресурсов
+
+`onCleanup` регистрирует функцию очистки, которая запускается когда:
+- Компонент удаляется из DOM
+- Эффект повторно запускается (между запусками)
+- Владелец (owner) уничтожается
+
+```tsx
+import { createEffect, onCleanup, createSignal } from 'solid-js';
+
+function Timer() {
+  const [seconds, setSeconds] = createSignal(0);
+
+  onMount(() => {
+    // Запускаем таймер при монтировании
+    const id = setInterval(() => setSeconds(s => s + 1), 1000);
+
+    // onCleanup внутри onMount — очищаем при демонтировании
+    onCleanup(() => clearInterval(id));
+  });
+
+  return <div>Прошло: {seconds()} сек</div>;
+}
+
+// onCleanup внутри createEffect — запускается перед каждым повторным эффектом
+function Subscription(props: { channel: string }) {
+  createEffect(() => {
+    const channel = props.channel; // Зависимость
+    const ws = new WebSocket(\`wss://api.example.com/\${channel}\`);
+
+    onCleanup(() => {
+      ws.close(); // Закрываем соединение перед переключением канала
+    });
+  });
+
+  return <div>Слушаем: {props.channel}</div>;
+}
+```
+
+## createEffect — реактивные побочные эффекты
+
+`createEffect` автоматически отслеживает сигналы, к которым обращается:
+
+```tsx
+import { createSignal, createEffect } from 'solid-js';
+
+function SearchBox() {
+  const [query, setQuery] = createSignal('');
+  const [results, setResults] = createSignal<string[]>([]);
+
+  createEffect(() => {
+    const q = query(); // Регистрируем зависимость от query
+
+    if (q.length < 2) {
+      setResults([]);
+      return;
+    }
+
+    // Этот код запустится при каждом изменении query
+    const abortController = new AbortController();
+
+    fetch(\`/api/search?q=\${q}\`, { signal: abortController.signal })
+      .then(r => r.json())
+      .then(setResults)
+      .catch(() => {}); // Игнорируем ошибку отмены
+
+    // Очистка — отменяем предыдущий запрос при новом вводе
+    onCleanup(() => abortController.abort());
+  });
+
+  return (
+    <div>
+      <input value={query()} onInput={e => setQuery(e.target.value)} />
+      <For each={results()}>{r => <div>{r}</div>}</For>
+    </div>
+  );
+}
+```
+
+## Порядок выполнения
+
+```
+1. Функция компонента вызывается (синхронно)
+   ↓
+2. JSX рендерится, создаётся дерево DOM
+   ↓
+3. onMount колбэки запускаются (bottom-up: дочерние раньше родительских)
+   ↓
+4. createEffect запускается (синхронно после mount)
+   ↓
+Изменение сигнала →
+5. Затронутые эффекты перезапускаются:
+   a. Запускается onCleanup предыдущего запуска
+   b. Запускается тело эффекта заново
+   ↓
+Компонент удаляется →
+6. onCleanup для эффектов
+7. onCleanup для onMount
+```
+
+## Дерево владельцев (Owner Tree)
+
+Solid строит дерево «владельцев» — каждый `createEffect`, `createMemo`, `createRoot` создаёт контекст владельца. `onCleanup` регистрируется у текущего владельца:
+
+```tsx
+import { createRoot, createSignal, onCleanup, getOwner } from 'solid-js';
+
+// createRoot — создать изолированный контекст реактивности
+const dispose = createRoot(cleanup => {
+  const [count, setCount] = createSignal(0);
+
+  createEffect(() => {
+    console.log('count:', count());
+    onCleanup(() => console.log('эффект очищен'));
+  });
+
+  // cleanup == dispose функция для всего root
+  return cleanup;
+});
+
+// Уничтожить все эффекты и очистить подписки
+dispose();
+```
+
+## Асинхронные операции в эффектах
+
+```tsx
+// ❌ НЕ делай эффекты async
+createEffect(async () => {
+  const data = await fetch('/api/data');
+  // Зависимости, читаемые ПОСЛЕ await, не отслеживаются!
+  setData(await data.json());
+});
+
+// ✅ Читай зависимости ДО async операции
+createEffect(() => {
+  const id = props.id; // ← Зависимость читается синхронно, отслеживается
+
+  const controller = new AbortController();
+  fetch(\`/api/data/\${id}\`, { signal: controller.signal })
+    .then(r => r.json())
+    .then(setData);
+
+  onCleanup(() => controller.abort());
+});
+
+// ✅ Или используй createResource для async данных
+const [data] = createResource(() => props.id, fetchData);
+```
+
+## Интерактивный пример
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+interface LogEntry {
+  id: number;
+  time: string;
+  type: 'mount' | 'effect' | 'cleanup' | 'unmount' | 'update';
+  message: string;
+}
+
+let logIdCounter = 0;
+
+function ChildComponent({ channel, onLog }: {
+  channel: string;
+  onLog: (entry: Omit<LogEntry, 'id' | 'time'>) => void;
+}) {
+  const [ticker, setTicker] = useState(0);
+  const mountedRef = useRef(false);
+
+  // Simulate onMount
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      onLog({ type: 'mount', message: \`onMount: компонент смонтирован, channel="\${channel}"\` });
+    }
+    return () => {
+      onLog({ type: 'unmount', message: \`onCleanup (unmount): компонент удалён\` });
+    };
+  }, []);
+
+  // Simulate createEffect on channel change
+  useEffect(() => {
+    onLog({ type: 'effect', message: \`createEffect: подписка на channel="\${channel}"\` });
+    return () => {
+      onLog({ type: 'cleanup', message: \`onCleanup (effect): отписка от channel="\${channel}"\` });
+    };
+  }, [channel]);
+
+  // Simulate a timer
+  useEffect(() => {
+    const id = setInterval(() => setTicker(t => t + 1), 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (ticker > 0) {
+      onLog({ type: 'update', message: \`createEffect: ticker обновился → \${ticker}\` });
+    }
+  }, [ticker]);
+
+  return (
+    <div style={{
+      padding: '10px 14px', background: BG, borderRadius: 8,
+      border: \`1px solid \${SOLID_BLUE}66\`,
+    }}>
+      <div style={{ color: SOLID_LIGHT, fontSize: 13, fontWeight: 600 }}>
+        ChildComponent
+      </div>
+      <div style={{ color: MUTED, fontSize: 12, marginTop: 4 }}>
+        channel: <span style={{ color: ORANGE }}>"{channel}"</span>
+        {' · '}ticker: <span style={{ color: GREEN }}>{ticker}</span>
+        <span style={{ color: MUTED, fontSize: 11 }}> (обновляется каждые 2с)</span>
+      </div>
+    </div>
+  );
+}
+
+const TYPE_COLORS: Record<LogEntry['type'], string> = {
+  mount: GREEN,
+  effect: SOLID_LIGHT,
+  cleanup: ORANGE,
+  unmount: '#f87171',
+  update: '#a78bfa',
+};
+const TYPE_ICONS: Record<LogEntry['type'], string> = {
+  mount: '🟢',
+  effect: '🔵',
+  cleanup: '🟠',
+  unmount: '🔴',
+  update: '🟣',
+};
+
+export default function App() {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [mounted, setMounted] = useState(false);
+  const [channel, setChannel] = useState('general');
+  const [showPhase, setShowPhase] = useState(false);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  const addLog = (entry: Omit<LogEntry, 'id' | 'time'>) => {
+    const now = new Date();
+    const time = \`\${now.getMinutes().toString().padStart(2,'0')}:\${now.getSeconds().toString().padStart(2,'0')}.\${now.getMilliseconds().toString().padStart(3,'0')}\`;
+    setLogs(l => [...l.slice(-29), { ...entry, id: ++logIdCounter, time }]);
+  };
+
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs]);
+
+  const channels = ['general', 'updates', 'alerts', 'news'];
+
+  const phases = [
+    { phase: 'Вызов функции компонента', color: MUTED, desc: 'Сигналы создаются, эффекты регистрируются' },
+    { phase: 'Рендеринг JSX', color: SOLID_LIGHT, desc: 'DOM-элементы создаются и вставляются' },
+    { phase: 'onMount', color: GREEN, desc: 'DOM готов, снизу вверх (дочерние → родители)' },
+    { phase: 'createEffect', color: '#a78bfa', desc: 'Первый запуск, читаются зависимости' },
+    { phase: 'Изменение сигнала', color: ORANGE, desc: 'onCleanup → переза пуск эффекта' },
+    { phase: 'Удаление компонента', color: '#f87171', desc: 'onCleanup всех эффектов и mount' },
+  ];
+
+  return (
+    <div style={{
+      background: BG, minHeight: '100vh', padding: 16,
+      fontFamily: "'Inter', sans-serif", color: TEXT,
+    }}>
+      <div style={{ maxWidth: 600, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 14px', fontSize: 18, textAlign: 'center' }}>
+          Жизненный цикл Solid.js
+        </h2>
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+          {[
+            { key: false, label: '🔬 Живая демо' },
+            { key: true, label: '📋 Порядок фаз' },
+          ].map(({ key, label }) => (
+            <button key={String(key)} onClick={() => setShowPhase(key)} style={{
+              flex: 1, padding: '7px 0', borderRadius: 8, cursor: 'pointer', fontSize: 13,
+              border: \`1px solid \${showPhase === key ? SOLID_BLUE : BORDER}\`,
+              background: showPhase === key ? SOLID_BLUE : CARD,
+              color: showPhase === key ? '#fff' : MUTED, fontWeight: 600,
+            }}>{label}</button>
+          ))}
+        </div>
+
+        {showPhase ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {phases.map((p, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'flex-start', gap: 12,
+                padding: '10px 14px', borderRadius: 9,
+                background: CARD, border: \`1px solid \${p.color}44\`,
+              }}>
+                <div style={{
+                  minWidth: 26, height: 26, borderRadius: '50%',
+                  background: p.color + '22', border: \`2px solid \${p.color}\`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: p.color, fontWeight: 700, fontSize: 13,
+                }}>{i + 1}</div>
+                <div>
+                  <div style={{ color: p.color, fontWeight: 700, fontSize: 14 }}>{p.phase}</div>
+                  <div style={{ color: MUTED, fontSize: 12, marginTop: 2 }}>{p.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <>
+            {/* Controls */}
+            <div style={{ background: CARD, borderRadius: 10, padding: 14,
+              border: \`1px solid \${BORDER}\`, marginBottom: 12 }}>
+              <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 10, fontSize: 13 }}>
+                Управление компонентом
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+                <button onClick={() => {
+                  if (!mounted) {
+                    addLog({ type: 'mount', message: 'Родитель: монтируем ChildComponent' });
+                  }
+                  setMounted(m => !m);
+                }} style={{
+                  padding: '7px 16px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                  background: mounted ? '#ef444422' : GREEN + '22',
+                  color: mounted ? '#f87171' : GREEN, fontWeight: 600, fontSize: 13,
+                  borderWidth: 1, borderStyle: 'solid',
+                  borderColor: mounted ? '#ef4444' : GREEN,
+                }}>
+                  {mounted ? '💀 Unmount' : '🚀 Mount'} компонент
+                </button>
+                <button onClick={() => setLogs([])} style={{
+                  padding: '7px 16px', borderRadius: 8, cursor: 'pointer',
+                  border: \`1px solid \${BORDER}\`, background: 'transparent',
+                  color: MUTED, fontSize: 13,
+                }}>
+                  🗑️ Очистить лог
+                </button>
+              </div>
+
+              {mounted && (
+                <div>
+                  <div style={{ color: MUTED, fontSize: 12, marginBottom: 6 }}>
+                    Переключить channel (запустит createEffect + onCleanup):
+                  </div>
+                  <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                    {channels.map(c => (
+                      <button key={c} onClick={() => setChannel(c)} style={{
+                        padding: '5px 12px', borderRadius: 7, fontSize: 13, cursor: 'pointer',
+                        border: \`1px solid \${channel === c ? ORANGE : BORDER}\`,
+                        background: channel === c ? ORANGE + '22' : 'transparent',
+                        color: channel === c ? ORANGE : MUTED,
+                      }}>{c}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Component preview */}
+            {mounted && (
+              <div style={{ marginBottom: 12 }}>
+                <ChildComponent channel={channel} onLog={addLog} />
+              </div>
+            )}
+
+            {/* Log */}
+            <div style={{
+              background: '#0d1117', borderRadius: 10, border: \`1px solid \${BORDER}\`,
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                padding: '8px 14px', borderBottom: \`1px solid \${BORDER}\`,
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              }}>
+                <span style={{ color: MUTED, fontSize: 12, fontFamily: 'monospace' }}>
+                  Lifecycle Log ({logs.length}/30)
+                </span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {Object.entries(TYPE_ICONS).map(([type, icon]) => (
+                    <span key={type} style={{ fontSize: 11, color: TYPE_COLORS[type as LogEntry['type']] }}>
+                      {icon} {type}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div style={{ maxHeight: 220, overflowY: 'auto', padding: 10 }}>
+                {logs.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: MUTED, padding: '20px 0', fontSize: 13 }}>
+                    Нажми "Mount" чтобы начать
+                  </div>
+                ) : (
+                  logs.map(log => (
+                    <div key={log.id} style={{
+                      display: 'flex', gap: 8, padding: '4px 0',
+                      borderBottom: \`1px solid \${BORDER}44\`,
+                      fontSize: 12, fontFamily: 'monospace',
+                    }}>
+                      <span style={{ color: MUTED, minWidth: 72 }}>{log.time}</span>
+                      <span>{TYPE_ICONS[log.type]}</span>
+                      <span style={{ color: TYPE_COLORS[log.type] }}>{log.message}</span>
+                    </div>
+                  ))
+                )}
+                <div ref={logsEndRef} />
+              </div>
+            </div>
+          </>
+        )}
+
+        <div style={{
+          marginTop: 14, padding: 12, borderRadius: 8,
+          background: '#1a1a2e', border: \`1px solid \${SOLID_BLUE}44\`,
+          fontSize: 12, color: MUTED,
+        }}>
+          <span style={{ color: SOLID_BLUE, fontWeight: 700 }}>💡 Ключевое отличие от React: </span>
+          В Solid компонент вызывается <em style={{ color: TEXT }}>один раз</em>. Нет повторных рендеров — только реактивные обновления через эффекты. Тикер обновляется каждые 2 секунды — наблюдай за логом.
+        </div>
+      </div>
+    </div>
+  );
+}
+` }}
+/>

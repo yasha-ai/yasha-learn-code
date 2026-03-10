@@ -1,0 +1,381 @@
+---
+title: "13. CSRF: атаки и защита"
+sidebar:
+  order: 12
+---
+import { Playground } from '@components/Playground'
+
+## Что такое CSRF?
+
+**CSRF (Cross-Site Request Forgery)** — атака, при которой злоумышленник заставляет браузер авторизованного пользователя выполнить нежелательные действия на другом сайте.
+
+**Сценарий атаки:**
+1. Пользователь залогинен в bank.com (куки активны)
+2. Пользователь открывает evil.com
+3. evil.com содержит скрытую форму или изображение, отправляющее запрос на bank.com
+4. Браузер автоматически включает куки bank.com в запрос
+5. bank.com думает, что это легитимный запрос от пользователя
+
+```html
+<!-- evil.com — невидимая форма автоматически отправляется -->
+<form action="https://bank.com/transfer" method="POST" id="evil">
+  <input name="to" value="attacker-account">
+  <input name="amount" value="10000">
+</form>
+<script>document.getElementById('evil').submit();</script>
+```
+
+**Важно**: CSRF работает именно потому, что браузер автоматически отправляет куки — включая куки сессии!
+
+## Методы защиты
+
+### 1. SameSite Cookie (главная защита)
+
+`SameSite` атрибут куки контролирует, когда браузер отправляет куку.
+
+```javascript
+res.cookie('sessionId', token, {
+  sameSite: 'Lax',    // защита от CSRF!
+  httpOnly: true,
+  secure: true,
+});
+```
+
+| SameSite | Описание | CSRF защита |
+|----------|----------|-------------|
+| `Strict` | Кука не отправляется никогда с других сайтов | Максимальная |
+| `Lax` | Отправляется только при навигации GET (ссылки) | Хорошая (default) |
+| `None` | Всегда отправляется (нужен Secure) | Нет защиты |
+
+**С 2020 года `Lax` — значение по умолчанию** в Chrome. Это уже частичная защита.
+
+### 2. CSRF Токены
+
+Классический метод: уникальный токен в каждой форме.
+
+```javascript
+import crypto from 'crypto';
+
+// Генерация CSRF токена
+function generateCSRFToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// Middleware: добавляем токен в сессию и cookie
+app.use((req, res, next) => {
+  if (!req.session.csrfToken) {
+    req.session.csrfToken = generateCSRFToken();
+  }
+  
+  // Доступный JavaScript cookie (не httpOnly!)
+  res.cookie('csrf-token', req.session.csrfToken, {
+    httpOnly: false,  // JavaScript должен читать его
+    secure: true,
+    sameSite: 'Strict',
+  });
+  
+  next();
+});
+
+// Middleware: проверка CSRF токена для изменяющих запросов
+function csrfProtection(req, res, next) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    return next(); // читающие запросы не проверяем
+  }
+  
+  const token = req.headers['x-csrf-token'] || req.body._csrf;
+  
+  if (!token || token !== req.session.csrfToken) {
+    return res.status(403).json({ error: 'Invalid CSRF token' });
+  }
+  
+  next();
+}
+
+app.use(csrfProtection);
+```
+
+```html
+<!-- В форме -->
+<form method="POST" action="/transfer">
+  <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+  <input name="amount">
+  <button type="submit">Перевести</button>
+</form>
+```
+
+### 3. Double Submit Cookie Pattern
+
+Токен в cookie + токен в запросе:
+
+```javascript
+// Клиент читает CSRF из cookie и добавляет в заголовок
+function getCookie(name) {
+  return document.cookie.split(';')
+    .find(c => c.trim().startsWith(name + '='))
+    ?.split('=')[1];
+}
+
+// Axios interceptor
+axios.interceptors.request.use(config => {
+  if (!['get', 'head', 'options'].includes(config.method)) {
+    config.headers['X-CSRF-Token'] = getCookie('csrf-token');
+  }
+  return config;
+});
+
+// fetch wrapper
+async function secureFetch(url, options = {}) {
+  const csrfToken = getCookie('csrf-token');
+  
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...options.headers,
+      'X-CSRF-Token': csrfToken,
+    },
+    credentials: 'include',
+  });
+}
+```
+
+### 4. CSRF защита в Express (csurf)
+
+```bash
+# csurf устарел, используй csrf пакет
+npm install csrf
+```
+
+```javascript
+import csrf from 'csrf';
+import cookieParser from 'cookie-parser';
+
+const tokens = new csrf();
+
+app.use(cookieParser());
+
+// Генерируем секрет при первом визите
+app.use((req, res, next) => {
+  let secret = req.cookies['csrf-secret'];
+  
+  if (!secret) {
+    secret = tokens.secretSync();
+    res.cookie('csrf-secret', secret, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Strict',
+    });
+  }
+  
+  // Создаём токен из секрета
+  res.locals.csrfToken = tokens.create(secret);
+  next();
+});
+
+// Проверяем токен
+app.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  
+  const secret = req.cookies['csrf-secret'];
+  const token = req.headers['x-csrf-token'] || req.body._csrf;
+  
+  if (!tokens.verify(secret, token)) {
+    return res.status(403).json({ error: 'Invalid CSRF token' });
+  }
+  
+  next();
+});
+```
+
+### 5. SameSite + Origin/Referer проверка
+
+```javascript
+function checkOrigin(req, res, next) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  
+  const origin = req.headers.origin;
+  const referer = req.headers.referer;
+  
+  const allowedOrigins = [
+    'https://myapp.com',
+    'https://www.myapp.com',
+  ];
+  
+  const requestOrigin = origin || (referer && new URL(referer).origin);
+  
+  if (!requestOrigin || !allowedOrigins.includes(requestOrigin)) {
+    return res.status(403).json({ error: 'Cross-site request blocked' });
+  }
+  
+  next();
+}
+```
+
+## CSRF в Next.js
+
+### Для API Routes
+
+```typescript
+// middleware.ts или в каждом API роуте
+import { NextRequest, NextResponse } from 'next/server';
+
+function isCsrfSafe(req: NextRequest): boolean {
+  // GET, HEAD, OPTIONS — безопасные
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return true;
+  
+  // Проверяем Origin
+  const origin = req.headers.get('origin');
+  const host = req.headers.get('host');
+  
+  if (origin) {
+    const originHost = new URL(origin).host;
+    return originHost === host;
+  }
+  
+  // Проверяем Referer как fallback
+  const referer = req.headers.get('referer');
+  if (referer) {
+    const refererHost = new URL(referer).host;
+    return refererHost === host;
+  }
+  
+  return false;
+}
+
+export function middleware(req: NextRequest) {
+  if (req.nextUrl.pathname.startsWith('/api/')) {
+    if (!isCsrfSafe(req)) {
+      return NextResponse.json(
+        { error: 'Cross-site request blocked' },
+        { status: 403 }
+      );
+    }
+  }
+}
+```
+
+### Использование JWT вместо куки
+
+JWT в Authorization заголовке — естественная защита от CSRF:
+
+```javascript
+// CSRF атака не работает: злоумышленник не может прочитать localStorage
+// и не может добавить Authorization заголовок в cross-site запросе
+
+fetch('/api/transfer', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${localStorage.getItem('token')}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({ amount: 100 }),
+});
+```
+
+**Но!** Хранение JWT в localStorage уязвимо к XSS. Гибрид: refresh token в httpOnly SameSite cookie + access token в памяти.
+
+## Проверка уязвимости
+
+```html
+<!-- Тест: открой это в другой вкладке пока залогинен -->
+<!DOCTYPE html>
+<html>
+<body>
+  <form action="https://yourapp.com/api/change-email" method="POST">
+    <input name="email" value="hacked@evil.com">
+  </form>
+  <script>document.forms[0].submit();</script>
+</body>
+</html>
+```
+
+Если запрос прошёл — у тебя CSRF уязвимость!
+
+## Итог: Чеклист защиты от CSRF
+
+- [ ] Куки с `SameSite=Lax` (минимум) или `Strict`
+- [ ] CSRF токен в формах (если нет SameSite)
+- [ ] Origin/Referer проверка для API
+- [ ] JWT в заголовке вместо куки (для API)
+- [ ] Важные действия требуют повторного подтверждения пароля
+
+## Практические задания
+
+1. Настрой `SameSite=Strict` для сессионных куки
+2. Реализуй CSRF токен для HTML форм в Express
+3. Добавь Origin проверку для API в Next.js middleware
+4. Протестируй свой сайт на CSRF уязвимость
+
+## Попробуй: CSRF атака и защита
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    '/App.js': `import { useState } from 'react';
+
+function generateToken() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export default function App() {
+  const [csrfToken] = useState(generateToken);
+  const [logs, setLogs] = useState([]);
+  const [balance, setBalance] = useState(1000);
+
+  const addLog = (msg, ok) => setLogs(prev => [...prev, { msg, ok, time: new Date().toLocaleTimeString() }]);
+
+  const legitimateTransfer = () => {
+    addLog('POST /transfer (with CSRF token: ' + csrfToken.slice(0,8) + '...)', true);
+    addLog('Server: token valid. Transfer OK!', true);
+    setBalance(b => b - 100);
+  };
+
+  const csrfAttack = () => {
+    addLog('evil.com: POST /transfer (no CSRF token)', false);
+    addLog('Server: 403 Forbidden — Invalid CSRF token!', false);
+  };
+
+  const csrfNoProtection = () => {
+    addLog('evil.com: POST /transfer (no protection on server)', false);
+    addLog('Server: Transfer executed! CSRF attack succeeded!', false);
+    setBalance(b => b - 500);
+  };
+
+  return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff' }}>
+      <h2>CSRF: Атака и защита</h2>
+      <div style={{ background: '#0f0f23', padding: 12, borderRadius: 8, marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
+        <span>Баланс: <strong style={{ color: '#22c55e' }}>\${balance}</strong></span>
+        <span style={{ color: '#64748b', fontSize: 12 }}>CSRF Token: {csrfToken.slice(0,16)}...</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+        <button onClick={legitimateTransfer} style={{ padding: '8px 14px', borderRadius: 6, border: 'none', background: '#22c55e', color: '#000', cursor: 'pointer', fontSize: 13 }}>
+          Легитимный перевод $100
+        </button>
+        <button onClick={csrfAttack} style={{ padding: '8px 14px', borderRadius: 6, border: 'none', background: '#3b82f6', color: '#fff', cursor: 'pointer', fontSize: 13 }}>
+          CSRF атака (защищён)
+        </button>
+        <button onClick={csrfNoProtection} style={{ padding: '8px 14px', borderRadius: 6, border: 'none', background: '#ef4444', color: '#fff', cursor: 'pointer', fontSize: 13 }}>
+          CSRF атака (без защиты!)
+        </button>
+      </div>
+
+      <div style={{ background: '#0f0f23', padding: 12, borderRadius: 8, maxHeight: 200, overflowY: 'auto' }}>
+        {logs.length === 0 && <div style={{ color: '#64748b', fontSize: 13 }}>Нажми кнопку для симуляции...</div>}
+        {logs.map((l, i) => (
+          <div key={i} style={{ fontSize: 12, fontFamily: 'monospace', padding: '3px 0', color: l.ok ? '#22c55e' : '#ef4444' }}>
+            [{l.time}] {l.msg}
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 12, fontSize: 12, color: '#94a3b8' }}>
+        SameSite=Strict + CSRF токен = надёжная защита от CSRF атак
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

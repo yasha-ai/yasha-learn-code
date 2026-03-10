@@ -1,0 +1,381 @@
+---
+title: "44. Module Resolution"
+sidebar:
+  order: 44
+---
+import { Playground } from '@components/Playground'
+
+
+## TypeScript: Разрешение Модулей (Module Resolution)
+
+Привет, коллеги-кодеры! Сегодня мы погрузимся в одну из самых фундаментальных, но часто недооцененных концепций в TypeScript (да и в JavaScript тоже) – разрешение модулей, или **Module Resolution**.
+
+Представьте, что ваш TypeScript-компилятор – это курьер, которому нужно доставить пакет (код модуля) по адресу, указанному в вашем `import` или `export` выражении. Если адрес написан чётко и полностью (например, относительный путь `./utils/math.ts`), курьер найдет его без проблем. Но что, если адрес сокращен (`import { someFunc } from 'lodash';`) или это логическое имя (`import { UserService } from '@services/user';`)? Вот тут-то и вступает в игру сложная система навигации, которая называется **Module Resolution**.
+
+Понимание того, как TypeScript находит и интерпретирует эти "адреса", критически важно для написания масштабируемого, поддерживаемого кода, а также для отладки надоедливых ошибок "Cannot find module...". Этот урок поможет вам разобраться в этом внутреннем GPS вашего компилятора.
+
+### Что такое Разрешение Модулей?
+
+Разрешение модулей – это процесс, который компилятор TypeScript (или среда выполнения JavaScript, такая как Node.js) использует для определения местоположения файла, на который ссылается оператор `import`. Когда вы пишете `import { someFunc } from './utils';` или `import { EventEmitter } from 'events';`, TypeScript должен найти фактический файл, который экспортирует `someFunc` или `EventEmitter`, чтобы проверить типы и скомпилировать ваш код.
+
+Этот процесс включает в себя несколько шагов и зависит от множества факторов:
+
+1.  **Тип модуля**: относительный путь (`./`, `../`) или "голый" (bare) путь (`lodash`, `react`).
+2.  **Настройки компилятора**: опция `moduleResolution` в `tsconfig.json`.
+3.  **Структура файловой системы**: наличие файлов `index.ts`/`index.js`, папок `node_modules`.
+4.  **`package.json`**: поля `main`, `types`, `exports`.
+
+### Стратегии Разрешения: Node.js и Classic
+
+TypeScript предлагает несколько стратегий разрешения модулей, которые вы указываете в опции `moduleResolution` вашего `tsconfig.json`.
+
+*   **`Classic`**: Старая, простая стратегия, которая использовалась до появления Node.js. Она в основном ищет файлы в той же директории, что и импортирующий файл, а затем в родительских директориях. Сейчас практически не используется, если вы не пишете очень старый код.
+*   **`NodeJs` (или `node`)**: Самая распространенная стратегия, эмулирующая алгоритм разрешения модулей Node.js. Она ищет файлы как по относительным путям, так и в `node_modules`.
+*   **`Node16` / `NodeNext`**: Более современные стратегии, соответствующие спецификациям ES Modules в Node.js. Они строго относятся к расширениям файлов (`.js`, `.mjs`, `.cjs`), полю `exports` в `package.json` и условным экспортам.
+*   **`Bundler`**: Новейшая стратегия, представленная в TypeScript 5.0. Она разработана для лучшей совместимости с современными бандлерами (Webpack, Rollup, esbuild, Vite), которые часто имеют свои собственные, более гибкие алгоритмы разрешения, иногда игнорируя строгие правила `Node16`/`NodeNext`.
+
+В большинстве современных проектов вы будете использовать `NodeJs`, `Node16`, `NodeNext` или `Bundler`. Давайте сосредоточимся на том, как работает `NodeJs` (и как `Node16`/`NodeNext`/`Bundler` расширяют ее), поскольку она является основой.
+
+### Как TypeScript Ищет Модули (Стратегия `NodeJs`)
+
+Когда TypeScript видит импорт, он проходит по определенному алгоритму:
+
+1.  **Относительный импорт (Relative Import)**: Если путь начинается с `./` или `../`, TypeScript ищет файл относительно текущего.
+    *   Пример: `import { func } from './utils';`
+    *   TypeScript попробует:
+        *   `./utils.ts`
+        *   `./utils.tsx`
+        *   `./utils.d.ts`
+        *   `./utils/index.ts`
+        *   `./utils/index.tsx`
+        *   `./utils/index.d.ts`
+
+2.  **"Голый" импорт (Non-Relative/Bare Import)**: Если путь не относительный (например, `lodash`), TypeScript предполагает, что это модуль из `node_modules` (или глобальный модуль).
+    *   Пример: `import { cloneDeep } from 'lodash';`
+    *   TypeScript начнет с текущей директории и будет подниматься вверх по дереву папок, ища `node_modules`.
+    *   В каждом `node_modules` он попробует:
+        *   `node_modules/lodash` (ищет файл `package.json`).
+        *   Если `package.json` найден:
+            *   Проверяет поле `types` (предпочтительнее для TypeScript, например, `"types": "./dist/lodash.d.ts"`).
+            *   Если `types` нет, проверяет поле `main` (обычно для JavaScript, например, `"main": "./dist/lodash.js"`). TypeScript попытается найти соответствующий `.d.ts` файл рядом с `.js` (например, `lodash.d.ts`).
+            *   Если `main` нет, или это директория, ищет `index.ts`, `index.d.ts`, `index.js` в этой директории.
+        *   Если `package.json` нет:
+            *   Ищет `node_modules/lodash.ts`, `node_modules/lodash.d.ts`, `node_modules/lodash/index.ts`, `node_modules/lodash/index.d.ts`.
+
+### Примеры в Действии
+
+Давайте рассмотрим несколько практических сценариев.
+
+#### Пример 1: Базовое разрешение с относительными путями и `index.ts`
+
+**Структура проекта:**
+```
+src/
+  api/
+    user.ts
+  utils/
+    math/
+      index.ts
+    string.ts
+  main.ts
+```
+
+**`src/utils/math/index.ts`:**
+```typescript
+// src/utils/math/index.ts
+export function add(a: number, b: number): number {
+    return a + b;
+}
+
+export function subtract(a: number, b: number): number {
+    return a - b;
+}
+```
+
+**`src/main.ts`:**
+```typescript
+// src/main.ts
+import { add } from './utils/math'; // TypeScript найдет 'src/utils/math/index.ts'
+import { getUserName } from './api/user'; // TS найдет 'src/api/user.ts'
+
+console.log(add(5, 3)); // Выведет 8
+// imagine getUserName is defined in user.ts
+```
+Здесь TypeScript автоматически понимает, что `import { add } from './utils/math';` означает `src/utils/math/index.ts` благодаря конвенции `index.ts`.
+
+#### Пример 2: Использование `baseUrl` и `paths` для абсолютных импортов
+
+Сложные относительные пути (`../../../utils/logger`) быстро превращаются в кошмар. `baseUrl` и `paths` в `tsconfig.json` позволяют вам создавать "псевдонимы" для путей.
+
+**`tsconfig.json`:**
+```json
+{
+    "compilerOptions": {
+        "baseUrl": ".", // Базовая директория для разрешения модулей
+        "paths": {
+            "@app/*": ["src/*"], // Любой импорт, начинающийся с @app/, будет искать в src/
+            "@utils/*": ["src/utils/*"],
+            "@services/*": ["src/services/*"]
+        },
+        "module": "NodeNext", // Или NodeJs, Bundler
+        "moduleResolution": "bundler", // Или NodeJs, Node16, NodeNext
+        "target": "ESNext",
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true
+    },
+    "include": ["src/**/*.ts"]
+}
+```
+
+**Структура проекта:**
+```
+src/
+  services/
+    UserService.ts
+  utils/
+    logger.ts
+  main.ts
+```
+
+**`src/services/UserService.ts`:**
+```typescript
+// src/services/UserService.ts
+import { logInfo } from '@utils/logger'; // Теперь работает!
+
+export class UserService {
+    getUser(id: string): string {
+        logInfo(`Fetching user ${id}`);
+        return `User-${id}`;
+    }
+}
+```
+
+**`src/utils/logger.ts`:**
+```typescript
+// src/utils/logger.ts
+export function logInfo(message: string): void {
+    console.log(`[INFO] ${message}`);
+}
+```
+
+**`src/main.ts`:**
+```typescript
+// src/main.ts
+import { UserService } from '@services/UserService'; // Красиво и коротко!
+
+const userService = new UserService();
+userService.getUser('123'); // Выведет [INFO] Fetching user 123
+```
+
+#### Пример 3: `typeRoots` для глобальных объявлений типов
+
+Обычно TypeScript ищет типы в `node_modules/@types`. Но что, если у вас есть свои глобальные объявления типов, которые не являются частью модуля `npm`? Для этого есть `typeRoots`.
+
+**`tsconfig.json`:**
+```json
+{
+    "compilerOptions": {
+        // ... другие опции ...
+        "typeRoots": ["./node_modules/@types", "./src/types"] // Добавляем нашу папку с типами
+    },
+    "include": ["src/**/*.ts"]
+}
+```
+
+**Структура проекта:**
+```
+src/
+  types/
+    global.d.ts
+  main.ts
+```
+
+**`src/types/global.d.ts`:**
+```typescript
+// src/types/global.d.ts
+// Предположим, у нас есть глобальная функция или переменная,
+// инжектированная в окружение (например, из скрипта в HTML)
+declare interface AppConfig {
+    apiUrl: string;
+    version: string;
+}
+
+declare const APP_CONFIG: AppConfig;
+
+// Можно также объявить глобальные модули, которые не находятся в node_modules
+declare module 'my-special-global-module' {
+    export function doSomethingSpecial(): void;
+}
+```
+
+**`src/main.ts`:**
+```typescript
+// src/main.ts
+// Теперь TypeScript знает о APP_CONFIG
+console.log(`API URL: ${APP_CONFIG.apiUrl}, Version: ${APP_CONFIG.version}`);
+
+// И о нашем специальном модуле
+import { doSomethingSpecial } from 'my-special-global-module';
+doSomethingSpecial(); // TS не будет ругаться, что не может найти модуль
+
+// Допустим, мы где-то инициализировали APP_CONFIG
+// (например, в index.html <script> window.APP_CONFIG = { ... }; </script>)
+const appConfiguration: AppConfig = {
+    apiUrl: "https://api.example.com",
+    version: "1.0.0"
+};
+// В реальном приложении это было бы назначено window.APP_CONFIG
+// globalThis.APP_CONFIG = appConfiguration; // Для демонстрации в Node.js
+```
+
+#### Пример 4: Поле `exports` в `package.json` (ESM и Subpath Exports)
+
+Это современный и мощный механизм в `package.json` для контроля того, как ваш пакет экспортирует модули, особенно важный для поддержки ESM и CommonJS одновременно, а также для создания "приватных" путей.
+
+**`my-package/package.json`:**
+```json
+{
+    "name": "my-package",
+    "version": "1.0.0",
+    "type": "module", // Указываем, что этот пакет использует ES Modules
+    "exports": {
+        ".": { // Основной экспорт пакета
+            "import": "./dist/esm/index.js",
+            "require": "./dist/cjs/index.js",
+            "types": "./dist/types/index.d.ts"
+        },
+        "./utils": { // Экспорт подпути
+            "import": "./dist/esm/utils.js",
+            "require": "./dist/cjs/utils.js",
+            "types": "./dist/types/utils.d.ts"
+        },
+        "./config": "./config/default.js", // Простой экспорт
+        "./*": "./dist/esm/*.js" // Подстановочный знак (wildcard)
+    },
+    "main": "./dist/cjs/index.js", // Fallback для старых версий Node.js/tools
+    "types": "./dist/types/index.d.ts" // Fallback для старых версий TS
+}
+```
+
+**`node_modules/my-package/dist/types/index.d.ts`:**
+```typescript
+// node_modules/my-package/dist/types/index.d.ts
+export function greet(): string;
+```
+
+**`node_modules/my-package/dist/types/utils.d.ts`:**
+```typescript
+// node_modules/my-package/dist/types/utils.d.ts
+export function formatName(name: string): string;
+```
+
+**Ваш проект (`src/main.ts`):**
+```typescript
+// src/main.ts
+import { greet } from 'my-package'; // Разрешается через "exports": "."
+import { formatName } from 'my-package/utils'; // Разрешается через "exports": "./utils"
+// import { someHelper } from 'my-package/helpers/file'; // Разрешится через wildcard "./*" -> "./dist/esm/helpers/file.js"
+// import { config } from 'my-package/config'; // Разрешится через "./config"
+
+console.log(greet()); // 'Hello from my-package!'
+console.log(formatName('yasha')); // 'YASHA'
+```
+Поле `exports` дает авторам библиотек гораздо больше контроля над тем, какие части их пакета доступны потребителям, и как они разрешаются в разных средах (ESM vs. CommonJS).
+
+### Типичные Ошибки и Решения
+
+1.  **`Cannot find module '...'`**:
+    *   **Причина**: TypeScript не может найти `.ts`, `.tsx`, `.d.ts` или `.js` файл по указанному пути.
+    *   **Решения**:
+        *   **Для "голых" импортов (например, `lodash`)**: Убедитесь, что пакет установлен (`npm install lodash`) и находится в `node_modules`. Проверьте `moduleResolution` в `tsconfig.json` – возможно, вы используете `classic` вместо `node` или `bundler`.
+        *   **Для абсолютных путей (@components/Button)**: Проверьте правильность `baseUrl` и `paths` в `tsconfig.json`. Убедитесь, что путь в `paths` соответствует реальной структуре папок.
+        *   **Опечатка**: Проверьте путь на опечатки.
+        *   **Расширения файлов**: Убедитесь, что вы не забыли расширение, если оно требуется вашей стратегией разрешения (особенно в `Node16`/`NodeNext` для ESM).
+
+2.  **`Could not find a declaration file for module '...'`**:
+    *   **Причина**: TypeScript нашел JavaScript-файл, но не нашел соответствующего файла с объявлениями типов (`.d.ts`).
+    *   **Решения**:
+        *   **Установка `@types`**: Для большинства популярных npm-пакетов декларации типов доступны в виде отдельного пакета `@types/<package-name>` (например, `npm install --save-dev @types/lodash`).
+        *   **Собственные декларации**: Если это ваш собственный пакет или пакет без `@types`, вам может потребоваться написать `.d.ts` файл вручную или сгенерировать его с помощью `tsc --declaration`.
+        *   **`allowSyntheticDefaultImports` / `esModuleInterop`**: Иногда эта ошибка возникает из-за некорректного импорта CommonJS-модулей в TS. Установка `esModuleInterop: true` и `allowSyntheticDefaultImports: true` в `tsconfig.json` часто решает эту проблему, позволяя вам использовать `import MyModule from 'my-commonjs-module';`.
+        *   **`typeRoots`**: Если ваши `.d.ts` файлы находятся в нестандартном месте, убедитесь, что это место указано в `typeRoots`.
+
+### 🎯 Практика
+
+1.  **Настройка псевдонимов путей**: Создайте проект с такой структурой:
+    ```
+    src/
+      components/
+        Button.ts
+      hooks/
+        useAuth.ts
+      pages/
+        HomePage.ts
+      main.ts
+    ```
+    Настройте `tsconfig.json` с `baseUrl` и `paths` так, чтобы вы могли импортировать модули следующим образом:
+    ```typescript
+    // src/pages/HomePage.ts
+    import { Button } from '@components/Button';
+    import { useAuth } from '@hooks/useAuth';
+    ```
+    Напишите минимальный код в `Button.ts`, `useAuth.ts` и `HomePage.ts`, чтобы проверить, что импорты разрешаются корректно.
+
+2.  **Имитация глобального модуля**: Представьте, что у вас есть старый JavaScript-файл (не модуль), который инжектирует глобальную переменную `window.myGlobalApi`. Создайте `.d.ts` файл для этой переменной и разместите его в пользовательской директории, которую вы добавите в `typeRoots`. Убедитесь, что TypeScript видит `myGlobalApi` в вашем `main.ts` без ошибок.
+
+3.  **Исправление `Cannot find module`**: Вам дали проект, где `tsconfig.json` настроен так: `"moduleResolution": "classic"`. Когда вы пытаетесь импортировать `lodash` (`import { cloneDeep } from 'lodash';`), вы получаете ошибку `Cannot find module 'lodash'`. Измените `tsconfig.json` так, чтобы `lodash` разрешался правильно. Объясните, почему `classic` не сработал.
+
+4.  **Исследование `exports`**: Создайте простой npm-пакет (или имитируйте его структуру) с `package.json`, который использует поле `exports` для двух подпутей: `main` (для основного экспорта) и `config` (для экспорта конфигурационного объекта). Попробуйте импортировать оба в вашем основном проекте и убедитесь, что они разрешаются.
+
+### 💡 Совет
+
+Всегда старайтесь держать `moduleResolution` в `tsconfig.json` в соответствии с вашей средой выполнения/бандлером. Если вы используете Node.js с ES Modules, выбирайте `Node16` или `NodeNext`. Если вы работаете с Webpack, Rollup или Vite, `Bundler` – ваш лучший друг. Несоответствие этих настроек является частой причиной проблем с разрешением модулей, особенно когда TypeScript успешно компилирует код, но среда выполнения падает из-за того, что не может найти модуль. Помните, что `tsconfig.json` – это контракт между вами и компилятором, а `package.json` – между вами и менеджером пакетов/средой выполнения. Они должны работать в гармонии!
+
+
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="vanilla-ts"
+  files={{
+    "/index.html": `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TypeScript Module Resolution</title>
+    <style>
+        body { background-color: #282c34; color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        #output { margin-left: 20px; }
+    </style>
+</head>
+<body>
+    <div>
+        <button id="myButton">Click Me</button>
+        <span id="output"></span>
+    </div>
+
+
+</body>
+</html>
+`,
+    "/greeter.ts": `
+export function greet(name: string): string {
+    return \`Hello, \${name}!\`;
+}
+`,
+    "/index.ts": `
+import { greet } from './greeter';
+
+const button = document.getElementById('myButton') as HTMLButtonElement;
+const output = document.getElementById('output') as HTMLSpanElement;
+
+button.addEventListener('click', () => {
+  output.textContent = greet('User');
+});
+`
+  }}
+/>

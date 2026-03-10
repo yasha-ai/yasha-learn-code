@@ -1,0 +1,637 @@
+---
+title: "53. Пользовательские Form Controls"
+sidebar:
+  order: 56
+---
+import { Playground } from '@components/Playground'
+
+
+## 56. Пользовательские Form Controls (ControlValueAccessor) ⭐
+
+Привет! Яша здесь. Когда стандартных `<input>` и `<select>` недостаточно — ты создаёшь **кастомный контрол**. ControlValueAccessor — мост между Angular Forms и твоим компонентом. После этого урока ты сможешь создать любой контрол: рейтинг, цветопикер, rich text editor 🎨
+
+---
+
+### Что такое ControlValueAccessor
+
+`ControlValueAccessor` — интерфейс Angular, который нужно реализовать чтобы компонент работал с:
+- `[(ngModel)]`
+- `formControlName`
+- `[formControl]`
+
+```typescript
+interface ControlValueAccessor {
+  // Вызывается Angular когда форма хочет обновить значение в компоненте
+  writeValue(value: any): void;
+
+  // Регистрирует callback — вызывай его когда значение изменилось в UI
+  registerOnChange(fn: (value: any) => void): void;
+
+  // Регистрирует callback — вызывай при blur (touch)
+  registerOnTouched(fn: () => void): void;
+
+  // Опционально — вызывается когда контрол стал disabled/enabled
+  setDisabledState?(isDisabled: boolean): void;
+}
+```
+
+---
+
+### Минимальная реализация
+
+```typescript
+import {
+  Component, forwardRef, Input, ChangeDetectionStrategy
+} from '@angular/core';
+import {
+  ControlValueAccessor, NG_VALUE_ACCESSOR, FormsModule
+} from '@angular/forms';
+
+@Component({
+  selector: 'app-text-input',
+  standalone: true,
+  imports: [FormsModule],
+  template: `
+    <input
+      [value]="value"
+      [disabled]="isDisabled"
+      (input)="onInput($event)"
+      (blur)="onTouched()">
+  `,
+  providers: [
+    {
+      // NG_VALUE_ACCESSOR — токен, по которому Angular находит CVA
+      provide: NG_VALUE_ACCESSOR,
+      useExisting: forwardRef(() => TextInputComponent), // forwardRef нужен из-за hoisting
+      multi: true, // multi: true — важно! много CVA на один токен
+    }
+  ],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class TextInputComponent implements ControlValueAccessor {
+  value = '';
+  isDisabled = false;
+
+  // Колбэки, зарегистрированные Angular
+  private onChange: (value: string) => void = () => {};
+  private onTouched: () => void = () => {};
+
+  // Angular → компонент
+  writeValue(value: string): void {
+    this.value = value ?? '';
+  }
+
+  // Регистрируем функцию "сообщить Angular об изменении"
+  registerOnChange(fn: (value: string) => void): void {
+    this.onChange = fn;
+  }
+
+  // Регистрируем функцию "сообщить Angular о touch"
+  registerOnTouched(fn: () => void): void {
+    this.onTouched = fn;
+  }
+
+  // Опционально — реакция на disabled
+  setDisabledState(isDisabled: boolean): void {
+    this.isDisabled = isDisabled;
+  }
+
+  // Компонент → Angular (вызываем onChange при изменении)
+  onInput(event: Event): void {
+    const value = (event.target as HTMLInputElement).value;
+    this.value = value;
+    this.onChange(value); // ← обязательно!
+  }
+}
+```
+
+---
+
+### Кастомный рейтинг (star rating)
+
+```typescript
+// star-rating.component.ts
+import {
+  Component, Input, forwardRef, ChangeDetectionStrategy,
+  ChangeDetectorRef, signal
+} from '@angular/core';
+import { ControlValueAccessor, NG_VALUE_ACCESSOR } from '@angular/forms';
+import { NgFor } from '@angular/common';
+
+@Component({
+  selector: 'app-star-rating',
+  standalone: true,
+  imports: [NgFor],
+  template: `
+    <div class="stars" [attr.aria-label]="'Рейтинг: ' + value() + ' из ' + maxStars">
+      @for (star of starsArray; track star) {
+        <button
+          type="button"
+          [class.filled]="star <= (hovered() || value())"
+          [class.hovered]="star <= hovered()"
+          [disabled]="isDisabled()"
+          (mouseenter)="hovered.set(star)"
+          (mouseleave)="hovered.set(0)"
+          (click)="setValue(star)"
+          [attr.aria-label]="star + ' звёзд'">
+          ★
+        </button>
+      }
+    </div>
+  `,
+  styles: [`
+    .stars { display: flex; gap: 4px; }
+    button {
+      background: none; border: none; cursor: pointer;
+      font-size: 28px; color: #475569; transition: color 0.15s;
+      padding: 0; line-height: 1;
+    }
+    button.filled { color: #fbbf24; }
+    button.hovered { color: #f59e0b; }
+    button:disabled { cursor: default; opacity: 0.5; }
+  `],
+  providers: [{
+    provide: NG_VALUE_ACCESSOR,
+    useExisting: forwardRef(() => StarRatingComponent),
+    multi: true,
+  }],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class StarRatingComponent implements ControlValueAccessor {
+  @Input() maxStars = 5;
+
+  value = signal(0);
+  hovered = signal(0);
+  isDisabled = signal(false);
+
+  get starsArray(): number[] {
+    return Array.from({ length: this.maxStars }, (_, i) => i + 1);
+  }
+
+  private onChange: (value: number) => void = () => {};
+  private onTouched: () => void = () => {};
+
+  setValue(star: number): void {
+    if (this.isDisabled()) return;
+    // Повторный клик — сброс
+    const newValue = this.value() === star ? 0 : star;
+    this.value.set(newValue);
+    this.onChange(newValue);
+    this.onTouched();
+  }
+
+  writeValue(value: number): void {
+    this.value.set(value || 0);
+  }
+
+  registerOnChange(fn: (value: number) => void): void {
+    this.onChange = fn;
+  }
+
+  registerOnTouched(fn: () => void): void {
+    this.onTouched = fn;
+  }
+
+  setDisabledState(isDisabled: boolean): void {
+    this.isDisabled.set(isDisabled);
+  }
+}
+
+// Использование в форме
+@Component({
+  template: `
+    <form [formGroup]="form">
+      <app-star-rating formControlName="rating" [maxStars]="5"></app-star-rating>
+      <div *ngIf="form.get('rating')?.invalid && form.get('rating')?.touched">
+        Пожалуйста, поставьте оценку
+      </div>
+    </form>
+  `
+})
+export class ReviewFormComponent {
+  form = this.fb.group({
+    rating: [0, [Validators.required, Validators.min(1)]],
+    comment: ['', Validators.required],
+  });
+
+  constructor(private fb: FormBuilder) {}
+}
+```
+
+---
+
+### Кастомный цветопикер
+
+```typescript
+@Component({
+  selector: 'app-color-picker',
+  standalone: true,
+  template: `
+    <div class="picker">
+      <div class="presets">
+        @for (color of presetColors; track color) {
+          <button
+            type="button"
+            [style.background]="color"
+            [class.selected]="value() === color"
+            (click)="selectColor(color)"
+            [attr.title]="color">
+          </button>
+        }
+      </div>
+      <div class="custom">
+        <input
+          type="color"
+          [value]="value()"
+          (input)="selectColor($any($event.target).value)"
+          (blur)="onTouched()">
+        <span>{{ value() }}</span>
+      </div>
+    </div>
+  `,
+  providers: [{
+    provide: NG_VALUE_ACCESSOR,
+    useExisting: forwardRef(() => ColorPickerComponent),
+    multi: true,
+  }],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class ColorPickerComponent implements ControlValueAccessor {
+  value = signal('#dd0031');
+  isDisabled = signal(false);
+
+  presetColors = [
+    '#dd0031', '#1976d2', '#388e3c', '#f57c00',
+    '#7b1fa2', '#0288d1', '#00838f', '#455a64'
+  ];
+
+  private onChange: (v: string) => void = () => {};
+  private onTouched: () => void = () => {};
+
+  selectColor(color: string): void {
+    this.value.set(color);
+    this.onChange(color);
+    this.onTouched();
+  }
+
+  writeValue(value: string): void {
+    this.value.set(value || '#000000');
+  }
+
+  registerOnChange(fn: (v: string) => void): void { this.onChange = fn; }
+  registerOnTouched(fn: () => void): void { this.onTouched = fn; }
+  setDisabledState(disabled: boolean): void { this.isDisabled.set(disabled); }
+}
+```
+
+---
+
+### Rich Text Editor (интеграция с contenteditable)
+
+```typescript
+@Component({
+  selector: 'app-rich-editor',
+  standalone: true,
+  template: `
+    <div class="toolbar">
+      <button (click)="format('bold')"><b>B</b></button>
+      <button (click)="format('italic')"><i>I</i></button>
+      <button (click)="format('underline')"><u>U</u></button>
+    </div>
+    <div
+      #editor
+      contenteditable="true"
+      [attr.disabled]="isDisabled"
+      (input)="onEditorInput()"
+      (blur)="onTouched()"
+      class="editor">
+    </div>
+  `,
+  providers: [{
+    provide: NG_VALUE_ACCESSOR,
+    useExisting: forwardRef(() => RichEditorComponent),
+    multi: true,
+  }],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class RichEditorComponent implements ControlValueAccessor {
+  @ViewChild('editor') editorRef!: ElementRef<HTMLDivElement>;
+
+  isDisabled = false;
+  private onChange: (v: string) => void = () => {};
+  private onTouched: () => void = () => {};
+
+  format(command: string): void {
+    document.execCommand(command, false);
+    this.editorRef.nativeElement.focus();
+    this.onEditorInput();
+  }
+
+  onEditorInput(): void {
+    this.onChange(this.editorRef.nativeElement.innerHTML);
+  }
+
+  writeValue(value: string): void {
+    if (this.editorRef) {
+      this.editorRef.nativeElement.innerHTML = value || '';
+    }
+  }
+
+  registerOnChange(fn: (v: string) => void): void { this.onChange = fn; }
+  registerOnTouched(fn: () => void): void { this.onTouched = fn; }
+  setDisabledState(disabled: boolean): void { this.isDisabled = disabled; }
+}
+```
+
+---
+
+### Валидация кастомного контрола
+
+```typescript
+// Добавляем Validator к CVA-компоненту
+import { Validator, NG_VALIDATORS, ValidationErrors, AbstractControl } from '@angular/forms';
+
+@Component({
+  providers: [
+    { provide: NG_VALUE_ACCESSOR, useExisting: forwardRef(() => StarRatingComponent), multi: true },
+    { provide: NG_VALIDATORS, useExisting: forwardRef(() => StarRatingComponent), multi: true },
+  ]
+})
+export class StarRatingComponent implements ControlValueAccessor, Validator {
+  @Input() minRating = 1;
+
+  validate(control: AbstractControl): ValidationErrors | null {
+    if (!control.value || control.value < this.minRating) {
+      return { minRating: { required: this.minRating, actual: control.value } };
+    }
+    return null;
+  }
+}
+```
+
+---
+
+### Тестирование CVA
+
+```typescript
+// star-rating.component.spec.ts
+describe('StarRatingComponent', () => {
+  let fixture: ComponentFixture<StarRatingComponent>;
+  let component: StarRatingComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [StarRatingComponent],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(StarRatingComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  it('должен обновлять значение при клике', () => {
+    const changeSpy = jasmine.createSpy('onChange');
+    component.registerOnChange(changeSpy);
+
+    component.setValue(3);
+    expect(component.value()).toBe(3);
+    expect(changeSpy).toHaveBeenCalledWith(3);
+  });
+
+  it('должен сбрасывать значение при повторном клике', () => {
+    component.writeValue(3);
+    component.setValue(3); // повторный клик
+    expect(component.value()).toBe(0);
+  });
+
+  it('должен быть отключён при setDisabledState(true)', () => {
+    component.setDisabledState(true);
+    expect(component.isDisabled()).toBeTrue();
+  });
+});
+```
+
+---
+
+## Playground 🎮
+
+Кастомный star-rating контрол с полной интеграцией форм:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+function StarRating({ value, onChange, disabled, maxStars = 5, readOnly = false }) {
+  const [hovered, setHovered] = useState(0);
+
+  const handleClick = (star) => {
+    if (disabled || readOnly) return;
+    onChange(value === star ? 0 : star);
+  };
+
+  return (
+    <div style={{ display: 'flex', gap: '4px' }}>
+      {Array.from({ length: maxStars }, (_, i) => i + 1).map(star => (
+        <button
+          key={star}
+          type="button"
+          onClick={() => handleClick(star)}
+          onMouseEnter={() => !disabled && !readOnly && setHovered(star)}
+          onMouseLeave={() => setHovered(0)}
+          disabled={disabled}
+          style={{
+            background: 'none', border: 'none',
+            cursor: disabled || readOnly ? 'default' : 'pointer',
+            fontSize: '28px', padding: '0', lineHeight: 1,
+            color: star <= (hovered || value) ? '#fbbf24' : '#475569',
+            opacity: disabled ? 0.5 : 1,
+            transition: 'color 0.15s, transform 0.1s',
+            transform: star <= hovered && !disabled && !readOnly ? 'scale(1.2)' : 'scale(1)',
+          }}
+        >★</button>
+      ))}
+    </div>
+  );
+}
+
+function FormField({ label, error, children }) {
+  return (
+    <div style={{ marginBottom: '16px' }}>
+      <label style={{ display: 'block', color: '#94a3b8', fontSize: '13px', marginBottom: '6px' }}>
+        {label}
+      </label>
+      {children}
+      {error && (
+        <div style={{ color: '#f87171', fontSize: '12px', marginTop: '4px' }}>⚠️ {error}</div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [form, setForm] = useState({ rating: 0, title: '', comment: '', recommend: '' });
+  const [touched, setTouched] = useState({});
+  const [submitted, setSubmitted] = useState(false);
+  const [disabled, setDisabled] = useState(false);
+
+  const validate = (values) => {
+    const errors = {};
+    if (!values.rating || values.rating < 1) errors.rating = 'Пожалуйста, поставьте оценку (1-5)';
+    if (!values.title.trim()) errors.title = 'Заголовок обязателен';
+    if (values.comment.length < 10) errors.comment = 'Комментарий должен быть не менее 10 символов';
+    if (!values.recommend) errors.recommend = 'Выберите ответ';
+    return errors;
+  };
+
+  const errors = validate(form);
+  const isValid = Object.keys(errors).length === 0;
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    setTouched({ rating: true, title: true, comment: true, recommend: true });
+    if (isValid) setSubmitted(true);
+  };
+
+  if (submitted) {
+    return (
+      <div style={{
+        background: '#0f172a', minHeight: '100vh', padding: '24px',
+        fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <div style={{ textAlign: 'center', maxWidth: '400px' }}>
+          <div style={{ fontSize: '64px', marginBottom: '16px' }}>🎉</div>
+          <h2 style={{ color: '#4ade80', marginBottom: '12px' }}>Отзыв отправлен!</h2>
+          <div style={{
+            background: '#1e293b', borderRadius: '12px', padding: '20px',
+            textAlign: 'left', marginBottom: '16px',
+          }}>
+            <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ color: '#94a3b8', fontSize: '13px' }}>Оценка:</span>
+              <StarRating value={form.rating} onChange={() => {}} readOnly maxStars={5} />
+            </div>
+            <div style={{ marginBottom: '6px' }}>
+              <span style={{ color: '#94a3b8', fontSize: '13px' }}>Заголовок: </span>
+              <span style={{ color: '#f1f5f9' }}>{form.title}</span>
+            </div>
+            <div style={{ marginBottom: '6px' }}>
+              <span style={{ color: '#94a3b8', fontSize: '13px' }}>Рекомендуете: </span>
+              <span style={{ color: form.recommend === 'yes' ? '#4ade80' : '#f87171' }}>
+                {form.recommend === 'yes' ? '✅ Да' : '❌ Нет'}
+              </span>
+            </div>
+          </div>
+          <button onClick={() => { setSubmitted(false); setForm({ rating: 0, title: '', comment: '', recommend: '' }); setTouched({}); }} style={{
+            padding: '10px 24px', borderRadius: '8px', border: 'none',
+            background: ANGULAR_RED, color: 'white', cursor: 'pointer', fontWeight: 'bold',
+          }}>Написать ещё</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '500px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>⭐ ControlValueAccessor Demo</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>Кастомный Star Rating в форме</div>
+        </div>
+
+        <div style={{
+          background: '#1e293b', borderRadius: '8px', padding: '10px 14px',
+          marginBottom: '16px', fontSize: '12px', fontFamily: 'monospace',
+          color: '#a78bfa',
+        }}>
+          {'<app-star-rating formControlName="rating" [maxStars]="5"></app-star-rating>'}
+        </div>
+
+        <div style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <label style={{ color: '#94a3b8', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+            <input type="checkbox" checked={disabled} onChange={e => setDisabled(e.target.checked)}
+              style={{ accentColor: ANGULAR_RED }} />
+            setDisabledState(true) — отключить форму
+          </label>
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <FormField label="Оценка *" error={touched.rating && errors.rating}>
+            <StarRating
+              value={form.rating}
+              onChange={v => { setForm(f => ({ ...f, rating: v })); setTouched(t => ({ ...t, rating: true })); }}
+              disabled={disabled}
+            />
+            <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
+              form.value.rating = {form.rating}
+            </div>
+          </FormField>
+
+          <FormField label="Заголовок *" error={touched.title && errors.title}>
+            <input
+              value={form.title}
+              onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
+              onBlur={() => setTouched(t => ({ ...t, title: true }))}
+              disabled={disabled}
+              placeholder="Кратко опишите опыт"
+              style={{
+                width: '100%', padding: '10px', borderRadius: '8px',
+                background: '#0f172a', border: \`1px solid \${touched.title && errors.title ? '#ef4444' : '#334155'}\`,
+                color: 'white', fontSize: '14px', boxSizing: 'border-box',
+              }}
+            />
+          </FormField>
+
+          <FormField label="Комментарий *" error={touched.comment && errors.comment}>
+            <textarea
+              value={form.comment}
+              onChange={e => setForm(f => ({ ...f, comment: e.target.value }))}
+              onBlur={() => setTouched(t => ({ ...t, comment: true }))}
+              disabled={disabled}
+              rows={3}
+              placeholder="Расскажите подробнее..."
+              style={{
+                width: '100%', padding: '10px', borderRadius: '8px',
+                background: '#0f172a', border: \`1px solid \${touched.comment && errors.comment ? '#ef4444' : '#334155'}\`,
+                color: 'white', fontSize: '14px', resize: 'vertical', boxSizing: 'border-box',
+              }}
+            />
+          </FormField>
+
+          <FormField label="Рекомендуете? *" error={touched.recommend && errors.recommend}>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              {[{ value: 'yes', label: '✅ Да' }, { value: 'no', label: '❌ Нет' }].map(opt => (
+                <button key={opt.value} type="button" onClick={() => { setForm(f => ({ ...f, recommend: opt.value })); setTouched(t => ({ ...t, recommend: true })); }} disabled={disabled} style={{
+                  padding: '8px 20px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+                  background: form.recommend === opt.value ? (opt.value === 'yes' ? '#14532d' : '#7f1d1d') : '#334155',
+                  color: 'white', fontWeight: 'bold',
+                }}>{opt.label}</button>
+              ))}
+            </div>
+          </FormField>
+
+          <button type="submit" disabled={disabled} style={{
+            width: '100%', padding: '12px', borderRadius: '10px',
+            border: 'none', cursor: disabled ? 'not-allowed' : 'pointer',
+            background: disabled ? '#374151' : isValid ? '#4ade80' : ANGULAR_RED,
+            color: isValid && !disabled ? '#0f172a' : 'white',
+            fontWeight: 'bold', fontSize: '15px',
+          }}>
+            {isValid ? '✅ Отправить отзыв' : \`❌ Форма не валидна (\${Object.keys(errors).length} ошибки)\`}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

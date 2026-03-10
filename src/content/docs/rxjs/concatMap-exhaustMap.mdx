@@ -1,0 +1,488 @@
+---
+title: "8. concatMap и exhaustMap"
+sidebar:
+  order: 8
+---
+import { Playground } from '@components/Playground'
+
+
+## ⏳ concatMap и exhaustMap — контроль очереди
+
+Яша, мы уже знаем `mergeMap` (параллельно) и `switchMap` (отменяй прошлое). Теперь — два оставшихся оператора сплющивания. Они про контроль и порядок! 🎛️
+
+---
+
+### 🎯 Четыре стратегии сплющивания
+
+Напомним всю картину целиком:
+
+```
+Новый запрос пришёл, пока старый ещё выполняется. Что делать?
+
+mergeMap   → Запускай параллельно! (всё сразу)
+switchMap  → Отмени старый, запусти новый! (только последний)
+concatMap  → Подожди, поставь в очередь! (по порядку)
+exhaustMap → Проигнорируй новый, старый ещё занят! (один за раз)
+```
+
+---
+
+### 📋 concatMap — очередь строго по порядку
+
+`concatMap` не отменяет ничего и не запускает параллельно. Он терпеливо ждёт завершения текущего Observable, и только потом берётся за следующий. Как в очереди к врачу — один вошёл, другие ждут. 🏥
+
+**Мраморная диаграмма:**
+```
+Клики:         --C1--C2--C3-->
+C1 запрос (занимает 3 тика): [---R1-->]
+C2 ждёт:                               [---R2-->]
+C3 ждёт ещё:                                     [---R3-->]
+concatMap:
+Результат:     --------R1--------R2--------R3-->
+```
+
+```typescript
+import { Subject, from } from 'rxjs';
+import { concatMap, map, delay } from 'rxjs/operators';
+import { of } from 'rxjs';
+
+// Симуляция API-запроса
+const saveData = (data: string) =>
+  of(`Сохранено: ${data}`).pipe(delay(1000));
+
+const saveQueue$ = new Subject<string>();
+
+// concatMap гарантирует: следующее сохранение начнётся только после завершения предыдущего
+saveQueue$.pipe(
+  concatMap(data => saveData(data))
+).subscribe(result => {
+  console.log(result);
+});
+
+// Добавляем в очередь
+saveQueue$.next('Запись 1');
+saveQueue$.next('Запись 2');
+saveQueue$.next('Запись 3');
+
+// Вывод (строго по порядку, через каждую секунду):
+// (1с) "Сохранено: Запись 1"
+// (2с) "Сохранено: Запись 2"
+// (3с) "Сохранено: Запись 3"
+```
+
+**Реальный пример: последовательные анимации**
+
+```typescript
+import { from, of } from 'rxjs';
+import { concatMap, delay, tap } from 'rxjs/operators';
+
+interface AnimationStep {
+  element: string;
+  animation: string;
+  duration: number;
+}
+
+const steps: AnimationStep[] = [
+  { element: '.header', animation: 'fadeIn', duration: 500 },
+  { element: '.content', animation: 'slideIn', duration: 800 },
+  { element: '.footer', animation: 'fadeIn', duration: 400 },
+];
+
+// Анимации идут строго одна за другой
+from(steps).pipe(
+  concatMap(step =>
+    of(step).pipe(
+      tap(s => {
+        const el = document.querySelector(s.element);
+        el?.classList.add(s.animation);
+        console.log(`▶️ Запустили анимацию: ${s.element}`);
+      }),
+      delay(step.duration),
+      tap(s => console.log(`✅ Завершено: ${s.element}`))
+    )
+  )
+).subscribe();
+```
+
+**Сравнение с mergeMap:**
+
+```typescript
+import { Subject, of, timer } from 'rxjs';
+import { mergeMap, concatMap, map } from 'rxjs/operators';
+
+const requests$ = new Subject<string>();
+
+// mergeMap: все три запроса летят одновременно, завершаются в произвольном порядке
+requests$.pipe(
+  mergeMap(id => of(`Результат ${id}`).pipe(
+    // разные задержки
+    map(v => v)
+  ))
+).subscribe(console.log);
+
+// concatMap: строгая очерёдность, даже если запрос быстрее
+requests$.pipe(
+  concatMap(id => of(`Результат ${id}`).pipe(
+    map(v => v)
+  ))
+).subscribe(console.log);
+```
+
+> 💡 **Когда использовать concatMap:**
+> - Последовательные шаги onboarding
+> - Анимации, зависящие от порядка
+> - Запись данных, где важна очерёдность
+> - Синхронизация офлайн-данных
+
+---
+
+### 🚫 exhaustMap — занят, приходи позже
+
+`exhaustMap` — это "кабинет директора с секретарём": если директор занят — новых посетителей не принимает. Текущая задача завершится — только тогда примет следующую. ВСЕ запросы, пришедшие пока занят, **игнорируются**. 🙅
+
+**Мраморная диаграмма:**
+```
+Клики:          --C1--C2--C3-------C4-->
+C1 запрос (занимает 3 тика): [---R1-->]
+C2 пришёл пока C1 занят:     ⛔ ПРОИГНОРИРОВАН
+C3 пришёл пока C1 занят:     ⛔ ПРОИГНОРИРОВАН
+C4 пришёл после завершения:            [---R4-->]
+exhaustMap:
+Результат:      --------R1---------R4-->
+```
+
+```typescript
+import { fromEvent, from, of } from 'rxjs';
+import { exhaustMap, tap, delay, map } from 'rxjs/operators';
+
+// 🎯 Классический пример: кнопка отправки формы
+const submitButton = document.getElementById('submit') as HTMLButtonElement;
+
+fromEvent(submitButton, 'click').pipe(
+  exhaustMap(() => {
+    // Пока запрос выполняется — дополнительные клики ИГНОРИРУЮТСЯ
+    return from(
+      fetch('/api/submit', {
+        method: 'POST',
+        body: JSON.stringify({ data: 'form data' }),
+      }).then(r => r.json())
+    ).pipe(
+      tap(() => console.log('✅ Форма отправлена'))
+    );
+  })
+).subscribe(response => {
+  console.log('Ответ сервера:', response);
+});
+
+// Нажали 5 раз подряд — отправится ТОЛЬКО ПЕРВЫЙ запрос
+// Остальные 4 клика будут проигнорированы!
+```
+
+**Реальный пример: обновление токена**
+
+```typescript
+import { Subject, from, of } from 'rxjs';
+import { exhaustMap, catchError, tap } from 'rxjs/operators';
+
+// Несколько компонентов могут запросить обновление токена одновременно
+const refreshToken$ = new Subject<void>();
+
+refreshToken$.pipe(
+  exhaustMap(() => {
+    console.log('🔄 Обновляем токен...');
+    return from(
+      fetch('/api/auth/refresh', { method: 'POST' }).then(r => r.json())
+    ).pipe(
+      tap(token => {
+        localStorage.setItem('token', token.access_token);
+        console.log('✅ Токен обновлён');
+      }),
+      catchError(err => {
+        console.error('❌ Ошибка обновления токена');
+        return of(null);
+      })
+    );
+  })
+).subscribe();
+
+// Три компонента одновременно просят обновить токен
+refreshToken$.next(); // ✅ Запрос отправлен
+refreshToken$.next(); // ⛔ Проигнорирован (предыдущий ещё не завершён)
+refreshToken$.next(); // ⛔ Проигнорирован
+// Токен обновится ровно ОДИН раз!
+```
+
+---
+
+### 🎛️ Полное сравнение всех четырёх операторов
+
+```typescript
+import { Subject, of } from 'rxjs';
+import { mergeMap, switchMap, concatMap, exhaustMap, delay, map } from 'rxjs/operators';
+
+// Тест: 3 быстрых клика, каждый запрос занимает 1 секунду
+const clicks$ = new Subject<number>();
+const request = (n: number) => of(`Ответ ${n}`).pipe(delay(1000));
+
+// mergeMap: все 3 запроса параллельно → 3 ответа через 1 секунду
+clicks$.pipe(mergeMap(n => request(n))).subscribe(v => console.log('merge:', v));
+
+// switchMap: только последний клик имеет значение → 1 ответ через 1 секунду
+clicks$.pipe(switchMap(n => request(n))).subscribe(v => console.log('switch:', v));
+
+// concatMap: ответы строго по порядку → через 1с, 2с, 3с
+clicks$.pipe(concatMap(n => request(n))).subscribe(v => console.log('concat:', v));
+
+// exhaustMap: только первый клик → 1 ответ через 1 секунду
+clicks$.pipe(exhaustMap(n => request(n))).subscribe(v => console.log('exhaust:', v));
+
+clicks$.next(1);
+clicks$.next(2);
+clicks$.next(3);
+```
+
+| Оператор | Параллельно? | Отменяет? | Игнорирует? | Use case |
+|----------|-------------|-----------|-------------|----------|
+| `mergeMap` | ✅ Да | ❌ Нет | ❌ Нет | Загрузка файлов |
+| `switchMap` | ❌ Нет | ✅ Да | ❌ Нет | Поиск, навигация |
+| `concatMap` | ❌ Нет | ❌ Нет | ❌ Нет | Анимации, очереди |
+| `exhaustMap` | ❌ Нет | ❌ Нет | ✅ Да | Submit-кнопки |
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible
+  template="react-ts"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from "react";
+import { Subject, of } from "rxjs";
+import { exhaustMap, delay, tap, map, finalize } from "rxjs/operators";
+
+interface LogEntry {
+  id: number;
+  message: string;
+  color: string;
+  time: number;
+}
+
+export default function App() {
+  const [isBusy, setIsBusy] = useState(false);
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const [clickCount, setClickCount] = useState(0);
+  const [sentCount, setSentCount] = useState(0);
+  const [ignoredCount, setIgnoredCount] = useState(0);
+  const subject$ = useRef(new Subject<number>());
+  const startTime = useRef(Date.now());
+  const logId = useRef(0);
+
+  const addLog = (message: string, color: string) => {
+    const elapsed = ((Date.now() - startTime.current) / 1000).toFixed(1);
+    setLog(prev => [...prev, {
+      id: ++logId.current,
+      message: \`[\${elapsed}с] \${message}\`,
+      color,
+      time: Date.now(),
+    }]);
+  };
+
+  useEffect(() => {
+    startTime.current = Date.now();
+
+    // exhaustMap: пока занят — новые клики игнорируются
+    const sub = subject$.current.pipe(
+      exhaustMap(clickNum => {
+        setSentCount(c => c + 1);
+        setIsBusy(true);
+        addLog(\`🚀 Клик #\${clickNum}: отправляем запрос...\`, "#fbbf24");
+
+        // Симулируем API-запрос (2 секунды)
+        return of(\`✅ Ответ на клик #\${clickNum}\`).pipe(
+          delay(2000),
+          tap(result => {
+            addLog(result, "#34d399");
+          }),
+          finalize(() => {
+            setIsBusy(false);
+          }),
+        );
+      })
+    ).subscribe();
+
+    return () => sub.unsubscribe();
+  }, []);
+
+  const handleClick = () => {
+    const num = clickCount + 1;
+    setClickCount(num);
+
+    if (isBusy) {
+      setIgnoredCount(c => c + 1);
+      addLog(\`⛔ Клик #\${num}: проигнорирован (сервер занят)\`, "#f87171");
+    } else {
+      subject$.current.next(num);
+    }
+  };
+
+  const reset = () => {
+    setClickCount(0);
+    setSentCount(0);
+    setIgnoredCount(0);
+    setLog([]);
+    startTime.current = Date.now();
+  };
+
+  return (
+    <div style={{
+      background: "#0f172a",
+      minHeight: "100vh",
+      padding: "2rem",
+      fontFamily: "monospace",
+      color: "#e2e8f0",
+    }}>
+      <h2 style={{ color: "#38bdf8", marginBottom: "0.5rem" }}>
+        🚫 exhaustMap — защита от двойного сабмита
+      </h2>
+      <p style={{ color: "#94a3b8", marginBottom: "1.5rem", fontSize: "0.875rem" }}>
+        Нажимай кнопку несколько раз подряд — пока запрос выполняется,
+        новые клики игнорируются! Запрос занимает 2 секунды.
+      </p>
+
+      {/* Кнопка отправки */}
+      <button
+        onClick={handleClick}
+        style={{
+          width: "100%",
+          padding: "1rem",
+          background: isBusy ? "#374151" : "#1d4ed8",
+          border: isBusy ? "2px solid #6b7280" : "2px solid #38bdf8",
+          borderRadius: "12px",
+          color: isBusy ? "#6b7280" : "#e2e8f0",
+          fontSize: "1.1rem",
+          cursor: "pointer",
+          fontFamily: "monospace",
+          fontWeight: "bold",
+          transition: "all 0.2s",
+          marginBottom: "1.5rem",
+          position: "relative",
+          overflow: "hidden",
+        }}
+      >
+        {isBusy ? (
+          <span>⏳ Отправка... (кнопка занята)</span>
+        ) : (
+          <span>🚀 Отправить форму</span>
+        )}
+        {isBusy && (
+          <div style={{
+            position: "absolute",
+            bottom: 0,
+            left: 0,
+            height: "3px",
+            background: "#38bdf8",
+            animation: "progress 2s linear",
+            width: "100%",
+          }} />
+        )}
+      </button>
+
+      {/* Статистика */}
+      <div style={{ display: "flex", gap: "1rem", marginBottom: "1.5rem" }}>
+        {[
+          { label: "Всего кликов", value: clickCount, color: "#94a3b8" },
+          { label: "Запросов отправлено", value: sentCount, color: "#34d399" },
+          { label: "Кликов проигнорировано", value: ignoredCount, color: "#f87171" },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{
+            flex: 1,
+            padding: "0.75rem",
+            background: "#1e293b",
+            borderRadius: "8px",
+            textAlign: "center",
+            border: \`1px solid \${color}33\`,
+          }}>
+            <div style={{ fontSize: "1.75rem", fontWeight: "bold", color }}>{value}</div>
+            <div style={{ fontSize: "0.65rem", color: "#64748b", marginTop: "0.25rem" }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Лог */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+        <h3 style={{ color: "#94a3b8", margin: 0, fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+          Лог событий:
+        </h3>
+        <button
+          onClick={reset}
+          style={{
+            padding: "0.25rem 0.75rem",
+            background: "#334155",
+            border: "none",
+            borderRadius: "4px",
+            color: "#94a3b8",
+            cursor: "pointer",
+            fontSize: "0.75rem",
+          }}
+        >
+          Сбросить
+        </button>
+      </div>
+
+      <div style={{
+        background: "#1e293b",
+        borderRadius: "8px",
+        padding: "1rem",
+        minHeight: "200px",
+        maxHeight: "300px",
+        overflowY: "auto",
+        border: "1px solid #334155",
+      }}>
+        {log.length === 0 ? (
+          <p style={{ color: "#475569", textAlign: "center", margin: "3rem 0", fontSize: "0.85rem" }}>
+            Нажми кнопку, чтобы начать 👆
+          </p>
+        ) : (
+          log.map(entry => (
+            <div key={entry.id} style={{
+              padding: "0.35rem 0.6rem",
+              marginBottom: "0.25rem",
+              borderRadius: "4px",
+              borderLeft: \`3px solid \${entry.color}\`,
+              background: "#0f172a",
+              color: entry.color,
+              fontSize: "0.8rem",
+            }}>
+              {entry.message}
+            </div>
+          ))
+        )}
+      </div>
+
+      <div style={{
+        marginTop: "1.5rem",
+        padding: "1rem",
+        background: "#1e293b",
+        borderRadius: "8px",
+        border: "1px solid #334155",
+        fontSize: "0.8rem",
+        color: "#64748b",
+      }}>
+        <strong style={{ color: "#38bdf8" }}>exhaustMap</strong> идеален для кнопок отправки формы:
+        пока запрос выполняется — повторные клики игнорируются.
+        Никаких дублирующих запросов! 🛡️
+      </div>
+
+      <style>{\`
+        @keyframes progress {
+          from { width: 0%; }
+          to { width: 100%; }
+        }
+      \`}</style>
+    </div>
+  );
+}
+`
+  }}
+/>

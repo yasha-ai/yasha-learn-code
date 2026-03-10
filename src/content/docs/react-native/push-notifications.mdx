@@ -1,0 +1,202 @@
+---
+title: "23. Push-уведомления"
+sidebar:
+  order: 22
+---
+
+import { Playground } from '@components/Playground'
+
+Push-уведомления позволяют отправлять сообщения когда приложение закрыто. iOS = APNs, Android = FCM.
+
+## Установка
+
+```bash
+npx expo install expo-notifications expo-device
+```
+
+## Настройка обработчика
+
+```tsx
+import * as Notifications from 'expo-notifications';
+
+// Вызвать ДО регистрации
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+```
+
+## Регистрация Push Token
+
+```tsx
+import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
+import Constants from 'expo-constants';
+import { Platform } from 'react-native';
+
+async function registerForPushNotifications() {
+  if (!Device.isDevice) return;  // Не работает в симуляторе!
+
+  const { status } = await Notifications.requestPermissionsAsync();
+  if (status !== 'granted') return;
+
+  // Android: канал уведомлений
+  if (Platform.OS === 'android') {
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'default',
+      importance: Notifications.AndroidImportance.MAX,
+      sound: 'default',
+    });
+  }
+
+  // Expo Push Token
+  const token = await Notifications.getExpoPushTokenAsync({
+    projectId: Constants.expoConfig?.extra?.eas?.projectId,
+  });
+
+  // Отправь токен на сервер
+  await saveTokenToServer(token.data);
+  return token;
+}
+```
+
+## Обработка уведомлений
+
+```tsx
+useEffect(() => {
+  registerForPushNotifications();
+
+  // Пришло уведомление (приложение открыто)
+  const sub1 = Notifications.addNotificationReceivedListener(notification => {
+    console.log('Уведомление:', notification);
+  });
+
+  // Пользователь нажал на уведомление
+  const sub2 = Notifications.addNotificationResponseReceivedListener(response => {
+    const data = response.notification.request.content.data;
+    if (data.screen) navigation.navigate(data.screen, data.params);
+  });
+
+  return () => { sub1.remove(); sub2.remove(); };
+}, []);
+```
+
+## Local Notifications (без сервера)
+
+```tsx
+// Немедленно
+await Notifications.scheduleNotificationAsync({
+  content: { title: 'Напоминание', body: 'Выпей воды!', data: { screen: 'Reminders' } },
+  trigger: null,
+});
+
+// Через 10 секунд
+await Notifications.scheduleNotificationAsync({
+  content: { title: 'Timer', body: 'Время вышло!' },
+  trigger: { seconds: 10 },
+});
+
+// Ежедневно в 9:00
+await Notifications.scheduleNotificationAsync({
+  content: { title: 'Доброе утро!', body: 'Время для тренировки' },
+  trigger: { hour: 9, minute: 0, repeats: true },
+});
+
+// Отменить все
+await Notifications.cancelAllScheduledNotificationsAsync();
+```
+
+## Отправка через Expo Push API (сервер)
+
+```typescript
+// Node.js
+const { Expo } = require('expo-server-sdk');
+const expo = new Expo();
+
+const messages = [{
+  to: 'ExponentPushToken[xxxxxx]',
+  sound: 'default',
+  title: 'Новое сообщение',
+  body: 'Привет! Как дела?',
+  data: { screen: 'Chat', chatId: '42' },
+}];
+
+const chunks = expo.chunkPushNotifications(messages);
+for (const chunk of chunks) {
+  await expo.sendPushNotificationsAsync(chunk);
+}
+```
+
+## Badge (счётчик на иконке)
+
+```tsx
+await Notifications.setBadgeCountAsync(5);   // Установить
+await Notifications.setBadgeCountAsync(0);   // Сбросить
+const count = await Notifications.getBadgeCountAsync();
+```
+
+## Итоги
+
+- Expo Push Token — уникальный ID устройства для push
+- Local Notifications — без сервера (напоминания, таймеры)
+- APNs (iOS) / FCM (Android) — платформенные push системы
+- `addNotificationResponseReceivedListener` — обработка нажатия
+- Expo Push API — простейший способ отправить push с сервера
+
+<Playground client:visible template="vite-react" files={{
+  '/App.js': `// React Web-эквивалент React Native кода
+// Browser Notifications API — аналог Push-уведомлений
+import { useState } from 'react';
+
+export default function App() {
+  const [permission, setPermission] = useState(
+    typeof Notification !== 'undefined' ? Notification.permission : 'unavailable'
+  );
+  const [log, setLog] = useState([]);
+
+  const requestPermission = async () => {
+    if (typeof Notification === 'undefined') return;
+    const result = await Notification.requestPermission();
+    setPermission(result);
+    addLog('Разрешение: ' + result);
+  };
+
+  const sendNotification = () => {
+    if (permission !== 'granted') return;
+    const n = new Notification('Привет!', {
+      body: 'Это локальное уведомление из браузера',
+      icon: '🔔',
+    });
+    addLog('Уведомление отправлено');
+    n.onclick = () => addLog('Нажали на уведомление');
+  };
+
+  const addLog = (msg) =>
+    setLog(prev => [...prev, new Date().toLocaleTimeString() + ' — ' + msg]);
+
+  return (
+    <div style={{ padding: 24, fontFamily: 'system-ui' }}>
+      <h3>Push Notifications (Browser API)</h3>
+      <p>Статус: <b>{permission}</b></p>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button onClick={requestPermission}
+          style={{ padding: '8px 16px', cursor: 'pointer' }}>
+          Запросить разрешение
+        </button>
+        <button onClick={sendNotification} disabled={permission !== 'granted'}
+          style={{ padding: '8px 16px', cursor: 'pointer' }}>
+          Отправить уведомление
+        </button>
+      </div>
+      <div style={{ background: '#f0f0f0', padding: 12, borderRadius: 8, minHeight: 60 }}>
+        {log.map((l, i) => <div key={i}>{l}</div>)}
+        {!log.length && <span style={{ color: '#999' }}>Лог событий...</span>}
+      </div>
+    </div>
+  );
+}
+`
+}} />

@@ -1,0 +1,493 @@
+---
+title: "44. NGXS State Management"
+sidebar:
+  order: 46
+---
+import { Playground } from '@components/Playground'
+
+
+## 🦋 NGXS — Альтернативный State Management
+
+NGXS — это state management библиотека для Angular, вдохновлённая NgRx/Redux, но с более лаконичным синтаксисом через декораторы. Если NgRx кажется слишком многословным — NGXS стоит рассмотреть 🎯
+
+---
+
+## Установка
+
+```bash
+npm install @ngxs/store
+npm install @ngxs/logger-plugin @ngxs/storage-plugin @ngxs/devtools-plugin
+```
+
+---
+
+## Ключевые отличия от NgRx
+
+| | NgRx | NGXS |
+|--|------|------|
+| Actions | `createAction()` + отдельные файлы | Классы с декораторами |
+| Reducers | `createReducer()` + `on()` | `@Action` методы в State |
+| Selectors | `createSelector()` | `@Selector` методы в State |
+| Effects | Отдельный `@Injectable Effects` | `@Action` может вернуть Observable |
+| Boilerplate | Больше | Меньше |
+| TypeScript | Лучше | Хуже (из-за декораторов) |
+| Экосистема | Больше | Меньше |
+
+---
+
+## @State декоратор — определение состояния
+
+```typescript
+// store/users/users.state.ts
+import { Injectable } from '@angular/core';
+import { State, Action, StateContext, Selector, NgxsOnInit } from '@ngxs/store';
+import { produce } from 'immer'; // Опционально, для удобства
+import { tap, catchError } from 'rxjs/operators';
+import { of } from 'rxjs';
+import { UserService } from '../../services/user.service';
+import { User } from '../../models/user.model';
+
+// Actions — просто классы
+export class LoadUsers {
+  static readonly type = '[Users] Load Users';
+}
+
+export class LoadUsersSuccess {
+  static readonly type = '[Users] Load Users Success';
+  constructor(public users: User[]) {}
+}
+
+export class LoadUsersFailure {
+  static readonly type = '[Users] Load Users Failure';
+  constructor(public error: string) {}
+}
+
+export class CreateUser {
+  static readonly type = '[Users] Create User';
+  constructor(public user: Partial<User>) {}
+}
+
+export class DeleteUser {
+  static readonly type = '[Users] Delete User';
+  constructor(public id: string) {}
+}
+
+export class SelectUser {
+  static readonly type = '[Users] Select User';
+  constructor(public userId: string | null) {}
+}
+
+export class SetFilter {
+  static readonly type = '[Users] Set Filter';
+  constructor(public filter: string) {}
+}
+
+// State model
+export interface UsersStateModel {
+  users: User[];
+  loading: boolean;
+  error: string | null;
+  selectedUserId: string | null;
+  filter: string;
+}
+
+@State<UsersStateModel>({
+  name: 'users',
+  defaults: {
+    users: [],
+    loading: false,
+    error: null,
+    selectedUserId: null,
+    filter: '',
+  }
+})
+@Injectable()
+export class UsersState implements NgxsOnInit {
+  constructor(private userService: UserService) {}
+
+  // Вызывается при инициализации State
+  ngxsOnInit(ctx: StateContext<UsersStateModel>) {
+    ctx.dispatch(new LoadUsers());
+  }
+
+  // ===== SELECTORS =====
+  @Selector()
+  static allUsers(state: UsersStateModel): User[] {
+    return state.users;
+  }
+
+  @Selector()
+  static loading(state: UsersStateModel): boolean {
+    return state.loading;
+  }
+
+  @Selector()
+  static error(state: UsersStateModel): string | null {
+    return state.error;
+  }
+
+  @Selector()
+  static filter(state: UsersStateModel): string {
+    return state.filter;
+  }
+
+  // Составной селектор
+  @Selector()
+  static filteredUsers(state: UsersStateModel): User[] {
+    if (!state.filter) return state.users;
+    return state.users.filter(u =>
+      u.name.toLowerCase().includes(state.filter.toLowerCase())
+    );
+  }
+
+  @Selector()
+  static selectedUser(state: UsersStateModel): User | null {
+    return state.users.find(u => u.id === state.selectedUserId) ?? null;
+  }
+
+  // ===== ACTIONS =====
+  @Action(LoadUsers)
+  loadUsers(ctx: StateContext<UsersStateModel>) {
+    ctx.patchState({ loading: true, error: null });
+
+    return this.userService.getAll().pipe(
+      tap(users => ctx.dispatch(new LoadUsersSuccess(users))),
+      catchError(error => {
+        ctx.dispatch(new LoadUsersFailure(error.message));
+        return of(null);
+      })
+    );
+  }
+
+  @Action(LoadUsersSuccess)
+  loadUsersSuccess(ctx: StateContext<UsersStateModel>, action: LoadUsersSuccess) {
+    ctx.patchState({
+      users: action.users,
+      loading: false,
+    });
+  }
+
+  @Action(LoadUsersFailure)
+  loadUsersFailure(ctx: StateContext<UsersStateModel>, action: LoadUsersFailure) {
+    ctx.patchState({
+      error: action.error,
+      loading: false,
+    });
+  }
+
+  @Action(CreateUser)
+  createUser(ctx: StateContext<UsersStateModel>, action: CreateUser) {
+    return this.userService.create(action.user).pipe(
+      tap(user => {
+        ctx.patchState({
+          users: [...ctx.getState().users, user],
+        });
+      })
+    );
+  }
+
+  @Action(DeleteUser)
+  deleteUser(ctx: StateContext<UsersStateModel>, action: DeleteUser) {
+    ctx.setState(
+      produce(ctx.getState(), draft => {
+        const idx = draft.users.findIndex(u => u.id === action.id);
+        if (idx !== -1) draft.users.splice(idx, 1);
+      })
+    );
+  }
+
+  @Action(SelectUser)
+  selectUser(ctx: StateContext<UsersStateModel>, action: SelectUser) {
+    ctx.patchState({ selectedUserId: action.userId });
+  }
+
+  @Action(SetFilter)
+  setFilter(ctx: StateContext<UsersStateModel>, action: SetFilter) {
+    ctx.patchState({ filter: action.filter });
+  }
+}
+```
+
+---
+
+## Регистрация
+
+```typescript
+// app.config.ts
+import { provideStore } from '@ngxs/store';
+import { withNgxsLoggerPlugin } from '@ngxs/logger-plugin';
+import { withNgxsStoragePlugin } from '@ngxs/storage-plugin';
+import { withNgxsReduxDevtoolsPlugin } from '@ngxs/devtools-plugin';
+import { UsersState } from './store/users/users.state';
+import { AuthState } from './store/auth/auth.state';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideStore(
+      [UsersState, AuthState],
+      withNgxsLoggerPlugin(),
+      withNgxsReduxDevtoolsPlugin(),
+      withNgxsStoragePlugin({ keys: ['auth'] }) // Персистить auth state
+    )
+  ]
+};
+```
+
+---
+
+## Использование в компоненте
+
+```typescript
+@Component({
+  standalone: true,
+  imports: [AsyncPipe, ...],
+  template: `
+    @if (loading$ | async) { <mat-spinner /> }
+
+    <input [value]="filter$ | async" (input)="onFilter($event)" />
+
+    @for (user of users$ | async; track user.id) {
+      <app-user-card
+        [user]="user"
+        (delete)="onDelete(user.id)"
+      />
+    }
+  `
+})
+export class UsersPageComponent {
+  private store = inject(Store);
+
+  // Select через StateClass.selector
+  loading$ = this.store.select(UsersState.loading);
+  users$ = this.store.select(UsersState.filteredUsers);
+  filter$ = this.store.select(UsersState.filter);
+
+  // Dispatch — просто new Action()
+  onFilter(event: Event) {
+    const filter = (event.target as HTMLInputElement).value;
+    this.store.dispatch(new SetFilter(filter));
+  }
+
+  onDelete(id: string) {
+    this.store.dispatch(new DeleteUser(id));
+  }
+}
+```
+
+---
+
+## Плагины NGXS
+
+### Storage Plugin — персистентность
+
+```typescript
+withNgxsStoragePlugin({
+  keys: ['auth', { key: 'users', serialize: JSON.stringify, deserialize: JSON.parse }],
+  storage: StorageOption.SessionStorage // или LocalStorage (по умолчанию)
+})
+```
+
+### Logger Plugin
+
+```typescript
+withNgxsLoggerPlugin({
+  disabled: environment.production,
+  expanded: false,
+  logger: console,
+})
+```
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useReducer, useMemo, useState } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+
+// ===== NGXS-style Actions (classes) =====
+const actions = {
+  LoadUsers: '[Users] Load Users',
+  LoadUsersSuccess: '[Users] Load Users Success',
+  AddTodo: '[Todos] Add Todo',
+  ToggleTodo: '[Todos] Toggle Todo',
+  DeleteTodo: '[Todos] Delete Todo',
+  SetFilter: '[Users] Set Filter',
+} as const;
+
+interface User { id: string; name: string; role: string; active: boolean; }
+interface Todo { id: number; text: string; done: boolean; }
+interface AppState {
+  users: User[];
+  loading: boolean;
+  filter: string;
+  todos: Todo[];
+}
+
+const MOCK_USERS: User[] = [
+  { id: '1', name: 'Яша', role: 'admin', active: true },
+  { id: '2', name: 'Алиса', role: 'user', active: true },
+  { id: '3', name: 'Боб', role: 'guest', active: false },
+];
+
+function reducer(state: AppState, action: { type: string; payload?: any }): AppState {
+  switch (action.type) {
+    case actions.LoadUsers: return { ...state, loading: true };
+    case actions.LoadUsersSuccess: return { ...state, users: action.payload, loading: false };
+    case actions.SetFilter: return { ...state, filter: action.payload };
+    case actions.AddTodo: return { ...state, todos: [...state.todos, { id: Date.now(), text: action.payload, done: false }] };
+    case actions.ToggleTodo: return { ...state, todos: state.todos.map(t => t.id === action.payload ? { ...t, done: !t.done } : t) };
+    case actions.DeleteTodo: return { ...state, todos: state.todos.filter(t => t.id !== action.payload) };
+    default: return state;
+  }
+}
+
+let actionLog: Array<{ type: string; id: number }> = [];
+let logId = 0;
+
+export default function App() {
+  const [state, dispatch] = useReducer(reducer, { users: [], loading: false, filter: '', todos: [] });
+  const [log, setLog] = useState<typeof actionLog>([]);
+  const [newTodo, setNewTodo] = useState('');
+  const [activeTab, setActiveTab] = useState<'users' | 'todos' | 'compare'>('users');
+  const [loaded, setLoaded] = useState(false);
+
+  const d = (type: string, payload?: any) => {
+    dispatch({ type, payload });
+    setLog(prev => [{ type, id: ++logId }, ...prev.slice(0, 9)]);
+  };
+
+  const loadUsers = () => {
+    d(actions.LoadUsers);
+    setTimeout(() => { d(actions.LoadUsersSuccess, MOCK_USERS); setLoaded(true); }, 700);
+  };
+
+  // @Selector() — derived state
+  const filteredUsers = useMemo(() =>
+    state.filter ? state.users.filter(u => u.name.toLowerCase().includes(state.filter.toLowerCase())) : state.users,
+    [state.users, state.filter]);
+
+  const stats = useMemo(() => ({
+    total: state.users.length,
+    active: state.users.filter(u => u.active).length,
+    doneTodos: state.todos.filter(t => t.done).length,
+  }), [state.users, state.todos]);
+
+  const ngrxEquiv: Record<string, string> = {
+    [actions.LoadUsers]: 'loadUsers = createAction(\'[Users] Load Users\')',
+    [actions.LoadUsersSuccess]: 'loadUsersSuccess = createAction(\'...\', props<{users}>())',
+    [actions.SetFilter]: 'setFilter = createAction(\'...\', props<{filter}>())',
+    [actions.AddTodo]: 'addTodo = createAction(\'...\', props<{text}>())',
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🦋 NGXS Pattern Simulator</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+        @State + @Action + @Selector + store.dispatch(new Action())
+      </p>
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: '0.25rem', marginBottom: '1rem', borderBottom: \`1px solid \${BORDER}\` }}>
+        {(['users', 'todos', 'compare'] as const).map(t => (
+          <button key={t} onClick={() => setActiveTab(t)} style={{ padding: '0.45rem 0.9rem', background: 'transparent', color: activeTab === t ? RED : '#64748b', border: 'none', borderBottom: activeTab === t ? \`2px solid \${RED}\` : '2px solid transparent', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 600, marginBottom: '-1px', textTransform: 'capitalize' }}>{t}</button>
+        ))}
+      </div>
+
+      {activeTab === 'users' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>dispatch(new Action())</div>
+            <div style={{ fontFamily: 'monospace', fontSize: '0.72rem', color: '#64748b', marginBottom: '0.75rem', padding: '0.5rem', background: BG, borderRadius: '4px', borderLeft: \`2px solid \${RED}\` }}>
+              store.dispatch(new LoadUsers())
+            </div>
+            <button onClick={loadUsers} disabled={loaded} style={{ display: 'block', width: '100%', padding: '0.45rem', background: loaded ? '#334155' : SUCCESS, color: loaded ? '#475569' : BG, border: 'none', borderRadius: '4px', cursor: loaded ? 'not-allowed' : 'pointer', fontSize: '0.78rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+              {state.loading ? '⏳ Loading...' : loaded ? '✅ Loaded' : '⚡ new LoadUsers()'}
+            </button>
+            <input
+              placeholder="@Selector filteredUsers..."
+              value={state.filter}
+              onChange={e => d(actions.SetFilter, e.target.value)}
+              style={{ width: '100%', padding: '0.4rem', background: BG, border: \`1px solid \${BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.75rem', outline: 'none', boxSizing: 'border-box' }}
+            />
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.75rem', fontSize: '0.75rem' }}>
+              <span>Total: <b style={{ color: '#e2e8f0' }}>{stats.total}</b></span>
+              <span>Active: <b style={{ color: SUCCESS }}>{stats.active}</b></span>
+            </div>
+          </div>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.5rem', textTransform: 'uppercase' }}>@Selector() filteredUsers</div>
+            {state.loading && <div style={{ color: WARN, fontSize: '0.8rem' }}>⏳ Loading...</div>}
+            {filteredUsers.map(u => (
+              <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.5rem', background: BG, border: \`1px solid \${BORDER}\`, borderRadius: '5px', marginBottom: '0.3rem', fontSize: '0.78rem' }}>
+                <span style={{ color: u.active ? SUCCESS : '#475569' }}>●</span>
+                <span>{u.name}</span>
+                <span style={{ color: '#475569', marginLeft: 'auto' }}>{u.role}</span>
+              </div>
+            ))}
+            {!state.loading && filteredUsers.length === 0 && <div style={{ color: '#334155', fontSize: '0.8rem' }}>Empty. Load users first.</div>}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'todos' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>Actions</div>
+            <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.5rem' }}>
+              <input value={newTodo} onChange={e => setNewTodo(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newTodo) { d(actions.AddTodo, newTodo); setNewTodo(''); }}} placeholder="new AddTodo(text)..." style={{ flex: 1, padding: '0.4rem', background: BG, border: \`1px solid \${BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.75rem', outline: 'none' }} />
+              <button onClick={() => { if (newTodo) { d(actions.AddTodo, newTodo); setNewTodo(''); }}} style={{ padding: '0.4rem 0.65rem', background: RED, color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 700 }}>+</button>
+            </div>
+            <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Done: {stats.doneTodos}/{state.todos.length}</div>
+          </div>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.5rem', textTransform: 'uppercase' }}>@State todos</div>
+            {state.todos.map(t => (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.35rem 0', borderBottom: \`1px solid \${BORDER}\` }}>
+                <input type="checkbox" checked={t.done} onChange={() => d(actions.ToggleTodo, t.id)} style={{ accentColor: SUCCESS, cursor: 'pointer' }} />
+                <span style={{ flex: 1, fontSize: '0.8rem', textDecoration: t.done ? 'line-through' : 'none', color: t.done ? '#475569' : '#e2e8f0' }}>{t.text}</span>
+                <button onClick={() => d(actions.DeleteTodo, t.id)} style={{ background: 'transparent', border: 'none', color: RED, cursor: 'pointer', fontSize: '0.9rem' }}>×</button>
+              </div>
+            ))}
+            {state.todos.length === 0 && <div style={{ color: '#334155', fontSize: '0.8rem' }}>No todos yet</div>}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'compare' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          {[
+            { title: '🦋 NGXS', color: '#22c55e', lines: ['export class LoadUsers {', '  static type = \'[Users] Load\';', '}', '', 'export class LoadUsersSuccess {', '  static type = \'[Users] Success\';', '  constructor(public users: User[]) {}', '}', '', '@State({name: \'users\', defaults})', '@Injectable()', 'export class UsersState {', '  @Action(LoadUsers)', '  load(ctx: StateContext) {', '    return this.svc.getAll().pipe(', '      tap(u => ctx.patchState({users: u}))', '    );', '  }', '', '  @Selector()', '  static allUsers(state) {', '    return state.users;', '  }', '}'] },
+            { title: '🏪 NgRx', color: RED, lines: ['export const loadUsers =', '  createAction(\'[Users] Load\');', '', 'export const loadUsersSuccess =', '  createAction(\'[Users] Success\',', '    props<{users: User[]}>());', '', 'export const usersReducer =', '  createReducer(initialState,', '    on(loadUsers, state =>', '      ({...state, loading: true})),', '    on(loadUsersSuccess, (s,{users}) =>', '      ({...s, users}))', '  );', '', 'export const selectAllUsers =', '  createSelector(', '    selectUsersState,', '    state => state.users', '  );'] },
+          ].map(({ title, color, lines }) => (
+            <div key={title} style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+              <div style={{ color, fontSize: '0.82rem', fontWeight: 700, marginBottom: '0.75rem' }}>{title}</div>
+              <div style={{ background: '#0a0f1e', borderRadius: '6px', padding: '0.75rem', fontSize: '0.7rem', color: '#94a3b8', fontFamily: 'monospace' }}>
+                {lines.map((l, i) => (
+                  <div key={i} style={{ marginBottom: '0.1rem', color: l.includes('@') ? color : l.includes('static') ? '#3b82f6' : l.includes('return') ? WARN : '#94a3b8' }}>
+                    {l || '\u00a0'}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Action log */}
+      <div style={{ marginTop: '1rem', background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', maxHeight: '100px', overflowY: 'auto' }}>
+        <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.35rem' }}>Dispatched Actions</div>
+        {log.length === 0
+          ? <div style={{ color: '#334155', fontSize: '0.78rem' }}>// store.dispatch(new Action())...</div>
+          : log.map((a, i) => <div key={a.id} style={{ fontSize: '0.75rem', marginBottom: '0.1rem', color: i === 0 ? SUCCESS : '#475569' }}>▶ {a.type}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+` }} />

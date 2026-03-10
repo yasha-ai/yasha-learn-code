@@ -1,0 +1,355 @@
+---
+title: "22. Fastify: быстрая альтернатива"
+sidebar:
+  order: 22
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-fastify.png)
+
+**Fastify** — высокопроизводительный Node.js фреймворк. До 2x быстрее Express, встроенная валидация, плагины, TypeScript-friendly.
+
+## Почему Fastify?
+
+```
+Express           Fastify
+────────────────  ────────────────
+~15,000 req/s     ~30,000 req/s
+Нет валидации     JSON Schema встроен
+Нет TypeScript    TypeScript из коробки
+callback-based    async/await нативно
+middleware цепи   плагины (инкапсуляция)
+Огромная экосист. Растущая экосистема
+```
+
+## Быстрый старт
+
+```bash
+npm install fastify
+```
+
+```javascript
+const fastify = require('fastify');
+
+const app = fastify({
+  logger: true,  // встроенный логгер pino
+});
+
+// GET роут
+app.get('/', async (request, reply) => {
+  return { message: 'Привет от Fastify!' };
+  // return автоматически сериализует JSON
+});
+
+// POST с валидацией через JSON Schema
+app.post('/users', {
+  schema: {
+    body: {
+      type: 'object',
+      required: ['name', 'email'],
+      properties: {
+        name: { type: 'string', minLength: 2, maxLength: 50 },
+        email: { type: 'string', format: 'email' },
+        age: { type: 'integer', minimum: 0 },
+      },
+    },
+    response: {
+      201: {
+        type: 'object',
+        properties: {
+          id: { type: 'integer' },
+          name: { type: 'string' },
+          email: { type: 'string' },
+        },
+      },
+    },
+  },
+}, async (request, reply) => {
+  const { name, email, age } = request.body;
+  const user = { id: 1, name, email, age };
+  reply.status(201);
+  return user;
+});
+
+// Запуск
+app.listen({ port: 3000, host: '0.0.0.0' }, (err) => {
+  if (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+});
+```
+
+## Роутинг
+
+```javascript
+// Параметры URL
+app.get('/users/:id', async (request) => {
+  const { id } = request.params;
+  return { id };
+});
+
+// Query параметры
+app.get('/search', {
+  schema: {
+    querystring: {
+      type: 'object',
+      properties: {
+        q: { type: 'string' },
+        page: { type: 'integer', default: 1 },
+        limit: { type: 'integer', default: 10, maximum: 100 },
+      },
+      required: ['q'],
+    },
+  },
+}, async (request) => {
+  const { q, page, limit } = request.query;
+  return { query: q, page, limit, results: [] };
+});
+
+// Wildcard
+app.get('/files/*', async (request) => {
+  return { path: request.params['*'] };
+});
+```
+
+## Плагины — основа архитектуры
+
+```javascript
+// plugins/db.js — плагин для БД
+const fp = require('fastify-plugin');
+
+async function dbPlugin(fastify, opts) {
+  const db = await connectToDatabase(opts.url);
+  
+  // Декорируем — добавляем db ко всем запросам
+  fastify.decorate('db', db);
+
+  // Закрываем при выключении
+  fastify.addHook('onClose', async () => {
+    await db.disconnect();
+  });
+}
+
+module.exports = fp(dbPlugin);
+```
+
+```javascript
+// app.js — регистрация плагинов
+const app = fastify({ logger: true });
+
+// Плагины
+app.register(require('./plugins/db'), {
+  url: process.env.DATABASE_URL,
+});
+app.register(require('@fastify/cors'), {
+  origin: ['http://localhost:3000'],
+  credentials: true,
+});
+app.register(require('@fastify/helmet'));
+
+// Роуты
+app.register(require('./routes/users'), { prefix: '/api/users' });
+app.register(require('./routes/auth'), { prefix: '/api/auth' });
+```
+
+```javascript
+// routes/users.js — роуты как плагин
+async function userRoutes(fastify, opts) {
+  // fastify.db доступен через плагин
+  
+  fastify.get('/', async (request) => {
+    const users = await fastify.db.user.findMany();
+    return { data: users };
+  });
+
+  fastify.get('/:id', async (request, reply) => {
+    const user = await fastify.db.user.findUnique({
+      where: { id: parseInt(request.params.id) },
+    });
+    if (!user) {
+      reply.status(404);
+      return { error: 'Not found' };
+    }
+    return { data: user };
+  });
+
+  fastify.post('/', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['name', 'email'],
+        properties: {
+          name: { type: 'string' },
+          email: { type: 'string', format: 'email' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const user = await fastify.db.user.create({ data: request.body });
+    reply.status(201);
+    return { data: user };
+  });
+}
+
+module.exports = userRoutes;
+```
+
+## Хуки (Hooks)
+
+```javascript
+// Хуки — аналог middleware, но более структурированные
+
+// onRequest — первый, для авторизации
+app.addHook('onRequest', async (request, reply) => {
+  request.startTime = Date.now();
+});
+
+// preValidation — до валидации
+app.addHook('preValidation', async (request, reply) => {
+  // Проверяем токен
+  const token = request.headers.authorization?.slice(7);
+  if (!token) {
+    reply.status(401).send({ error: 'Unauthorized' });
+    return;
+  }
+  request.user = jwt.verify(token, secret);
+});
+
+// preHandler — после валидации, до обработчика
+app.addHook('preHandler', async (request, reply) => {
+  app.log.info({ userId: request.user?.id, url: request.url });
+});
+
+// onSend — перед отправкой ответа
+app.addHook('onSend', async (request, reply, payload) => {
+  // Можно модифицировать ответ
+  return payload;
+});
+
+// onResponse — после отправки ответа (для логирования)
+app.addHook('onResponse', async (request, reply) => {
+  const duration = Date.now() - request.startTime;
+  app.log.info(`${request.method} ${request.url} ${reply.statusCode} ${duration}ms`);
+});
+
+// onError — при ошибке
+app.setErrorHandler(async (error, request, reply) => {
+  app.log.error(error);
+  reply.status(error.statusCode || 500).send({
+    error: error.message,
+    statusCode: error.statusCode || 500,
+  });
+});
+```
+
+## Декораторы
+
+```javascript
+// Добавить свойство к request
+app.decorateRequest('user', null);
+
+// Добавить метод к reply
+app.decorateReply('success', function (data) {
+  this.status(200).send({ success: true, data });
+});
+
+app.decorateReply('fail', function (message, status = 400) {
+  this.status(status).send({ success: false, error: message });
+});
+
+// Использование
+app.get('/profile', async (request, reply) => {
+  if (!request.user) return reply.fail('Unauthorized', 401);
+  return reply.success(request.user);
+});
+```
+
+## Миграция с Express
+
+```javascript
+// Express → Fastify: основные отличия
+
+// Express:
+app.use(middleware);
+app.get('/path', (req, res) => { res.json(data); });
+
+// Fastify:
+app.register(plugin);
+app.addHook('onRequest', hook);
+app.get('/path', async (request, reply) => { return data; });
+
+// req.body → request.body
+// req.params → request.params
+// req.query → request.query
+// res.json() → return data (или reply.send(data))
+// res.status(201).json() → reply.status(201); return data;
+// app.use(cors()) → app.register(require('@fastify/cors'))
+```
+
+## Практика
+
+1. Создай Fastify сервер с JSON Schema валидацией для POST /users
+2. Реализуй плагин для подключения к БД
+3. Структурируй роуты через `app.register(routes, { prefix: '/api' })`
+4. Добавь хук `onRequest` для логирования
+5. Создай кастомный error handler через `setErrorHandler`
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+const routes = {
+  "GET /api/users": { status: 200, body: [{ id: 1, name: "Alice" }], time: 0.8 },
+  "GET /api/users/1": { status: 200, body: { id: 1, name: "Alice", email: "alice@mail.com" }, time: 0.5 },
+  "POST /api/users": { status: 201, body: { id: 2, name: "Bob" }, time: 1.2 },
+  "GET /api/health": { status: 200, body: { status: "ok", uptime: 12345 }, time: 0.1 },
+};
+
+export default function App() {
+  const [log, setLog] = useState([]);
+
+  const send = (route) => {
+    const res = routes[route] || { status: 404, body: { error: "Not Found" }, time: 0.3 };
+    setLog(prev => [...prev.slice(-5), {
+      route, ...res,
+      body: JSON.stringify(res.body, null, 2),
+      ts: new Date().toLocaleTimeString(),
+    }]);
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Fastify API</h3>
+      <p style={{ color: "#94a3b8", fontSize: 12 }}>Fastify — до 2x быстрее Express, JSON Schema валидация</p>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        {Object.keys(routes).map(r => (
+          <button key={r} onClick={() => send(r)}
+            style={{ padding: "4px 8px", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>
+            {r}
+          </button>
+        ))}
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 80 }}>
+        {log.map((l, i) => (
+          <div key={i} style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 12 }}>
+              <span style={{ color: "#475569" }}>{l.ts}</span>{" "}
+              <span style={{ color: "#94a3b8" }}>{l.route}</span>{" "}
+              <span style={{ color: l.status < 300 ? "#10b981" : "#ef4444" }}>{l.status}</span>{" "}
+              <span style={{ color: "#f59e0b" }}>{l.time}ms</span>
+            </div>
+            <pre style={{ color: "#e2e8f0", fontSize: 11, margin: "2px 0 0" }}>{l.body}</pre>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

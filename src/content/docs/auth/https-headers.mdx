@@ -1,0 +1,392 @@
+---
+title: "14. HTTPS и Security Headers"
+sidebar:
+  order: 13
+---
+import { Playground } from '@components/Playground'
+
+## HTTPS / TLS
+
+**HTTPS** — HTTP поверх TLS (Transport Layer Security). Шифрует трафик между браузером и сервером.
+
+**Без HTTPS:**
+- Пароли, токены, куки — всё видно в сети
+- Провайдер может видеть и изменять трафик
+- MITM атаки становятся тривиальными
+- Браузеры помечают сайт как "Небезопасный"
+
+### Получение SSL сертификата
+
+**Let's Encrypt (бесплатно):**
+
+```bash
+# Certbot на Ubuntu/Debian
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d example.com -d www.example.com
+
+# Автоматическое обновление (добавляется автоматически)
+sudo systemctl status certbot.timer
+```
+
+**Cloudflare (CDN + SSL):**
+- Настрой DNS на Cloudflare
+- Включи Proxy (оранжевая иконка)
+- SSL/TLS → Full (strict) — шифрование end-to-end
+
+### Принудительный HTTPS
+
+```nginx
+# Nginx — redirect HTTP → HTTPS
+server {
+    listen 80;
+    server_name example.com www.example.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name example.com www.example.com;
+    
+    ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+    
+    # Современные настройки TLS
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+    ssl_prefer_server_ciphers off;
+    
+    # Session resumption
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+    
+    # OCSP Stapling
+    ssl_stapling on;
+    ssl_stapling_verify on;
+}
+```
+
+## Security Headers
+
+HTTP заголовки, инструктирующие браузер о политиках безопасности.
+
+### Strict-Transport-Security (HSTS)
+
+Браузер всегда использует HTTPS для сайта:
+
+```
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+```
+
+```javascript
+// Express
+app.use((req, res, next) => {
+  res.setHeader(
+    'Strict-Transport-Security',
+    'max-age=31536000; includeSubDomains; preload'
+  );
+  next();
+});
+```
+
+- `max-age=31536000` — 1 год
+- `includeSubDomains` — включая поддомены
+- `preload` — включение в браузерный preload list
+
+**Осторожно**: после включения HSTS невозможно вернуться на HTTP без долгого ожидания!
+
+### Content-Security-Policy (CSP)
+
+Уже рассмотрели в уроке по XSS. Краткое напоминание:
+
+```
+Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-{random}'; style-src 'self' https://fonts.googleapis.com
+```
+
+### X-Content-Type-Options
+
+Запрещает браузеру угадывать MIME тип:
+
+```
+X-Content-Type-Options: nosniff
+```
+
+Без этого заголовка браузер может выполнить файл как скрипт, даже если Content-Type: text/plain.
+
+### X-Frame-Options
+
+Запрещает загрузку сайта в iframe (защита от Clickjacking):
+
+```
+X-Frame-Options: DENY              # никогда не показывать в iframe
+X-Frame-Options: SAMEORIGIN        # только в iframe с того же домена
+```
+
+Современная альтернатива через CSP:
+```
+Content-Security-Policy: frame-ancestors 'none'
+```
+
+### Referrer-Policy
+
+Контролирует, какой Referer отправляется при переходах:
+
+```
+Referrer-Policy: no-referrer                    # никогда не отправлять
+Referrer-Policy: same-origin                    # только внутри сайта
+Referrer-Policy: strict-origin-when-cross-origin # (recommended)
+```
+
+### Permissions-Policy
+
+Ограничивает доступ к браузерным API:
+
+```
+Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+```
+
+### Cross-Origin Headers (CORP/COEP/COOP)
+
+Для современных изолированных окружений:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+Cross-Origin-Resource-Policy: same-origin
+```
+
+Нужны для SharedArrayBuffer и high-resolution timers.
+
+## Полный набор Security Headers
+
+### Express с helmet
+
+```bash
+npm install helmet
+```
+
+```javascript
+import helmet from 'helmet';
+
+app.use(helmet({
+  // Content-Security-Policy
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'"],
+      frameSrc: ["'none'"],
+      objectSrc: ["'none'"],
+    },
+  },
+  
+  // HSTS
+  strictTransportSecurity: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  },
+  
+  crossOriginEmbedderPolicy: true,
+  crossOriginOpenerPolicy: { policy: 'same-origin' },
+  crossOriginResourcePolicy: { policy: 'same-origin' },
+  
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+}));
+```
+
+### Next.js Security Headers
+
+```javascript
+// next.config.js
+const securityHeaders = [
+  {
+    key: 'X-DNS-Prefetch-Control',
+    value: 'on',
+  },
+  {
+    key: 'Strict-Transport-Security',
+    value: 'max-age=63072000; includeSubDomains; preload',
+  },
+  {
+    key: 'X-Frame-Options',
+    value: 'DENY',
+  },
+  {
+    key: 'X-Content-Type-Options',
+    value: 'nosniff',
+  },
+  {
+    key: 'X-XSS-Protection',
+    value: '1; mode=block',
+  },
+  {
+    key: 'Referrer-Policy',
+    value: 'strict-origin-when-cross-origin',
+  },
+  {
+    key: 'Permissions-Policy',
+    value: 'camera=(), microphone=(), geolocation=(), browsing-topics=()',
+  },
+  {
+    key: 'Content-Security-Policy',
+    value: [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-eval' 'unsafe-inline'", // unsafe нужен для Next.js
+      "style-src 'self' 'unsafe-inline'",
+      "img-src * blob: data:",
+      "media-src 'none'",
+      "connect-src *",
+      "font-src 'self'",
+    ].join('; '),
+  },
+];
+
+module.exports = {
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: securityHeaders,
+      },
+    ];
+  },
+};
+```
+
+## CORS (Cross-Origin Resource Sharing)
+
+Контролирует, какие сайты могут обращаться к твоему API:
+
+```javascript
+import cors from 'cors';
+
+// Разрешить конкретные домены
+app.use(cors({
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      'https://myapp.com',
+      'https://www.myapp.com',
+      process.env.NODE_ENV === 'development' ? 'http://localhost:3000' : null,
+    ].filter(Boolean);
+    
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,           // разрешить куки
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+  maxAge: 86400,               // кешировать preflight 24 часа
+}));
+
+// Не делай этого!
+app.use(cors({ origin: '*', credentials: true })); // credentials не работает с *
+app.use(cors()); // разрешает все — плохо для production API
+```
+
+## Проверка Security Headers
+
+### Онлайн инструменты
+
+- **[securityheaders.com](https://securityheaders.com)** — оценка заголовков (от A+ до F)
+- **[observatory.mozilla.org](https://observatory.mozilla.org)** — Mozilla Observatory
+- **[ssllabs.com/ssltest](https://ssllabs.com/ssltest)** — SSL конфигурация
+
+### Через curl
+
+```bash
+curl -I https://example.com | grep -E "(Strict|Content-Security|X-Frame|X-Content)"
+```
+
+### В Browser DevTools
+
+Network → выбери запрос → Response Headers
+
+## Итог: полный Security Headers чеклист
+
+| Заголовок | Приоритет | Что делает |
+|-----------|-----------|------------|
+| HSTS | Критичный | Принудительный HTTPS |
+| Content-Security-Policy | Критичный | Защита от XSS |
+| X-Content-Type-Options | Высокий | Запрет MIME sniffing |
+| X-Frame-Options | Высокий | Защита от Clickjacking |
+| Referrer-Policy | Средний | Контроль Referer |
+| Permissions-Policy | Средний | Ограничение API |
+| CORS | Критичный для API | Контроль cross-origin |
+
+## Практические задания
+
+1. Установи `helmet` в Express приложение и настрой все заголовки
+2. Проверь своё приложение на https://securityheaders.com
+3. Настрой Let's Encrypt через certbot для домена
+4. Добавь Security Headers в next.config.js
+
+## Попробуй: Проверка Security Headers
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    '/App.js': `import { useState } from 'react';
+
+const headers = [
+  { name: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains; preload', priority: 'critical', desc: 'Принудительный HTTPS' },
+  { name: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self'", priority: 'critical', desc: 'Защита от XSS' },
+  { name: 'X-Content-Type-Options', value: 'nosniff', priority: 'high', desc: 'Запрет MIME sniffing' },
+  { name: 'X-Frame-Options', value: 'DENY', priority: 'high', desc: 'Защита от Clickjacking' },
+  { name: 'Referrer-Policy', value: 'strict-origin-when-cross-origin', priority: 'medium', desc: 'Контроль Referer' },
+  { name: 'Permissions-Policy', value: 'camera=(), microphone=()', priority: 'medium', desc: 'Ограничение API' },
+];
+
+const colors = { critical: '#ef4444', high: '#f59e0b', medium: '#3b82f6' };
+
+export default function App() {
+  const [enabled, setEnabled] = useState({});
+  const toggle = (name) => setEnabled(prev => ({ ...prev, [name]: !prev[name] }));
+
+  const score = Object.values(enabled).filter(Boolean).length;
+  const grade = score >= 6 ? 'A+' : score >= 5 ? 'A' : score >= 4 ? 'B' : score >= 3 ? 'C' : score >= 2 ? 'D' : 'F';
+  const gradeColor = score >= 5 ? '#22c55e' : score >= 3 ? '#f59e0b' : '#ef4444';
+
+  return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff' }}>
+      <h2>Security Headers Checker</h2>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+        <div style={{ width: 60, height: 60, borderRadius: '50%', background: gradeColor + '22', border: '3px solid ' + gradeColor, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, fontWeight: 700, color: gradeColor }}>
+          {grade}
+        </div>
+        <div>
+          <div style={{ color: '#94a3b8', fontSize: 13 }}>Включи заголовки для повышения оценки</div>
+          <div style={{ fontSize: 13 }}>{score}/{headers.length} заголовков активно</div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {headers.map(h => (
+          <div key={h.name} onClick={() => toggle(h.name)} style={{
+            padding: '10px 14px', borderRadius: 8, cursor: 'pointer',
+            background: enabled[h.name] ? '#22c55e11' : '#0f0f23',
+            border: '1px solid ' + (enabled[h.name] ? '#22c55e44' : '#ffffff1a'),
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                <span style={{ color: enabled[h.name] ? '#22c55e' : '#94a3b8', marginRight: 6 }}>{enabled[h.name] ? '✓' : '✗'}</span>
+                {h.name}
+                <span style={{ fontSize: 10, marginLeft: 8, color: colors[h.priority], textTransform: 'uppercase' }}>{h.priority}</span>
+              </div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{h.desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

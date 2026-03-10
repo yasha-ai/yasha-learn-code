@@ -1,0 +1,287 @@
+---
+title: "13. Observer"
+sidebar:
+  order: 13
+---
+import { Playground } from '@components/Playground'
+
+## Design Patterns. Урок: Observer (Наблюдатель)
+
+**Observer** — поведенческий паттерн, создающий механизм подписки, который позволяет одним объектам следить за событиями в других.
+
+Это основа событийного программирования. DOM events, RxJS, Redux, Node.js EventEmitter — всё это Observer в разных формах.
+
+---
+
+### Принцип работы
+
+Есть **Subject** (источник событий) и **Observers** (подписчики). Subject уведомляет всех подписчиков при изменениях.
+
+```typescript
+// Интерфейсы
+interface Observer<T> {
+  update(data: T): void;
+}
+
+interface Subject<T> {
+  subscribe(observer: Observer<T>): void;
+  unsubscribe(observer: Observer<T>): void;
+  notify(data: T): void;
+}
+
+// Базовая реализация Subject
+class EventEmitter<T> implements Subject<T> {
+  private observers: Set<Observer<T>> = new Set();
+
+  subscribe(observer: Observer<T>): void {
+    this.observers.add(observer);
+  }
+
+  unsubscribe(observer: Observer<T>): void {
+    this.observers.delete(observer);
+  }
+
+  notify(data: T): void {
+    this.observers.forEach(observer => observer.update(data));
+  }
+}
+
+// Пример: корзина покупок
+interface CartEvent {
+  type: 'item_added' | 'item_removed' | 'cart_cleared';
+  cartId: string;
+  item?: CartItem;
+}
+
+class ShoppingCart extends EventEmitter<CartEvent> {
+  private items: CartItem[] = [];
+  
+  constructor(private readonly cartId: string) {
+    super();
+  }
+
+  addItem(item: CartItem): void {
+    this.items.push(item);
+    this.notify({ type: 'item_added', cartId: this.cartId, item });
+  }
+
+  removeItem(itemId: string): void {
+    const item = this.items.find(i => i.id === itemId);
+    this.items = this.items.filter(i => i.id !== itemId);
+    this.notify({ type: 'item_removed', cartId: this.cartId, item });
+  }
+
+  clear(): void {
+    this.items = [];
+    this.notify({ type: 'cart_cleared', cartId: this.cartId });
+  }
+}
+
+// Наблюдатели реагируют на события
+class AnalyticsTracker implements Observer<CartEvent> {
+  update(event: CartEvent): void {
+    if (event.type === 'item_added') {
+      analytics.track('product_added_to_cart', {
+        product_id: event.item?.id,
+        cart_id: event.cartId,
+      });
+    }
+  }
+}
+
+class StockChecker implements Observer<CartEvent> {
+  update(event: CartEvent): void {
+    if (event.type === 'item_added' && event.item) {
+      inventoryService.reserveItem(event.item.id);
+    }
+    if (event.type === 'item_removed' && event.item) {
+      inventoryService.releaseItem(event.item.id);
+    }
+  }
+}
+
+class CartPersister implements Observer<CartEvent> {
+  update(event: CartEvent): void {
+    cartRepository.saveEvent(event);
+  }
+}
+
+// Подключаем наблюдателей
+const cart = new ShoppingCart('cart-123');
+cart.subscribe(new AnalyticsTracker());
+cart.subscribe(new StockChecker());
+cart.subscribe(new CartPersister());
+
+cart.addItem({ id: 'prod-1', name: 'Laptop', price: 999 });
+// Все три наблюдателя получат уведомление
+```
+
+---
+
+### Функциональный Observer: Event Emitter
+
+```typescript
+// Типизированный Event Emitter
+type EventMap = Record<string, any>;
+type EventKey<T extends EventMap> = string & keyof T;
+type EventCallback<T extends EventMap, K extends EventKey<T>> = (payload: T[K]) => void;
+
+class TypedEventEmitter<T extends EventMap> {
+  private handlers: Partial<{ [K in EventKey<T>]: Set<EventCallback<T, K>> }> = {};
+
+  on<K extends EventKey<T>>(event: K, handler: EventCallback<T, K>): () => void {
+    if (!this.handlers[event]) {
+      this.handlers[event] = new Set();
+    }
+    (this.handlers[event] as Set<EventCallback<T, K>>).add(handler);
+    
+    // Возвращаем функцию отписки
+    return () => this.off(event, handler);
+  }
+
+  off<K extends EventKey<T>>(event: K, handler: EventCallback<T, K>): void {
+    this.handlers[event]?.delete(handler as any);
+  }
+
+  emit<K extends EventKey<T>>(event: K, payload: T[K]): void {
+    this.handlers[event]?.forEach(handler => handler(payload));
+  }
+}
+
+// Использование с типами
+interface AppEvents {
+  'user:login': { userId: string; timestamp: Date };
+  'user:logout': { userId: string };
+  'order:created': { orderId: string; total: number };
+}
+
+const eventBus = new TypedEventEmitter<AppEvents>();
+
+// TypeScript подскажет типы!
+const unsubscribe = eventBus.on('user:login', ({ userId, timestamp }) => {
+  console.log(`User ${userId} logged in at ${timestamp}`);
+});
+
+eventBus.emit('user:login', { userId: 'u-123', timestamp: new Date() });
+
+// Отписка
+unsubscribe();
+```
+
+---
+
+### Observer в React (useState, useContext)
+
+React — это Observer паттерн. Компоненты «наблюдают» за состоянием:
+
+```typescript
+// Кастомный Observable Store
+class Store<T> {
+  private state: T;
+  private listeners = new Set<(state: T) => void>();
+
+  constructor(initialState: T) {
+    this.state = initialState;
+  }
+
+  getState(): T {
+    return this.state;
+  }
+
+  setState(updater: (prev: T) => T): void {
+    this.state = updater(this.state);
+    this.listeners.forEach(listener => listener(this.state));
+  }
+
+  subscribe(listener: (state: T) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+}
+
+// React hook для подписки на Store
+function useStore<T>(store: Store<T>): T {
+  const [state, setState] = useState(store.getState());
+  
+  useEffect(() => {
+    const unsubscribe = store.subscribe(setState);
+    return unsubscribe; // Автоматическая отписка при unmount
+  }, [store]);
+  
+  return state;
+}
+```
+
+---
+
+### Практические задания
+
+1. Реализуй `FormObserver` — наблюдатель за изменениями полей формы, который обновляет счётчик заполненных полей.
+
+2. Создай `NetworkStatusObserver` — следит за состоянием сети (online/offline) и уведомляет подписчиков.
+
+3. Напиши Observer для real-time валидации формы — каждое поле подписано на события изменений других полей.
+
+4. В чём разница между Observer и EventEmitter на практике?
+
+5. Изучи как RxJS расширяет концепцию Observer: что такое `Observable`, `Subject`, `BehaviorSubject`?
+
+---
+
+### Playground: Observer в действии
+
+<Playground client:visible template="vanilla" files={{ '/index.js': `// Observer: подписка на события
+
+class EventEmitter {
+  constructor() { this.listeners = new Map(); }
+
+  on(event, fn) {
+    if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+    this.listeners.get(event).add(fn);
+    return () => this.listeners.get(event).delete(fn); // unsubscribe
+  }
+
+  emit(event, data) {
+    const fns = this.listeners.get(event);
+    if (fns) fns.forEach(fn => fn(data));
+  }
+}
+
+// Магазин с наблюдателями
+class Store extends EventEmitter {
+  constructor() { super(); this.items = []; }
+
+  addItem(item) {
+    this.items.push(item);
+    this.emit("item:added", item);
+  }
+
+  removeItem(name) {
+    this.items = this.items.filter(i => i.name !== name);
+    this.emit("item:removed", { name });
+  }
+}
+
+const store = new Store();
+
+// Подписчики
+store.on("item:added", (item) =>
+  console.log("[Analytics] Added:", item.name, "$" + item.price)
+);
+
+store.on("item:added", (item) =>
+  console.log("[Stock] Reserve:", item.name)
+);
+
+const unsub = store.on("item:removed", ({ name }) =>
+  console.log("[Stock] Release:", name)
+);
+
+store.addItem({ name: "Laptop", price: 999 });
+store.addItem({ name: "Mouse", price: 29 });
+store.removeItem("Mouse");
+
+unsub(); // Отписались от item:removed
+store.removeItem("Laptop"); // Stock не получит уведомление
+console.log("Cart:", store.items);
+` }} />

@@ -1,0 +1,410 @@
+---
+title: "8. Push-уведомления"
+sidebar:
+  order: 8
+---
+
+import { Playground } from "@components/Playground"
+
+Уведомления в реальном времени — ключевая фича любого современного приложения. Разберём несколько подходов.
+
+## Варианты реализации
+
+```
+1. In-App уведомления (Socket.io/SSE)
+   → Пользователь онлайн на сайте
+   → Моментально через WebSocket
+
+2. Web Push Notifications (Push API + Service Worker)
+   → Пользователь оффлайн или на другой вкладке
+   → Нативные уведомления ОС/браузера
+
+3. Email/SMS уведомления
+   → Для важных событий, когда пользователь давно оффлайн
+```
+
+## 1. In-App уведомления через Socket.io
+
+Простейший вариант — отправить событие через WebSocket:
+
+```javascript
+// server.js
+const userSockets = new Map(); // userId → Set<socketId>
+
+io.on('connection', (socket) => {
+  const userId = socket.data.userId;
+
+  // Регистрируем сокет пользователя
+  if (!userSockets.has(userId)) {
+    userSockets.set(userId, new Set());
+  }
+  userSockets.get(userId).add(socket.id);
+
+  socket.on('disconnect', () => {
+    userSockets.get(userId)?.delete(socket.id);
+    if (userSockets.get(userId)?.size === 0) {
+      userSockets.delete(userId);
+    }
+  });
+});
+
+// Отправить уведомление пользователю
+async function notifyUser(userId, notification) {
+  const socketIds = userSockets.get(userId);
+  
+  // Сохранить в БД (для пропущенных уведомлений)
+  const saved = await db.notification.create({
+    data: {
+      userId,
+      type: notification.type,
+      title: notification.title,
+      body: notification.body,
+      data: JSON.stringify(notification.data || {}),
+      read: false,
+    },
+  });
+
+  if (socketIds?.size > 0) {
+    // Пользователь онлайн — отправить в реальном времени
+    socketIds.forEach((socketId) => {
+      io.to(socketId).emit('notification', {
+        id: saved.id,
+        ...notification,
+        timestamp: saved.createdAt,
+      });
+    });
+  }
+  // Если оффлайн — уведомление сохранено в БД для получения при входе
+}
+
+// При подключении — отправить непрочитанные
+io.on('connection', async (socket) => {
+  const { userId } = socket.data;
+
+  const unread = await db.notification.findMany({
+    where: { userId, read: false },
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+  });
+
+  socket.emit('unread-notifications', unread);
+});
+
+// API для отметки прочитанным
+app.patch('/api/notifications/:id/read', async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+  await db.notification.update({
+    where: { id, userId },
+    data: { read: true },
+  });
+
+  // Синхронизировать статус по другим вкладкам
+  userSockets.get(userId)?.forEach((socketId) => {
+    io.to(socketId).emit('notification-read', { id });
+  });
+
+  res.json({ success: true });
+});
+```
+
+## 2. Web Push Notifications
+
+Уведомления даже когда браузер закрыт:
+
+### Установка
+
+```bash
+npm install web-push
+npx web-push generate-vapid-keys
+```
+
+### Сервер
+
+```javascript
+const webpush = require('web-push');
+
+// VAPID ключи (сгенерировать один раз, хранить в .env)
+webpush.setVapidDetails(
+  'mailto:your@email.com',
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY
+);
+
+// Сохранить подписку пользователя
+app.post('/api/push/subscribe', express.json(), async (req, res) => {
+  const subscription = req.body;
+  const userId = req.user.id;
+
+  await db.pushSubscription.upsert({
+    where: { userId },
+    create: { userId, subscription: JSON.stringify(subscription) },
+    update: { subscription: JSON.stringify(subscription) },
+  });
+
+  res.json({ success: true });
+});
+
+// Отправить push-уведомление
+async function sendPushNotification(userId, notification) {
+  const subs = await db.pushSubscription.findMany({
+    where: { userId },
+  });
+
+  const payload = JSON.stringify({
+    title: notification.title,
+    body: notification.body,
+    icon: '/icon-192x192.png',
+    badge: '/badge-72x72.png',
+    data: { url: notification.url },
+  });
+
+  const results = await Promise.allSettled(
+    subs.map(({ subscription }) =>
+      webpush.sendNotification(JSON.parse(subscription), payload)
+    )
+  );
+
+  // Удалить невалидные подписки
+  results.forEach((result, i) => {
+    if (result.status === 'rejected' && result.reason.statusCode === 410) {
+      db.pushSubscription.delete({ where: { id: subs[i].id } });
+    }
+  });
+}
+```
+
+### Клиент — Service Worker
+
+```javascript
+// public/sw.js
+self.addEventListener('push', (event) => {
+  const data = event.data.json();
+  
+  const options = {
+    body: data.body,
+    icon: data.icon,
+    badge: data.badge,
+    data: data.data,
+    actions: [
+      { action: 'open', title: 'Открыть' },
+      { action: 'dismiss', title: 'Закрыть' },
+    ],
+  };
+
+  event.waitUntil(
+    self.registration.showNotification(data.title, options)
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  
+  if (event.action === 'dismiss') return;
+
+  const url = event.notification.data?.url || '/';
+  
+  event.waitUntil(
+    clients.matchAll({ type: 'window' }).then((clientList) => {
+      // Найти открытую вкладку
+      const existingWindow = clientList.find((client) =>
+        client.url === url && 'focus' in client
+      );
+      
+      if (existingWindow) {
+        return existingWindow.focus();
+      }
+      
+      return clients.openWindow(url);
+    })
+  );
+});
+```
+
+### Клиент — регистрация
+
+```javascript
+// Регистрация Service Worker и подписка на push
+async function subscribeToPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    console.warn('Push уведомления не поддерживаются');
+    return;
+  }
+
+  // Запросить разрешение
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    console.warn('Пользователь отклонил уведомления');
+    return;
+  }
+
+  // Зарегистрировать Service Worker
+  const registration = await navigator.serviceWorker.register('/sw.js');
+
+  // Подписаться на push
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+  });
+
+  // Отправить подписку на сервер
+  await fetch('/api/push/subscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(subscription),
+  });
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
+}
+```
+
+## Полная система уведомлений
+
+```javascript
+// notification.service.js
+class NotificationService {
+  constructor(io) {
+    this.io = io;
+    this.userSockets = new Map();
+  }
+
+  // Зарегистрировать сокет пользователя
+  register(userId, socketId) {
+    if (!this.userSockets.has(userId)) {
+      this.userSockets.set(userId, new Set());
+    }
+    this.userSockets.get(userId).add(socketId);
+  }
+
+  // Отписать сокет
+  unregister(userId, socketId) {
+    this.userSockets.get(userId)?.delete(socketId);
+  }
+
+  // Отправить уведомление
+  async send(userId, { type, title, body, data = {}, url = '/' }) {
+    // Сохранить в БД
+    const notification = await db.notification.create({
+      data: { userId, type, title, body, data: JSON.stringify(data), read: false },
+    });
+
+    const isOnline = (this.userSockets.get(userId)?.size || 0) > 0;
+
+    if (isOnline) {
+      // In-app уведомление
+      this.userSockets.get(userId).forEach((socketId) => {
+        this.io.to(socketId).emit('notification', notification);
+      });
+    } else {
+      // Web Push (если подписан)
+      await sendPushNotification(userId, { title, body, url });
+    }
+
+    return notification;
+  }
+
+  // Отправить всем
+  async broadcast({ type, title, body }) {
+    const notification = { type, title, body, timestamp: new Date() };
+    this.io.emit('global-notification', notification);
+    
+    // Пользователям оффлайн — push
+    const allUsers = await db.user.findMany({ select: { id: true } });
+    await Promise.all(
+      allUsers.map(({ id }) => 
+        !this.userSockets.has(id) ? sendPushNotification(id, { title, body }) : null
+      )
+    );
+  }
+}
+```
+
+## Задания
+
+1. Реализуй систему с двумя каналами: Socket.io (если онлайн) → Web Push (если оффлайн)
+2. Добавь категории уведомлений и настройки (какие хочу, какие нет)
+3. Сделай колокольчик с числом непрочитанных уведомлений в React
+4. Реализуй мягкий сброс "всё прочитано"
+
+## Итог
+
+In-app уведомления через Socket.io — просто и быстро. Web Push — для оффлайн-пользователей. Комбинируй оба подхода для полного покрытия. В следующем уроке — сравнение всех технологий real-time.
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState, useEffect, useRef } from "react";
+
+export default function App() {
+  const [notifications, setNotifications] = useState([]);
+  const [permission, setPermission] = useState("default");
+  const [connected, setConnected] = useState(false);
+  const intervalRef = useRef(null);
+
+  const types = [
+    { icon: "📩", title: "Новое сообщение", body: "Алиса: Привет, как проект?" },
+    { icon: "🛒", title: "Заказ отправлен", body: "Заказ #4521 в пути" },
+    { icon: "⚡", title: "Деплой завершён", body: "v2.1.0 успешно развёрнут" },
+    { icon: "👤", title: "Новый подписчик", body: "+1 подписчик на канале" },
+    { icon: "🔔", title: "Напоминание", body: "Встреча через 15 минут" },
+  ];
+
+  const requestPermission = () => setPermission("granted");
+
+  const startPush = () => {
+    setConnected(true);
+    intervalRef.current = setInterval(() => {
+      const t = types[Math.floor(Math.random() * types.length)];
+      setNotifications(prev => [{ ...t, time: new Date().toLocaleTimeString(), id: Date.now() }, ...prev.slice(0, 4)]);
+    }, 2500);
+  };
+
+  const stopPush = () => {
+    clearInterval(intervalRef.current);
+    setConnected(false);
+  };
+
+  useEffect(() => () => clearInterval(intervalRef.current), []);
+
+  return (
+    <div style={{ fontFamily: "sans-serif", padding: 16 }}>
+      <h3>Push-уведомления</h3>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <button onClick={requestPermission} disabled={permission === "granted"}
+          style={{ padding: "6px 12px", background: permission === "granted" ? "#334155" : "#f59e0b", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>
+          {permission === "granted" ? "✓ Разрешено" : "Запросить разрешение"}
+        </button>
+        {permission === "granted" && (
+          <button onClick={connected ? stopPush : startPush}
+            style={{ padding: "6px 12px", background: connected ? "#ef4444" : "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>
+            {connected ? "Отключить" : "Подключить push"}
+          </button>
+        )}
+      </div>
+      <div style={{ minHeight: 120 }}>
+        {notifications.map(n => (
+          <div key={n.id} style={{ display: "flex", gap: 10, padding: "8px 12px", background: "#1e293b", borderRadius: 6, marginBottom: 6, alignItems: "center" }}>
+            <span style={{ fontSize: 20 }}>{n.icon}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: "#e2e8f0", fontSize: 13, fontWeight: 600 }}>{n.title}</div>
+              <div style={{ color: "#94a3b8", fontSize: 12 }}>{n.body}</div>
+            </div>
+            <span style={{ color: "#475569", fontSize: 11 }}>{n.time}</span>
+          </div>
+        ))}
+        {notifications.length === 0 && <div style={{ color: "#475569", fontSize: 13 }}>Нет уведомлений</div>}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,533 @@
+---
+title: "40. NgRx: Effects"
+sidebar:
+  order: 42
+---
+import { Playground } from '@components/Playground'
+
+
+## ⚡ NgRx Effects — Побочные эффекты
+
+Effects — это место для всего, что нельзя делать в редьюсере: HTTP-запросы, работа с localStorage, навигация, аналитика. Effects слушают поток actions и могут dispatch-ить новые actions в ответ. Это сердце асинхронной логики в NgRx 🔌
+
+---
+
+## Установка
+
+```bash
+npm install @ngrx/effects
+```
+
+---
+
+## createEffect() — создание эффекта
+
+```typescript
+// store/users/users.effects.ts
+import { Injectable } from '@angular/core';
+import { Actions, createEffect, ofType } from '@ngrx/effects';
+import { inject } from '@angular/core';
+import { switchMap, map, catchError, tap, exhaustMap } from 'rxjs/operators';
+import { of, EMPTY } from 'rxjs';
+import * as UsersActions from './users.actions';
+import { UserService } from '../../services/user.service';
+import { Router } from '@angular/router';
+
+@Injectable()
+export class UsersEffects {
+  private actions$ = inject(Actions);
+  private userService = inject(UserService);
+  private router = inject(Router);
+
+  // Загрузка пользователей
+  loadUsers$ = createEffect(() =>
+    this.actions$.pipe(
+      ofType(UsersActions.loadUsers), // Фильтруем только нужный action
+      switchMap(() =>                  // switchMap отменяет предыдущий запрос
+        this.userService.getAll().pipe(
+          map(users => UsersActions.loadUsersSuccess({ users })),
+          catchError(error =>
+            of(UsersActions.loadUsersFailure({ error: error.message }))
+          )
+        )
+      )
+    )
+  );
+
+  // Создание пользователя
+  createUser$ = createEffect(() =>
+    this.actions$.pipe(
+      ofType(UsersActions.createUser),
+      exhaustMap(({ user }) =>  // exhaustMap игнорирует новые запросы пока текущий не завершён
+        this.userService.create(user).pipe(
+          map(created => UsersActions.createUserSuccess({ user: created })),
+          catchError(error =>
+            of(UsersActions.createUserFailure({ error: error.message }))
+          )
+        )
+      )
+    )
+  );
+
+  // Удаление пользователя
+  deleteUser$ = createEffect(() =>
+    this.actions$.pipe(
+      ofType(UsersActions.deleteUser),
+      switchMap(({ id }) =>
+        this.userService.delete(id).pipe(
+          map(() => UsersActions.deleteUserSuccess({ id })),
+          catchError(error =>
+            of(UsersActions.deleteUserFailure({ error: error.message }))
+          )
+        )
+      )
+    )
+  );
+}
+```
+
+---
+
+## Actions и ofType()
+
+`ofType()` — оператор-фильтр, который пропускает только указанные actions:
+
+```typescript
+// Один тип
+ofType(loadUsers)
+
+// Несколько типов
+ofType(loginSuccess, loginFromCache)
+
+// Type narrowing — TypeScript понимает тип payload
+this.actions$.pipe(
+  ofType(UsersActions.createUser),
+  // Здесь action автоматически типизирован как { user: UserCreateDto }
+  switchMap(({ user }) => ...)
+)
+```
+
+---
+
+## Операторы маппинга в Effects
+
+Выбор оператора критически важен:
+
+```typescript
+// switchMap — отменяет предыдущий запрос
+// ✅ Поиск, загрузка данных при смене фильтра
+loadUsers$ = createEffect(() =>
+  this.actions$.pipe(
+    ofType(loadUsers),
+    switchMap(() => this.service.getAll())
+  )
+);
+
+// concatMap — очередь, не отменяет предыдущий
+// ✅ Операции, которые ДОЛЖНЫ выполниться по порядку
+saveItems$ = createEffect(() =>
+  this.actions$.pipe(
+    ofType(saveItem),
+    concatMap(({ item }) => this.service.save(item))
+  )
+);
+
+// exhaustMap — игнорирует новые пока идёт текущий
+// ✅ Логин (не дублировать запросы)
+login$ = createEffect(() =>
+  this.actions$.pipe(
+    ofType(login),
+    exhaustMap(({ credentials }) => this.authService.login(credentials))
+  )
+);
+
+// mergeMap — параллельно, все запросы
+// ✅ Независимые операции (загрузка файлов)
+uploadFile$ = createEffect(() =>
+  this.actions$.pipe(
+    ofType(uploadFile),
+    mergeMap(({ file }) => this.service.upload(file))
+  )
+);
+```
+
+---
+
+## Non-dispatching Effects
+
+Иногда эффект не должен dispatch-ить новый action (навигация, аналитика, localStorage):
+
+```typescript
+// Навигация после успешного логина
+navigateAfterLogin$ = createEffect(() =>
+  this.actions$.pipe(
+    ofType(loginSuccess),
+    tap(() => this.router.navigate(['/dashboard']))
+  ),
+  { dispatch: false } // ← важно!
+);
+
+// Сохранение в localStorage
+saveToStorage$ = createEffect(() =>
+  this.actions$.pipe(
+    ofType(setTheme, setLanguage),
+    tap(action => {
+      localStorage.setItem('app_settings', JSON.stringify(action));
+    })
+  ),
+  { dispatch: false }
+);
+
+// Аналитика
+trackPageView$ = createEffect(() =>
+  this.router.events.pipe(
+    filter(event => event instanceof NavigationEnd),
+    tap(event => {
+      analytics.track('page_view', { url: (event as NavigationEnd).url });
+    })
+  ),
+  { dispatch: false }
+);
+```
+
+---
+
+## EMPTY — завершение потока без action
+
+```typescript
+import { EMPTY } from 'rxjs';
+
+// Иногда нужно ничего не dispatch-ить при определённых условиях
+loadIfNotCached$ = createEffect(() =>
+  this.actions$.pipe(
+    ofType(loadUsers),
+    withLatestFrom(this.store.select(selectUsersLoaded)),
+    switchMap(([, alreadyLoaded]) => {
+      if (alreadyLoaded) {
+        return EMPTY; // Данные уже есть — ничего не делаем
+      }
+      return this.userService.getAll().pipe(
+        map(users => loadUsersSuccess({ users })),
+        catchError(error => of(loadUsersFailure({ error: error.message })))
+      );
+    })
+  )
+);
+```
+
+---
+
+## Router Effects
+
+```typescript
+import { ROUTER_NAVIGATED, RouterNavigatedAction } from '@ngrx/router-store';
+
+@Injectable()
+export class RouterEffects {
+  private actions$ = inject(Actions);
+
+  // Загружаем данные при навигации на страницу пользователя
+  loadUserOnNavigation$ = createEffect(() =>
+    this.actions$.pipe(
+      ofType(ROUTER_NAVIGATED),
+      map((action: RouterNavigatedAction) => action.payload.routerState),
+      filter(routerState =>
+        routerState.url.startsWith('/users/')
+      ),
+      map(routerState => {
+        const id = routerState.root.firstChild?.params['id'];
+        return loadUserById({ id });
+      })
+    )
+  );
+}
+```
+
+---
+
+## Effect Lifecycle Hooks
+
+```typescript
+import { OnInitEffects, OnRunEffects, EffectNotification } from '@ngrx/effects';
+import { Observable } from 'rxjs';
+
+@Injectable()
+export class AppEffects implements OnInitEffects, OnRunEffects {
+  // Вызывается при регистрации модуля Effects
+  ngrxOnInitEffects(): Action {
+    return initApp(); // dispatch action при старте
+  }
+
+  // Оборачивает все эффекты — можно добавить retry логику
+  ngrxOnRunEffects(
+    resolvedEffects$: Observable<EffectNotification>
+  ): Observable<EffectNotification> {
+    return resolvedEffects$.pipe(
+      tap(notification => {
+        if (notification.kind === 'E') {
+          console.error('Effect error:', notification.error);
+        }
+      })
+    );
+  }
+}
+```
+
+---
+
+## Регистрация Effects
+
+```typescript
+// app.config.ts
+import { provideEffects } from '@ngrx/effects';
+import { UsersEffects } from './store/users/users.effects';
+import { AuthEffects } from './store/auth/auth.effects';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideStore(reducers),
+    provideEffects(UsersEffects, AuthEffects),
+    // Feature effects регистрируются через provideEffects в routes
+  ]
+};
+
+// Для feature (lazy loaded):
+// routes.ts
+export const routes: Routes = [{
+  path: 'admin',
+  loadComponent: () => import('./admin.component'),
+  providers: [
+    provideEffects(AdminEffects)
+  ]
+}];
+```
+
+---
+
+## Тестирование Effects
+
+```typescript
+describe('UsersEffects', () => {
+  let actions$: Observable<Action>;
+  let effects: UsersEffects;
+  let userService: jasmine.SpyObj<UserService>;
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      providers: [
+        UsersEffects,
+        provideMockActions(() => actions$),
+        {
+          provide: UserService,
+          useValue: jasmine.createSpyObj('UserService', ['getAll'])
+        }
+      ]
+    });
+
+    effects = TestBed.inject(UsersEffects);
+    userService = TestBed.inject(UserService) as any;
+  });
+
+  it('should dispatch loadUsersSuccess on success', () => {
+    const users = [{ id: '1', name: 'Test' }];
+    userService.getAll.and.returnValue(of(users));
+
+    actions$ = hot('-a-', { a: loadUsers() });
+    const expected = cold('-b-', { b: loadUsersSuccess({ users }) });
+
+    expect(effects.loadUsers$).toBeObservable(expected);
+  });
+});
+```
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useState, useCallback } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+const BLUE = '#3b82f6';
+
+type Phase = 'idle' | 'action' | 'effect' | 'loading' | 'success' | 'error';
+type EffectStatus = 'pending' | 'loading' | 'success' | 'error';
+
+interface EffectRun {
+  id: number;
+  action: string;
+  operator: string;
+  status: EffectStatus;
+  duration: number;
+  result?: string;
+  error?: string;
+}
+
+let runId = 0;
+
+export default function App() {
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [runs, setRuns] = useState<EffectRun[]>([]);
+  const [state, setState] = useState({ users: [] as string[], loading: false, error: null as string | null });
+  const [selectedOp, setSelectedOp] = useState<'switchMap' | 'exhaustMap' | 'concatMap' | 'mergeMap'>('switchMap');
+
+  const simulate = useCallback((action: string, shouldFail = false) => {
+    const id = ++runId;
+    const duration = 1000 + Math.random() * 1000;
+
+    setPhase('action');
+    setState(s => ({ ...s, loading: true, error: null }));
+
+    const run: EffectRun = { id, action, operator: selectedOp, status: 'loading', duration: Math.round(duration) };
+    setRuns(prev => [run, ...prev.slice(0, 6)]);
+
+    setTimeout(() => setPhase('effect'), 300);
+    setTimeout(() => setPhase('loading'), 600);
+
+    setTimeout(() => {
+      if (shouldFail) {
+        setState(s => ({ ...s, loading: false, error: 'HTTP 500: Server Error' }));
+        setRuns(prev => prev.map(r => r.id === id ? { ...r, status: 'error', error: 'HTTP 500' } : r));
+        setPhase('error');
+      } else {
+        const users = ['Яша', 'Алиса', 'Боб', 'Катя'].slice(0, Math.floor(Math.random() * 4) + 1);
+        setState({ users, loading: false, error: null });
+        setRuns(prev => prev.map(r => r.id === id ? { ...r, status: 'success', result: \`\${users.length} users loaded\` } : r));
+        setPhase('success');
+      }
+      setTimeout(() => setPhase('idle'), 1000);
+    }, duration);
+  }, [selectedOp]);
+
+  const phaseColors: Record<Phase, string> = {
+    idle: BORDER, action: WARN, effect: '#8b5cf6', loading: BLUE, success: SUCCESS, error: RED,
+  };
+
+  const pipeline = [
+    { key: 'action', label: '⚡ Action' },
+    { key: 'effect', label: '🔌 Effect' },
+    { key: 'loading', label: '⏳ HTTP' },
+    { key: 'success', label: '✅ Success / ❌ Error' },
+  ];
+
+  const operatorInfo: Record<string, string> = {
+    switchMap: 'Отменяет предыдущий запрос',
+    exhaustMap: 'Игнорирует новые пока идёт текущий',
+    concatMap: 'Очередь — ждёт завершения',
+    mergeMap: 'Параллельно — все запросы',
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem' }}>⚡ NgRx Effects Simulator</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+        createEffect + ofType + switchMap/exhaustMap/concatMap/mergeMap
+      </p>
+
+      {/* Pipeline visualization */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
+        <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>Effect Pipeline</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+          {pipeline.map((step, i) => (
+            <div key={step.key} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <div style={{
+                padding: '0.4rem 0.75rem',
+                background: phase === step.key ? (phaseColors[phase as Phase] + '20') : '#0f172a',
+                border: \`1px solid \${phase === step.key ? phaseColors[phase as Phase] : BORDER}\`,
+                borderRadius: '6px',
+                color: phase === step.key ? phaseColors[phase as Phase] : '#475569',
+                fontSize: '0.78rem',
+                fontWeight: phase === step.key ? 700 : 400,
+                transition: 'all 0.3s',
+              }}>{step.label}</div>
+              {i < pipeline.length - 1 && <span style={{ color: BORDER }}>→</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        {/* Controls */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>Operator</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.35rem', marginBottom: '0.75rem' }}>
+            {(['switchMap', 'exhaustMap', 'concatMap', 'mergeMap'] as const).map(op => (
+              <button key={op} onClick={() => setSelectedOp(op)} style={{
+                padding: '0.35rem 0.5rem',
+                background: selectedOp === op ? (RED + '20') : '#0f172a',
+                border: \`1px solid \${selectedOp === op ? RED : BORDER}\`,
+                color: selectedOp === op ? RED : '#64748b',
+                borderRadius: '4px', cursor: 'pointer', fontSize: '0.72rem', fontWeight: selectedOp === op ? 700 : 400,
+              }}>{op}</button>
+            ))}
+          </div>
+          <div style={{ padding: '0.5rem', background: '#0f172a', borderRadius: '4px', marginBottom: '0.75rem', fontSize: '0.72rem', color: '#94a3b8', borderLeft: \`2px solid \${RED}\` }}>
+            {operatorInfo[selectedOp]}
+          </div>
+          <button onClick={() => simulate('loadUsers')} disabled={phase !== 'idle' && selectedOp === 'exhaustMap'} style={actBtn(SUCCESS, BG, phase !== 'idle' && selectedOp === 'exhaustMap')}>
+            ⚡ dispatch(loadUsers)
+          </button>
+          <button onClick={() => simulate('loadUsers', true)} style={actBtn(RED)}>
+            ⚡ dispatch(loadUsers) → FAIL
+          </button>
+        </div>
+
+        {/* State */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>Store State</div>
+          <div style={{ marginBottom: '0.5rem' }}>
+            <span style={{ color: '#475569', fontSize: '0.75rem' }}>loading: </span>
+            <span style={{ color: state.loading ? WARN : '#475569', fontSize: '0.75rem', fontWeight: 600 }}>{String(state.loading)}</span>
+          </div>
+          <div style={{ marginBottom: '0.5rem' }}>
+            <span style={{ color: '#475569', fontSize: '0.75rem' }}>error: </span>
+            <span style={{ color: state.error ? RED : '#475569', fontSize: '0.75rem' }}>{state.error || 'null'}</span>
+          </div>
+          <div>
+            <span style={{ color: '#475569', fontSize: '0.75rem' }}>users: </span>
+            {state.users.length > 0
+              ? state.users.map(u => <span key={u} style={{ display: 'inline-block', margin: '0.15rem', padding: '0.1rem 0.35rem', background: '#334155', borderRadius: '3px', fontSize: '0.72rem', color: '#94a3b8' }}>{u}</span>)
+              : <span style={{ color: '#334155', fontSize: '0.75rem' }}>[]</span>
+            }
+          </div>
+        </div>
+      </div>
+
+      {/* Effect runs log */}
+      <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem' }}>
+        <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.5rem' }}>Effect Runs</div>
+        {runs.length === 0
+          ? <div style={{ color: '#334155', fontSize: '0.78rem' }}>// Dispatch actions to see effect runs...</div>
+          : runs.map(run => (
+            <div key={run.id} style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginBottom: '0.3rem', fontSize: '0.75rem' }}>
+              <span style={{
+                padding: '0.1rem 0.4rem', borderRadius: '3px', fontSize: '0.68rem', fontWeight: 700,
+                background: run.status === 'loading' ? BLUE + '20' : run.status === 'success' ? SUCCESS + '20' : RED + '20',
+                color: run.status === 'loading' ? BLUE : run.status === 'success' ? SUCCESS : RED,
+                border: \`1px solid \${run.status === 'loading' ? BLUE : run.status === 'success' ? SUCCESS : RED}\`,
+              }}>{run.status}</span>
+              <span style={{ color: '#64748b' }}>{run.operator}</span>
+              <span style={{ color: '#94a3b8' }}>{run.action}</span>
+              <span style={{ color: '#475569' }}>{run.duration}ms</span>
+              {run.result && <span style={{ color: SUCCESS }}>{run.result}</span>}
+              {run.error && <span style={{ color: RED }}>{run.error}</span>}
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
+
+const actBtn = (bg: string, color = '#fff', disabled = false): React.CSSProperties => ({
+  display: 'block', width: '100%', padding: '0.45rem 0.75rem',
+  background: disabled ? '#334155' : bg, color: disabled ? '#475569' : color,
+  border: 'none', borderRadius: '4px', cursor: disabled ? 'not-allowed' : 'pointer',
+  fontSize: '0.78rem', fontWeight: 600, marginBottom: '0.4rem', textAlign: 'left',
+  opacity: disabled ? 0.6 : 1,
+});
+` }} />

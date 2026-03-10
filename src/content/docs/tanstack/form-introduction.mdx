@@ -1,0 +1,335 @@
+---
+title: "20. Form: введение"
+sidebar:
+  order: 20
+---
+import { Playground } from '@components/Playground'
+
+
+## Почему TanStack Form?
+
+Существующие библиотеки форм (React Hook Form, Formik) имеют ограничения: слабая типизация,
+сложная интеграция с TypeScript, отсутствие поддержки других фреймворков.
+
+TanStack Form создан с нуля с акцентом на:
+- **TypeScript-first**: полная типизация полей, значений и ошибок
+- **Фреймворк-независимость**: React, Vue, Solid, Angular
+- **Headless**: никаких встроенных UI-компонентов
+- **Производительность**: точечные обновления, нет лишних перерендеров
+
+## Установка
+
+```bash
+npm install @tanstack/react-form
+```
+
+## useForm: Базовый хук
+
+```typescript
+import { useForm } from '@tanstack/react-form'
+
+const form = useForm({
+  defaultValues: {
+    name: '',
+    email: '',
+    age: 0,
+  },
+  onSubmit: async ({ value }) => {
+    await saveUser(value)
+    // value полностью типизирован: { name: string; email: string; age: number }
+  },
+})
+```
+
+## Field API
+
+Поля создаются через `form.Field`:
+
+```tsx
+<form.Field
+  name="email"
+  validators={{
+    onChange: ({ value }) =>
+      !value ? 'Обязательное поле' :
+      !value.includes('@') ? 'Невалидный email' :
+      undefined,
+    onBlur: ({ value }) =>
+      value.length < 5 ? 'Слишком короткий email' : undefined,
+  }}
+>
+  {(field) => (
+    <div>
+      <label>Email</label>
+      <input
+        name={field.name}
+        value={field.state.value}
+        onBlur={field.handleBlur}
+        onChange={(e) => field.handleChange(e.target.value)}
+      />
+      {field.state.meta.errors.map(error => (
+        <span key={error}>{error}</span>
+      ))}
+    </div>
+  )}
+</form.Field>
+```
+
+## Field State
+
+`field.state` содержит всю информацию о поле:
+
+```typescript
+field.state = {
+  value: string,              // Текущее значение
+  meta: {
+    errors: string[],         // Массив ошибок
+    errorMap: {...},          // Ошибки по источнику (onChange, onBlur...)
+    isDirty: boolean,         // Значение изменилось
+    isTouched: boolean,       // Пользователь взаимодействовал
+    isValidating: boolean,    // Идёт асинхронная валидация
+  },
+}
+```
+
+## form.state
+
+Глобальное состояние формы:
+
+```typescript
+form.state = {
+  values: FormValues,         // Текущие значения всех полей
+  errors: FormErrors,         // Все ошибки
+  isSubmitting: boolean,      // Форма отправляется
+  isSubmitted: boolean,       // Форма была отправлена
+  isDirty: boolean,           // Есть несохранённые изменения
+  isValid: boolean,           // Нет ошибок
+  canSubmit: boolean,         // Можно отправить
+}
+```
+
+## Обработка отправки
+
+```tsx
+<form
+  onSubmit={(e) => {
+    e.preventDefault()
+    form.handleSubmit()
+  }}
+>
+  {/* поля */}
+  <form.Subscribe
+    selector={(state) => [state.canSubmit, state.isSubmitting]}
+  >
+    {([canSubmit, isSubmitting]) => (
+      <button type="submit" disabled={!canSubmit || isSubmitting}>
+        {isSubmitting ? 'Сохранение...' : 'Сохранить'}
+      </button>
+    )}
+  </form.Subscribe>
+</form>
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+type FormValues = {
+  name: string
+  email: string
+  phone: string
+  role: string
+  bio: string
+}
+
+type FieldErrors = Partial<Record<keyof FormValues, string[]>>
+
+// Симуляция useForm
+function useSimulatedForm(defaultValues: FormValues, onSubmit: (values: FormValues) => Promise<void>) {
+  const [values, setValues] = useState<FormValues>(defaultValues)
+  const [errors, setErrors] = useState<FieldErrors>({})
+  const [touched, setTouched] = useState<Partial<Record<keyof FormValues, boolean>>>({})
+  const [dirty, setDirty] = useState<Partial<Record<keyof FormValues, boolean>>>({})
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isSubmitted, setIsSubmitted] = useState(false)
+
+  const validators: Record<keyof FormValues, (v: string) => string | undefined> = {
+    name: v => !v ? 'Обязательное поле' : v.length < 2 ? 'Минимум 2 символа' : undefined,
+    email: v => !v ? 'Обязательное поле' : !/^[^@]+@[^@]+\.[^@]+$/.test(v) ? 'Невалидный email' : undefined,
+    phone: v => v && !/^\+7\d{10}$/.test(v) ? 'Формат: +7XXXXXXXXXX' : undefined,
+    role: v => !v ? 'Выберите роль' : undefined,
+    bio: v => v.length > 200 ? 'Максимум 200 символов' : undefined,
+  }
+
+  const validate = (field: keyof FormValues, value: string) => {
+    const err = validators[field](value)
+    setErrors(e => ({ ...e, [field]: err ? [err] : [] }))
+    return err
+  }
+
+  const handleChange = (field: keyof FormValues, value: string) => {
+    setValues(v => ({ ...v, [field]: value }))
+    setDirty(d => ({ ...d, [field]: value !== defaultValues[field] }))
+    if (touched[field]) validate(field, value)
+  }
+
+  const handleBlur = (field: keyof FormValues) => {
+    setTouched(t => ({ ...t, [field]: true }))
+    validate(field, values[field])
+  }
+
+  const handleSubmit = async () => {
+    const allTouched: Partial<Record<keyof FormValues, boolean>> = {}
+    const allErrors: FieldErrors = {}
+    let hasErrors = false
+
+    for (const key of Object.keys(validators) as (keyof FormValues)[]) {
+      allTouched[key] = true
+      const err = validators[key](values[key])
+      if (err) { allErrors[key] = [err]; hasErrors = true }
+    }
+    setTouched(allTouched)
+    setErrors(allErrors)
+    if (hasErrors) return
+
+    setIsSubmitting(true)
+    try {
+      await onSubmit(values)
+      setIsSubmitted(true)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const isDirty = Object.values(dirty).some(Boolean)
+  const hasErrors = Object.values(errors).some(e => e && e.length > 0)
+  const isValid = !hasErrors
+  const canSubmit = isValid && !isSubmitting
+
+  return { values, errors, touched, dirty, isSubmitting, isSubmitted, isDirty, isValid, canSubmit, handleChange, handleBlur, handleSubmit }
+}
+
+function Field({ label, name, value, error, touched, dirty, type = 'text', onBlur, onChange, placeholder, children }: {
+  label: string; name: string; value: string; error?: string[]; touched?: boolean; dirty?: boolean
+  type?: string; onBlur: () => void; onChange: (v: string) => void; placeholder?: string; children?: React.ReactNode
+}) {
+  const hasError = touched && error && error.length > 0
+  return (
+    <div style={{ marginBottom: '14px' }}>
+      <label style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
+        <span style={{ fontSize: '13px', color: '#94a3b8' }}>{label}</span>
+        <span style={{ fontSize: '11px', color: dirty ? '#f97316' : '#334155' }}>{dirty ? 'изменено' : ''}</span>
+      </label>
+      {children ?? (
+        <input
+          value={value}
+          onBlur={onBlur}
+          onChange={e => onChange(e.target.value)}
+          type={type}
+          placeholder={placeholder}
+          style={{
+            width: '100%',
+            background: '#0f172a',
+            border: \`1px solid \${hasError ? '#ef4444' : touched && !hasError ? '#22c55e' : '#334155'}\`,
+            borderRadius: '8px',
+            padding: '8px 12px',
+            color: '#e2e8f0',
+            fontSize: '13px',
+            boxSizing: 'border-box',
+            outline: 'none',
+          }}
+        />
+      )}
+      {hasError && <p style={{ color: '#ef4444', fontSize: '11px', margin: '4px 0 0 0' }}>⚠ {error![0]}</p>}
+      {touched && !hasError && value && <p style={{ color: '#22c55e', fontSize: '11px', margin: '4px 0 0 0' }}>✓ Валидно</p>}
+    </div>
+  )
+}
+
+export default function App() {
+  const [submitted, setSubmitted] = useState<FormValues | null>(null)
+
+  const form = useSimulatedForm(
+    { name: '', email: '', phone: '', role: '', bio: '' },
+    async (values) => {
+      await new Promise(res => setTimeout(res, 1000))
+      setSubmitted(values)
+    }
+  )
+
+  if (form.isSubmitted && submitted) {
+    return (
+      <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '32px', maxWidth: '400px', width: '100%', textAlign: 'center' }}>
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>✅</div>
+          <h2 style={{ color: '#22c55e', marginBottom: '16px' }}>Форма отправлена!</h2>
+          <pre style={{ background: '#0f172a', borderRadius: '8px', padding: '12px', fontSize: '12px', color: '#a5f3fc', textAlign: 'left' }}>
+            {JSON.stringify(submitted, null, 2)}
+          </pre>
+          <button onClick={() => { setSubmitted(null) }} style={{ marginTop: '16px', background: '#ef4444', border: 'none', borderRadius: '8px', padding: '10px 24px', color: 'white', cursor: 'pointer', fontSize: '13px' }}>
+            Новая форма
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>TanStack Form</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Форма с полевой валидацией</p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: '16px' }}>
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '20px' }}>
+          <form onSubmit={e => { e.preventDefault(); form.handleSubmit() }}>
+            <Field label="Имя *" name="name" value={form.values.name} error={form.errors.name} touched={form.touched.name} dirty={form.dirty.name} placeholder="Введите имя" onBlur={() => form.handleBlur('name')} onChange={v => form.handleChange('name', v)} />
+            <Field label="Email *" name="email" value={form.values.email} error={form.errors.email} touched={form.touched.email} dirty={form.dirty.email} type="email" placeholder="user@example.com" onBlur={() => form.handleBlur('email')} onChange={v => form.handleChange('email', v)} />
+            <Field label="Телефон" name="phone" value={form.values.phone} error={form.errors.phone} touched={form.touched.phone} dirty={form.dirty.phone} placeholder="+79991234567" onBlur={() => form.handleBlur('phone')} onChange={v => form.handleChange('phone', v)} />
+
+            <div style={{ marginBottom: '14px' }}>
+              <label style={{ display: 'block', fontSize: '13px', color: '#94a3b8', marginBottom: '5px' }}>Роль *</label>
+              <select value={form.values.role} onBlur={() => form.handleBlur('role')} onChange={e => form.handleChange('role', e.target.value)}
+                style={{ width: '100%', background: '#0f172a', border: \`1px solid \${form.touched.role && form.errors.role?.length ? '#ef4444' : form.touched.role && form.values.role ? '#22c55e' : '#334155'}\`, borderRadius: '8px', padding: '8px 12px', color: '#e2e8f0', fontSize: '13px' }}>
+                <option value="">Выберите роль</option>
+                {['Frontend', 'Backend', 'Design', 'DevOps', 'QA'].map(r => <option key={r} value={r}>{r}</option>)}
+              </select>
+              {form.touched.role && form.errors.role?.[0] && <p style={{ color: '#ef4444', fontSize: '11px', margin: '4px 0 0 0' }}>⚠ {form.errors.role[0]}</p>}
+            </div>
+
+            <div style={{ marginBottom: '14px' }}>
+              <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#94a3b8', marginBottom: '5px' }}>
+                <span>О себе</span>
+                <span style={{ color: form.values.bio.length > 180 ? '#ef4444' : '#475569' }}>{form.values.bio.length}/200</span>
+              </label>
+              <textarea value={form.values.bio} onBlur={() => form.handleBlur('bio')} onChange={e => form.handleChange('bio', e.target.value)} placeholder="Расскажите о себе..."
+                style={{ width: '100%', background: '#0f172a', border: '1px solid #334155', borderRadius: '8px', padding: '8px 12px', color: '#e2e8f0', fontSize: '13px', minHeight: '80px', resize: 'vertical', boxSizing: 'border-box' }} />
+            </div>
+
+            <button type="submit" disabled={!form.canSubmit}
+              style={{ width: '100%', background: form.canSubmit ? '#ef4444' : '#334155', border: 'none', borderRadius: '8px', padding: '12px', color: form.canSubmit ? 'white' : '#64748b', cursor: form.canSubmit ? 'pointer' : 'not-allowed', fontSize: '14px', fontWeight: 600 }}>
+              {form.isSubmitting ? '⏳ Отправка...' : 'Отправить форму'}
+            </button>
+          </form>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ color: '#94a3b8', fontSize: '12px', margin: '0 0 12px 0', textTransform: 'uppercase' }}>form.state</h3>
+          {[
+            { label: 'isDirty', value: String(form.isDirty), color: form.isDirty ? '#f97316' : '#475569' },
+            { label: 'isValid', value: String(form.isValid), color: form.isValid ? '#22c55e' : '#ef4444' },
+            { label: 'canSubmit', value: String(form.canSubmit), color: form.canSubmit ? '#22c55e' : '#ef4444' },
+            { label: 'isSubmitting', value: String(form.isSubmitting), color: form.isSubmitting ? '#f97316' : '#475569' },
+          ].map(item => (
+            <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid #334155', fontSize: '12px' }}>
+              <span style={{ color: '#64748b', fontFamily: 'monospace' }}>{item.label}</span>
+              <span style={{ color: item.color, fontWeight: 600 }}>{item.value}</span>
+            </div>
+          ))}
+          <h4 style={{ color: '#94a3b8', fontSize: '11px', margin: '12px 0 8px 0', textTransform: 'uppercase' }}>Ошибки</h4>
+          {Object.entries(form.errors).filter(([, v]) => v?.length).map(([k, v]) => (
+            <div key={k} style={{ fontSize: '11px', color: '#ef4444', padding: '3px 0' }}>⚠ {k}: {v![0]}</div>
+          ))}
+          {!Object.values(form.errors).some(e => e?.length) && <div style={{ fontSize: '11px', color: '#475569' }}>Нет ошибок</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

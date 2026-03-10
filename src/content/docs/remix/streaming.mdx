@@ -1,0 +1,275 @@
+---
+title: "20. Streaming SSR"
+sidebar:
+  order: 20
+---
+import { Playground } from '@components/Playground'
+
+
+Streaming SSR позволяет браузеру получать и рендерить HTML постепенно, не дожидаясь полной генерации страницы на сервере. Remix поддерживает стриминг через `defer()` и React Streaming.
+
+## Как работает Streaming
+
+```
+Без стриминга:
+  Сервер → [ждёт 3000ms] → [полный HTML] → Браузер показывает страницу
+
+Со стримингом:
+  Сервер → [100ms] → [начало HTML] → Браузер начинает рендер
+         → [500ms] → [секция 1]   → Браузер обновляет
+         → [3000ms]→ [секция 2]   → Браузер обновляет
+```
+
+## entry.server.tsx для Streaming
+
+```typescript
+import { renderToPipeableStream } from "react-dom/server";
+import { RemixServer } from "@remix-run/react";
+import { isbot } from "isbot";
+
+const ABORT_DELAY = 5_000;
+
+export default function handleRequest(
+  request: Request,
+  responseStatusCode: number,
+  responseHeaders: Headers,
+  remixContext: EntryContext,
+) {
+  const userAgent = request.headers.get("user-agent");
+  const callbackName = isbot(userAgent ?? "")
+    ? "onAllReady"    // Боты ждут полного HTML
+    : "onShellReady"; // Пользователи — стриминг
+
+  return new Promise((resolve, reject) => {
+    let didError = false;
+    let shellRendered = false;
+
+    const { pipe, abort } = renderToPipeableStream(
+      <RemixServer context={remixContext} url={request.url} />,
+      {
+        [callbackName]() {
+          shellRendered = true;
+          const body = new PassThrough();
+
+          responseHeaders.set("Content-Type", "text/html");
+
+          resolve(
+            new Response(body, {
+              headers: responseHeaders,
+              status: didError ? 500 : responseStatusCode,
+            })
+          );
+
+          pipe(body);
+        },
+        onShellError(error) {
+          reject(error);
+        },
+        onError(error) {
+          didError = true;
+          if (shellRendered) console.error(error);
+        },
+      }
+    );
+
+    setTimeout(abort, ABORT_DELAY);
+  });
+}
+```
+
+## Паттерн: критические данные + медленные
+
+```typescript
+export async function loader({ request }) {
+  // Параллельно запускаем запросы
+  const [user, meta] = await Promise.all([
+    getUser(request),           // ~50ms — блокируем
+    getPageMeta(request),       // ~100ms — блокируем
+  ]);
+
+  // Медленные запросы — стримим
+  return defer({
+    user,
+    meta,
+    products: getProducts(),       // ~1000ms — стриминг
+    reviews: getReviews(),         // ~1500ms — стриминг
+    recommendations: getRecs(),    // ~2000ms — стриминг
+  });
+}
+```
+
+## SEO и стриминг
+
+Для поисковых ботов стриминг отключается (они получают полный HTML):
+
+```typescript
+const callbackName = isbot(userAgent)
+  ? "onAllReady"     // Ждём полной генерации для ботов
+  : "onShellReady";  // Стриминг для пользователей
+```
+
+## Timeout для медленных данных
+
+```typescript
+// Если данные не пришли за 3 секунды — показываем fallback
+const slowPromise = new Promise((_, reject) =>
+  setTimeout(() => reject(new Error("Timeout")), 3000)
+);
+
+return defer({
+  data: Promise.race([getSlowData(), slowPromise]),
+});
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const WARN = "#f59e0b";
+
+type StreamChunk = {
+  id: number;
+  name: string;
+  size: string;
+  delay: number;
+  arrivalTime?: number;
+  content: string;
+};
+
+const chunks: StreamChunk[] = [
+  { id: 1, name: "HTML Shell", size: "~2KB", delay: 0, content: "<html><head>...</head><body><div id='root'>" },
+  { id: 2, name: "Критические стили", size: "~5KB", delay: 50, content: "<style>/* critical CSS */</style>" },
+  { id: 3, name: "Данные пользователя", size: "~0.5KB", delay: 150, content: '{"user":{"name":"Алексей","role":"admin"}}' },
+  { id: 4, name: "Навигация (hydrated)", size: "~8KB", delay: 400, content: "<nav>Dashboard | Users | Settings</nav>" },
+  { id: 5, name: "Список продуктов", size: "~12KB", delay: 1200, content: '[{"id":1},{"id":2},{"id":3},...] (50 items)' },
+  { id: 6, name: "Рекомендации", size: "~3KB", delay: 2000, content: '[{"product":"Pro Plan"},{"product":"Addon"}]' },
+  { id: 7, name: "Аналитика", size: "~2KB", delay: 2800, content: '{"views":12450,"bounce":0.34}' },
+];
+
+export default function App() {
+  const [received, setReceived] = useState<(StreamChunk & { arrivalTime: number })[]>([]);
+  const [running, setRunning] = useState(false);
+  const [mode, setMode] = useState<"streaming" | "blocking">("streaming");
+  const startRef = useRef<number>(0);
+
+  const run = () => {
+    setReceived([]);
+    setRunning(true);
+    startRef.current = Date.now();
+
+    if (mode === "blocking") {
+      // All arrive at once after max delay
+      setTimeout(() => {
+        const now = Date.now();
+        setReceived(chunks.map(c => ({ ...c, arrivalTime: now - startRef.current })));
+        setRunning(false);
+      }, Math.max(...chunks.map(c => c.delay)));
+      return;
+    }
+
+    // Streaming: each chunk arrives independently
+    chunks.forEach(chunk => {
+      setTimeout(() => {
+        setReceived(prev => {
+          const newChunk = { ...chunk, arrivalTime: Date.now() - startRef.current };
+          const updated = [...prev, newChunk];
+          if (updated.length === chunks.length) setRunning(false);
+          return updated;
+        });
+      }, chunk.delay);
+    });
+  };
+
+  const ttfb = received.length > 0 ? received[0].arrivalTime : null;
+  const ttlc = received.length === chunks.length ? received[received.length - 1].arrivalTime : null;
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>🌊 Streaming SSR</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "20px" }}>Визуализация потоковой передачи данных</p>
+
+      <div style={{ display: "flex", gap: "10px", marginBottom: "24px", alignItems: "center" }}>
+        <div style={{ display: "flex", border: "1px solid #334155", borderRadius: "8px", overflow: "hidden" }}>
+          {(["streaming", "blocking"] as const).map(m => (
+            <button key={m} onClick={() => { setMode(m); setReceived([]); setRunning(false); }} style={{
+              padding: "8px 16px",
+              background: mode === m ? ACCENT + "33" : "transparent",
+              color: mode === m ? ACCENT : MUTED,
+              border: "none", cursor: "pointer", fontSize: "13px",
+            }}>
+              {m === "streaming" ? "🌊 Streaming" : "⏸️ Blocking"}
+            </button>
+          ))}
+        </div>
+        <button onClick={run} disabled={running} style={{
+          padding: "10px 20px", background: running ? "#334155" : ACCENT,
+          color: "#fff", border: "none", borderRadius: "8px",
+          cursor: running ? "not-allowed" : "pointer", fontWeight: 700,
+        }}>
+          {running ? "⏳ Загрузка..." : "▶ Запустить"}
+        </button>
+      </div>
+
+      {ttfb !== null && (
+        <div style={{ display: "flex", gap: "16px", marginBottom: "20px" }}>
+          <div style={{ background: CARD, borderRadius: "8px", padding: "10px 16px" }}>
+            <div style={{ fontSize: "11px", color: MUTED }}>TTFB</div>
+            <div style={{ color: SUCCESS, fontWeight: 700 }}>{ttfb}ms</div>
+          </div>
+          {ttlc !== null && (
+            <div style={{ background: CARD, borderRadius: "8px", padding: "10px 16px" }}>
+              <div style={{ fontSize: "11px", color: MUTED }}>Полная загрузка</div>
+              <div style={{ color: WARN, fontWeight: 700 }}>{ttlc}ms</div>
+            </div>
+          )}
+          {mode === "blocking" && ttlc !== null && (
+            <div style={{ background: CARD, borderRadius: "8px", padding: "10px 16px" }}>
+              <div style={{ fontSize: "11px", color: MUTED }}>vs Streaming TTFB</div>
+              <div style={{ color: ACCENT, fontWeight: 700 }}>0ms 🎉</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Timeline */}
+      <div style={{ maxWidth: "700px", display: "flex", flexDirection: "column", gap: "6px" }}>
+        {chunks.map(chunk => {
+          const rcv = received.find(r => r.id === chunk.id);
+          return (
+            <div key={chunk.id} style={{
+              background: CARD,
+              borderRadius: "8px",
+              padding: "10px 16px",
+              display: "grid",
+              gridTemplateColumns: "1fr auto auto",
+              alignItems: "center",
+              gap: "12px",
+              borderLeft: \`3px solid \${rcv ? SUCCESS : running ? ACCENT + "44" : "#334155"}\`,
+              opacity: rcv ? 1 : 0.5,
+              transition: "all 0.3s",
+            }}>
+              <div>
+                <span style={{ fontSize: "13px", color: rcv ? TEXT : MUTED }}>{rcv ? "✅" : "○"} {chunk.name}</span>
+                {rcv && (
+                  <div style={{ fontFamily: "monospace", fontSize: "10px", color: MUTED, marginTop: "2px" }}>
+                    {chunk.content.slice(0, 50)}...
+                  </div>
+                )}
+              </div>
+              <span style={{ fontSize: "11px", color: MUTED }}>{chunk.size}</span>
+              <span style={{ fontSize: "11px", color: rcv ? SUCCESS : MUTED }}>
+                {rcv ? \`+\${rcv.arrivalTime}ms\` : \`~\${chunk.delay}ms\`}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+` }} />

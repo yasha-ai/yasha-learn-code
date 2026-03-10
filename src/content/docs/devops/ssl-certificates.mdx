@@ -1,0 +1,304 @@
+---
+title: "12. SSL и HTTPS"
+sidebar:
+  order: 12
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/devops-ssl.png)
+
+**SSL/TLS** — протокол шифрования трафика между клиентом и сервером. HTTPS = HTTP + SSL. Без него браузеры показывают "Не защищено" и поисковики понижают в выдаче.
+
+## Как работает SSL
+
+```
+1. Клиент подключается к серверу
+2. Сервер отправляет SSL сертификат (публичный ключ)
+3. Клиент проверяет сертификат у CA (Certificate Authority)
+4. Handshake — договариваются об алгоритме шифрования
+5. Весь трафик зашифрован симметричным ключом
+
+CA (Certificate Authority):
+- Let's Encrypt (бесплатный, автоматический)
+- DigiCert, Comodo, GlobalSign (платные, для enterprise)
+```
+
+## Let's Encrypt + Certbot
+
+Бесплатные SSL сертификаты для всех. Обновляются автоматически.
+
+```bash
+# Установка Certbot (Ubuntu)
+sudo apt install certbot python3-certbot-nginx -y
+
+# Получить сертификат для домена
+sudo certbot --nginx -d example.com -d www.example.com
+
+# Только получить сертификат (без изменения Nginx)
+sudo certbot certonly --nginx -d example.com
+
+# Standalone (без Nginx, для других серверов)
+sudo certbot certonly --standalone -d example.com
+```
+
+После получения файлы сохраняются в:
+```
+/etc/letsencrypt/live/example.com/
+├── fullchain.pem     # сертификат + цепочка CA
+├── privkey.pem       # приватный ключ (держи в секрете!)
+├── cert.pem          # только сертификат
+└── chain.pem         # только цепочка CA
+```
+
+## Wildcard сертификат
+
+```bash
+# Wildcard — один сертификат для всех поддоменов
+# Требует DNS валидацию
+
+sudo certbot certonly \
+  --manual \
+  --preferred-challenges=dns \
+  -d "*.example.com" \
+  -d "example.com"
+
+# Certbot попросит добавить TXT запись в DNS:
+# _acme-challenge.example.com TXT "xxxxxxxxxxxxx"
+```
+
+## Автоматическое обновление
+
+Сертификаты Let's Encrypt действуют 90 дней. Certbot настраивает автообновление через systemd:
+
+```bash
+# Проверить статус автообновления
+sudo systemctl status certbot.timer
+
+# Тест обновления (dry run)
+sudo certbot renew --dry-run
+
+# Принудительное обновление
+sudo certbot renew --force-renewal
+
+# Хук после обновления (перезагрузить Nginx)
+sudo nano /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+```
+
+```bash
+#!/bin/bash
+# /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+systemctl reload nginx
+```
+
+```bash
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+```
+
+## Nginx SSL конфигурация (оптимальная)
+
+```nginx
+# /etc/nginx/sites-available/example.com
+
+# HTTP → HTTPS редирект
+server {
+    listen 80;
+    listen [::]:80;
+    server_name example.com www.example.com;
+    
+    # ACME challenge для Certbot
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    
+    location / {
+        return 301 https://$server_name$request_uri;
+    }
+}
+
+# HTTPS
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name example.com www.example.com;
+
+    # SSL сертификаты
+    ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+
+    # SSL параметры (Mozilla Intermediate рекомендация)
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+
+    # HSTS (говорим браузеру всегда использовать HTTPS)
+    add_header Strict-Transport-Security "max-age=63072000" always;
+
+    # OCSP Stapling — быстрее валидация сертификата
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    ssl_trusted_certificate /etc/letsencrypt/live/example.com/chain.pem;
+    resolver 8.8.8.8 1.1.1.1;
+
+    # Session cache
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'" always;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+## Self-signed сертификат (для разработки)
+
+```bash
+# Создание self-signed (не для production!)
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/nginx-selfsigned.key \
+  -out /etc/ssl/certs/nginx-selfsigned.crt \
+  -subj "/C=RU/ST=Moscow/L=Moscow/O=MyCompany/CN=localhost"
+
+# Использование в Nginx
+ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;
+ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;
+```
+
+```bash
+# Для локальной разработки с HTTPS — лучше использовать mkcert
+brew install mkcert
+mkcert -install    # установить root CA в системе
+mkcert localhost 127.0.0.1 ::1
+
+# Создаст:
+# localhost+2.pem      — сертификат
+# localhost+2-key.pem  — ключ
+# Браузер не будет ругаться!
+```
+
+## SSL для Node.js напрямую
+
+```javascript
+import https from 'https';
+import fs from 'fs';
+import express from 'express';
+
+const app = express();
+app.get('/', (req, res) => res.send('Hello HTTPS!'));
+
+// Только для разработки — в production лучше Nginx
+const options = {
+  key: fs.readFileSync('./ssl/private.key'),
+  cert: fs.readFileSync('./ssl/certificate.crt'),
+};
+
+https.createServer(options, app).listen(443, () => {
+  console.log('HTTPS server running on port 443');
+});
+```
+
+## Проверка SSL
+
+```bash
+# Проверить сертификат
+openssl s_client -connect example.com:443 -servername example.com
+
+# Дата истечения
+echo | openssl s_client -connect example.com:443 2>/dev/null | \
+  openssl x509 -noout -dates
+
+# SSL Labs — полная проверка (онлайн)
+# https://www.ssllabs.com/ssltest/analyze.html?d=example.com
+```
+
+## Ключевые моменты
+
+- HTTPS обязателен — без него браузеры и поисковики наказывают
+- Let's Encrypt + Certbot — бесплатные SSL сертификаты с автообновлением
+- Certbot автоматически настраивает Nginx
+- HSTS — говорит браузеру всегда использовать HTTPS
+- Wildcard `*.example.com` — один сертификат для всех поддоменов
+- Никогда не используй self-signed в production
+- `ssl_protocols TLSv1.2 TLSv1.3` — только современные протоколы
+
+## Интерактивный пример
+
+Как работает HTTPS — визуализация TLS-рукопожатия:
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": {
+      code: `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0f172a; color: #e2e8f0; padding: 20px; }
+h3 { color: #818cf8; margin-bottom: 12px; }
+.diagram { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 16px; }
+.actor { text-align: center; width: 80px; }
+.actor .icon { font-size: 28px; margin-bottom: 4px; }
+.actor .name { font-size: 11px; color: #94a3b8; }
+.messages { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.msg { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: #1e293b; border-radius: 6px; font-size: 11px; opacity: 0.3; transition: all .4s; }
+.msg.active { opacity: 1; background: #1e1b4b; border: 1px solid #4338ca; }
+.msg.done { opacity: 1; }
+.msg .arrow { color: #818cf8; min-width: 20px; }
+.msg .text { color: #94a3b8; }
+button { background: #22c55e; color: #0f172a; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 13px; }
+</style>
+</head>
+<body>
+<h3>TLS Handshake</h3>
+<div class="diagram">
+  <div class="actor"><div class="icon">🖥️</div><div class="name">Client</div></div>
+  <div class="messages" id="msgs"></div>
+  <div class="actor"><div class="icon">🔒</div><div class="name">Server</div></div>
+</div>
+<button onclick="animate()">▶ Start Handshake</button>
+<script>
+const steps = [
+  { arrow: "→", text: "ClientHello: supported ciphers, random" },
+  { arrow: "←", text: "ServerHello: chosen cipher, certificate" },
+  { arrow: "←", text: "Server sends SSL Certificate + public key" },
+  { arrow: "→", text: "Client verifies cert, generates pre-master secret" },
+  { arrow: "→", text: "Client sends encrypted pre-master secret" },
+  { arrow: "↔", text: "Both derive session key from pre-master" },
+  { arrow: "↔", text: "✅ Encrypted connection established!" },
+];
+const el = document.getElementById("msgs");
+steps.forEach(s => {
+  const div = document.createElement("div");
+  div.className = "msg";
+  div.innerHTML = "<span class=\\"arrow\\">" + s.arrow + "</span><span class=\\"text\\">" + s.text + "</span>";
+  el.appendChild(div);
+});
+function animate() {
+  const msgs = el.querySelectorAll(".msg");
+  msgs.forEach(m => m.className = "msg");
+  let i = 0;
+  const interval = setInterval(() => {
+    if (i > 0) msgs[i-1].className = "msg done";
+    if (i < msgs.length) { msgs[i].className = "msg active"; i++; }
+    else { clearInterval(interval); }
+  }, 800);
+}
+<\/script>
+</body>
+</html>`,
+      active: true,
+    },
+  }}
+/>

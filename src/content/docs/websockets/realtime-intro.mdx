@@ -1,0 +1,234 @@
+---
+title: "1. Что такое Real-time"
+sidebar:
+  order: 1
+---
+
+import { Playground } from "@components/Playground"
+
+**Real-time** — это когда данные доставляются пользователю немедленно, как только они появляются, без необходимости обновлять страницу вручную.
+
+## Обычный HTTP vs Real-time
+
+```
+Обычный HTTP (request-response):
+═══════════════════════════════
+Клиент:  "Дай мне новые данные?"  →  Сервер
+Сервер:  ← "Вот данные" (или "ничего нового")
+Клиент:  (ждёт N секунд)
+Клиент:  "Дай мне новые данные?"  →  Сервер
+...повторяется бесконечно
+
+Real-time:
+══════════
+Клиент:  "Подпишись на обновления"  →  Сервер
+Сервер:  ← "Новое сообщение!" (сразу, когда появилось)
+Сервер:  ← "Ещё одно сообщение!" (сразу)
+Сервер:  ← "Новый пользователь подключился!" (сразу)
+```
+
+## Где применяется
+
+| Приложение | Real-time функция |
+|------------|-------------------|
+| Мессенджеры (Telegram, WhatsApp) | Мгновенные сообщения |
+| Google Docs | Совместное редактирование |
+| Uber/Яндекс.Такси | Трекинг водителя |
+| Binance, TradingView | Биржевые котировки |
+| Онлайн-игры | Состояние игры |
+| Трелло, Notion | Коллаборация в реальном времени |
+| Системы мониторинга | Метрики в реальном времени |
+
+## Технологии real-time
+
+### 1. Polling (опрос)
+Клиент постоянно спрашивает: "Есть что-нибудь новенькое?"
+
+```javascript
+// Простой polling — каждые 5 секунд
+setInterval(async () => {
+  const response = await fetch('/api/messages?since=' + lastId);
+  const data = await response.json();
+  if (data.messages.length > 0) {
+    renderMessages(data.messages);
+    lastId = data.messages[data.messages.length - 1].id;
+  }
+}, 5000);
+```
+
+**Минусы:** нагрузка на сервер, задержка до 5 секунд, расход трафика.
+
+### 2. Long Polling
+Сервер держит запрос открытым до появления новых данных:
+
+```javascript
+// Клиент
+async function longPoll() {
+  try {
+    const response = await fetch('/api/messages/wait?since=' + lastId);
+    const data = await response.json();
+    renderMessages(data.messages);
+    lastId = data.lastId;
+  } finally {
+    longPoll(); // Сразу запускаем следующий запрос
+  }
+}
+
+longPoll();
+
+// Сервер (Express)
+app.get('/api/messages/wait', (req, res) => {
+  const since = req.query.since;
+  
+  // Ждём новых сообщений (до 30 секунд)
+  const timeout = setTimeout(() => {
+    res.json({ messages: [], lastId: since });
+  }, 30000);
+  
+  // Когда появится новое сообщение — отвечаем
+  emitter.once('new-message', (message) => {
+    clearTimeout(timeout);
+    res.json({ messages: [message], lastId: message.id });
+  });
+});
+```
+
+**Лучше polling, но всё равно создаёт накладные расходы.**
+
+### 3. Server-Sent Events (SSE)
+Одностороннее соединение: сервер → клиент.
+
+```javascript
+// Клиент — встроенный EventSource API браузера
+const events = new EventSource('/api/stream');
+
+events.onmessage = (e) => {
+  const data = JSON.parse(e.data);
+  renderUpdate(data);
+};
+
+events.addEventListener('message', (e) => {
+  console.log('Новое сообщение:', JSON.parse(e.data));
+});
+```
+
+**Хорош для:** уведомлений, новостных лент, обновлений статуса.
+
+### 4. WebSocket
+Двустороннее постоянное соединение:
+
+```javascript
+// Клиент
+const ws = new WebSocket('wss://example.com/ws');
+
+ws.onopen = () => ws.send(JSON.stringify({ type: 'hello' }));
+ws.onmessage = (e) => console.log('Получено:', JSON.parse(e.data));
+ws.onerror = (e) => console.error('Ошибка:', e);
+ws.onclose = () => console.log('Соединение закрыто');
+```
+
+**Хорош для:** чатов, игр, всего двустороннего.
+
+### 5. WebRTC
+Peer-to-peer без сервера-посредника:
+
+```
+Клиент A ←——————————→ Клиент B
+         (прямое соединение)
+         
+Сервер нужен только для установки связи (signaling)
+```
+
+**Хорош для:** видеозвонков, peer-to-peer файлообмена.
+
+## Сравнение технологий
+
+```
+                    Polling  Long Poll  SSE    WebSocket  WebRTC
+─────────────────────────────────────────────────────────────────
+Поддержка браузера   ✅        ✅        ✅      ✅         ✅
+Прост в реализации   ✅        ✅        ✅      ✅         ❌
+Двусторонний         ❌        ❌        ❌      ✅         ✅
+Автопереподключение  manual   manual    ✅      manual     ❌
+Работает с прокси    ✅        ✅        ✅      ✅⚠️        ❌
+Без сервера          ❌        ❌        ❌      ❌         ✅
+Задержка             высокая  средняя  низкая  низкая    низкая
+```
+
+## Выбор технологии
+
+```
+Нужен поток от сервера к клиенту?
+  → SSE (уведомления, ленты, статус)
+
+Нужна двусторонняя связь?
+  → WebSocket / Socket.io (чат, игры, коллаборация)
+
+Нужно P2P без сервера?
+  → WebRTC (видеозвонки, файлообмен)
+
+Простой случай, не критична задержка?
+  → Polling или Long Polling
+```
+
+## Задания
+
+1. Придумай 3 сценария, где подойдёт SSE, а WebSocket избыточен
+2. Придумай 3 сценария, где нужен именно WebSocket
+3. Какую технологию использует Telegram Web? А Google Meet? Подумай, почему.
+
+## Итог
+
+Real-time — это когда сервер **сам пушит** данные клиенту, не ожидая запроса. Главные технологии: SSE (просто, одностороннее) и WebSocket (мощно, двустороннее). В следующем уроке разберём WebSocket протокол изнутри.
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState, useEffect } from "react";
+
+export default function App() {
+  const [mode, setMode] = useState("polling");
+  const [messages, setMessages] = useState([]);
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    if (mode === "polling") {
+      const id = setInterval(() => {
+        setCount(c => c + 1);
+        setMessages(m => [...m.slice(-4), \`[polling] Запрос #\${m.length + 1} → ответ: \${Date.now()}\`]);
+      }, 2000);
+      return () => clearInterval(id);
+    } else {
+      // Simulate real-time push
+      setMessages(m => [...m, "[realtime] Соединение установлено ✓"]);
+      const id = setInterval(() => {
+        setMessages(m => [...m.slice(-4), \`[realtime] Сервер пушит: \${new Date().toLocaleTimeString()}\`]);
+      }, 1000);
+      return () => clearInterval(id);
+    }
+  }, [mode]);
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Polling vs Real-time</h3>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <button onClick={() => { setMode("polling"); setMessages([]); }}
+          style={{ padding: "6px 12px", background: mode === "polling" ? "#3b82f6" : "#334155", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
+          Polling (каждые 2с)
+        </button>
+        <button onClick={() => { setMode("realtime"); setMessages([]); }}
+          style={{ padding: "6px 12px", background: mode === "realtime" ? "#10b981" : "#334155", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
+          Real-time (push)
+        </button>
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 120 }}>
+        {messages.map((m, i) => <div key={i} style={{ color: "#94a3b8", fontSize: 13 }}>{m}</div>)}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

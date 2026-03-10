@@ -1,0 +1,597 @@
+---
+title: "8. Server-Side Rendering (SSR)"
+sidebar:
+  order: 8
+---
+import { Playground } from '@components/Playground'
+
+
+## ⚡ Server-Side Rendering (SSR) в Next.js
+
+SSR — это когда HTML генерируется **на сервере при каждом запросе**. Пользователь получает свежий, полностью заполненный HTML прямо с сервера. Не пустую страницу, не устаревший кеш — именно свежий контент для этого конкретного запроса! 🌐
+
+```
+Запрос пользователя
+       │
+       ▼
+   Next.js Server
+       │
+       ├─► cookies() / headers()  ─── данные запроса
+       ├─► searchParams            ─── параметры URL
+       ├─► DB запрос               ─── свежие данные
+       │
+       ▼
+   Рендеринг HTML
+       │
+       ▼
+   Ответ клиенту
+   (готовый HTML с данными!)
+```
+
+---
+
+### 🔄 Динамический рендеринг: Как включается SSR
+
+В Next.js App Router страница становится **динамической** (SSR) когда:
+
+```typescript
+// 1. Используется cookies() — каждый запрос имеет свои cookies
+import { cookies } from 'next/headers';
+
+export default async function ProfilePage() {
+  const cookieStore = await cookies(); // ← Делает страницу динамической!
+  const sessionToken = cookieStore.get('session');
+  
+  const user = await getUserBySession(sessionToken?.value);
+  
+  return <UserProfile user={user} />;
+}
+
+// 2. Используется headers()
+import { headers } from 'next/headers';
+
+export default async function LocalizedPage() {
+  const headersList = await headers(); // ← Динамическая!
+  const locale = headersList.get('accept-language') ?? 'ru';
+  
+  const content = await getContentByLocale(locale);
+  return <Page content={content} />;
+}
+
+// 3. Используется searchParams (параметры URL ?q=...)
+interface Props {
+  searchParams: Promise<{ q?: string; page?: string }>;
+}
+
+export default async function SearchPage({ searchParams }: Props) {
+  const { q = '', page = '1' } = await searchParams; // ← Динамическая!
+  
+  const results = await searchPosts(q, parseInt(page));
+  
+  return (
+    <div>
+      <SearchInput defaultValue={q} />
+      <ResultsList results={results} />
+      <Pagination currentPage={parseInt(page)} />
+    </div>
+  );
+}
+
+// 4. Явная настройка force-dynamic
+export const dynamic = 'force-dynamic'; // ← Явно динамическая!
+export const revalidate = 0; // Альтернатива: revalidate = 0
+
+export default async function AlwaysFreshPage() {
+  const data = await getLatestData();
+  return <DataDisplay data={data} />;
+}
+
+// 5. noStore() — отключить кеш для конкретного запроса
+import { unstable_noStore as noStore } from 'next/cache';
+
+export default async function RealtimePage() {
+  noStore(); // ← Делает текущий рендер динамическим
+  
+  const price = await getCurrentPrice();
+  return <PriceDisplay price={price} />;
+}
+```
+
+---
+
+### 🌊 Streaming HTML: Не жди, стримь!
+
+Streaming — это отправка HTML по частям, пока медленные компоненты ещё загружаются:
+
+```typescript
+// app/dashboard/page.tsx
+import { Suspense } from 'react';
+
+export default function DashboardPage() {
+  return (
+    <div>
+      {/* Мгновенно: статический контент */}
+      <h1>Дашборд</h1>
+      <QuickStats />  {/* Быстро — нет Suspense */}
+      
+      {/* Streaming: отправляется когда готово */}
+      <Suspense fallback={<RevenueChartSkeleton />}>
+        <RevenueChart />   {/* Медленный запрос */}
+      </Suspense>
+      
+      <Suspense fallback={<TransactionsSkeleton />}>
+        <TransactionsTable />  {/* Ещё один медленный */}
+      </Suspense>
+    </div>
+  );
+}
+
+// Медленный компонент — не блокирует остальное!
+async function RevenueChart() {
+  await new Promise(r => setTimeout(r, 2000)); // Симуляция медленного API
+  const revenue = await getMonthlyRevenue();
+  return <Chart data={revenue} />;
+}
+
+async function TransactionsTable() {
+  const transactions = await getRecentTransactions();
+  return <Table data={transactions} />;
+}
+```
+
+```
+Без Streaming:
+────────────────────────────────── 3s
+|         ждём всё...              |→ Страница появляется целиком
+
+С Streaming:
+|====| 0.3s → Базовый HTML + скелетоны
+       |======| 1s → RevenueChart встраивается
+              |========| 2s → TransactionsTable встраивается
+```
+
+---
+
+### 🔮 Как сервер отдаёт Streaming
+
+```
+HTTP Response:
+──────────────────────────────────────
+Content-Type: text/html
+Transfer-Encoding: chunked
+
+<-- Chunk 1 (мгновенно): -->
+<!DOCTYPE html>
+<html>
+<head>...</head>
+<body>
+  <h1>Дашборд</h1>
+  <div id="__NEXT_SUSPENSE__0">
+    <!-- skeleton placeholder -->
+    <div class="skeleton">Loading chart...</div>
+  </div>
+
+<-- Chunk 2 (через 1s, когда RevenueChart готов): -->
+  <script>
+    // Вставляем готовый HTML в placeholder
+    $RC("__NEXT_SUSPENSE__0", `<div class="chart">...</div>`)
+  </script>
+
+<-- Chunk 3 (через 2s): -->
+  <script>$RC("__NEXT_SUSPENSE__1", `<table>...</table>`)</script>
+</body>
+</html>
+──────────────────────────────────────
+```
+
+---
+
+### ⚙️ Конфигурация динамического рендеринга
+
+```typescript
+// Варианты export const dynamic:
+export const dynamic = 'auto';         // По умолчанию — Next.js решает
+export const dynamic = 'force-dynamic'; // Всегда SSR
+export const dynamic = 'error';        // Ошибка если нужен динамический рендер
+export const dynamic = 'force-static'; // Всегда статика (игнор cookies и т.д.)
+
+// Варианты export const revalidate:
+export const revalidate = 0;      // Как force-dynamic
+export const revalidate = false;  // Как force-cache (никогда не обновлять)
+export const revalidate = 3600;   // ISR — обновлять каждый час
+
+// runtime: Edge vs Node.js
+export const runtime = 'edge';    // Edge Functions (Cloudflare Workers-like)
+export const runtime = 'nodejs';  // Node.js (по умолчанию)
+
+// fetchCache
+export const fetchCache = 'force-no-store'; // Все fetch() без кеша
+```
+
+---
+
+### 🆚 SSR vs SSG vs ISR vs CSR: Когда что?
+
+```typescript
+// SSR — используй когда:
+// ✅ Данные должны быть СВЕЖИМИ при каждом запросе
+// ✅ Контент персонализирован (зависит от пользователя/сессии)
+// ✅ Используешь cookies/headers
+// ✅ Поисковые результаты (searchParams)
+
+// Примеры SSR:
+// - Лента новостей (всегда свежие)
+// - Профиль пользователя (персонализировано)
+// - Корзина покупок
+// - Страница поиска
+// - Dashboard с реальными данными
+
+// SSG — используй когда:
+// ✅ Контент редко меняется
+// ✅ Одинаков для всех пользователей
+// ✅ Нужна максимальная скорость
+// Примеры: блоги, документация, лендинги
+
+// ISR — используй когда:
+// ✅ Контент меняется редко, но не статичен
+// ✅ Нужна скорость + относительная свежесть
+// Примеры: каталог товаров, новости
+
+// CSR — используй когда:
+// ✅ Только за логином (SEO не нужен)
+// ✅ Очень интерактивная (дашборд, редактор)
+// ✅ Данные меняются в реальном времени
+```
+
+---
+
+### 🔐 SSR и авторизация
+
+Типичный паттерн — проверка авторизации в SSR:
+
+```typescript
+// app/dashboard/page.tsx
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+import { verifyToken } from '@/lib/jwt';
+
+export default async function DashboardPage() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get('auth-token');
+  
+  if (!token) {
+    redirect('/login'); // Серверный редирект — нет мигания!
+  }
+  
+  const payload = await verifyToken(token.value);
+  
+  if (!payload) {
+    redirect('/login?error=invalid-token');
+  }
+  
+  const user = await db.user.findUnique({
+    where: { id: payload.userId },
+    include: { profile: true },
+  });
+  
+  if (!user) {
+    redirect('/login');
+  }
+  
+  return (
+    <div>
+      <h1>Привет, {user.name}!</h1>
+      <DashboardContent user={user} />
+    </div>
+  );
+}
+// Вся логика авторизации — на сервере! Клиент никогда не видит неавторизованный контент.
+```
+
+---
+
+### 🚀 Оптимизация SSR: Partial Prerendering (PPR)
+
+Next.js 14+ предлагает экспериментальную фичу — **Partial Prerendering**:
+
+```typescript
+// next.config.mjs
+const nextConfig = {
+  experimental: {
+    ppr: 'incremental', // или true для всего приложения
+  },
+};
+
+// app/product/[id]/page.tsx
+export const experimental_ppr = true;
+
+import { Suspense } from 'react';
+
+export default function ProductPage({ params }) {
+  return (
+    <div>
+      {/* СТАТИЧЕСКАЯ часть — предрендерится при сборке */}
+      <ProductBreadcrumbs />
+      <StaticProductInfo />
+      
+      {/* ДИНАМИЧЕСКАЯ часть — потокова при запросе */}
+      <Suspense fallback={<PriceSkeleton />}>
+        <DynamicPrice productId={params.id} />  {/* Реальная цена */}
+      </Suspense>
+      
+      <Suspense fallback={<InventorySkeleton />}>
+        <InventoryStatus productId={params.id} />  {/* Наличие */}
+      </Suspense>
+    </div>
+  );
+}
+// Статическая оболочка + динамические "дырки" = лучшее из обоих миров!
+```
+
+---
+
+### 🎯 Резюме урока
+
+1. **Динамический рендеринг** включается автоматически при: `cookies()`, `headers()`, `searchParams`, `noStore()`
+2. **force-dynamic** — явный способ включить SSR
+3. **Streaming** — HTML отправляется по частям через `<Suspense>`
+4. **Edge Runtime** — выполнение на CDN-узлах (быстрее, но меньше APIs)
+5. **PPR** — комбинация статики и динамики в одной странице (future!)
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from "react";
+
+type RenderMode = "ssg" | "ssr" | "streaming";
+type RequestUser = "anonymous" | "user1" | "user2";
+
+const users = {
+  user1: { name: "Иван Иванов", role: "Admin", balance: "₽12,450" },
+  user2: { name: "Мария Петрова", role: "User", balance: "₽3,200" },
+};
+
+interface ChunkInfo {
+  id: string;
+  label: string;
+  delay: number;
+  content: string;
+  color: string;
+}
+
+const getChunks = (mode: RenderMode, user: RequestUser): ChunkInfo[] => {
+  if (mode === "ssg") {
+    return [{
+      id: "all",
+      label: "Весь HTML (из кеша)",
+      delay: 50,
+      content: "Статичный контент для всех пользователей одинаков",
+      color: "#4ade80"
+    }];
+  }
+
+  if (mode === "ssr") {
+    return [{
+      id: "all",
+      label: "Весь HTML (серверный рендер)",
+      delay: 900,
+      content: user === "anonymous"
+        ? "Привет, гость! Войдите для доступа к аккаунту"
+        : \`Привет, \${users[user as keyof typeof users]?.name}! Роль: \${users[user as keyof typeof users]?.role}\`,
+      color: "#60a5fa"
+    }];
+  }
+
+  // streaming
+  return [
+    {
+      id: "shell",
+      label: "Chunk 1: Шаблон страницы",
+      delay: 80,
+      content: "<Header /><h1>Дашборд</h1><скелетоны...>",
+      color: "#4ade80"
+    },
+    {
+      id: "user-info",
+      label: "Chunk 2: Данные пользователя",
+      delay: 400,
+      content: user === "anonymous"
+        ? "Нужна авторизация"
+        : \`✅ \${users[user as keyof typeof users]?.name} (\${users[user as keyof typeof users]?.role})\`,
+      color: "#60a5fa"
+    },
+    {
+      id: "stats",
+      label: "Chunk 3: Статистика",
+      delay: 900,
+      content: user === "anonymous"
+        ? "—"
+        : \`💰 Баланс: \${users[user as keyof typeof users]?.balance}\`,
+      color: "#a78bfa"
+    },
+    {
+      id: "table",
+      label: "Chunk 4: Транзакции",
+      delay: 1500,
+      content: user === "anonymous"
+        ? "—"
+        : "📊 Загружено 25 транзакций",
+      color: "#fb923c"
+    },
+  ];
+};
+
+export default function App() {
+  const [mode, setMode] = useState<RenderMode>("ssr");
+  const [user, setUser] = useState<RequestUser>("user1");
+  const [running, setRunning] = useState(false);
+  const [arrivedChunks, setArrivedChunks] = useState<string[]>([]);
+  const [elapsed, setElapsed] = useState(0);
+
+  const chunks = getChunks(mode, user);
+
+  const simulateRequest = async () => {
+    if (running) return;
+    setRunning(true);
+    setArrivedChunks([]);
+    const start = Date.now();
+
+    if (mode === "ssg" || mode === "ssr") {
+      await new Promise(r => setTimeout(r, chunks[0].delay));
+      setArrivedChunks([chunks[0].id]);
+    } else {
+      // streaming — chunks arrive at different times
+      chunks.forEach(async (chunk) => {
+        await new Promise(r => setTimeout(r, chunk.delay));
+        setArrivedChunks(prev => [...prev, chunk.id]);
+      });
+      const maxDelay = Math.max(...chunks.map(c => c.delay));
+      await new Promise(r => setTimeout(r, maxDelay + 100));
+    }
+
+    setElapsed(Date.now() - start);
+    setRunning(false);
+  };
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: 24,
+      fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ maxWidth: 640, margin: "0 auto" }}>
+        <h2 style={{ color: "#fff", fontSize: 20, marginBottom: 4 }}>
+          ⚡ Симулятор SSR + Streaming
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 13, marginBottom: 20 }}>
+          Сравни как HTML доставляется клиенту в разных режимах
+        </p>
+
+        {/* Mode */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          {([
+            { value: "ssg", label: "🏗️ SSG", desc: "из кеша" },
+            { value: "ssr", label: "⚙️ SSR", desc: "весь HTML" },
+            { value: "streaming", label: "🌊 SSR+Stream", desc: "по частям" },
+          ] as const).map(m => (
+            <button
+              key={m.value}
+              onClick={() => { setMode(m.value); setArrivedChunks([]); setElapsed(0); }}
+              style={{
+                padding: "8px 16px", borderRadius: 8, border: "none",
+                background: mode === m.value ? "#000" : "#1e293b",
+                color: mode === m.value ? "#4ade80" : "#64748b",
+                fontWeight: mode === m.value ? 700 : 400,
+                cursor: "pointer", fontSize: 12,
+                borderBottom: mode === m.value ? "2px solid #4ade80" : "2px solid transparent"
+              }}
+            >
+              {m.label}
+              <div style={{ fontSize: 10, color: "#475569" }}>{m.desc}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* User selector */}
+        <div style={{
+          background: "#1e293b", borderRadius: 8, padding: 12,
+          marginBottom: 16, display: "flex", alignItems: "center", gap: 12
+        }}>
+          <span style={{ color: "#94a3b8", fontSize: 13 }}>Пользователь:</span>
+          {(["anonymous", "user1", "user2"] as RequestUser[]).map(u => (
+            <button
+              key={u}
+              onClick={() => { setUser(u); setArrivedChunks([]); setElapsed(0); }}
+              style={{
+                padding: "5px 12px", borderRadius: 6, border: "none",
+                background: user === u ? "#334155" : "transparent",
+                color: user === u ? "#fff" : "#475569",
+                cursor: "pointer", fontSize: 12
+              }}
+            >
+              {u === "anonymous" ? "👤 Анонимный" : u === "user1" ? "👨 Иван" : "👩 Мария"}
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={simulateRequest}
+          disabled={running}
+          style={{
+            width: "100%", padding: "12px", borderRadius: 8, border: "none",
+            background: running ? "#334155" : "#4ade80",
+            color: running ? "#64748b" : "#000",
+            fontWeight: 700, cursor: running ? "not-allowed" : "pointer",
+            fontSize: 14, marginBottom: 20
+          }}
+        >
+          {running ? "Запрос обрабатывается..." : "▶ Сделать запрос"}
+        </button>
+
+        {/* HTTP Response visualization */}
+        <div style={{
+          background: "#111827", borderRadius: 10, padding: 16, border: "1px solid #1e293b"
+        }}>
+          <div style={{ color: "#64748b", fontSize: 11, marginBottom: 12 }}>
+            HTTP RESPONSE — {mode === "streaming" ? "Transfer-Encoding: chunked" : "Content-Length: fixed"}
+          </div>
+
+          {chunks.map((chunk, i) => {
+            const arrived = arrivedChunks.includes(chunk.id);
+
+            return (
+              <div
+                key={chunk.id}
+                style={{
+                  padding: "10px 14px", borderRadius: 8, marginBottom: 8,
+                  background: arrived ? chunk.color + "15" : "#0f172a",
+                  border: \`1px solid \${arrived ? chunk.color : "#1e293b"}\`,
+                  transition: "all 0.4s",
+                  opacity: !running && arrivedChunks.length === 0 ? 0.4 : 1
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{
+                    color: arrived ? chunk.color : "#475569",
+                    fontSize: 13, fontWeight: arrived ? 600 : 400
+                  }}>
+                    {arrived ? "✅" : running ? "⏳" : "○"} {chunk.label}
+                  </span>
+                  {mode === "streaming" && (
+                    <span style={{
+                      fontSize: 10, color: "#475569",
+                      background: "#1e293b", padding: "2px 6px", borderRadius: 4
+                    }}>
+                      +{chunk.delay}ms
+                    </span>
+                  )}
+                </div>
+                {arrived && (
+                  <div style={{
+                    marginTop: 6, color: "#94a3b8", fontSize: 12,
+                    fontFamily: "monospace", borderLeft: \`2px solid \${chunk.color}44\`,
+                    paddingLeft: 8
+                  }}>
+                    {chunk.content}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {elapsed > 0 && (
+            <div style={{
+              marginTop: 8, padding: "8px 14px", borderRadius: 6,
+              background: "#052e16", color: "#4ade80", fontSize: 13,
+              textAlign: "center"
+            }}>
+              ⏱️ Полное время: <strong>{elapsed}мс</strong>
+              {mode === "streaming" && (
+                <span style={{ color: "#6ee7b7", fontSize: 12 }}>
+                  {" "}— пользователь видел контент уже через ~{chunks[0].delay}мс!
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

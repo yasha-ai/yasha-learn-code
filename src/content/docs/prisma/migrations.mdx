@@ -1,0 +1,277 @@
+---
+title: "6. Миграции"
+sidebar:
+  order: 6
+---
+import { Playground } from '@components/Playground'
+
+
+Миграции — это способ версионировать изменения схемы базы данных. Prisma Migrate автоматически генерирует SQL-файлы миграций на основе изменений в `schema.prisma` и применяет их к базе данных.
+
+## Как работают миграции
+
+Когда вы вносите изменения в `schema.prisma`, Prisma сравнивает текущее состояние схемы с последней примёнённой миграцией и генерирует SQL для перехода от одного состояния к другому.
+
+## Основные команды
+
+**Создание и применение миграции (разработка):**
+
+```bash
+npx prisma migrate dev --name add-user-email
+```
+
+Эта команда создаёт новый SQL-файл в `prisma/migrations/`, применяет его к БД и регенерирует Prisma Client.
+
+**Применение миграций в продакшене:**
+
+```bash
+npx prisma migrate deploy
+```
+
+Применяет все неприменённые миграции без интерактивных запросов. Предназначена для CI/CD пайплайнов.
+
+**Сброс базы данных (осторожно!):**
+
+```bash
+npx prisma migrate reset
+```
+
+Удаляет и пересоздаёт БД, применяя все миграции с нуля. Только для разработки.
+
+## Структура папки migrations
+
+```
+prisma/migrations/
+├── 20240115120000_init/
+│   └── migration.sql
+├── 20240116090000_add_email_to_user/
+│   └── migration.sql
+└── 20240117150000_create_posts_table/
+    └── migration.sql
+```
+
+## Таблица _prisma_migrations
+
+Prisma хранит историю применённых миграций в специальной таблице `_prisma_migrations`. Это позволяет отслеживать какие миграции уже применены, а какие ещё нет.
+
+## Ручные миграции
+
+Иногда нужно добавить в миграцию кастомный SQL, который Prisma не может сгенерировать автоматически (например, наполнение данными или создание триггеров). Для этого просто отредактируйте файл миграции до её применения.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const migrations = [
+  {
+    id: '20240115120000',
+    name: 'init',
+    date: '15 янв 2024, 12:00',
+    status: 'applied',
+    description: 'Начальная схема: создание таблицы users',
+    sql: \`-- CreateTable
+CREATE TABLE "users" (
+    "id"         SERIAL PRIMARY KEY,
+    "email"      TEXT NOT NULL,
+    "name"       TEXT,
+    "created_at" TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "users_email_key" ON "users"("email");\`,
+    changes: ['+ Таблица users', '+ Индекс по email'],
+  },
+  {
+    id: '20240116090000',
+    name: 'add_user_role',
+    date: '16 янв 2024, 09:00',
+    status: 'applied',
+    description: 'Добавить поле role к пользователям',
+    sql: \`-- CreateEnum
+CREATE TYPE "Role" AS ENUM ('USER', 'ADMIN', 'MODERATOR');
+
+-- AlterTable
+ALTER TABLE "users"
+ADD COLUMN "role" "Role" NOT NULL DEFAULT 'USER';\`,
+    changes: ['+ Enum Role', '+ Колонка role в users'],
+  },
+  {
+    id: '20240117150000',
+    name: 'create_posts',
+    date: '17 янв 2024, 15:00',
+    status: 'applied',
+    description: 'Создание таблицы posts для публикаций',
+    sql: \`-- CreateTable
+CREATE TABLE "posts" (
+    "id"          SERIAL PRIMARY KEY,
+    "title"       TEXT NOT NULL,
+    "content"     TEXT,
+    "published"   BOOLEAN NOT NULL DEFAULT false,
+    "author_id"   INTEGER NOT NULL,
+    "created_at"  TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "posts_author_id_fkey"
+        FOREIGN KEY ("author_id")
+        REFERENCES "users"("id") ON DELETE CASCADE
+);
+
+-- CreateIndex
+CREATE INDEX "posts_author_id_idx" ON "posts"("author_id");\`,
+    changes: ['+ Таблица posts', '+ FK posts.author_id → users.id', '+ Индекс по author_id'],
+  },
+  {
+    id: '20240120110000',
+    name: 'add_post_tags',
+    date: '20 янв 2024, 11:00',
+    status: 'applied',
+    description: 'Создание тегов и связи многие-ко-многим',
+    sql: \`-- CreateTable
+CREATE TABLE "tags" (
+    "id"   SERIAL PRIMARY KEY,
+    "name" TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX "tags_name_key" ON "tags"("name");
+
+-- CreateTable (junction)
+CREATE TABLE "_PostToTag" (
+    "A" INTEGER NOT NULL REFERENCES "posts"("id"),
+    "B" INTEGER NOT NULL REFERENCES "tags"("id")
+);
+
+CREATE UNIQUE INDEX "_PostToTag_AB_unique" ON "_PostToTag"("A", "B");
+CREATE INDEX "_PostToTag_B_index" ON "_PostToTag"("B");\`,
+    changes: ['+ Таблица tags', '+ Промежуточная таблица _PostToTag', '+ Индексы'],
+  },
+  {
+    id: '20240122080000',
+    name: 'add_comments',
+    date: '22 янв 2024, 08:00',
+    status: 'pending',
+    description: 'Система комментариев к постам (ещё не применена)',
+    sql: \`-- CreateTable
+CREATE TABLE "comments" (
+    "id"         SERIAL PRIMARY KEY,
+    "body"       TEXT NOT NULL,
+    "post_id"    INTEGER NOT NULL REFERENCES "posts"("id"),
+    "author_id"  INTEGER NOT NULL REFERENCES "users"("id"),
+    "created_at" TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP
+);\`,
+    changes: ['+ Таблица comments', '+ FK к posts', '+ FK к users'],
+  },
+]
+
+export default function App() {
+  const [selected, setSelected] = useState(0)
+  const [view, setView] = useState('sql')
+  const mig = migrations[selected]
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '32px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 4px 0' }}>
+          История миграций
+        </h2>
+        <p style={{ color: '#94a3b8', margin: '0 0 24px 0', fontSize: 13 }}>
+          Хронология изменений схемы базы данных
+        </p>
+
+        <div style={{ display: 'flex', gap: 16 }}>
+          <div style={{ width: 260, flexShrink: 0 }}>
+            <div style={{ position: 'relative', paddingLeft: 16 }}>
+              <div style={{ position: 'absolute', left: 8, top: 0, bottom: 0, width: 2, background: '#334155' }} />
+              {migrations.map((m, i) => (
+                <div
+                  key={i}
+                  onClick={() => setSelected(i)}
+                  style={{
+                    position: 'relative',
+                    marginBottom: 8,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{
+                    position: 'absolute',
+                    left: -20,
+                    top: 14,
+                    width: 12,
+                    height: 12,
+                    borderRadius: '50%',
+                    background: m.status === 'applied' ? '#38a169' : '#d69e2e',
+                    border: '2px solid ' + BG,
+                    zIndex: 1,
+                  }} />
+                  <div style={{
+                    background: selected === i ? CARD : 'transparent',
+                    border: '1px solid ' + (selected === i ? '#334155' : 'transparent'),
+                    borderRadius: 10,
+                    padding: '10px 12px',
+                    transition: 'all 0.15s',
+                  }}>
+                    <div style={{ color: selected === i ? TEXT : '#94a3b8', fontSize: 12, fontWeight: 600, marginBottom: 2 }}>
+                      {m.name}
+                    </div>
+                    <div style={{ color: '#475569', fontSize: 11 }}>{m.date}</div>
+                    <div style={{ display: 'inline-block', background: m.status === 'applied' ? '#14532d' : '#713f12', color: m.status === 'applied' ? '#86efac' : '#fde047', fontSize: 10, padding: '1px 6px', borderRadius: 4, marginTop: 4, fontWeight: 600 }}>
+                      {m.status === 'applied' ? '✓ Применена' : '⏳ Ожидает'}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ flex: 1 }}>
+            <div style={{ background: CARD, borderRadius: 14, padding: 20, border: '1px solid #334155', marginBottom: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                <div>
+                  <h3 style={{ color: TEXT, margin: '0 0 4px 0', fontSize: 16, fontWeight: 700 }}>
+                    {mig.name}
+                  </h3>
+                  <p style={{ color: '#94a3b8', margin: 0, fontSize: 12 }}>{mig.description}</p>
+                </div>
+                <code style={{ color: '#475569', fontSize: 10, fontFamily: 'monospace' }}>{mig.id}</code>
+              </div>
+
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {mig.changes.map((c, i) => (
+                  <span key={i} style={{ background: '#0a0f1e', color: c.startsWith('+') ? '#86efac' : '#fc8181', fontSize: 11, padding: '3px 8px', borderRadius: 6, fontFamily: 'monospace' }}>
+                    {c}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+              <button
+                onClick={() => setView('sql')}
+                style={{ background: view === 'sql' ? PRISMA : CARD, color: view === 'sql' ? '#fff' : '#94a3b8', border: '1px solid ' + (view === 'sql' ? PRISMA : '#334155'), borderRadius: 8, padding: '5px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+              >
+                SQL
+              </button>
+            </div>
+
+            <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 16, border: '1px solid #1e3a5f' }}>
+              <pre style={{ margin: 0, color: '#94a3b8', fontSize: 12, lineHeight: 1.8, overflowX: 'auto', fontFamily: 'monospace' }}>
+                {mig.sql.split('\\n').map((line, i) => (
+                  <span key={i} style={{
+                    color: line.trim().startsWith('--') ? '#475569' :
+                      line.includes('CREATE') || line.includes('ALTER') || line.includes('DROP') ? '#7dd3fc' :
+                      line.includes('NOT NULL') || line.includes('DEFAULT') || line.includes('PRIMARY') ? '#fbbf24' :
+                      TEXT,
+                    display: 'block',
+                  }}>
+                    {line}
+                  </span>
+                ))}
+              </pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

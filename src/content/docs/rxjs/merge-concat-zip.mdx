@@ -1,0 +1,457 @@
+---
+title: "6. merge, concat, zip"
+sidebar:
+  order: 6
+---
+import { Playground } from '@components/Playground'
+
+
+## 🔀 Комбинирование потоков: merge, concat, zip, race
+
+Яша, ты уже умеешь работать с одним потоком — отлично! 🎉 Но в реальных приложениях данные приходят из разных источников одновременно. Сегодня учимся их объединять!
+
+---
+
+### 🧠 Зачем комбинировать потоки?
+
+Представь: ты пишешь дашборд. Данные о пользователях приходят с одного API, уведомления — с другого, статус системы — с третьего. Как всё это объединить?
+
+RxJS даёт нам 4 главных оператора комбинирования. У каждого — своя стратегия! 🎯
+
+---
+
+### 🚦 merge — несколько полос движения
+
+`merge` — это как несколько полос на шоссе. Автомобили из любой полосы едут вместе, и каждый попадает в результирующий поток в том порядке, в котором он прибыл.
+
+**Мраморная диаграмма:**
+```
+Поток A:  --A1-------A2-------A3-->
+Поток B:  ------B1-------B2------->
+merge():
+Результат: --A1---B1--A2--B2--A3-->
+```
+
+```typescript
+import { merge, interval, timer } from 'rxjs';
+import { map, take } from 'rxjs/operators';
+
+// Два потока с разными интервалами
+const slow$ = interval(1000).pipe(
+  take(3),
+  map(i => `🐢 Медленный: ${i}`)
+);
+
+const fast$ = interval(400).pipe(
+  take(5),
+  map(i => `🐇 Быстрый: ${i}`)
+);
+
+// merge объединяет — значения появляются в порядке их прихода
+merge(slow$, fast$).subscribe(value => {
+  console.log(value);
+});
+// 🐇 Быстрый: 0  (400ms)
+// 🐇 Быстрый: 1  (800ms)
+// 🐢 Медленный: 0 (1000ms)
+// 🐇 Быстрый: 2  (1200ms)
+// ...
+
+// Реальный пример: объединение UI-событий
+import { fromEvent } from 'rxjs';
+
+const button1 = document.getElementById('btn1')!;
+const button2 = document.getElementById('btn2')!;
+
+// Слушаем клики на обоих кнопках в одном потоке
+merge(
+  fromEvent(button1, 'click').pipe(map(() => 'Кнопка 1')),
+  fromEvent(button2, 'click').pipe(map(() => 'Кнопка 2')),
+).subscribe(source => {
+  console.log('Нажата:', source);
+});
+```
+
+> 💡 **merge** — когда важна реактивность: хочешь получать данные как только они появились, из любого источника.
+
+---
+
+### 🚶 concat — очередь, один за другим
+
+`concat` — это как очередь в кассу. Пока первый человек не обслужен — второй не подходит. Потоки выполняются строго последовательно!
+
+**Мраморная диаграмма:**
+```
+Поток A:  --A1--A2--A3--|
+Поток B:                 --B1--B2--|
+concat():
+Результат: --A1--A2--A3----B1--B2--|
+```
+
+> ⚠️ **Важно:** `concat` подписывается на следующий поток ТОЛЬКО после завершения предыдущего. Если первый поток бесконечный — второй никогда не начнётся!
+
+```typescript
+import { concat, of, timer } from 'rxjs';
+import { delay, map, tap } from 'rxjs/operators';
+
+// Анимация: шаги выполняются строго по порядку
+const step1$ = of('Шаг 1: Загружаем данные...').pipe(delay(1000));
+const step2$ = of('Шаг 2: Обрабатываем...').pipe(delay(800));
+const step3$ = of('Шаг 3: Сохраняем...').pipe(delay(600));
+const done$ = of('✅ Готово!');
+
+concat(step1$, step2$, step3$, done$).subscribe(status => {
+  console.log(status);
+});
+// (через 1с) "Шаг 1: Загружаем данные..."
+// (через 1.8с) "Шаг 2: Обрабатываем..."
+// (через 2.4с) "Шаг 3: Сохраняем..."
+// (через 2.4с) "✅ Готово!"
+
+// Реальный пример: последовательная загрузка
+import { from } from 'rxjs';
+
+const loadUser$ = from(fetch('/api/user').then(r => r.json()));
+const loadPosts$ = from(fetch('/api/posts').then(r => r.json()));
+
+// Сначала загружаем пользователя, потом его посты
+concat(loadUser$, loadPosts$).subscribe(data => {
+  console.log('Получено:', data);
+});
+```
+
+---
+
+### 🤐 zip — застёжка-молния
+
+`zip` работает как застёжка-молния: берёт по одному элементу из каждого потока и объединяет их в пару (или тройку). Следующая пара — только когда ВСЕ потоки выдали по элементу.
+
+**Мраморная диаграмма:**
+```
+Поток A:  --A1-------A2-------A3-->
+Поток B:  ------B1-------B2------->
+zip():
+Результат: ------[A1,B1]---[A2,B2]-->
+```
+
+```typescript
+import { zip, of, interval } from 'rxjs';
+import { take, map } from 'rxjs/operators';
+
+// zip синхронизирует потоки "по парам"
+const names$ = of('Алиса', 'Боб', 'Чарли');
+const scores$ = of(95, 87, 92);
+
+zip(names$, scores$).pipe(
+  map(([name, score]) => `${name}: ${score} баллов`)
+).subscribe(result => {
+  console.log(result);
+});
+// "Алиса: 95 баллов"
+// "Боб: 87 баллов"
+// "Чарли: 92 баллов"
+
+// Реальный пример: загрузка нескольких ресурсов и их попарное объединение
+const questions$ = from(fetch('/api/questions').then(r => r.json() as Promise<string[]>));
+const answers$ = from(fetch('/api/answers').then(r => r.json() as Promise<string[]>));
+
+zip(questions$, answers$).subscribe(([questions, answers]) => {
+  // оба запроса завершены, данные синхронизированы
+  const qa = questions.map((q, i) => ({ q, a: answers[i] }));
+  console.log(qa);
+});
+```
+
+> 💡 **zip** редко используется для потоков с разными скоростями — медленный тормозит всех. Отлично подходит для синхронизации завершённых потоков.
+
+---
+
+### 🏁 race — первый побеждает
+
+`race` — это соревнование. Побеждает тот поток, который первым выдаст значение. Все остальные игнорируются!
+
+**Мраморная диаграмма:**
+```
+Поток A:  ----A1--A2--A3-->
+Поток B:  --B1--B2------->
+race():
+Результат: --B1--B2------->  (A проиграл)
+```
+
+```typescript
+import { race, timer } from 'rxjs';
+import { map, mapTo } from 'rxjs/operators';
+
+// Таймаут для запроса
+import { from } from 'rxjs';
+
+const apiRequest$ = from(fetch('/api/data').then(r => r.json()));
+const timeout$ = timer(5000).pipe(
+  map(() => { throw new Error('Запрос превысил таймаут!'); })
+);
+
+// Кто быстрее — API или таймаут?
+race(apiRequest$, timeout$).subscribe({
+  next: data => console.log('Данные:', data),
+  error: err => console.error(err.message),
+});
+
+// Другой пример: резервный сервер
+const primaryServer$ = from(fetch('https://api.primary.com/data').then(r => r.json()));
+const backupServer$ = from(fetch('https://api.backup.com/data').then(r => r.json()));
+
+race(primaryServer$, backupServer$).subscribe(data => {
+  console.log('Ответил быстрейший сервер:', data);
+});
+```
+
+---
+
+### 📊 Сравнительная таблица
+
+| Оператор | Аналогия | Когда использовать |
+|----------|----------|-------------------|
+| `merge` | Несколько полос шоссе | Объединить UI-события, параллельные данные |
+| `concat` | Очередь в кассу | Последовательные шаги, зависимые запросы |
+| `zip` | Застёжка-молния | Попарное объединение синхронных данных |
+| `race` | Гонки | Таймауты, резервные серверы |
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible
+  template="react-ts"
+  files={{
+    "/App.tsx": `import { useState } from "react";
+import { merge, concat, zip, of } from "rxjs";
+import { delay, map } from "rxjs/operators";
+
+// Цвета для двух потоков
+const COLOR_A = "#38bdf8";
+const COLOR_B = "#f472b6";
+const COLOR_RESULT = "#34d399";
+
+interface StreamItem {
+  id: number;
+  source: "A" | "B" | "result";
+  value: string;
+  color: string;
+}
+
+type OperatorType = "merge" | "concat" | "zip";
+
+export default function App() {
+  const [items, setItems] = useState<StreamItem[]>([]);
+  const [running, setRunning] = useState(false);
+  const [activeOp, setActiveOp] = useState<OperatorType>("merge");
+
+  const addItem = (item: StreamItem) =>
+    setItems(prev => [...prev, item]);
+
+  const runDemo = (op: OperatorType) => {
+    setItems([]);
+    setRunning(true);
+    setActiveOp(op);
+
+    // Два потока с задержками
+    const streamA$ = of("A1", "A2", "A3").pipe(
+      // A эмитит на 300, 900, 1500мс
+      map((v, i) => v),
+    );
+    const streamB$ = of("B1", "B2", "B3").pipe(
+      map(v => v),
+    );
+
+    // Для наглядности создаём вручную с задержками
+    const a1$ = of("A1").pipe(delay(300), map(v => v));
+    const a2$ = of("A2").pipe(delay(900), map(v => v));
+    const a3$ = of("A3").pipe(delay(1500), map(v => v));
+    const b1$ = of("B1").pipe(delay(600), map(v => v));
+    const b2$ = of("B2").pipe(delay(1100), map(v => v));
+    const b3$ = of("B3").pipe(delay(1700), map(v => v));
+
+    // Источники для отображения (без комбинирования)
+    merge(
+      merge(a1$, a2$, a3$).pipe(map(v => ({ source: "A" as const, value: v }))),
+      merge(b1$, b2$, b3$).pipe(map(v => ({ source: "B" as const, value: v }))),
+    ).subscribe(({ source, value }) => {
+      addItem({
+        id: Date.now() + Math.random(),
+        source,
+        value,
+        color: source === "A" ? COLOR_A : COLOR_B,
+      });
+    });
+
+    // Результирующий поток в зависимости от оператора
+    let result$;
+    const aValues$ = of("A1", "A2", "A3");
+    const bValues$ = of("B1", "B2", "B3");
+
+    if (op === "merge") {
+      result$ = merge(
+        a1$.pipe(map(v => \`→ \${v}\`)),
+        a2$.pipe(map(v => \`→ \${v}\`)),
+        a3$.pipe(map(v => \`→ \${v}\`)),
+        b1$.pipe(map(v => \`→ \${v}\`)),
+        b2$.pipe(map(v => \`→ \${v}\`)),
+        b3$.pipe(map(v => \`→ \${v}\`)),
+      );
+    } else if (op === "concat") {
+      // concat: сначала все A, потом все B
+      result$ = concat(
+        merge(a1$, a2$, a3$).pipe(map(v => \`→ \${v}\`)),
+        merge(b1$, b2$, b3$).pipe(map(v => \`→ \${v}\`)),
+      );
+    } else {
+      // zip: попарно объединяем
+      result$ = zip(
+        merge(a1$, a2$, a3$),
+        merge(b1$, b2$, b3$)
+      ).pipe(map(([a, b]) => \`→ [\${a}, \${b}]\`));
+    }
+
+    result$.subscribe({
+      next: value => {
+        addItem({
+          id: Date.now() + Math.random(),
+          source: "result",
+          value,
+          color: COLOR_RESULT,
+        });
+      },
+      complete: () => setRunning(false),
+    });
+  };
+
+  const descriptions: Record<OperatorType, string> = {
+    merge: "merge: значения появляются в порядке прихода из любого потока 🚦",
+    concat: "concat: сначала ВСЕ значения из A, потом из B (очередь) 🚶",
+    zip: "zip: пары [A1,B1], [A2,B2], [A3,B3] — застёжка-молния 🤐",
+  };
+
+  return (
+    <div style={{
+      background: "#0f172a",
+      minHeight: "100vh",
+      padding: "2rem",
+      fontFamily: "monospace",
+      color: "#e2e8f0",
+    }}>
+      <h2 style={{ color: "#38bdf8", marginBottom: "0.5rem" }}>
+        🔀 Комбинирование потоков
+      </h2>
+      <p style={{ color: "#94a3b8", marginBottom: "1.5rem", fontSize: "0.875rem" }}>
+        Два потока (A и B) — разные операторы, разное поведение
+      </p>
+
+      {/* Кнопки операторов */}
+      <div style={{ display: "flex", gap: "0.75rem", marginBottom: "1rem", flexWrap: "wrap" }}>
+        {(["merge", "concat", "zip"] as OperatorType[]).map(op => (
+          <button
+            key={op}
+            onClick={() => !running && runDemo(op)}
+            disabled={running}
+            style={{
+              padding: "0.6rem 1.25rem",
+              background: activeOp === op ? "#1e40af" : "#1e293b",
+              border: \`1px solid \${activeOp === op ? "#38bdf8" : "#334155"}\`,
+              borderRadius: "8px",
+              color: activeOp === op ? "#38bdf8" : "#94a3b8",
+              cursor: running ? "not-allowed" : "pointer",
+              fontSize: "0.9rem",
+              fontWeight: "bold",
+              fontFamily: "monospace",
+              transition: "all 0.2s",
+            }}
+          >
+            {op}()
+          </button>
+        ))}
+      </div>
+
+      {/* Описание */}
+      <div style={{
+        padding: "0.75rem 1rem",
+        background: "#1e293b",
+        borderRadius: "6px",
+        borderLeft: "3px solid #38bdf8",
+        marginBottom: "1.5rem",
+        fontSize: "0.85rem",
+        color: "#94a3b8",
+      }}>
+        {descriptions[activeOp]}
+      </div>
+
+      {/* Легенда */}
+      <div style={{ display: "flex", gap: "1.5rem", marginBottom: "1rem", fontSize: "0.8rem" }}>
+        {[
+          { color: COLOR_A, label: "Поток A (300, 900, 1500мс)" },
+          { color: COLOR_B, label: "Поток B (600, 1100, 1700мс)" },
+          { color: COLOR_RESULT, label: "Результат" },
+        ].map(({ color, label }) => (
+          <span key={label} style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            <span style={{ width: 12, height: 12, borderRadius: "50%", background: color, display: "inline-block" }} />
+            <span style={{ color: "#64748b" }}>{label}</span>
+          </span>
+        ))}
+      </div>
+
+      {/* Поток событий */}
+      <div style={{
+        background: "#1e293b",
+        borderRadius: "8px",
+        padding: "1rem",
+        minHeight: "200px",
+        maxHeight: "400px",
+        overflowY: "auto",
+        border: "1px solid #334155",
+      }}>
+        {items.length === 0 ? (
+          <p style={{ color: "#475569", textAlign: "center", margin: "3rem 0" }}>
+            Нажми кнопку оператора чтобы запустить демо 👆
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignContent: "flex-start" }}>
+            {items.map(item => (
+              <div
+                key={item.id}
+                style={{
+                  padding: "0.4rem 0.75rem",
+                  background: "#0f172a",
+                  border: \`1px solid \${item.color}\`,
+                  borderRadius: "20px",
+                  color: item.color,
+                  fontSize: "0.8rem",
+                  fontWeight: item.source === "result" ? "bold" : "normal",
+                  animation: "fadeIn 0.3s ease",
+                }}
+              >
+                {item.value}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {running && (
+        <p style={{ color: "#38bdf8", marginTop: "0.75rem", fontSize: "0.8rem" }}>
+          ⏳ Потоки работают...
+        </p>
+      )}
+
+      <style>{\`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: scale(0.8); }
+          to { opacity: 1; transform: scale(1); }
+        }
+      \`}</style>
+    </div>
+  );
+}
+`
+  }}
+/>

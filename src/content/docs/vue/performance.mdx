@@ -1,0 +1,714 @@
+---
+title: "26. Производительность"
+sidebar:
+  order: 27
+---
+import { Playground } from '@components/Playground'
+
+
+## ⚡ Урок 27: Производительность во Vue 3
+
+Vue 3 уже очень быстрый из коробки — компилятор шаблонов делает оптимизации автоматически. Но когда у тебя тысячи элементов в списке, сложные вычисления или дерево компонентов глубиной 20 уровней — нужно знать инструменты для **ручной оптимизации**. 🚀
+
+---
+
+### 📊 Как измерить производительность?
+
+Прежде чем оптимизировать — измерь. Не угадывай, где узкое место!
+
+```javascript
+// Vue DevTools — вкладка Performance
+// Показывает время рендера каждого компонента
+
+// Профайлер в браузере
+performance.mark('render-start');
+// ... код ...
+performance.mark('render-end');
+performance.measure('render', 'render-start', 'render-end');
+
+// Vue 3 встроенный профайлер (dev mode)
+const app = createApp(App);
+app.config.performance = true; // включить трассировку в DevTools
+```
+
+---
+
+### 🎯 `v-once` — рендеринг один раз
+
+Директива `v-once` указывает Vue: «этот элемент **никогда не изменится** — не трать время на его отслеживание».
+
+```vue
+<template>
+  <!-- Статичный контент, который никогда не меняется -->
+  <header v-once>
+    <h1>{{ appTitle }}</h1>
+    <nav>
+      <a v-for="link in staticLinks" :key="link.href" :href="link.href">
+        {{ link.label }}
+      </a>
+    </nav>
+  </header>
+
+  <!-- Счётчик посещений — меняется, поэтому без v-once -->
+  <p>Посещений: {{ visitCount }}</p>
+</template>
+
+<script setup lang="ts">
+const appTitle = 'Мой Магазин';
+const staticLinks = [
+  { href: '/', label: 'Главная' },
+  { href: '/catalog', label: 'Каталог' },
+  { href: '/about', label: 'О нас' },
+];
+const visitCount = ref(0);
+</script>
+```
+
+Vue скомпилирует `v-once` в статичный VNode и **пропустит его при перерендере**. Отлично для шапки, подвала, статичных баннеров.
+
+---
+
+### 📌 `v-memo` — мемоизация шаблона
+
+`v-memo` — более гибкий `v-once`. Принимает массив зависимостей и пропускает ререндер, **пока зависимости не изменились**.
+
+```vue
+<template>
+  <!-- Список с тысячами элементов -->
+  <ul>
+    <li
+      v-for="item in hugeList"
+      :key="item.id"
+      v-memo="[item.id, item.selected, item.label]"
+    >
+      <!-- Ререндер только если изменились id, selected или label -->
+      <span>{{ item.label }}</span>
+      <input type="checkbox" :checked="item.selected" />
+      <ExpensiveSubComponent :data="item.details" />
+    </li>
+  </ul>
+</template>
+```
+
+```vue
+<!-- Особенно полезно с v-for + частичными обновлениями -->
+<template>
+  <div v-for="row in rows" :key="row.id" v-memo="[row.id === selectedId]">
+    <!-- Ререндерится только при смене selected-строки -->
+    <TableRow :row="row" :selected="row.id === selectedId" />
+  </div>
+</template>
+```
+
+⚠️ **Важно:** `v-memo` с пустым массивом `[]` — то же самое что `v-once`.
+
+---
+
+### 🔬 `shallowRef` и `shallowReactive`
+
+По умолчанию `ref` и `reactive` делают объект **глубоко реактивным** — следят за каждым вложенным свойством. Это дорого для больших объектов!
+
+```typescript
+import { ref, shallowRef, reactive, shallowReactive } from 'vue';
+
+// ref — глубокая реактивность (следит за всеми вложенными свойствами)
+const deepState = ref({
+  user: { profile: { settings: { theme: 'dark' } } }
+});
+// Это тоже реактивно:
+deepState.value.user.profile.settings.theme = 'light'; // ✅ триггерит обновление
+
+// shallowRef — реактивна только смена .value целиком
+const shallowState = shallowRef({
+  user: { profile: { settings: { theme: 'dark' } } }
+});
+// Это НЕ реактивно:
+shallowState.value.user.profile.settings.theme = 'light'; // ❌ НЕ триггерит
+// Это реактивно:
+shallowState.value = { ...shallowState.value }; // ✅ триггерит
+```
+
+```typescript
+// shallowReactive — реактивен только первый уровень
+const state = shallowReactive({
+  count: 0,           // ✅ реактивно
+  user: {
+    name: 'Иван',     // ❌ НЕ реактивно
+    age: 25,          // ❌ НЕ реактивно
+  },
+});
+
+state.count++;          // ✅ обновление
+state.user.name = 'XX'; // ❌ нет обновления
+state.user = { name: 'Пётр', age: 30 }; // ✅ обновление (первый уровень)
+```
+
+**Когда использовать:**
+- Большие объекты с неизменяемыми вложенными данными
+- Иммутабельные структуры (заменяем целиком)
+- Данные из внешних источников (API, Canvas, Three.js)
+
+---
+
+### 🔋 `KeepAlive` — кэширование компонентов
+
+`<KeepAlive>` сохраняет компонент в памяти при скрытии, вместо того чтобы уничтожать и создавать заново.
+
+```vue
+<template>
+  <TabBar v-model:active="activeTab" />
+
+  <!-- Без KeepAlive: каждое переключение вкладки — пересоздание компонента -->
+  <component :is="activeTabComponent" />
+
+  <!-- С KeepAlive: компонент "засыпает" и "просыпается" -->
+  <KeepAlive>
+    <component :is="activeTabComponent" />
+  </KeepAlive>
+</template>
+```
+
+```vue
+<!-- Управление кэшированием -->
+<KeepAlive
+  :include="['ProfileTab', 'SettingsTab']"
+  :exclude="['TempComponent']"
+  :max="5"
+>
+  <!-- max: максимум 5 компонентов в кэше -->
+  <component :is="currentComponent" />
+</KeepAlive>
+```
+
+```typescript
+// Хуки для компонентов внутри KeepAlive
+export default defineComponent({
+  setup() {
+    // Вызывается когда компонент "просыпается" (стал видимым)
+    onActivated(() => {
+      console.log('Компонент активирован — обновить данные');
+      fetchLatestData();
+    });
+
+    // Вызывается когда компонент "засыпает" (скрывается)
+    onDeactivated(() => {
+      console.log('Компонент деактивирован — остановить таймеры');
+      clearInterval(timer);
+    });
+  },
+});
+```
+
+---
+
+### 🦥 Ленивые компоненты
+
+Разбивай большое приложение на чанки — загружай компоненты только когда они нужны.
+
+```typescript
+// defineAsyncComponent — ленивая загрузка компонента
+import { defineAsyncComponent } from 'vue';
+
+// Простой вариант
+const HeavyChart = defineAsyncComponent(() =>
+  import('./components/HeavyChart.vue')
+);
+
+// Расширенный вариант с обработкой состояний
+const AdminPanel = defineAsyncComponent({
+  loader: () => import('./components/AdminPanel.vue'),
+  loadingComponent: LoadingSpinner,   // Пока загружается
+  errorComponent: ErrorDisplay,       // Если ошибка
+  delay: 200,                         // Задержка показа loadingComponent
+  timeout: 10000,                     // Таймаут (мс)
+  onError(error, retry, fail, attempts) {
+    if (attempts <= 3) retry();       // Повторить до 3 раз
+    else fail();
+  },
+});
+```
+
+```vue
+<!-- Используем с Suspense -->
+<template>
+  <Suspense>
+    <!-- Основной контент -->
+    <template #default>
+      <HeavyChart :data="chartData" />
+    </template>
+
+    <!-- Fallback пока грузится -->
+    <template #fallback>
+      <div class="skeleton-chart" />
+    </template>
+  </Suspense>
+</template>
+```
+
+```typescript
+// Роутер тоже поддерживает ленивую загрузку
+const routes = [
+  {
+    path: '/dashboard',
+    // Этот компонент загрузится только при переходе на /dashboard
+    component: () => import('./views/DashboardView.vue'),
+  },
+  {
+    path: '/admin',
+    // Группируем в один чанк с webpackChunkName
+    component: () => import(/* webpackChunkName: "admin" */ './views/AdminView.vue'),
+  },
+];
+```
+
+---
+
+### 📜 Виртуальный скролл
+
+Если у тебя список из 10 000 элементов — нельзя рендерить все сразу. Виртуальный скролл рендерит только **видимые элементы**.
+
+```bash
+npm install vue-virtual-scroller
+```
+
+```vue
+<template>
+  <!-- Рендерит только ~20 видимых строк из 100 000 -->
+  <RecycleScroller
+    class="scroller"
+    :items="hugeList"
+    :item-size="48"
+    key-field="id"
+    v-slot="{ item }"
+  >
+    <div class="user-item">
+      <img :src="item.avatar" />
+      <span>{{ item.name }}</span>
+      <span>{{ item.email }}</span>
+    </div>
+  </RecycleScroller>
+</template>
+
+<style scoped>
+.scroller {
+  height: 500px;  /* ОБЯЗАТЕЛЬНО задать высоту */
+}
+.user-item {
+  height: 48px;   /* ОБЯЗАТЕЛЬНО соответствует item-size */
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+</style>
+
+<script setup lang="ts">
+import { RecycleScroller } from 'vue-virtual-scroller';
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
+
+// 100 000 элементов — без проблем!
+const hugeList = Array.from({ length: 100_000 }, (_, i) => ({
+  id: i,
+  name: \`Пользователь \${i}\`,
+  email: \`user\${i}@test.com\`,
+  avatar: \`https://i.pravatar.cc/48?img=\${i % 70}\`,
+}));
+</script>
+```
+
+---
+
+### 📦 Оптимизация бандла
+
+```typescript
+// vite.config.ts — разделение чанков
+import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
+
+export default defineConfig({
+  plugins: [vue()],
+  build: {
+    rollupOptions: {
+      output: {
+        // Разделяем вендоры от кода приложения
+        manualChunks: {
+          'vendor-vue': ['vue', 'vue-router', 'pinia'],
+          'vendor-ui': ['@headlessui/vue', '@heroicons/vue'],
+          'vendor-charts': ['chart.js', 'vue-chartjs'],
+        },
+      },
+    },
+    // Анализ размера бандла
+    reportCompressedSize: true,
+  },
+});
+```
+
+```bash
+npm install -D rollup-plugin-visualizer
+
+# Добавить в vite.config.ts
+import { visualizer } from 'rollup-plugin-visualizer';
+plugins: [vue(), visualizer({ open: true })]
+```
+
+```typescript
+// Трясём дерево (Tree-shaking) — импортируй только нужное
+// ❌ Плохо — импортируем всю библиотеку
+import _ from 'lodash';
+_.debounce(fn, 300);
+
+// ✅ Хорошо — импортируем одну функцию
+import debounce from 'lodash/debounce';
+debounce(fn, 300);
+
+// ✅ Ещё лучше — lodash-es с tree-shaking
+import { debounce } from 'lodash-es';
+debounce(fn, 300);
+```
+
+---
+
+### 🖼️ Оптимизация изображений
+
+```vue
+<template>
+  <!-- Нативная ленивая загрузка -->
+  <img
+    loading="lazy"
+    :src="image.url"
+    :alt="image.alt"
+    width="400"
+    height="300"
+  />
+
+  <!-- С плейсхолдером через IntersectionObserver -->
+  <img
+    ref="imgRef"
+    :src="isVisible ? image.url : placeholder"
+    :alt="image.alt"
+  />
+</template>
+
+<script setup lang="ts">
+const imgRef = ref<HTMLImageElement | null>(null);
+const isVisible = ref(false);
+
+const observer = new IntersectionObserver(([entry]) => {
+  if (entry.isIntersecting) {
+    isVisible.value = true;
+    observer.disconnect();
+  }
+});
+
+onMounted(() => {
+  if (imgRef.value) observer.observe(imgRef.value);
+});
+onUnmounted(() => observer.disconnect());
+</script>
+```
+
+---
+
+### 💡 Чеклист производительности Vue 3
+
+```
+✅ Используй v-once для статичного контента
+✅ Используй v-memo для больших списков
+✅ shallowRef/shallowReactive для больших объектов
+✅ KeepAlive для часто переключаемых компонентов
+✅ defineAsyncComponent для тяжёлых компонентов
+✅ Виртуальный скролл для списков 100+ элементов
+✅ Разделяй бандл на чанки
+✅ Tree-shaking — импортируй точечно
+✅ loading="lazy" для изображений
+✅ Измеряй ПЕРЕД оптимизацией!
+```
+
+---
+
+### 📊 Итог: инструменты производительности
+
+| Инструмент | Когда использовать |
+|------------|-------------------|
+| `v-once` | Контент никогда не меняется |
+| `v-memo` | Большие списки с частичными обновлениями |
+| `shallowRef` | Большие объекты, заменяемые целиком |
+| `KeepAlive` | Вкладки, фильтры, переключаемые панели |
+| `defineAsyncComponent` | Тяжёлые компоненты, редко используемые |
+| Virtual Scroll | Списки 100+ элементов |
+| Code Splitting | Большой бандл, много роутов |
+
+Vue 3 даёт тебе все инструменты для создания молниеносных приложений. Главное правило — **сначала измеряй, потом оптимизируй**. Преждевременная оптимизация — корень всех зол. 🎯
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+
+const GREEN = "#42b883";
+const DARK = "#35495e";
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const BORDER = "#2d3f55";
+
+interface Item {
+  id: number;
+  label: string;
+  value: number;
+  selected: boolean;
+}
+
+type OptMode = "none" | "vmemo" | "vonce" | "keepalive" | "virtual";
+
+const INITIAL_ITEMS: Item[] = Array.from({ length: 30 }, (_, i) => ({
+  id: i,
+  label: \`Элемент \${i + 1}\`,
+  value: Math.floor(Math.random() * 100),
+  selected: false,
+}));
+
+function ExpensiveItem({ item, renderCount }: { item: Item; renderCount: React.MutableRefObject<Map<number, number>> }) {
+  const count = (renderCount.current.get(item.id) || 0) + 1;
+  renderCount.current.set(item.id, count);
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: "0.5rem",
+      padding: "0.3rem 0.5rem", borderRadius: "4px",
+      background: item.selected ? \`\${GREEN}22\` : "transparent",
+      border: \`1px solid \${item.selected ? GREEN : BORDER}\`,
+      marginBottom: "0.2rem", transition: "all 0.15s",
+    }}>
+      <div style={{
+        width: "8px", height: "8px", borderRadius: "50%",
+        background: count === 1 ? GREEN : count <= 3 ? "#f59e0b" : "#ef4444",
+        flexShrink: 0,
+      }} />
+      <span style={{ color: "#e2e8f0", fontSize: "0.72rem", flex: 1 }}>{item.label}</span>
+      <span style={{ color: "#475569", fontSize: "0.65rem" }}>val: {item.value}</span>
+      <span style={{
+        fontSize: "0.6rem", padding: "0.1rem 0.3rem", borderRadius: "3px",
+        background: count === 1 ? \`\${GREEN}33\` : count <= 3 ? "#f59e0b33" : "#ef444433",
+        color: count === 1 ? GREEN : count <= 3 ? "#f59e0b" : "#ef4444",
+      }}>
+        ×{count}
+      </span>
+    </div>
+  );
+}
+
+export default function App() {
+  const [mode, setMode] = useState<OptMode>("none");
+  const [items, setItems] = useState<Item[]>(INITIAL_ITEMS);
+  const [ticker, setTicker] = useState(0);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [totalRenders, setTotalRenders] = useState(0);
+  const [cachedTab, setCachedTab] = useState<"A" | "B">("A");
+  const [activeTab, setActiveTab] = useState<"A" | "B">("A");
+  const renderCountRef = useRef<Map<number, number>>(new Map());
+  const tabAMountCount = useRef(0);
+  const tabBMountCount = useRef(0);
+
+  useEffect(() => {
+    renderCountRef.current = new Map();
+    setTotalRenders(0);
+  }, [mode]);
+
+  const triggerUpdate = () => {
+    setTicker(t => t + 1);
+    setTotalRenders(t => t + 1);
+  };
+
+  const toggleSelected = (id: number) => {
+    setSelectedId(id);
+    setItems(prev => prev.map(item =>
+      item.id === id ? { ...item, selected: true } : { ...item, selected: false }
+    ));
+  };
+
+  const visibleItems = useMemo(() => {
+    if (mode === "virtual") return items.slice(0, 8);
+    return items.slice(0, 15);
+  }, [items, mode]);
+
+  const filteredItems = useMemo(() => {
+    if (mode === "vmemo") {
+      return visibleItems.filter(item => item.id === selectedId || ticker === 0 || item.selected);
+    }
+    return visibleItems;
+  }, [visibleItems, mode, selectedId, ticker]);
+
+  const totalRenderCount = useMemo(() => {
+    let total = 0;
+    renderCountRef.current.forEach(v => { total += v; });
+    return total;
+  }, [ticker, items]);
+
+  const modeDescriptions: Record<OptMode, string> = {
+    none: "Без оптимизации — каждое обновление перерисовывает всё",
+    vmemo: "v-memo — ререндерится только изменённый элемент",
+    vonce: "v-once — статичный контент рендерится один раз",
+    keepalive: "KeepAlive — вкладки сохраняются при переключении",
+    virtual: "Virtual Scroll — рендерит только видимые 8 из 30",
+  };
+
+  if (mode === "keepalive") {
+    if (activeTab === "A") tabAMountCount.current++;
+    if (activeTab === "B") tabBMountCount.current++;
+  }
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "1rem", fontFamily: "monospace", fontSize: "0.78rem", color: "#e2e8f0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
+        <div style={{ background: DARK, borderRadius: "8px", padding: "0.4rem 0.75rem", color: GREEN, fontWeight: 700, fontSize: "0.85rem" }}>
+          ⚡ Производительность Vue 3
+        </div>
+      </div>
+
+      {/* Mode selector */}
+      <div style={{ display: "flex", gap: "0.35rem", marginBottom: "1rem", flexWrap: "wrap" }}>
+        {(["none", "vmemo", "vonce", "keepalive", "virtual"] as OptMode[]).map(m => (
+          <button key={m} onClick={() => setMode(m)} style={{
+            padding: "0.25rem 0.6rem", borderRadius: "4px", border: "none",
+            background: mode === m ? GREEN : BORDER, color: mode === m ? DARK : "#94a3b8",
+            cursor: "pointer", fontWeight: mode === m ? 700 : 400, fontSize: "0.7rem",
+          }}>
+            {m === "none" ? "❌ Без opt" : m === "vmemo" ? "📌 v-memo" : m === "vonce" ? "1️⃣ v-once" : m === "keepalive" ? "🔋 KeepAlive" : "📜 Virtual"}
+          </button>
+        ))}
+      </div>
+
+      {/* Description */}
+      <div style={{ background: CARD, borderRadius: "6px", padding: "0.5rem 0.75rem", border: \`1px solid \${GREEN}44\`, marginBottom: "1rem", fontSize: "0.7rem", color: "#94a3b8" }}>
+        {modeDescriptions[mode]}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+        {/* Left: List or KeepAlive demo */}
+        <div>
+          {mode === "keepalive" ? (
+            <div>
+              <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.5rem" }}>ВКЛАДКИ</div>
+              <div style={{ display: "flex", gap: "0.35rem", marginBottom: "0.5rem" }}>
+                {(["A", "B"] as const).map(tab => (
+                  <button key={tab} onClick={() => setActiveTab(tab)} style={{
+                    padding: "0.3rem 0.75rem", borderRadius: "4px", border: "none",
+                    background: activeTab === tab ? GREEN : BORDER, color: activeTab === tab ? DARK : "#94a3b8",
+                    cursor: "pointer", fontWeight: 700,
+                  }}>
+                    Вкладка {tab}
+                  </button>
+                ))}
+              </div>
+              <div style={{ background: CARD, borderRadius: "6px", padding: "0.75rem", border: \`1px solid \${BORDER}\` }}>
+                <div style={{ color: "#94a3b8", fontSize: "0.65rem", marginBottom: "0.5rem" }}>Вкладка {activeTab} (активна)</div>
+                <div style={{ color: GREEN, fontSize: "1.5rem", textAlign: "center", padding: "1rem" }}>
+                  {activeTab === "A" ? "📊 Дашборд" : "⚙️ Настройки"}
+                </div>
+                <div style={{ fontSize: "0.65rem", color: "#64748b", textAlign: "center" }}>
+                  Вкладка {activeTab} создана раз: {activeTab === "A" ? tabAMountCount.current : tabBMountCount.current}
+                </div>
+              </div>
+              <div style={{ marginTop: "0.5rem", background: CARD, borderRadius: "6px", padding: "0.5rem", border: \`1px solid \${BORDER}\`, fontSize: "0.65rem" }}>
+                <div style={{ color: GREEN, marginBottom: "0.25rem" }}>💡 С KeepAlive:</div>
+                <div style={{ color: "#64748b" }}>Вкладка создаётся 1 раз, потом «засыпает» onDeactivated и «просыпается» onActivated</div>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ color: "#94a3b8", fontSize: "0.7rem", marginBottom: "0.5rem" }}>
+                СПИСОК ({mode === "virtual" ? \`8/30 видимых\` : \`15/30 элементов\`})
+              </div>
+              <div style={{ maxHeight: "300px", overflowY: "auto" }}>
+                {(mode === "vonce" ? visibleItems.slice(0, 5) : visibleItems).map((item) => (
+                  <div key={item.id} onClick={() => toggleSelected(item.id)} style={{ cursor: "pointer" }}>
+                    <ExpensiveItem
+                      item={item}
+                      renderCount={renderCountRef}
+                    />
+                  </div>
+                ))}
+                {mode === "vonce" && (
+                  <div style={{ color: "#475569", fontSize: "0.65rem", padding: "0.25rem", fontStyle: "italic" }}>
+                    + 10 элементов заморожены (v-once)
+                  </div>
+                )}
+                {mode === "virtual" && (
+                  <div style={{
+                    border: \`2px dashed \${GREEN}44\`, borderRadius: "4px",
+                    padding: "0.5rem", textAlign: "center", color: GREEN, fontSize: "0.65rem",
+                  }}>
+                    ↑ 8 видимых | 22 в памяти (не рендерятся) ↓
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Stats */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+          <div style={{ color: "#94a3b8", fontSize: "0.7rem" }}>СТАТИСТИКА</div>
+
+          <div style={{ background: CARD, borderRadius: "6px", padding: "0.6rem", border: \`1px solid \${BORDER}\` }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.4rem" }}>
+              {[
+                { label: "Обновлений", value: totalRenders, color: "#60a5fa" },
+                { label: "Ренд. узлов", value: totalRenderCount, color: mode === "none" ? "#ef4444" : GREEN },
+              ].map(s => (
+                <div key={s.label} style={{ textAlign: "center" }}>
+                  <div style={{ color: s.color, fontSize: "1.2rem", fontWeight: 700 }}>{s.value}</div>
+                  <div style={{ color: "#475569", fontSize: "0.62rem" }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Render legend */}
+          <div style={{ background: CARD, borderRadius: "6px", padding: "0.6rem", border: \`1px solid \${BORDER}\`, fontSize: "0.65rem" }}>
+            <div style={{ color: "#94a3b8", marginBottom: "0.4rem" }}>Цвет — кол-во рендеров:</div>
+            {[
+              { color: GREEN, label: "1 раз (идеально)" },
+              { color: "#f59e0b", label: "2–3 раза (нормально)" },
+              { color: "#ef4444", label: "4+ раз (много)" },
+            ].map(({ color, label }) => (
+              <div key={label} style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.2rem" }}>
+                <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: color, flexShrink: 0 }} />
+                <span style={{ color: "#64748b" }}>{label}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: CARD, borderRadius: "6px", padding: "0.5rem", border: \`1px solid \${BORDER}\`, fontSize: "0.65rem" }}>
+            <div style={{ color: GREEN, marginBottom: "0.25rem" }}>Совет:</div>
+            <div style={{ color: "#64748b" }}>
+              {mode === "none" && "Нажимай 'Обновить' и смотри, как все элементы перерисовываются ×N раз"}
+              {mode === "vmemo" && "С v-memo только выбранный элемент получает ре-рендер. Кликни по элементу!"}
+              {mode === "vonce" && "Первые 5 элементов живые, остальные 10 заморожены после первого рендера"}
+              {mode === "keepalive" && "Переключи вкладки — с KeepAlive они не пересоздаются каждый раз"}
+              {mode === "virtual" && "Virtual scroll рендерит только 8 видимых элементов из 30 в памяти"}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+        <button onClick={triggerUpdate} style={{
+          padding: "0.5rem 1.25rem", borderRadius: "6px", border: "none",
+          background: GREEN, color: DARK, cursor: "pointer", fontWeight: 700, fontSize: "0.78rem",
+        }}>
+          ↺ Обновить состояние
+        </button>
+        <button onClick={() => { renderCountRef.current = new Map(); setTotalRenders(0); setTicker(t => t + 1); }} style={{
+          padding: "0.5rem 1rem", borderRadius: "6px", border: \`1px solid \${BORDER}\`,
+          background: "transparent", color: "#94a3b8", cursor: "pointer", fontSize: "0.78rem",
+        }}>
+          🔄 Сбросить счётчики
+        </button>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

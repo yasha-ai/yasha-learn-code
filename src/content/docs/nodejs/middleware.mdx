@@ -1,0 +1,373 @@
+---
+title: "11. Middleware"
+sidebar:
+  order: 11
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-middleware.png)
+
+**Middleware** — это функции, которые выполняются между получением запроса и отправкой ответа. Основа архитектуры Express.
+
+## Как работает Middleware
+
+```
+Запрос → MW1 → MW2 → MW3 → Роут → Ответ
+          ↓     ↓     ↓     ↓
+         next  next  next  res.json()
+```
+
+```javascript
+// Подпись middleware функции
+function myMiddleware(req, res, next) {
+  // Что-то делаем с запросом/ответом
+  console.log(`${req.method} ${req.url}`);
+  
+  // Передаём управление следующему middleware
+  next();
+  
+  // Или прерываем цепочку отправив ответ
+  // res.status(401).json({ error: 'Unauthorized' });
+  
+  // Или передаём ошибку
+  // next(new Error('Something went wrong'));
+}
+```
+
+## Типы Middleware
+
+```javascript
+// 1. Глобальный — применяется ко всем роутам
+app.use(myMiddleware);
+
+// 2. Для конкретного пути
+app.use('/api', apiMiddleware);
+app.use('/admin', adminMiddleware);
+
+// 3. Для конкретного роута
+app.get('/profile', authMiddleware, profileHandler);
+
+// 4. Несколько MW для роута
+app.post('/upload',
+  authMiddleware,
+  rateLimitMiddleware,
+  fileValidationMiddleware,
+  uploadHandler
+);
+
+// 5. Error middleware — 4 параметра!
+app.use((err, req, res, next) => {
+  res.status(500).json({ error: err.message });
+});
+```
+
+## Популярные Middleware пакеты
+
+```javascript
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+
+const app = express();
+
+// Безопасность HTTP заголовков
+app.use(helmet());
+
+// CORS — разрешаем запросы с других доменов
+app.use(cors({
+  origin: ['https://mysite.com', 'http://localhost:3000'],
+  credentials: true,
+}));
+
+// Логирование запросов
+app.use(morgan('combined'));  // подробный формат
+app.use(morgan('dev'));       // красивый для разработки
+
+// Парсинг тела запроса
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Сжатие ответов gzip
+app.use(compression());
+
+// Rate limiting — защита от DDoS
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,  // 15 минут
+  max: 100,                   // максимум 100 запросов
+  message: 'Слишком много запросов, попробуй позже',
+}));
+```
+
+## Создание своих Middleware
+
+### Логирование запросов
+
+```javascript
+// middleware/logger.js
+function logger(req, res, next) {
+  const start = Date.now();
+  
+  // Перехватываем finish события
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const color = res.statusCode >= 400 ? '\x1b[31m' : '\x1b[32m';
+    console.log(
+      `${color}${req.method}\x1b[0m ${req.originalUrl} ${res.statusCode} ${duration}ms`
+    );
+  });
+  
+  next();
+}
+
+module.exports = logger;
+```
+
+### Проверка авторизации
+
+```javascript
+// middleware/auth.js
+const jwt = require('jsonwebtoken');
+const { JWT_SECRET } = require('../config');
+
+function authenticate(req, res, next) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Токен не предоставлен' });
+  }
+  
+  const token = authHeader.slice(7);
+  
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = payload;  // добавляем данные юзера в req
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Токен истёк' });
+    }
+    res.status(401).json({ error: 'Неверный токен' });
+  }
+}
+
+// Проверка роли
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Не авторизован' });
+    }
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Недостаточно прав' });
+    }
+    next();
+  };
+}
+
+module.exports = { authenticate, requireRole };
+```
+
+### Валидация запроса
+
+```javascript
+// middleware/validate.js
+const { z } = require('zod');
+
+function validate(schema, source = 'body') {
+  return (req, res, next) => {
+    const result = schema.safeParse(req[source]);
+    
+    if (!result.success) {
+      return res.status(400).json({
+        error: 'Ошибка валидации',
+        details: result.error.flatten().fieldErrors,
+      });
+    }
+    
+    req[source] = result.data;  // нормализованные данные
+    next();
+  };
+}
+
+module.exports = { validate };
+```
+
+```javascript
+// Использование
+const { z } = require('zod');
+const { authenticate, requireRole } = require('./middleware/auth');
+const { validate } = require('./middleware/validate');
+
+const createUserSchema = z.object({
+  name: z.string().min(2).max(50),
+  email: z.string().email(),
+  password: z.string().min(8),
+  role: z.enum(['user', 'admin']).default('user'),
+});
+
+app.post('/api/users',
+  authenticate,
+  requireRole('admin'),
+  validate(createUserSchema),
+  createUser
+);
+```
+
+## Обработка ошибок
+
+```javascript
+// middleware/errorHandler.js
+function errorHandler(err, req, res, next) {
+  console.error(err.stack);
+  
+  // Известные ошибки с кодом
+  if (err.status || err.statusCode) {
+    return res.status(err.status || err.statusCode).json({
+      error: err.message,
+    });
+  }
+  
+  // Ошибки базы данных (Prisma)
+  if (err.code === 'P2002') {
+    return res.status(409).json({
+      error: 'Запись уже существует',
+    });
+  }
+  
+  if (err.code === 'P2025') {
+    return res.status(404).json({
+      error: 'Запись не найдена',
+    });
+  }
+  
+  // Ошибки валидации Zod
+  if (err.name === 'ZodError') {
+    return res.status(400).json({
+      error: 'Ошибка валидации',
+      details: err.flatten().fieldErrors,
+    });
+  }
+  
+  // Неизвестная ошибка — 500
+  const isDev = process.env.NODE_ENV === 'development';
+  res.status(500).json({
+    error: isDev ? err.message : 'Внутренняя ошибка сервера',
+    ...(isDev && { stack: err.stack }),
+  });
+}
+
+module.exports = { errorHandler };
+```
+
+## Async middleware — важный нюанс
+
+```javascript
+// ❌ Ошибка не перехватится в Express 4!
+app.get('/data', async (req, res) => {
+  const data = await someAsyncOperation();  // если тут ошибка...
+  res.json(data);                           // Express её не поймает!
+});
+
+// ✅ Вариант 1: обёртка try/catch
+app.get('/data', async (req, res, next) => {
+  try {
+    const data = await someAsyncOperation();
+    res.json(data);
+  } catch (error) {
+    next(error);  // передаём в error handler
+  }
+});
+
+// ✅ Вариант 2: утилита asyncHandler
+function asyncHandler(fn) {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+app.get('/data', asyncHandler(async (req, res) => {
+  const data = await someAsyncOperation();
+  res.json(data);
+}));
+
+// ✅ Вариант 3: Express 5 (async поддержка из коробки)
+// npm install express@next
+```
+
+## Практика
+
+1. Создай middleware для логирования с временем ответа
+2. Напиши middleware `authenticate` через JWT
+3. Реализуй middleware `validate(schema)` для валидации тела запроса через Zod
+4. Создай централизованный `errorHandler` для всех ошибок приложения
+5. Создай `asyncHandler` обёртку и примени её ко всем роутам
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+const middlewares = [
+  { name: "cors", color: "#f59e0b", action: "✓ CORS headers добавлены" },
+  { name: "bodyParser", color: "#3b82f6", action: "✓ Body parsed (JSON)" },
+  { name: "auth", color: "#a78bfa", action: null }, // may reject
+  { name: "logger", color: "#10b981", action: "✓ GET /api/users [logged]" },
+];
+
+export default function App() {
+  const [log, setLog] = useState([]);
+  const [hasToken, setHasToken] = useState(true);
+
+  const sendRequest = () => {
+    setLog([]);
+    let delay = 0;
+    for (const mw of middlewares) {
+      delay += 400;
+      const d = delay;
+      setTimeout(() => {
+        if (mw.name === "auth" && !hasToken) {
+          setLog(prev => [...prev, { text: "✕ auth: 401 Unauthorized — запрос остановлен", color: "#ef4444" }]);
+          return;
+        }
+        const text = mw.action || "✓ auth: токен валиден";
+        setLog(prev => [...prev, { text: \`[\${mw.name}] \${text}\`, color: mw.color }]);
+      }, d);
+    }
+    // Route handler
+    setTimeout(() => {
+      if (hasToken) {
+        setLog(prev => [...prev, { text: "[handler] → 200 { users: [...] }", color: "#e2e8f0" }]);
+      }
+    }, delay + 400);
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Middleware цепочка</h3>
+      <p style={{ color: "#94a3b8", fontSize: 12 }}>req → cors → bodyParser → auth → logger → handler → res</p>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
+        <button onClick={sendRequest}
+          style={{ padding: "6px 14px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
+          Отправить запрос
+        </button>
+        <label style={{ color: "#94a3b8", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+          <input type="checkbox" checked={hasToken} onChange={e => setHasToken(e.target.checked)} />
+          С токеном
+        </label>
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {log.map((l, i) => (
+          <div key={i} style={{ fontSize: 12, color: l.color, marginBottom: 2 }}>{l.text}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

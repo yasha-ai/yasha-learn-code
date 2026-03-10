@@ -1,0 +1,868 @@
+---
+title: "19. Динамические маршруты"
+sidebar:
+  order: 20
+---
+import { Playground } from '@components/Playground'
+
+
+## 🎯 Динамические маршруты: углублённый разбор
+
+Динамические маршруты — основа любого реального приложения. Страница товара, профиль пользователя, пост блога — всё это динамические маршруты. Next.js предлагает несколько видов: простые `[param]`, catch-all `[...slug]`, опциональные `[[...slug]]` и множество инструментов для работы с ними. Разберём всё по косточкам! 🦴
+
+---
+
+### 📁 Виды динамических сегментов
+
+```
+app/
+├── blog/
+│   └── [slug]/
+│       └── page.tsx          # /blog/my-post
+├── products/
+│   └── [category]/
+│       └── [id]/
+│           └── page.tsx      # /products/electronics/42
+├── docs/
+│   └── [...slug]/
+│       └── page.tsx          # /docs/a, /docs/a/b, /docs/a/b/c
+└── shop/
+    └── [[...filters]]/
+        └── page.tsx          # /shop, /shop/sale, /shop/sale/under-100
+```
+
+```typescript
+// [slug] — одиночный динамический сегмент
+// Совпадает: /blog/hello-world
+// НЕ совпадает: /blog/a/b
+
+// [...slug] — catch-all (один и более сегментов)
+// Совпадает: /docs/a, /docs/a/b, /docs/a/b/c
+// НЕ совпадает: /docs (без сегментов!)
+
+// [[...slug]] — optional catch-all (ноль и более сегментов)
+// Совпадает: /shop, /shop/sale, /shop/sale/under-100
+```
+
+---
+
+### 🔑 Доступ к параметрам: params
+
+В Next.js 15 `params` — это `Promise`, нужно `await`:
+
+```typescript
+// app/blog/[slug]/page.tsx
+interface Props {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}
+
+export default async function BlogPost({ params, searchParams }: Props) {
+  // В Next.js 15: params — это Promise!
+  const { slug } = await params;
+  const { page, sort } = await searchParams;
+
+  const post = await getPost(slug);
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <p>{post.content}</p>
+    </article>
+  );
+}
+
+// Вложенные параметры
+// app/products/[category]/[id]/page.tsx
+interface NestedProps {
+  params: Promise<{ category: string; id: string }>;
+}
+
+export default async function ProductPage({ params }: NestedProps) {
+  const { category, id } = await params;
+
+  const product = await getProduct(category, id);
+  return <ProductDetail product={product} />;
+}
+```
+
+---
+
+### 🌊 Catch-all Routes: [...slug]
+
+```typescript
+// app/docs/[...slug]/page.tsx
+interface DocsProps {
+  params: Promise<{ slug: string[] }>; // Массив!
+}
+
+export default async function DocsPage({ params }: DocsProps) {
+  const { slug } = await params;
+
+  // /docs/getting-started     → slug = ['getting-started']
+  // /docs/api/users           → slug = ['api', 'users']
+  // /docs/guides/auth/oauth   → slug = ['guides', 'auth', 'oauth']
+
+  // Строим путь для MDX файла
+  const filePath = slug.join('/'); // 'guides/auth/oauth'
+
+  const doc = await getDoc(filePath);
+
+  return (
+    <div className="docs-layout">
+      <DocsBreadcrumb segments={slug} />
+      <article>{doc.content}</article>
+    </div>
+  );
+}
+
+// Хлебные крошки из сегментов
+function DocsBreadcrumb({ segments }: { segments: string[] }) {
+  return (
+    <nav>
+      {segments.map((segment, i) => (
+        <span key={i}>
+          {i > 0 && ' › '}
+          <a href={`/docs/${segments.slice(0, i + 1).join('/')}`}>
+            {segment.replace(/-/g, ' ')}
+          </a>
+        </span>
+      ))}
+    </nav>
+  );
+}
+```
+
+---
+
+### 🎭 Optional Catch-all: [[...slug]]
+
+```typescript
+// app/shop/[[...filters]]/page.tsx
+interface ShopProps {
+  params: Promise<{ filters?: string[] }>; // Опциональный!
+}
+
+export default async function ShopPage({ params }: ShopProps) {
+  const { filters = [] } = await params;
+
+  // /shop           → filters = [] или undefined
+  // /shop/sale      → filters = ['sale']
+  // /shop/sale/men  → filters = ['sale', 'men']
+
+  // Парсим фильтры из URL-сегментов
+  const [category, subcategory, priceRange] = filters;
+
+  const products = await getProducts({
+    category: category ?? 'all',
+    subcategory,
+    priceRange,
+  });
+
+  return (
+    <div>
+      <ShopFilters current={filters} />
+      <ProductGrid products={products} />
+    </div>
+  );
+}
+```
+
+---
+
+### ⚡ generateStaticParams: статическая генерация
+
+`generateStaticParams` — аналог `getStaticPaths` из Pages Router. Говорит Next.js, какие пути нужно пресгенерировать во время сборки:
+
+```typescript
+// app/blog/[slug]/page.tsx
+import { getAllPosts } from '@/lib/blog';
+
+// Выполняется во время BUILD
+export async function generateStaticParams() {
+  const posts = await getAllPosts();
+
+  return posts.map(post => ({
+    slug: post.slug,
+  }));
+  // Возвращает: [{ slug: 'hello-world' }, { slug: 'next-js-guide' }, ...]
+}
+
+// Next.js пресгенерирует:
+// /blog/hello-world → статический HTML
+// /blog/next-js-guide → статический HTML
+// ...
+
+export default async function BlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+  return <article>{post.content}</article>;
+}
+```
+
+---
+
+### 🔧 generateStaticParams для вложенных маршрутов
+
+```typescript
+// app/products/[category]/[id]/page.tsx
+export async function generateStaticParams() {
+  const products = await getAllProducts();
+
+  return products.map(product => ({
+    category: product.category.slug,
+    id: product.id.toString(),
+  }));
+  // [{ category: 'electronics', id: '1' }, ...]
+}
+
+// Оптимизация: родительский generateStaticParams можно переиспользовать
+// app/products/[category]/page.tsx
+export async function generateStaticParams() {
+  const categories = await getCategories();
+  return categories.map(cat => ({ category: cat.slug }));
+}
+
+// app/products/[category]/[id]/page.tsx
+export async function generateStaticParams({
+  params: { category },
+}: {
+  params: { category: string };
+}) {
+  // Вызывается отдельно для каждой категории!
+  const products = await getProductsByCategory(category);
+  return products.map(p => ({ id: p.id.toString() }));
+}
+```
+
+---
+
+### 🚫 notFound(): страница 404
+
+```typescript
+// app/blog/[slug]/page.tsx
+import { notFound } from 'next/navigation';
+
+export default async function BlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+
+  // Пост не найден → показываем 404
+  if (!post) {
+    notFound(); // выбрасывает NEXT_NOT_FOUND
+    // Код ниже не выполнится!
+  }
+
+  return <article>{post.content}</article>;
+}
+
+// app/blog/[slug]/not-found.tsx — кастомная 404 для этого сегмента
+export default function BlogNotFound() {
+  return (
+    <div className="text-center py-20">
+      <h1 className="text-4xl font-bold">404</h1>
+      <p className="text-gray-600 mt-2">Статья не найдена</p>
+      <a href="/blog" className="mt-4 inline-block text-blue-600 hover:underline">
+        ← Вернуться в блог
+      </a>
+    </div>
+  );
+}
+
+// app/not-found.tsx — глобальная 404
+export default function GlobalNotFound() {
+  return (
+    <div className="text-center py-20">
+      <h1 className="text-6xl font-black">404</h1>
+      <p>Страница не найдена</p>
+    </div>
+  );
+}
+```
+
+---
+
+### 🔀 redirect и permanentRedirect
+
+```typescript
+// app/old-blog/[slug]/page.tsx
+import { redirect, permanentRedirect } from 'next/navigation';
+
+export default async function OldBlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
+  const { slug } = await params;
+
+  // Временный редирект (307)
+  redirect(`/blog/${slug}`);
+  // ВАЖНО: redirect() выбрасывает исключение!
+  // Не оборачивай в try-catch без повторного throw!
+
+  // Постоянный редирект (308)
+  permanentRedirect(`/blog/${slug}`);
+}
+
+// Правильная обработка redirect в Server Action:
+'use server';
+import { redirect } from 'next/navigation';
+
+export async function createPost(formData: FormData) {
+  try {
+    const post = await db.post.create({ data: { title: formData.get('title') as string } });
+    // ❌ Неправильно: redirect внутри try → не сработает
+    // redirect(`/blog/${post.slug}`);
+  } catch (error) {
+    if (error instanceof SomeError) throw error;
+    return { error: 'Что-то пошло не так' };
+  }
+
+  // ✅ Правильно: redirect вне try-catch
+  const post = await db.post.create({ data: { title: formData.get('title') as string } });
+  redirect(`/blog/${post.slug}`);
+}
+```
+
+---
+
+### 📝 Типизированные маршруты (next-types / experimental)
+
+```typescript
+// next.config.mjs — включаем типизацию
+const nextConfig = {
+  experimental: {
+    typedRoutes: true,
+  },
+};
+
+// Теперь Link и useRouter знают о существующих маршрутах!
+import Link from 'next/link';
+
+// ✅ TypeScript знает, что этот маршрут существует
+<Link href="/blog/my-post">Статья</Link>
+
+// ❌ TypeScript ошибка: маршрут не существует
+<Link href="/blogg/my-post">Статья</Link>
+
+// Динамические маршруты с типизацией
+import { useRouter } from 'next/navigation';
+
+const router = useRouter();
+
+// ✅ Типизированная навигация
+router.push('/blog/[slug]', { slug: 'my-post' });
+
+// С Route type
+import type { Route } from 'next';
+
+function NavLink<T extends string>({ href, children }: {
+  href: Route<T>;
+  children: React.ReactNode;
+}) {
+  return <Link href={href}>{children}</Link>;
+}
+```
+
+---
+
+### 🏗️ Полный пример: блог с динамическими маршрутами
+
+```typescript
+// lib/blog.ts
+export interface Post {
+  slug: string;
+  title: string;
+  excerpt: string;
+  content: string;
+  tags: string[];
+  publishedAt: string;
+  author: { name: string; avatar: string };
+  coverImage: string;
+}
+
+// app/blog/page.tsx — список постов
+import Link from 'next/link';
+import { getPosts } from '@/lib/blog';
+
+export default async function BlogPage() {
+  const posts = await getPosts();
+
+  return (
+    <div className="max-w-4xl mx-auto py-12 px-4">
+      <h1 className="text-4xl font-bold mb-8">Блог</h1>
+      <div className="grid gap-8">
+        {posts.map(post => (
+          <article key={post.slug}>
+            <Link href={`/blog/${post.slug}`}>
+              <h2 className="text-2xl font-bold hover:text-blue-600">
+                {post.title}
+              </h2>
+            </Link>
+            <p className="text-gray-600 mt-2">{post.excerpt}</p>
+            <div className="flex gap-2 mt-3">
+              {post.tags.map(tag => (
+                // Тег → тегированная страница
+                <Link
+                  key={tag}
+                  href={`/blog/tag/${tag}`}
+                  className="text-sm bg-gray-100 px-3 py-1 rounded-full hover:bg-gray-200"
+                >
+                  #{tag}
+                </Link>
+              ))}
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// app/blog/[slug]/page.tsx
+import type { Metadata } from 'next';
+import { notFound } from 'next/navigation';
+import { getPost, getPosts } from '@/lib/blog';
+
+// Статическая генерация всех постов
+export async function generateStaticParams() {
+  const posts = await getPosts();
+  return posts.map(post => ({ slug: post.slug }));
+}
+
+// Динамическая metadata
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}): Promise<Metadata> {
+  const { slug } = await params;
+  const post = await getPost(slug);
+  if (!post) return { title: 'Не найдено' };
+
+  return {
+    title: post.title,
+    description: post.excerpt,
+    openGraph: { images: [post.coverImage] },
+  };
+}
+
+export default async function BlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+
+  if (!post) notFound();
+
+  return (
+    <article className="max-w-3xl mx-auto py-12 px-4 prose">
+      <h1>{post.title}</h1>
+      <div dangerouslySetInnerHTML={{ __html: post.content }} />
+    </article>
+  );
+}
+```
+
+---
+
+<Playground client:visible
+  template="react"
+  files={{
+    'App.tsx': `import { useState } from 'react';
+
+type RouteType = 'single' | 'catchall' | 'optional' | 'nested';
+
+interface RouteExample {
+  pattern: string;
+  examples: Array<{ url: string; params: Record<string, string | string[]> }>;
+  description: string;
+  color: string;
+}
+
+const ROUTES: Record<RouteType, RouteExample> = {
+  single: {
+    pattern: '/blog/[slug]',
+    description: 'Одиночный динамический сегмент',
+    color: '#4ade80',
+    examples: [
+      { url: '/blog/hello-world', params: { slug: 'hello-world' } },
+      { url: '/blog/next-js-guide', params: { slug: 'next-js-guide' } },
+      { url: '/blog/react-hooks', params: { slug: 'react-hooks' } },
+    ],
+  },
+  catchall: {
+    pattern: '/docs/[...slug]',
+    description: 'Catch-all: один и более сегментов',
+    color: '#60a5fa',
+    examples: [
+      { url: '/docs/intro', params: { slug: ['intro'] } },
+      { url: '/docs/api/users', params: { slug: ['api', 'users'] } },
+      { url: '/docs/guides/auth/oauth', params: { slug: ['guides', 'auth', 'oauth'] } },
+    ],
+  },
+  optional: {
+    pattern: '/shop/[[...filters]]',
+    description: 'Optional catch-all: ноль и более сегментов',
+    color: '#fbbf24',
+    examples: [
+      { url: '/shop', params: { filters: [] } },
+      { url: '/shop/sale', params: { filters: ['sale'] } },
+      { url: '/shop/sale/men', params: { filters: ['sale', 'men'] } },
+      { url: '/shop/sale/men/under-100', params: { filters: ['sale', 'men', 'under-100'] } },
+    ],
+  },
+  nested: {
+    pattern: '/products/[category]/[id]',
+    description: 'Вложенные динамические сегменты',
+    color: '#c084fc',
+    examples: [
+      { url: '/products/electronics/1', params: { category: 'electronics', id: '1' } },
+      { url: '/products/clothing/42', params: { category: 'clothing', id: '42' } },
+      { url: '/products/books/99', params: { category: 'books', id: '99' } },
+    ],
+  },
+};
+
+const BLOG_POSTS = [
+  { slug: 'next-js-15', title: 'Next.js 15: Всё новое', date: '2025-01-15', tags: ['nextjs', 'react'] },
+  { slug: 'server-actions', title: 'Server Actions в деталях', date: '2025-01-10', tags: ['nextjs', 'forms'] },
+  { slug: 'typescript-tricks', title: '10 трюков TypeScript', date: '2025-01-05', tags: ['typescript'] },
+  { slug: 'react-19', title: 'React 19: Что нового', date: '2024-12-20', tags: ['react'] },
+];
+
+export default function App() {
+  const [activeType, setActiveType] = useState<RouteType>('single');
+  const [selectedUrl, setSelectedUrl] = useState('');
+  const [currentPost, setCurrentPost] = useState<typeof BLOG_POSTS[0] | null>(null);
+  const [notFoundPost, setNotFoundPost] = useState(false);
+  const [activeTab, setActiveTab] = useState<'routes' | 'blog' | 'code'>('routes');
+
+  const route = ROUTES[activeType];
+
+  const navigateToBlog = (slug: string) => {
+    const post = BLOG_POSTS.find(p => p.slug === slug);
+    if (post) {
+      setCurrentPost(post);
+      setNotFoundPost(false);
+    } else {
+      setCurrentPost(null);
+      setNotFoundPost(true);
+    }
+  };
+
+  const codeSnippets: Record<RouteType, string> = {
+    single: \`// app/blog/[slug]/page.tsx
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+export async function generateStaticParams() {
+  const posts = await getPosts();
+  return posts.map(post => ({ slug: post.slug }));
+}
+
+export default async function BlogPost({ params }: Props) {
+  const { slug } = await params;
+  // slug = 'hello-world'
+
+  const post = await getPost(slug);
+  if (!post) notFound();
+
+  return <article>{post.content}</article>;
+}\`,
+    catchall: \`// app/docs/[...slug]/page.tsx
+interface Props {
+  params: Promise<{ slug: string[] }>;
+}
+
+export default async function DocsPage({ params }: Props) {
+  const { slug } = await params;
+  // /docs/api/users → slug = ['api', 'users']
+
+  const filePath = slug.join('/');
+  const doc = await getDoc(filePath);
+
+  if (!doc) notFound();
+
+  return (
+    <div>
+      <DocsBreadcrumb segments={slug} />
+      <article>{doc.content}</article>
+    </div>
+  );
+}\`,
+    optional: \`// app/shop/[[...filters]]/page.tsx
+interface Props {
+  params: Promise<{ filters?: string[] }>;
+}
+
+export default async function ShopPage({ params }: Props) {
+  const { filters = [] } = await params;
+  // /shop → filters = []
+  // /shop/sale/men → filters = ['sale', 'men']
+
+  const [category, subcategory] = filters;
+
+  const products = await getProducts({
+    category: category ?? 'all',
+    subcategory,
+  });
+
+  return <ProductGrid products={products} />;
+}\`,
+    nested: \`// app/products/[category]/[id]/page.tsx
+interface Props {
+  params: Promise<{
+    category: string;
+    id: string;
+  }>;
+}
+
+export async function generateStaticParams() {
+  const products = await getAllProducts();
+  return products.map(p => ({
+    category: p.category.slug,
+    id: p.id.toString(),
+  }));
+}
+
+export default async function ProductPage({ params }: Props) {
+  const { category, id } = await params;
+
+  const product = await getProduct(category, id);
+  if (!product) notFound();
+
+  return <ProductDetail product={product} />;
+}\`,
+  };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <div style={{ background: '#020617', borderBottom: '1px solid #1e293b', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ color: '#171717', background: 'white', borderRadius: 4, padding: '2px 8px', fontWeight: 900, fontSize: 13 }}>N</span>
+        <span style={{ fontWeight: 700 }}>Динамические маршруты</span>
+        <span style={{ color: '#64748b', fontSize: 12 }}>Углублённый разбор</span>
+      </div>
+
+      <div style={{ display: 'flex', borderBottom: '1px solid #1e293b' }}>
+        {(['routes', 'blog', 'code'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            style={{
+              padding: '10px 20px', border: 'none', cursor: 'pointer', fontSize: 12,
+              background: activeTab === tab ? '#1e293b' : 'transparent',
+              color: activeTab === tab ? '#e2e8f0' : '#64748b',
+              borderBottom: activeTab === tab ? '2px solid #4ade80' : '2px solid transparent',
+            }}
+          >
+            {tab === 'routes' ? '🗺️ Типы маршрутов' : tab === 'blog' ? '📝 Блог (notFound)' : '📄 Код'}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding: 16 }}>
+        {activeTab === 'routes' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: 16 }}>
+            <div>
+              {(Object.entries(ROUTES) as [RouteType, RouteExample][]).map(([key, r]) => (
+                <button
+                  key={key}
+                  onClick={() => { setActiveType(key); setSelectedUrl(''); }}
+                  style={{
+                    width: '100%', padding: '8px 10px', marginBottom: 6, textAlign: 'left',
+                    border: \`1px solid \${activeType === key ? r.color : '#334155'}\`,
+                    borderRadius: 6, cursor: 'pointer',
+                    background: activeType === key ? \`\${r.color}22\` : '#1e293b',
+                    color: activeType === key ? r.color : '#64748b', fontSize: 11,
+                  }}
+                >
+                  <div style={{ fontWeight: 700 }}>{r.pattern}</div>
+                  <div style={{ opacity: 0.7, fontSize: 10, marginTop: 2 }}>{r.description}</div>
+                </button>
+              ))}
+            </div>
+
+            <div>
+              <div style={{ color: '#64748b', fontSize: 11, marginBottom: 10 }}>
+                Нажми на URL чтобы увидеть распарсенные параметры:
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+                {route.examples.map(example => (
+                  <div
+                    key={example.url}
+                    onClick={() => setSelectedUrl(example.url)}
+                    style={{
+                      background: selectedUrl === example.url ? \`\${route.color}22\` : '#1e293b',
+                      border: \`1px solid \${selectedUrl === example.url ? route.color : '#334155'}\`,
+                      borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    }}
+                  >
+                    <span style={{ color: selectedUrl === example.url ? route.color : '#e2e8f0', fontWeight: 700, fontSize: 13 }}>
+                      {example.url}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {selectedUrl && (
+                <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, border: \`1px solid \${route.color}44\` }}>
+                  <div style={{ color: route.color, fontWeight: 700, fontSize: 12, marginBottom: 10 }}>
+                    params для {selectedUrl}:
+                  </div>
+                  {Object.entries(route.examples.find(e => e.url === selectedUrl)?.params ?? {}).map(([key, val]) => (
+                    <div key={key} style={{ display: 'flex', gap: 12, alignItems: 'flex-start', marginBottom: 8, fontSize: 12 }}>
+                      <span style={{ color: '#c084fc', minWidth: 80 }}>{key}:</span>
+                      <span style={{ color: '#fbbf24' }}>
+                        {Array.isArray(val)
+                          ? val.length === 0 ? '[] (пустой массив)' : \`[\${val.map(v => \`"\${v}"\`).join(', ')}]\`
+                          : \`"\${val}"\`}
+                      </span>
+                    </div>
+                  ))}
+                  <div style={{ marginTop: 10, background: '#0f172a', borderRadius: 6, padding: 10, fontSize: 11, color: '#64748b', lineHeight: 1.8 }}>
+                    // В компоненте:<br/>
+                    // const \{' '}
+                    {Object.keys(route.examples.find(e => e.url === selectedUrl)?.params ?? {}).join(', ')}
+                    {'\n'}// {' '}= await params;
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'blog' && (
+          <div style={{ maxWidth: 600 }}>
+            <div style={{ color: '#64748b', fontSize: 11, marginBottom: 12 }}>
+              Симуляция generateStaticParams + notFound():
+            </div>
+
+            {!currentPost && !notFoundPost ? (
+              <div>
+                <div style={{ marginBottom: 16 }}>
+                  {BLOG_POSTS.map(post => (
+                    <div
+                      key={post.slug}
+                      onClick={() => navigateToBlog(post.slug)}
+                      style={{ background: '#1e293b', borderRadius: 8, padding: 12, marginBottom: 8, cursor: 'pointer', border: '1px solid #334155' }}
+                    >
+                      <div style={{ fontWeight: 700, marginBottom: 4 }}>{post.title}</div>
+                      <div style={{ color: '#64748b', fontSize: 11, marginBottom: 6 }}>/blog/{post.slug} · {post.date}</div>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        {post.tags.map(tag => (
+                          <span key={tag} style={{ background: '#0f172a', color: '#60a5fa', padding: '2px 6px', borderRadius: 3, fontSize: 10 }}>#{tag}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ color: '#64748b', fontSize: 11, marginBottom: 8 }}>Тест notFound() — несуществующий slug:</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {['unknown-post', 'deleted-article'].map(slug => (
+                    <button
+                      key={slug}
+                      onClick={() => navigateToBlog(slug)}
+                      style={{ padding: '7px 14px', background: '#450a0a', border: '1px solid #f87171', borderRadius: 6, cursor: 'pointer', color: '#f87171', fontSize: 12 }}
+                    >
+                      /blog/{slug} →
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : notFoundPost ? (
+              <div style={{ textAlign: 'center', padding: '40px 20px', background: '#1e293b', borderRadius: 12, border: '1px solid #450a0a' }}>
+                <div style={{ fontSize: 64, marginBottom: 12 }}>404</div>
+                <div style={{ color: '#f87171', fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Статья не найдена</div>
+                <div style={{ color: '#64748b', fontSize: 12, marginBottom: 16 }}>
+                  notFound() → ближайший not-found.tsx
+                </div>
+                <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, fontSize: 11, color: '#64748b', marginBottom: 16, textAlign: 'left' }}>
+                  // app/blog/[slug]/page.tsx<br/>
+                  // const post = await getPost(slug);<br/>
+                  // if (!post) notFound(); // ← сработало!
+                </div>
+                <button
+                  onClick={() => { setCurrentPost(null); setNotFoundPost(false); }}
+                  style={{ padding: '8px 20px', background: '#1e293b', border: '1px solid #334155', borderRadius: 8, cursor: 'pointer', color: '#94a3b8', fontSize: 13 }}
+                >
+                  ← Назад к блогу
+                </button>
+              </div>
+            ) : (
+              currentPost && (
+                <div>
+                  <button
+                    onClick={() => { setCurrentPost(null); setNotFoundPost(false); }}
+                    style={{ padding: '6px 12px', background: '#1e293b', border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', color: '#94a3b8', fontSize: 12, marginBottom: 16 }}
+                  >
+                    ← Назад к блогу
+                  </button>
+                  <div style={{ background: '#1e293b', borderRadius: 12, padding: 20, border: '1px solid #334155' }}>
+                    <div style={{ color: '#4ade80', fontSize: 11, marginBottom: 6 }}>/blog/{currentPost.slug}</div>
+                    <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>{currentPost.title}</h1>
+                    <div style={{ color: '#64748b', fontSize: 12, marginBottom: 12 }}>{currentPost.date}</div>
+                    <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
+                      {currentPost.tags.map(tag => (
+                        <span key={tag} style={{ background: '#0f172a', color: '#60a5fa', padding: '3px 8px', borderRadius: 4, fontSize: 11 }}>#{tag}</span>
+                      ))}
+                    </div>
+                    <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, fontSize: 11, color: '#64748b' }}>
+                      params: {JSON.stringify({ slug: currentPost.slug }, null, 2)}<br/><br/>
+                      // generateStaticParams вернул этот slug ✅<br/>
+                      // post найден → рендерим страницу ✅
+                    </div>
+                  </div>
+                </div>
+              )
+            )}
+          </div>
+        )}
+
+        {activeTab === 'code' && (
+          <div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+              {(Object.keys(ROUTES) as RouteType[]).map(key => (
+                <button
+                  key={key}
+                  onClick={() => setActiveType(key)}
+                  style={{
+                    padding: '6px 12px', border: \`1px solid \${activeType === key ? ROUTES[key].color : '#334155'}\`,
+                    borderRadius: 6, cursor: 'pointer', fontSize: 11,
+                    background: activeType === key ? \`\${ROUTES[key].color}22\` : '#1e293b',
+                    color: activeType === key ? ROUTES[key].color : '#64748b',
+                  }}
+                >
+                  {ROUTES[key].pattern}
+                </button>
+              ))}
+            </div>
+            <pre style={{
+              background: '#1e293b', borderRadius: 8, padding: 16, fontSize: 11,
+              color: '#94a3b8', overflow: 'auto', lineHeight: 1.8, margin: 0,
+              borderLeft: \`3px solid \${route.color}\`, whiteSpace: 'pre-wrap',
+            }}>
+              {codeSnippets[activeType]}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

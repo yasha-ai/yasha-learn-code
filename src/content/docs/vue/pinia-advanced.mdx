@@ -1,0 +1,677 @@
+---
+title: "16. Pinia: продвинутые паттерны"
+sidebar:
+  order: 17
+---
+import { Playground } from '@components/Playground'
+
+
+## 🍍⚡ Продвинутая Pinia
+
+Ты уже знаешь базовую Pinia. Теперь — мощные паттерны: сторы, использующие другие сторы, плагины, персистентность данных, HMR, SSR и юнит-тестирование. Это то, что нужно знать для продакшн-приложений 🚀
+
+---
+
+## Store Composition — сторы используют другие сторы
+
+В Pinia нет встроенных модулей как в Vuex. Вместо этого сторы просто импортируют друг друга:
+
+```typescript
+// stores/user.ts
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+
+export const useUserStore = defineStore('user', () => {
+  const currentUser = ref<User | null>(null)
+  const isLoggedIn = computed(() => !!currentUser.value)
+
+  return { currentUser, isLoggedIn }
+})
+```
+
+```typescript
+// stores/cart.ts — использует userStore
+import { defineStore, storeToRefs } from 'pinia'
+import { ref, computed, watch } from 'vue'
+import { useUserStore } from './user'
+
+export const useCartStore = defineStore('cart', () => {
+  const userStore = useUserStore()
+  const { currentUser, isLoggedIn } = storeToRefs(userStore)
+
+  const items = ref<CartItem[]>([])
+
+  // Computed зависит от другого стора
+  const canCheckout = computed(() =>
+    isLoggedIn.value && items.value.length > 0
+  )
+
+  // Реагируем на смену пользователя
+  watch(currentUser, (newUser, oldUser) => {
+    if (!newUser && oldUser) {
+      // Пользователь вышел — очищаем корзину
+      items.value = []
+    }
+  })
+
+  async function checkout() {
+    if (!isLoggedIn.value) {
+      throw new Error('Нужно авторизоваться')
+    }
+
+    // Используем данные из другого стора
+    const userId = currentUser.value!.id
+    await api.checkout(userId, items.value)
+    items.value = []
+  }
+
+  return { items, canCheckout, checkout }
+})
+```
+
+> ⚠️ В **Options Store** используй `useOtherStore()` внутри методов, а не в `state()` — иначе проблемы с порядком инициализации!
+
+```typescript
+// В Options Store — вызывай другие сторы внутри actions/getters
+export const useCartStore = defineStore('cart', {
+  state: () => ({ items: [] }),
+
+  actions: {
+    async checkout() {
+      const userStore = useUserStore()  // ✅ Внутри action
+      if (!userStore.isLoggedIn) throw new Error('...')
+    }
+  }
+})
+```
+
+---
+
+## Plugins — плагины Pinia
+
+Плагины позволяют добавлять функциональность ко **всем сторам** сразу:
+
+```typescript
+// plugins/logging.ts — логирование всех actions
+import type { PiniaPluginContext } from 'pinia'
+
+export function LoggingPlugin({ store }: PiniaPluginContext) {
+  // Перехватываем все actions
+  store.$onAction(({ name, args, after, onError }) => {
+    console.log(\`[ACTION] \${store.$id}.\${name}\`, args)
+
+    after((result) => {
+      console.log(\`[ACTION DONE] \${store.$id}.\${name}\`, result)
+    })
+
+    onError((error) => {
+      console.error(\`[ACTION ERROR] \${store.$id}.\${name}\`, error)
+    })
+  })
+}
+```
+
+```typescript
+// plugins/timestamp.ts — добавляем свойство ко всем сторам
+import type { PiniaPluginContext } from 'pinia'
+
+declare module 'pinia' {
+  export interface PiniaCustomProperties {
+    $createdAt: Date
+    $updatedAt: Date
+  }
+}
+
+export function TimestampPlugin({ store }: PiniaPluginContext) {
+  store.$createdAt = new Date()
+
+  store.$subscribe(() => {
+    store.$updatedAt = new Date()
+  })
+
+  return {
+    $createdAt: new Date(),
+    $updatedAt: new Date(),
+  }
+}
+```
+
+```typescript
+// main.ts
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import { LoggingPlugin } from './plugins/logging'
+import { TimestampPlugin } from './plugins/timestamp'
+
+const pinia = createPinia()
+pinia.use(LoggingPlugin)
+pinia.use(TimestampPlugin)
+```
+
+---
+
+## Persistence — персистентность через плагин
+
+Самый популярный плагин — `pinia-plugin-persistedstate`:
+
+```bash
+npm install pinia-plugin-persistedstate
+```
+
+```typescript
+// main.ts
+import { createPinia } from 'pinia'
+import piniaPluginPersistedstate from 'pinia-plugin-persistedstate'
+
+const pinia = createPinia()
+pinia.use(piniaPluginPersistedstate)
+```
+
+```typescript
+// stores/user.ts — с персистентностью
+import { defineStore } from 'pinia'
+
+export const useUserStore = defineStore('user', {
+  state: () => ({
+    token: null as string | null,
+    user: null as User | null,
+    preferences: {
+      theme: 'dark' as 'light' | 'dark',
+      language: 'ru',
+    },
+  }),
+
+  // persist: true — сохранять всё в localStorage
+  persist: true,
+})
+```
+
+```typescript
+// Тонкая настройка
+export const useAuthStore = defineStore('auth', {
+  state: () => ({
+    token: null as string | null,
+    user: null as User | null,
+    sessionId: '',         // НЕ сохраняем
+    lastActive: new Date(), // НЕ сохраняем
+  }),
+
+  persist: {
+    // Куда сохранять
+    storage: localStorage,  // или sessionStorage, или кастомное
+
+    // Какие поля сохранять (whitelist)
+    pick: ['token', 'user'],
+
+    // Или что исключить (blacklist)
+    // omit: ['sessionId', 'lastActive'],
+
+    // Кастомный ключ в storage
+    key: 'my-app-auth',
+
+    // Хуки
+    beforeRestore: (ctx) => {
+      console.log('Восстанавливаем стор:', ctx.store.$id)
+    },
+    afterRestore: (ctx) => {
+      console.log('Стор восстановлен:', ctx.store.$state)
+    },
+  },
+})
+```
+
+---
+
+## HMR — горячая замена модулей
+
+Pinia автоматически поддерживает HMR в Vite, но нужно добавить небольшой код:
+
+```typescript
+// stores/counter.ts
+import { defineStore, acceptHMRUpdate } from 'pinia'
+
+export const useCounterStore = defineStore('counter', () => {
+  // ...
+})
+
+// Без этого при изменении стора состояние сбрасывается!
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useCounterStore, import.meta.hot))
+}
+```
+
+---
+
+## SSR — серверный рендеринг
+
+```typescript
+// server.ts (Nuxt или кастомный SSR)
+import { createPinia } from 'pinia'
+import { createSSRApp } from 'vue'
+
+export async function renderPage(url: string) {
+  // Создаём новый экземпляр Pinia для каждого запроса!
+  // Это важно — иначе состояние будет общим между пользователями
+  const pinia = createPinia()
+  const app = createSSRApp(App)
+
+  app.use(pinia)
+
+  // Рендерим
+  const html = await renderToString(app)
+
+  // Сериализуем состояние для передачи клиенту
+  const state = JSON.stringify(pinia.state.value)
+
+  return {
+    html,
+    // Встраиваем в HTML для гидрации на клиенте
+    stateScript: \`<script>window.__pinia_state__ = \${state}</script>\`,
+  }
+}
+```
+
+```typescript
+// client.ts — гидрация
+import { createPinia } from 'pinia'
+
+const pinia = createPinia()
+
+// Восстанавливаем состояние с сервера
+if (window.__pinia_state__) {
+  pinia.state.value = window.__pinia_state__
+}
+
+createApp(App).use(pinia).mount('#app')
+```
+
+---
+
+## Unit Testing — тестирование сторов
+
+```typescript
+// stores/__tests__/counter.spec.ts
+import { setActivePinia, createPinia } from 'pinia'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
+import { useCounterStore } from '../counter'
+
+describe('useCounterStore', () => {
+  beforeEach(() => {
+    // Создаём свежую Pinia перед каждым тестом
+    setActivePinia(createPinia())
+  })
+
+  it('начальное состояние', () => {
+    const store = useCounterStore()
+    expect(store.count).toBe(0)
+    expect(store.doubleCount).toBe(0)
+  })
+
+  it('increment увеличивает count', () => {
+    const store = useCounterStore()
+    store.increment()
+    expect(store.count).toBe(1)
+    store.increment()
+    expect(store.count).toBe(2)
+  })
+
+  it('$reset возвращает к начальному состоянию', () => {
+    const store = useCounterStore()
+    store.increment()
+    store.increment()
+    store.$reset()
+    expect(store.count).toBe(0)
+  })
+
+  it('fetchCount вызывает API и обновляет count', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ count: 42 })
+    })
+    global.fetch = mockFetch
+
+    const store = useCounterStore()
+    await store.fetchCount()
+
+    expect(store.count).toBe(42)
+    expect(mockFetch).toHaveBeenCalledWith('/api/count')
+  })
+})
+```
+
+```typescript
+// Тестирование стора с зависимостями
+import { useCartStore } from '../cart'
+import { useUserStore } from '../user'
+
+describe('useCartStore', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('checkout требует авторизации', async () => {
+    const cartStore = useCartStore()
+    const userStore = useUserStore()
+
+    // Пользователь не авторизован
+    userStore.currentUser = null
+    cartStore.items = [{ id: 1, name: 'Test', price: 100 }]
+
+    await expect(cartStore.checkout()).rejects.toThrow('Нужно авторизоваться')
+  })
+
+  it('checkout очищает корзину после успеха', async () => {
+    const cartStore = useCartStore()
+    const userStore = useUserStore()
+
+    userStore.currentUser = { id: 1, name: 'Яша' }
+    cartStore.items = [{ id: 1, name: 'Test', price: 100 }]
+
+    vi.spyOn(api, 'checkout').mockResolvedValue({ success: true })
+    await cartStore.checkout()
+
+    expect(cartStore.items).toHaveLength(0)
+  })
+})
+```
+
+---
+
+## Storeの подписка на внешние источники
+
+```typescript
+// stores/websocket.ts — стор синхронизируется через WebSocket
+export const useWebSocketStore = defineStore('websocket', () => {
+  const messages = ref<Message[]>([])
+  const connected = ref(false)
+  let ws: WebSocket | null = null
+
+  function connect(url: string) {
+    ws = new WebSocket(url)
+
+    ws.onopen = () => { connected.value = true }
+    ws.onclose = () => { connected.value = false }
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data)
+      messages.value.push(msg)
+    }
+  }
+
+  function disconnect() {
+    ws?.close()
+    ws = null
+  }
+
+  function send(data: unknown) {
+    ws?.send(JSON.stringify(data))
+  }
+
+  // Очищаем соединение при уничтожении стора
+  // (например, при unmount компонента, который создал стор)
+  onUnmounted(disconnect)
+
+  return { messages, connected, connect, disconnect, send }
+})
+```
+
+---
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useCallback } from 'react';
+
+const BG = '#0f172a';
+const GREEN = '#42b883';
+const DARK = '#35495e';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const YELLOW = '#f59e0b';
+const PURPLE = '#a78bfa';
+
+// Симуляция Pinia Plugin + Persistence + Store Composition
+
+interface User { id: number; name: string; isLoggedIn: boolean; }
+interface CartItem { id: number; name: string; price: number; qty: number; }
+interface PluginLog { plugin: string; event: string; data: string; time: string; }
+
+const PRODUCTS = [
+  { id: 1, name: '🍍 Pinia Advanced', price: 1990 },
+  { id: 2, name: '🔌 Plugin Pack', price: 990 },
+  { id: 3, name: '🧪 Testing Guide', price: 1490 },
+];
+
+type Tab = 'composition' | 'plugin' | 'persist' | 'testing';
+
+export default function App() {
+  const [tab, setTab] = useState<Tab>('composition');
+
+  // User store
+  const [user, setUser] = useState<User>(() => {
+    try { return JSON.parse(localStorage.getItem('demo-user') || 'null') || { id: 1, name: 'Яша', isLoggedIn: false }; }
+    catch { return { id: 1, name: 'Яша', isLoggedIn: false }; }
+  });
+
+  // Cart store (depends on user store)
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [pluginLogs, setPluginLogs] = useState<PluginLog[]>([]);
+  const [testResults, setTestResults] = useState<Array<{ name: string; pass: boolean; duration: number }>>([]);
+  const [running, setRunning] = useState(false);
+
+  const addPluginLog = useCallback((plugin: string, event: string, data: string) => {
+    const time = new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setPluginLogs(prev => [{ plugin, event, data, time }, ...prev.slice(0, 8)]);
+  }, []);
+
+  // Симуляция persist plugin
+  useEffect(() => {
+    localStorage.setItem('demo-user', JSON.stringify(user));
+    if (tab === 'persist') {
+      addPluginLog('persistedstate', 'afterRestore / save', \`key="demo-user" \${JSON.stringify(user)}\`);
+    }
+  }, [user]);
+
+  // Симуляция logging plugin для cart actions
+  const addToCart = (product: { id: number; name: string; price: number }) => {
+    addPluginLog('LoggingPlugin', '[ACTION]', \`cartStore.addItem("\${product.name}")\`);
+    setCart(prev => {
+      const ex = prev.find(i => i.id === product.id);
+      return ex ? prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i) : [...prev, { ...product, qty: 1 }];
+    });
+    setTimeout(() => addPluginLog('LoggingPlugin', '[ACTION DONE]', \`cartStore.addItem → qty+1\`), 50);
+  };
+
+  const checkout = () => {
+    addPluginLog('LoggingPlugin', '[ACTION]', 'cartStore.checkout()');
+    if (!user.isLoggedIn) {
+      addPluginLog('LoggingPlugin', '[ACTION ERROR]', 'Error: Нужно авторизоваться');
+      return;
+    }
+    addPluginLog('LoggingPlugin', '[ACTION DONE]', \`checkout → \${cart.length} items, total: \${cart.reduce((s,i) => s+i.price*i.qty,0)}₽\`);
+    setCart([]);
+  };
+
+  const runTests = async () => {
+    setRunning(true);
+    setTestResults([]);
+
+    const tests: Array<{ name: string; fn: () => boolean | Promise<boolean> }> = [
+      { name: 'начальное состояние count = 0', fn: () => true },
+      { name: 'increment увеличивает count', fn: () => true },
+      { name: '$reset возвращает к 0', fn: () => true },
+      { name: 'checkout требует авторизации', fn: () => !user.isLoggedIn ? true : false },
+      { name: 'persist сохраняет token в localStorage', fn: () => !!localStorage.getItem('demo-user') },
+      { name: 'cartStore зависит от userStore', fn: () => true },
+    ];
+
+    for (const test of tests) {
+      const start = Date.now();
+      await new Promise(r => setTimeout(r, 150 + Math.random() * 200));
+      const pass = await test.fn();
+      const duration = Date.now() - start;
+      setTestResults(prev => [...prev, { name: test.name, pass: !!pass, duration }]);
+    }
+    setRunning(false);
+  };
+
+  const tabs: { key: Tab; label: string }[] = [
+    { key: 'composition', label: '🔗 Store Composition' },
+    { key: 'plugin', label: '🔌 Plugins' },
+    { key: 'persist', label: '💾 Persistence' },
+    { key: 'testing', label: '🧪 Testing' },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: GREEN, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🍍⚡ Advanced Pinia Playground</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>composition · plugins · persistence · testing</p>
+
+      <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)} style={{
+            padding: '0.4rem 0.8rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+            background: tab === t.key ? GREEN : CARD,
+            color: tab === t.key ? '#0f172a' : '#94a3b8',
+            fontWeight: tab === t.key ? 700 : 400, fontSize: '0.78rem',
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {/* Store Composition */}
+      {tab === 'composition' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem' }}>userStore</div>
+            <div style={{ marginBottom: '0.5rem' }}>
+              <input value={user.name} onChange={e => setUser(u => ({ ...u, name: e.target.value }))} style={{
+                width: '100%', padding: '0.4rem', borderRadius: '4px', border: \`1px solid \${BORDER}\`,
+                background: '#0a0f1e', color: '#e2e8f0', fontSize: '0.82rem', boxSizing: 'border-box', marginBottom: '0.4rem',
+              }} />
+              <button onClick={() => setUser(u => ({ ...u, isLoggedIn: !u.isLoggedIn }))} style={{
+                width: '100%', padding: '0.4rem', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                background: user.isLoggedIn ? '#ef4444' : GREEN,
+                color: user.isLoggedIn ? '#fff' : '#0f172a', fontWeight: 700, fontSize: '0.78rem',
+              }}>
+                {user.isLoggedIn ? 'logout()' : 'login()'}
+              </button>
+            </div>
+            <div style={{ background: '#0a0f1e', padding: '0.5rem', borderRadius: '4px', fontSize: '0.75rem' }}>
+              <span style={{ color: '#64748b' }}>isLoggedIn: </span>
+              <span style={{ color: user.isLoggedIn ? GREEN : '#ef4444' }}>{String(user.isLoggedIn)}</span>
+            </div>
+          </div>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.5rem' }}>
+              cartStore <span style={{ color: '#475569' }}>← использует userStore</span>
+            </div>
+            {PRODUCTS.map(p => {
+              const inCart = cart.find(i => i.id === p.id);
+              return (
+                <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.3rem 0', borderBottom: \`1px solid \${BORDER}\` }}>
+                  <span style={{ fontSize: '0.78rem' }}>{p.name}</span>
+                  <button onClick={() => addToCart(p)} style={{
+                    padding: '0.2rem 0.5rem', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                    background: inCart ? GREEN : BORDER, color: inCart ? '#0f172a' : '#94a3b8', fontSize: '0.72rem',
+                  }}>{inCart ? \`×\${inCart.qty}\` : '+Add'}</button>
+                </div>
+              );
+            })}
+            <div style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#64748b' }}>
+              canCheckout: <span style={{ color: user.isLoggedIn && cart.length > 0 ? GREEN : '#ef4444' }}>
+                {String(user.isLoggedIn && cart.length > 0)}
+              </span>
+            </div>
+            <button onClick={checkout} disabled={!user.isLoggedIn || cart.length === 0} style={{
+              marginTop: '0.4rem', width: '100%', padding: '0.4rem', borderRadius: '4px', border: 'none',
+              background: user.isLoggedIn && cart.length > 0 ? GREEN : '#1a2540',
+              color: user.isLoggedIn && cart.length > 0 ? '#0f172a' : '#334155',
+              cursor: user.isLoggedIn && cart.length > 0 ? 'pointer' : 'not-allowed', fontWeight: 700, fontSize: '0.78rem',
+            }}>checkout()</button>
+          </div>
+        </div>
+      )}
+
+      {/* Plugin Log */}
+      {(tab === 'plugin' || tab === 'persist') && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem' }}>
+              {tab === 'plugin' ? 'pinia.use(LoggingPlugin)' : 'pinia.use(persistedstate)'}
+            </div>
+            {tab === 'plugin' && (
+              <>
+                {PRODUCTS.map(p => (
+                  <button key={p.id} onClick={() => addToCart(p)} style={{
+                    display: 'block', width: '100%', textAlign: 'left', padding: '0.4rem 0.6rem', marginBottom: '0.3rem',
+                    borderRadius: '4px', border: \`1px solid \${BORDER}\`, background: 'transparent', color: '#e2e8f0',
+                    cursor: 'pointer', fontSize: '0.78rem',
+                  }}>
+                    + addToCart("{p.name}")
+                  </button>
+                ))}
+                <button onClick={checkout} style={{
+                  width: '100%', padding: '0.4rem', borderRadius: '4px', border: 'none',
+                  background: DARK, color: '#e2e8f0', cursor: 'pointer', fontSize: '0.78rem', marginTop: '0.4rem',
+                }}>checkout()</button>
+              </>
+            )}
+            {tab === 'persist' && (
+              <div>
+                <div style={{ marginBottom: '0.5rem', fontSize: '0.78rem', color: '#94a3b8' }}>
+                  persist: {'{'}{ ' pick: ["token", "user"]' }{ ' }'}
+                </div>
+                <input value={user.name} onChange={e => setUser(u => ({ ...u, name: e.target.value }))}
+                  placeholder="Изменяй имя — сохраняется!"
+                  style={{ width: '100%', padding: '0.4rem', borderRadius: '4px', border: \`1px solid \${BORDER}\`, background: '#0a0f1e', color: '#e2e8f0', fontSize: '0.82rem', boxSizing: 'border-box' }} />
+                <div style={{ marginTop: '0.5rem', background: '#0a0f1e', padding: '0.5rem', borderRadius: '4px', fontSize: '0.75rem' }}>
+                  <span style={{ color: '#64748b' }}>localStorage["demo-user"]: </span>
+                  <span style={{ color: GREEN }}>{localStorage.getItem('demo-user')?.slice(0, 50)}...</span>
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem' }}>
+            <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.75rem' }}>Plugin Log</div>
+            {pluginLogs.length === 0
+              ? <div style={{ color: '#334155', fontSize: '0.75rem' }}>// Взаимодействуй со сторами...</div>
+              : pluginLogs.map((l, i) => (
+                <div key={i} style={{ marginBottom: '0.35rem', fontSize: '0.72rem' }}>
+                  <span style={{ color: PURPLE }}>[{l.plugin}] </span>
+                  <span style={{ color: YELLOW }}>{l.event} </span>
+                  <span style={{ color: i === 0 ? '#e2e8f0' : '#475569' }}>{l.data}</span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      )}
+
+      {/* Testing */}
+      {tab === 'testing' && (
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.72rem' }}>vitest · setActivePinia(createPinia())</div>
+            <button onClick={runTests} disabled={running} style={{
+              padding: '0.4rem 0.9rem', borderRadius: '6px', border: 'none', cursor: running ? 'not-allowed' : 'pointer',
+              background: running ? BORDER : GREEN, color: running ? '#475569' : '#0f172a', fontWeight: 700, fontSize: '0.8rem',
+            }}>
+              {running ? '⏳ Запуск...' : '▶ Запустить тесты'}
+            </button>
+          </div>
+          {testResults.map((t, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem', borderRadius: '4px', marginBottom: '0.3rem', background: '#0a0f1e' }}>
+              <span style={{ color: t.pass ? GREEN : '#ef4444', fontSize: '0.85rem' }}>{t.pass ? '✓' : '✗'}</span>
+              <span style={{ color: '#e2e8f0', fontSize: '0.78rem', flex: 1 }}>{t.name}</span>
+              <span style={{ color: '#334155', fontSize: '0.68rem' }}>{t.duration}ms</span>
+            </div>
+          ))}
+          {testResults.length > 0 && (
+            <div style={{ marginTop: '0.75rem', fontSize: '0.8rem' }}>
+              <span style={{ color: GREEN }}>{testResults.filter(t => t.pass).length} passed</span>
+              {testResults.some(t => !t.pass) && <span style={{ color: '#ef4444', marginLeft: '0.5rem' }}>{testResults.filter(t => !t.pass).length} failed</span>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

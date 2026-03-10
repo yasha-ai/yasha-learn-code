@@ -1,0 +1,411 @@
+---
+title: "1. Что такое Vite"
+sidebar:
+  order: 1
+---
+import { Playground } from '@components/Playground'
+
+
+Vite — это **инструмент разработки и сборки** с двумя основными режимами работы: быстрый dev-сервер на базе Native ESM и оптимизированный production-бандл через Rollup.
+
+## Проблема, которую решает Vite
+
+До Vite стандартным инструментом был Webpack (или CRA поверх него). Webpack появился ещё до того, как браузеры получили нативную поддержку ES Modules, поэтому он был вынужден **собирать весь код в один файл** перед запуском сервера.
+
+Сегодня все современные браузеры поддерживают ES Modules нативно. Vite воспользовался этим и переосмыслил подход к разработке.
+
+## Два режима Vite
+
+### Dev режим: Native ESM
+
+```typescript
+// vite.config.ts в dev режиме:
+// Vite НЕ собирает ваш код.
+// Браузер запрашивает модули по HTTP напрямую.
+
+// В браузере выполняется:
+// <script type="module" src="/src/main.tsx">
+// main.tsx → import App from './App.tsx'
+//          → Vite получает запрос к /src/App.tsx
+//          → Трансформирует TSX → JS
+//          → Отдаёт браузеру
+// Обрабатывается ТОЛЬКО то, что нужно прямо сейчас
+```
+
+### Pre-bundling зависимостей (esbuild)
+
+Зависимости из `node_modules` — исключение. Vite pre-bundle их с помощью esbuild:
+
+```bash
+# Что делает esbuild при первом запуске:
+# 1. Конвертирует CommonJS → ESM
+#    (react, lodash и т.д. используют CJS)
+# 2. Объединяет мелкие файлы (lodash имеет ~600 файлов!)
+#    в один модуль для экономии HTTP-запросов
+# 3. Кэширует результат в node_modules/.vite/deps/
+
+.vite/
+└── deps/
+    ├── react.js
+    ├── react-dom.js
+    ├── react_jsx-runtime.js
+    └── _metadata.json
+```
+
+### Production: Rollup
+
+В production Vite использует **Rollup** — зрелый и мощный бандлер:
+
+```typescript
+// Rollup даёт:
+// ✓ Глубокий tree-shaking (удаление неиспользуемого кода)
+// ✓ Code splitting (разбивка на чанки)
+// ✓ Dynamic import (ленивая загрузка)
+// ✓ CSS extraction
+// ✓ Asset optimization с хэшированием
+```
+
+## Жизненный цикл запроса в dev-режиме
+
+```
+1. browser → GET /src/main.tsx
+2. Vite middleware → finds file on disk
+3. Transform pipeline:
+   TypeScript → remove types
+   JSX → React.createElement
+   Imports → resolve paths
+4. Response → browser executes module
+5. browser → GET /src/App.tsx (from import in main.tsx)
+6. Repeat for each import...
+
+Вся эта цепочка занимает < 10ms на файл!
+```
+
+## HMR (Hot Module Replacement)
+
+Vite's HMR принципиально отличается от Webpack:
+
+```
+Webpack HMR:
+  Изменился файл → пересобрать весь бандл → reload
+
+Vite HMR:
+  Изменился файл → invalidate ТОЛЬКО этот модуль
+              → отправить обновление через WebSocket
+              → браузер заменяет ТОЛЬКО этот модуль
+              → состояние приложения сохраняется!
+
+Время обновления: <10ms независимо от размера проекта
+```
+
+## Поддерживаемые технологии out-of-the-box
+
+| Технология        | Поддержка               |
+|-------------------|-------------------------|
+| TypeScript        | ✓ (esbuild transpile)  |
+| JSX/TSX           | ✓ (esbuild/plugin)     |
+| CSS Modules       | ✓ нативно              |
+| PostCSS           | ✓ автоматически        |
+| JSON import       | ✓ нативно              |
+| Web Workers       | ✓ через ?worker        |
+| WASM              | ✓ через ?init          |
+| SVG               | ✓ как компонент        |
+
+## Архитектура плагинов
+
+Vite расширяет Plugin API Rollup, добавляя Vite-специфичные хуки:
+
+```typescript
+// Структура плагина Vite
+export function myPlugin() {
+  return {
+    name: 'my-plugin',
+    // Rollup хуки
+    buildStart() { /* ... */ },
+    transform(code, id) { /* ... */ },
+    // Vite-специфичные хуки
+    configureServer(server) { /* ... */ },
+    handleHotUpdate(ctx) { /* ... */ },
+  }
+}
+```
+
+Ниже — анимированное сравнение процесса запуска dev-сервера Vite и Webpack с отображением каждого шага:
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const VITE_COLOR = '#646cff';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#38bdf8';
+const GREEN = '#4ade80';
+const AMBER = '#f59e0b';
+
+interface BuildStep {
+  label: string;
+  durationRatio: number;
+  color: string;
+}
+
+const viteSteps: BuildStep[] = [
+  { label: '1. Запуск сервера', durationRatio: 0.05, color: VITE_COLOR },
+  { label: '2. esbuild pre-bundle deps', durationRatio: 0.40, color: ACCENT },
+  { label: '3. Готов!', durationRatio: 0.55, color: GREEN },
+];
+
+const webpackSteps: BuildStep[] = [
+  { label: '1. Разбор entry point', durationRatio: 0.08, color: AMBER },
+  { label: '2. Resolve all imports', durationRatio: 0.22, color: '#f97316' },
+  { label: '3. Transform all modules', durationRatio: 0.45, color: '#ef4444' },
+  { label: '4. Bundle & optimize', durationRatio: 0.70, color: '#dc2626' },
+  { label: '5. Emit chunks', durationRatio: 0.88, color: '#b91c1c' },
+  { label: '6. Готов!', durationRatio: 1.0, color: GREEN },
+];
+
+const TOTAL_DURATION = 4000;
+
+function BuildVisualizer({
+  name,
+  color,
+  steps,
+  started,
+  totalMs,
+}: {
+  name: string;
+  color: string;
+  steps: BuildStep[];
+  started: boolean;
+  totalMs: number;
+}) {
+  const [progress, setProgress] = useState(0);
+  const startRef = useRef<number>(0);
+  const rafRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!started) { setProgress(0); return; }
+    startRef.current = performance.now();
+    const tick = () => {
+      const elapsed = performance.now() - startRef.current;
+      const p = Math.min(elapsed / totalMs, 1);
+      setProgress(p);
+      if (p < 1) rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [started, totalMs]);
+
+  const completedSteps = steps.filter(s => progress >= s.durationRatio);
+  const currentStep = steps.find(s => progress < s.durationRatio);
+
+  return (
+    <div style={{ background: CARD, borderRadius: 14, padding: 20, border: \`1px solid \${color}30\` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <h3 style={{ margin: 0, color, fontSize: 15, fontWeight: 800 }}>{name}</h3>
+        <span style={{ fontFamily: 'monospace', fontSize: 12, color: progress >= 1 ? GREEN : ACCENT }}>
+          {progress >= 1
+            ? (totalMs < 1000 ? \`\${totalMs}ms ✓\` : \`\${(totalMs / 1000).toFixed(1)}s ✓\`)
+            : \`\${Math.round(progress * totalMs)}ms\`}
+        </span>
+      </div>
+
+      {/* Overall progress bar */}
+      <div style={{ height: 8, background: '#334155', borderRadius: 4, overflow: 'hidden', marginBottom: 16 }}>
+        <div style={{
+          height: '100%', width: \`\${progress * 100}%\`,
+          background: \`linear-gradient(90deg, \${color}, \${color}88)\`,
+          borderRadius: 4, transition: 'none',
+          boxShadow: progress >= 1 ? \`0 0 10px \${color}60\` : 'none',
+        }} />
+      </div>
+
+      {/* Steps */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {steps.map((step, i) => {
+          const done = progress >= step.durationRatio;
+          const active = currentStep === step;
+          return (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              opacity: done || active ? 1 : 0.3,
+              transition: 'opacity 0.3s',
+            }}>
+              <div style={{
+                width: 16, height: 16, borderRadius: '50%', flexShrink: 0,
+                background: done ? step.color : (active ? \`\${step.color}40\` : '#334155'),
+                border: \`2px solid \${done || active ? step.color : '#475569'}\`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 9, color: done ? BG : step.color,
+                transition: 'all 0.3s',
+              }}>
+                {done ? '✓' : ''}
+              </div>
+              <span style={{
+                fontSize: 12, color: done ? TEXT : (active ? step.color : '#64748b'),
+                fontWeight: done ? 600 : 400,
+              }}>{step.label}</span>
+              {active && started && (
+                <span style={{ fontSize: 10, color: step.color, animation: 'none' }}>⟳</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [started, setStarted] = useState(false);
+  const [done, setDone] = useState(false);
+  const [activeTab, setActiveTab] = useState<'demo' | 'esm' | 'hmr'>('demo');
+
+  const handleStart = () => {
+    setDone(false);
+    setStarted(false);
+    setTimeout(() => {
+      setStarted(true);
+      setTimeout(() => setDone(true), TOTAL_DURATION + 100);
+    }, 50);
+  };
+
+  const esmFlow = [
+    { step: 'Browser', action: 'GET /src/main.tsx', color: ACCENT },
+    { step: 'Vite', action: 'Transform: TS → JS, JSX → createElement', color: VITE_COLOR },
+    { step: 'Browser', action: 'Execute main.tsx, find import App', color: ACCENT },
+    { step: 'Browser', action: 'GET /src/App.tsx', color: ACCENT },
+    { step: 'Vite', action: 'Transform App.tsx', color: VITE_COLOR },
+    { step: 'Browser', action: 'Render! 🎉', color: GREEN },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '24px 16px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 620, margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <h1 style={{
+            margin: 0, fontSize: 22, fontWeight: 800,
+            background: \`linear-gradient(90deg, \${VITE_COLOR}, \${ACCENT})\`,
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+          }}>Как работает Vite?</h1>
+          <p style={{ color: '#64748b', fontSize: 13, marginTop: 6 }}>Интерактивная визуализация архитектуры</p>
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 20, background: CARD, padding: 4, borderRadius: 10 }}>
+          {[
+            { id: 'demo' as const, label: '🏁 Dev Server' },
+            { id: 'esm' as const, label: '📡 ESM Flow' },
+            { id: 'hmr' as const, label: '🔥 HMR' },
+          ].map(t => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+              flex: 1, padding: '8px 4px', borderRadius: 7, border: 'none', cursor: 'pointer',
+              background: activeTab === t.id ? VITE_COLOR : 'transparent',
+              color: activeTab === t.id ? '#fff' : '#94a3b8',
+              fontSize: 12, fontWeight: activeTab === t.id ? 700 : 400,
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {activeTab === 'demo' && (
+          <div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 20 }}>
+              <BuildVisualizer
+                name="⚡ Vite Dev Server"
+                color={VITE_COLOR}
+                steps={viteSteps}
+                started={started}
+                totalMs={80}
+              />
+              <BuildVisualizer
+                name="📦 Webpack Dev Server"
+                color={AMBER}
+                steps={webpackSteps}
+                started={started}
+                totalMs={TOTAL_DURATION}
+              />
+            </div>
+            {done && (
+              <div style={{
+                textAlign: 'center', padding: 16,
+                background: \`\${VITE_COLOR}12\`, borderRadius: 12,
+                border: \`1px solid \${VITE_COLOR}30\`, marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 24, marginBottom: 4 }}>⚡ vs 📦</div>
+                <div style={{ color: TEXT, fontWeight: 700 }}>Vite запустился за 80ms</div>
+                <div style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
+                  Webpack всё ещё собирает бандл... в реальности это займёт ~30 секунд
+                </div>
+              </div>
+            )}
+            <button onClick={handleStart} style={{
+              width: '100%', padding: '12px 0', borderRadius: 10,
+              border: 'none', cursor: 'pointer', background: VITE_COLOR,
+              color: '#fff', fontWeight: 700, fontSize: 14,
+            }}>
+              {started && !done ? '⏳ Запускаем серверы...' : '🚀 Запустить оба сервера'}
+            </button>
+          </div>
+        )}
+
+        {activeTab === 'esm' && (
+          <div style={{ background: CARD, borderRadius: 14, padding: 20, border: '1px solid #334155' }}>
+            <h3 style={{ margin: '0 0 16px', fontSize: 14, color: ACCENT }}>📡 Native ESM Request Flow</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {esmFlow.map((item, i) => (
+                <div key={i} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                    <div style={{
+                      width: 32, height: 32, borderRadius: '50%', display: 'flex',
+                      alignItems: 'center', justifyContent: 'center',
+                      background: \`\${item.color}20\`, border: \`2px solid \${item.color}\`,
+                      fontSize: 11, color: item.color, fontWeight: 700, flexShrink: 0,
+                    }}>{i + 1}</div>
+                    {i < esmFlow.length - 1 && (
+                      <div style={{ width: 2, height: 20, background: '#334155' }} />
+                    )}
+                  </div>
+                  <div style={{ paddingTop: 6, paddingBottom: 8 }}>
+                    <div style={{ fontSize: 10, color: item.color, fontWeight: 700, marginBottom: 2 }}>{item.step}</div>
+                    <div style={{ fontSize: 12, color: TEXT, fontFamily: 'monospace' }}>{item.action}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'hmr' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {[
+              { title: '📝 Vite HMR', color: VITE_COLOR, steps: [
+                'Файл изменён на диске',
+                'Vite invalidate только этот модуль',
+                'WebSocket → браузер',
+                'Браузер заменяет ТОЛЬКО этот модуль',
+                'Состояние React сохраняется ✓',
+              ]},
+              { title: '📦 Webpack HMR', color: AMBER, steps: [
+                'Файл изменён на диске',
+                'Пересобрать весь affected граф',
+                'Пересобрать бандл',
+                'Webpack emit new bundle',
+                'Возможен полный reload 🔄',
+              ]},
+            ].map(tool => (
+              <div key={tool.title} style={{ background: CARD, borderRadius: 12, padding: 16, border: \`1px solid \${tool.color}30\` }}>
+                <h3 style={{ margin: '0 0 12px', color: tool.color, fontSize: 14 }}>{tool.title}</h3>
+                {tool.steps.map((s, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                    <div style={{ width: 20, height: 20, borderRadius: '50%', background: \`\${tool.color}20\`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: tool.color, fontWeight: 700 }}>{i + 1}</div>
+                    <span style={{ fontSize: 12, color: s.includes('✓') ? GREEN : s.includes('🔄') ? '#ef4444' : '#94a3b8' }}>{s}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}` }} />

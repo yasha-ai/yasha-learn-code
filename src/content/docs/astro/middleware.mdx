@@ -1,0 +1,467 @@
+---
+title: "18. Middleware"
+sidebar:
+  order: 18
+---
+import { Playground } from '@components/Playground'
+
+
+Middleware в Astro — это функции, которые выполняются **между получением запроса и отправкой ответа**. Они позволяют централизованно обрабатывать аутентификацию, логирование, rate limiting, A/B-тестирование и многое другое.
+
+Думай о middleware как о контрольно-пропускных пунктах на трассе: запрос проходит через каждый КПП по очереди, каждый может его проверить, изменить или остановить.
+
+---
+
+## Создание middleware
+
+```ts
+// src/middleware.ts
+import { defineMiddleware } from 'astro:middleware';
+
+export const onRequest = defineMiddleware(async (context, next) => {
+  // context: { request, url, cookies, locals, redirect, ... }
+
+  // Код ПЕРЕД обработкой запроса
+  console.log('→ Запрос:', context.request.url);
+
+  const response = await next(); // передаём управление дальше
+
+  // Код ПОСЛЕ обработки
+  response.headers.set('X-Powered-By', 'Astro');
+
+  return response;
+});
+```
+
+---
+
+## Объект context
+
+```ts
+export const onRequest = defineMiddleware(async (context, next) => {
+  const {
+    request,    // Стандартный Web API Request
+    url,        // URL объект
+    cookies,    // AstroCookies — get/set/delete
+    locals,     // { } — передача данных между middleware и страницами
+    redirect,   // redirect(url, status) 
+    site,       // базовый URL сайта
+  } = context;
+
+  // Пишем в locals — доступно в .astro компонентах через Astro.locals
+  context.locals.user = await getUser(request);
+
+  return next();
+});
+```
+
+---
+
+## Аутентификационный middleware
+
+```ts
+// src/middleware.ts
+export const onRequest = defineMiddleware(async ({ cookies, redirect, url, locals }, next) => {
+  const protectedPaths = ['/dashboard', '/admin', '/profile'];
+  const isProtected = protectedPaths.some(p => url.pathname.startsWith(p));
+
+  if (isProtected) {
+    const token = cookies.get('session')?.value;
+    if (!token) {
+      return redirect('/login?from=' + url.pathname, 302);
+    }
+
+    const user = await validateToken(token);
+    if (!user) {
+      cookies.delete('session');
+      return redirect('/login', 302);
+    }
+
+    locals.user = user;
+  }
+
+  return next();
+});
+```
+
+---
+
+## Цепочка middleware с sequence()
+
+```ts
+// src/middleware.ts
+import { sequence } from 'astro:middleware';
+
+// Логирование
+const logger = defineMiddleware(async ({ request }, next) => {
+  const start = Date.now();
+  const response = await next();
+  console.log(\`\${request.method} \${request.url} → \${response.status} (\${Date.now() - start}ms)\`);
+  return response;
+});
+
+// Авторизация
+const auth = defineMiddleware(async ({ cookies, redirect }, next) => {
+  if (!cookies.get('session')) return redirect('/login');
+  return next();
+});
+
+// Rate limiting
+const rateLimit = defineMiddleware(async ({ request }, next) => {
+  const ip = request.headers.get('cf-connecting-ip') ?? 'unknown';
+  if (await isRateLimited(ip)) {
+    return new Response('Too Many Requests', { status: 429 });
+  }
+  return next();
+});
+
+// Порядок выполнения: logger → rateLimit → auth → handler
+export const onRequest = sequence(logger, rateLimit, auth);
+```
+
+---
+
+## Модификация запроса и ответа
+
+```ts
+export const onRequest = defineMiddleware(async ({ request }, next) => {
+  // Добавляем заголовок к запросу (нужно создать новый Request)
+  const modifiedRequest = new Request(request, {
+    headers: new Headers({
+      ...Object.fromEntries(request.headers),
+      'X-Request-ID': crypto.randomUUID(),
+    }),
+  });
+
+  const response = await next();
+
+  // Добавляем заголовки к ответу
+  const modifiedResponse = new Response(response.body, response);
+  modifiedResponse.headers.set('X-Response-Time', Date.now().toString());
+  modifiedResponse.headers.set('X-Frame-Options', 'DENY');
+
+  return modifiedResponse;
+});
+```
+
+---
+
+## Интерактивная практика
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useRef } from "react";
+
+const BG = "#0f172a";
+const ASTRO = "#FF5D01";
+const CARD = "#1e293b";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const GREEN = "#22c55e";
+const BLUE = "#38bdf8";
+const YELLOW = "#f59e0b";
+const RED = "#f87171";
+const PURPLE = "#a78bfa";
+
+const MIDDLEWARES = [
+  {
+    id: "logger",
+    name: "Logger",
+    icon: "📝",
+    color: BLUE,
+    description: "Логирует все запросы с временем выполнения",
+    process: (req) => ({ ...req, logs: [...(req.logs || []), \`[LOG] \${req.method} \${req.path} — начало\`] }),
+    after: (req, res) => ({ ...res, logs: [...(res.logs || []), \`[LOG] \${req.method} \${req.path} → \${res.status} (\${res.time}ms)\`] }),
+  },
+  {
+    id: "auth",
+    name: "Auth Check",
+    icon: "🔐",
+    color: YELLOW,
+    description: "Проверяет токен. Если нет — редиректит на /login",
+    process: (req) => {
+      if (!req.hasToken && req.path.startsWith("/dashboard")) {
+        return { ...req, blocked: true, blockReason: "Нет сессии → redirect /login", blockStatus: 302, logs: [...(req.logs || []), "[AUTH] ❌ Нет токена — останавливаем запрос"] };
+      }
+      return { ...req, logs: [...(req.logs || []), \`[AUTH] ✅ Токен валиден → user=\${req.user}\`] };
+    },
+  },
+  {
+    id: "ratelimit",
+    name: "Rate Limit",
+    icon: "🚦",
+    color: PURPLE,
+    description: "Ограничивает количество запросов с одного IP",
+    process: (req) => {
+      if (req.requestCount > 5) {
+        return { ...req, blocked: true, blockReason: "Слишком много запросов", blockStatus: 429, logs: [...(req.logs || []), "[RATE] ❌ Лимит превышен → 429"] };
+      }
+      return { ...req, logs: [...(req.logs || []), \`[RATE] ✅ OK (\${req.requestCount}/5 запросов)\`] };
+    },
+  },
+  {
+    id: "cors",
+    name: "CORS Headers",
+    icon: "🌐",
+    color: GREEN,
+    description: "Добавляет заголовки CORS к ответу",
+    after: (req, res) => ({
+      ...res,
+      headers: { ...res.headers, "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST" },
+      logs: [...(res.logs || []), "[CORS] ✅ Добавлены CORS-заголовки"],
+    }),
+  },
+];
+
+export default function App() {
+  const [enabled, setEnabled] = useState({ logger: true, auth: true, ratelimit: true, cors: true });
+  const [path, setPath] = useState("/dashboard/profile");
+  const [hasToken, setHasToken] = useState(false);
+  const [requestCount, setRequestCount] = useState(1);
+  const [running, setRunning] = useState(false);
+  const [steps, setSteps] = useState([]);
+  const [activeStep, setActiveStep] = useState(-1);
+  const [finalResponse, setFinalResponse] = useState(null);
+
+  const timerRef = useRef([]);
+
+  const clearTimers = () => {
+    timerRef.current.forEach(t => clearTimeout(t));
+    timerRef.current = [];
+  };
+
+  const simulate = () => {
+    clearTimers();
+    setRunning(true);
+    setSteps([]);
+    setActiveStep(-1);
+    setFinalResponse(null);
+
+    const activeMiddlewares = MIDDLEWARES.filter(m => enabled[m.id]);
+
+    let req = {
+      method: "GET", path, hasToken, user: "alex", requestCount,
+      logs: [], headers: { "User-Agent": "Chrome/120", "Accept": "text/html" },
+    };
+
+    const allSteps = [];
+    let blocked = false;
+    let blockStep = null;
+
+    // Simulate request phase
+    for (const m of activeMiddlewares) {
+      if (blocked) break;
+      req = m.process ? m.process(req) : req;
+      allSteps.push({ phase: "request", middleware: m, req: { ...req }, blocked: !!req.blocked });
+      if (req.blocked) {
+        blocked = true;
+        blockStep = { middleware: m, reason: req.blockReason, status: req.blockStatus };
+      }
+    }
+
+    // Simulate handler
+    if (!blocked) {
+      allSteps.push({
+        phase: "handler", middleware: { id: "handler", name: "Page Handler", icon: "🏠", color: ASTRO },
+        req: { ...req }, response: { status: 200, body: \`<html>Страница: \${path}</html>\`, headers: {}, logs: [], time: 45 },
+      });
+    }
+
+    // Simulate response phase (reverse order)
+    if (!blocked) {
+      let res = allSteps[allSteps.length - 1].response;
+      [...activeMiddlewares].reverse().forEach(m => {
+        if (m.after) {
+          res = m.after(req, res);
+          allSteps.push({ phase: "response", middleware: m, response: { ...res } });
+        }
+      });
+    }
+
+    // Play animation
+    allSteps.forEach((step, i) => {
+      const t = setTimeout(() => {
+        setActiveStep(i);
+        setSteps(prev => [...prev, step]);
+        if (i === allSteps.length - 1) {
+          setTimeout(() => {
+            setRunning(false);
+            if (blocked && blockStep) {
+              setFinalResponse({ status: blockStep.status, blocked: true, reason: blockStep.reason });
+            } else {
+              const lastResponse = allSteps.filter(s => s.response).pop()?.response;
+              setFinalResponse({ status: lastResponse?.status || 200, blocked: false, headers: lastResponse?.headers || {} });
+            }
+          }, 300);
+        }
+      }, i * 600);
+      timerRef.current.push(t);
+    });
+  };
+
+  const statusColor = s => s < 300 ? GREEN : s < 400 ? YELLOW : RED;
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+        <h2 style={{ color: ASTRO, marginBottom: 4, fontSize: 22 }}>🛤️ Middleware Pipeline Visualizer</h2>
+        <p style={{ color: MUTED, marginBottom: 20, fontSize: 14 }}>Визуализация прохождения запроса через цепочку middleware</p>
+
+        <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 20 }}>
+          {/* Config */}
+          <div>
+            <div style={{ background: CARD, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontWeight: 600, marginBottom: 12, color: ASTRO }}>⚙️ Параметры запроса</div>
+
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>URL path</div>
+                <select value={path} onChange={e => setPath(e.target.value)} style={{
+                  width: "100%", padding: "7px 10px", background: "#0f172a", border: "1px solid #334155",
+                  borderRadius: 6, color: TEXT, fontSize: 13,
+                }}>
+                  <option value="/dashboard/profile">/dashboard/profile</option>
+                  <option value="/api/data">/api/data</option>
+                  <option value="/">/</option>
+                  <option value="/about">/about</option>
+                </select>
+              </div>
+
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                  <input type="checkbox" checked={hasToken} onChange={e => setHasToken(e.target.checked)} />
+                  <span style={{ color: hasToken ? GREEN : MUTED }}>
+                    {hasToken ? "🔑 Есть токен сессии" : "🚫 Нет токена"}
+                  </span>
+                </label>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>Запросов с IP: {requestCount}</div>
+                <input type="range" min={1} max={8} value={requestCount} onChange={e => setRequestCount(Number(e.target.value))}
+                  style={{ width: "100%", accentColor: requestCount > 5 ? RED : GREEN }} />
+                <div style={{ fontSize: 11, color: requestCount > 5 ? RED : MUTED, marginTop: 2 }}>
+                  {requestCount > 5 ? "⚠️ Лимит превышен!" : "В пределах нормы"}
+                </div>
+              </div>
+            </div>
+
+            {/* Middlewares toggle */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+              <div style={{ fontWeight: 600, marginBottom: 12, color: ASTRO }}>🔧 Middleware</div>
+              {MIDDLEWARES.map(m => (
+                <div key={m.id} style={{
+                  padding: "10px 12px", borderRadius: 8, marginBottom: 8,
+                  background: enabled[m.id] ? m.color + "11" : "#ffffff04",
+                  border: \`1px solid \${enabled[m.id] ? m.color + "33" : "transparent"}\`,
+                  transition: "all 0.2s",
+                }}>
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={enabled[m.id]}
+                      onChange={e => setEnabled({ ...enabled, [m.id]: e.target.checked })}
+                      style={{ marginTop: 3, accentColor: m.color }} />
+                    <div>
+                      <div style={{ fontSize: 13, color: enabled[m.id] ? m.color : MUTED, fontWeight: 600 }}>
+                        {m.icon} {m.name}
+                      </div>
+                      <div style={{ fontSize: 11, color: MUTED, marginTop: 2 }}>{m.description}</div>
+                    </div>
+                  </label>
+                </div>
+              ))}
+
+              <button onClick={simulate} disabled={running} style={{
+                width: "100%", marginTop: 8, padding: "10px", background: running ? "#334155" : ASTRO,
+                border: "none", borderRadius: 8, color: "#fff", cursor: running ? "not-allowed" : "pointer",
+                fontWeight: 700, fontSize: 14, transition: "all 0.2s",
+              }}>
+                {running ? "⏳ Запрос идёт..." : "▶ Отправить запрос"}
+              </button>
+            </div>
+          </div>
+
+          {/* Pipeline visualization */}
+          <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+            <div style={{ fontWeight: 600, marginBottom: 16, color: ASTRO }}>🔄 Конвейер обработки</div>
+
+            {steps.length === 0 && !running && (
+              <div style={{ textAlign: "center", padding: "60px 0", color: MUTED }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>🌊</div>
+                <div>Нажми «Отправить запрос»</div>
+              </div>
+            )}
+
+            {steps.map((step, i) => {
+              const isBlocked = step.blocked;
+              const m = step.middleware;
+              const isActive = activeStep === i;
+              const logs = step.phase === "request"
+                ? (step.req?.logs || []).slice(-1)
+                : (step.response?.logs || []).slice(-1);
+
+              return (
+                <div key={i} style={{
+                  marginBottom: 8, padding: "12px 14px", borderRadius: 10,
+                  background: isBlocked ? RED + "11" : m.color + "11",
+                  border: \`1px solid \${isBlocked ? RED : m.color}33\`,
+                  transition: "all 0.3s",
+                  boxShadow: isActive ? \`0 0 16px \${isBlocked ? RED : m.color}44\` : "none",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 18 }}>{m.icon}</span>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: isBlocked ? RED : m.color }}>{m.name}</div>
+                        <div style={{ fontSize: 11, color: MUTED }}>{step.phase === "request" ? "→ request phase" : step.phase === "response" ? "← response phase" : "🏠 handler"}</div>
+                      </div>
+                    </div>
+                    {isBlocked && (
+                      <div style={{ padding: "3px 10px", background: RED + "22", color: RED, borderRadius: 8, fontSize: 12, fontWeight: 700 }}>
+                        BLOCKED {step.req?.blockStatus}
+                      </div>
+                    )}
+                  </div>
+
+                  {logs.map((log, j) => (
+                    <div key={j} style={{ marginTop: 6, fontSize: 11, fontFamily: "monospace", color: MUTED, paddingLeft: 26 }}>
+                      {log}
+                    </div>
+                  ))}
+
+                  {isBlocked && (
+                    <div style={{ marginTop: 6, fontSize: 12, color: RED, paddingLeft: 26 }}>
+                      ⛔ {step.req?.blockReason}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {finalResponse && (
+              <div style={{
+                marginTop: 12, padding: "14px 16px", borderRadius: 10,
+                background: finalResponse.blocked ? RED + "11" : GREEN + "11",
+                border: \`1px solid \${finalResponse.blocked ? RED : GREEN}44\`,
+              }}>
+                <div style={{ fontWeight: 700, color: finalResponse.blocked ? RED : GREEN, marginBottom: 6 }}>
+                  {finalResponse.blocked ? "⛔ Запрос заблокирован" : "✅ Ответ отправлен"}
+                </div>
+                <div style={{ fontSize: 13, color: MUTED }}>
+                  Статус: <span style={{ color: statusColor(finalResponse.status), fontWeight: 700 }}>{finalResponse.status}</span>
+                  {finalResponse.blocked && \` — \${finalResponse.reason}\`}
+                </div>
+                {finalResponse.headers && Object.keys(finalResponse.headers).length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    {Object.entries(finalResponse.headers).map(([k, v]) => (
+                      <div key={k} style={{ fontSize: 11, fontFamily: "monospace", color: MUTED }}>
+                        <span style={{ color: BLUE }}>{k}</span>: {String(v)}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

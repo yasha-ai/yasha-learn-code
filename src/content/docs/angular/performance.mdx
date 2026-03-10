@@ -1,0 +1,593 @@
+---
+title: "64. Оптимизация производительности"
+---
+import { Playground } from '@components/Playground'
+
+
+## 53. Оптимизация производительности ⚡
+
+Привет! Яша здесь. Производительность Angular-приложений — это не магия, а конкретные техники. Сегодня разберём всё: от OnPush до bundle analysis. После этого урока твои приложения будут летать 🚀
+
+---
+
+### Почему Angular может тормозить
+
+Angular по умолчанию использует **Default** стратегию change detection — она проверяет ВСЁ дерево компонентов при любом событии. Представь 1000 компонентов на странице — и каждый клик запускает 1000 проверок.
+
+```
+Default CD: каждое событие → проверить все компоненты сверху вниз
+OnPush CD: только при изменении @Input или async pipe → намного меньше работы
+```
+
+---
+
+### OnPush: первый и главный оптимизатор
+
+```typescript
+import { Component, Input, ChangeDetectionStrategy } from '@angular/core';
+
+// ✅ OnPush — компонент проверяется только когда:
+// 1. Изменилась ссылка на @Input
+// 2. Сработал EventEmitter (@Output)
+// 3. async pipe получил новое значение
+// 4. markForCheck() вызван вручную
+@Component({
+  selector: 'app-user-card',
+  template: `
+    <div class="card">
+      <h3>{{ user.name }}</h3>
+      <p>{{ user.email }}</p>
+    </div>
+  `,
+  changeDetection: ChangeDetectionStrategy.OnPush, // ← КЛЮЧЕВАЯ СТРОКА
+})
+export class UserCardComponent {
+  @Input() user!: { name: string; email: string };
+}
+
+// ❌ Default — всегда проверяется
+@Component({
+  selector: 'app-user-card',
+  template: `...`,
+  // changeDetection: ChangeDetectionStrategy.Default (по умолчанию)
+})
+export class SlowUserCardComponent {
+  @Input() user!: { name: string; email: string };
+}
+```
+
+**Правило**: OnPush везде по умолчанию. Используй иммутабельные данные.
+
+---
+
+### ChangeDetectorRef: ручное управление
+
+```typescript
+import { ChangeDetectorRef, ChangeDetectionStrategy } from '@angular/core';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class DashboardComponent implements OnInit {
+  data: DashboardData | null = null;
+
+  constructor(private cdr: ChangeDetectorRef) {}
+
+  ngOnInit(): void {
+    // Данные из WebSocket — Angular не знает об изменениях
+    this.websocket.on('data', (newData) => {
+      this.data = newData;
+      this.cdr.markForCheck(); // ← сообщаем Angular: "проверь меня!"
+    });
+  }
+
+  // detach/reattach — хирургический инструмент
+  pauseUpdates(): void {
+    this.cdr.detach(); // полностью отключить CD для компонента
+  }
+
+  resumeUpdates(): void {
+    this.cdr.reattach();
+    this.cdr.detectChanges(); // мгновенная проверка
+  }
+}
+```
+
+---
+
+### trackBy в ngFor: обязательно!
+
+```typescript
+@Component({
+  template: `
+    <!-- ❌ Без trackBy — каждый рендер пересоздаёт ВСЕ DOM-элементы -->
+    <div *ngFor="let item of items">{{ item.name }}</div>
+
+    <!-- ✅ С trackBy — пересоздаются только изменившиеся элементы -->
+    <div *ngFor="let item of items; trackBy: trackById">
+      {{ item.name }}
+    </div>
+
+    <!-- Современный синтаксис (Angular 17+) -->
+    @for (item of items; track item.id) {
+      <div>{{ item.name }}</div>
+    }
+  `
+})
+export class ListComponent {
+  items: Item[] = [];
+
+  trackById(index: number, item: Item): number {
+    return item.id; // ← уникальный идентификатор
+  }
+}
+```
+
+---
+
+### Pure Pipes: кэширование вычислений
+
+```typescript
+// ✅ Pure pipe — пересчитывается только при изменении входных данных
+@Pipe({
+  name: 'filterByStatus',
+  pure: true, // по умолчанию true
+})
+export class FilterByStatusPipe implements PipeTransform {
+  transform(items: Item[], status: string): Item[] {
+    console.log('Pipe called!'); // вызовется только при реальном изменении
+    return items.filter(item => item.status === status);
+  }
+}
+
+// ❌ Плохо — метод в шаблоне вызывается при КАЖДОЙ проверке!
+@Component({
+  template: `
+    <!-- Вызывается при каждом CD — даже если items не изменились -->
+    <div *ngFor="let item of getFilteredItems()">{{ item.name }}</div>
+
+    <!-- ✅ Pipe кэшируется Angular -->
+    <div *ngFor="let item of items | filterByStatus:'active'">{{ item.name }}</div>
+  `
+})
+export class BadComponent {
+  getFilteredItems(): Item[] {
+    return this.items.filter(i => i.status === 'active'); // ← вызов при каждом CD!
+  }
+}
+```
+
+---
+
+### Lazy Loading модулей
+
+```typescript
+// app-routing.module.ts
+const routes: Routes = [
+  {
+    path: 'dashboard',
+    loadChildren: () => import('./dashboard/dashboard.module')
+      .then(m => m.DashboardModule),
+  },
+  // Standalone компоненты (Angular 14+)
+  {
+    path: 'settings',
+    loadComponent: () => import('./settings/settings.component')
+      .then(c => c.SettingsComponent),
+  },
+];
+```
+
+---
+
+### Стратегии предзагрузки
+
+```typescript
+import { PreloadAllModules, RouterModule } from '@angular/router';
+import { QuicklinkStrategy, QuicklinkModule } from 'ngx-quicklink';
+
+// PreloadAllModules — загружает все модули после первой загрузки
+RouterModule.forRoot(routes, {
+  preloadingStrategy: PreloadAllModules,
+})
+
+// Кастомная стратегия — только помеченные маршруты
+export class SelectivePreloadingStrategy implements PreloadingStrategy {
+  preload(route: Route, load: () => Observable<any>): Observable<any> {
+    return route.data?.['preload'] ? load() : of(null);
+  }
+}
+
+const routes: Routes = [
+  {
+    path: 'popular-feature',
+    loadChildren: () => import('./feature/feature.module').then(m => m.FeatureModule),
+    data: { preload: true }, // ← предзагрузить
+  },
+];
+```
+
+---
+
+### NgOptimizedImage
+
+```typescript
+import { NgOptimizedImage } from '@angular/common';
+
+@Component({
+  imports: [NgOptimizedImage],
+  template: `
+    <!-- ✅ NgOptimizedImage: lazy loading, correct sizes, LCP optimization -->
+    <img ngSrc="assets/hero.jpg" width="800" height="400" priority>
+
+    <!-- ✅ С responsive srcset -->
+    <img ngSrc="https://cdn.example.com/photo.jpg"
+         width="400" height="300"
+         [ngSrcset]="'400w, 800w, 1200w'"
+         sizes="(max-width: 400px) 100vw, 50vw">
+
+    <!-- ❌ Обычный img без оптимизации -->
+    <img src="assets/hero.jpg">
+  `
+})
+export class HeroComponent {}
+```
+
+---
+
+### Bundle Analysis с webpack-bundle-analyzer
+
+```bash
+npm install --save-dev webpack-bundle-analyzer
+
+# 2. Собрать с генерацией статистики
+ng build --stats-json
+
+# 3. Запустить анализатор
+npx webpack-bundle-analyzer dist/my-app/browser/stats.json
+
+# Или добавить скрипт в package.json
+# "analyze": "ng build --stats-json && npx webpack-bundle-analyzer dist/my-app/browser/stats.json"
+```
+
+```typescript
+// angular.json — настройка бюджетов сборки
+{
+  "budgets": [
+    {
+      "type": "initial",
+      "maximumWarning": "500kb",
+      "maximumError": "1mb"
+    },
+    {
+      "type": "anyComponentStyle",
+      "maximumWarning": "2kb",
+      "maximumError": "4kb"
+    }
+  ]
+}
+```
+
+---
+
+### Виртуализация списков (CDK)
+
+```typescript
+import { ScrollingModule } from '@angular/cdk/scrolling';
+
+@Component({
+  imports: [ScrollingModule],
+  template: `
+    <!-- Рендерит только видимые элементы — идеально для 10k+ items -->
+    <cdk-virtual-scroll-viewport itemSize="50" style="height: 400px">
+      <div *cdkVirtualFor="let item of items; trackBy: trackById"
+           style="height: 50px; display: flex; align-items: center;">
+        {{ item.name }}
+      </div>
+    </cdk-virtual-scroll-viewport>
+  `
+})
+export class VirtualListComponent {
+  items = Array.from({ length: 10000 }, (_, i) => ({ id: i, name: \`Item \${i}\` }));
+}
+```
+
+---
+
+### Lighthouse и Core Web Vitals
+
+```typescript
+// Улучшение LCP (Largest Contentful Paint)
+// 1. Используй NgOptimizedImage с priority для hero-изображений
+// 2. Предзагрузка критических шрифтов в index.html
+
+// Улучшение FID/INP (Interaction to Next Paint)
+// 1. Деферируй тяжёлые компоненты
+@defer (on viewport) {
+  <app-heavy-chart />
+} @placeholder {
+  <div class="chart-skeleton"></div>
+}
+
+// 2. Используй Web Workers для CPU-intensive задач
+// 3. Избегай long tasks > 50ms в главном потоке
+
+// Улучшение CLS (Cumulative Layout Shift)
+// 1. Всегда указывай width/height для изображений
+// 2. Резервируй место для асинхронного контента
+```
+
+---
+
+### Чеклист производительности 📋
+
+```typescript
+// ✅ Архитектура
+// - OnPush везде
+// - Иммутабельные данные (spread, Object.assign)
+// - trackBy для всех ngFor
+// - Pure pipes вместо методов в шаблонах
+// - Lazy loading всех feature-модулей
+
+// ✅ Рендеринг
+// - NgOptimizedImage для всех изображений
+// - @defer для off-screen контента
+// - CDK Virtual Scroll для больших списков
+// - Избегать сложной логики в ngOnChanges
+
+// ✅ Бандл
+// - Анализ webpack-bundle-analyzer
+// - Бюджеты в angular.json
+// - Tree shaking (избегать side-effect imports)
+// - esbuild вместо Webpack (Angular 17+)
+
+// ✅ Загрузка
+// - SSR/SSG для критических страниц
+// - HTTP2 push для критических ресурсов
+// - Service Worker для кэширования
+```
+
+---
+
+## Playground 🎮
+
+Визуализация разницы Default vs OnPush change detection:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+function useAnimatedCounter(value, color) {
+  const [display, setDisplay] = useState(value);
+  const prevRef = useRef(value);
+  useEffect(() => {
+    if (prevRef.current !== value) {
+      setDisplay(value);
+      prevRef.current = value;
+    }
+  }, [value]);
+  return display;
+}
+
+function ComponentBox({ label, strategy, checkCount, lastCheck, isHighlighted }) {
+  return (
+    <div style={{
+      background: isHighlighted ? '#1e3a2f' : '#1e293b',
+      border: \`1px solid \${isHighlighted ? '#4ade80' : '#334155'}\`,
+      borderRadius: '8px', padding: '10px 14px',
+      transition: 'all 0.3s',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <span style={{ color: '#f1f5f9', fontSize: '13px', fontWeight: 'bold' }}>{label}</span>
+          <span style={{
+            marginLeft: '8px', fontSize: '10px', padding: '2px 6px', borderRadius: '4px',
+            background: strategy === 'OnPush' ? '#1d4ed820' : '#7f1d1d20',
+            color: strategy === 'OnPush' ? '#60a5fa' : '#f87171',
+            border: \`1px solid \${strategy === 'OnPush' ? '#1d4ed8' : '#7f1d1d'}\`,
+          }}>
+            {strategy}
+          </span>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: '18px', fontWeight: 'bold', color: isHighlighted ? '#4ade80' : '#94a3b8' }}>
+            {checkCount}
+          </div>
+          <div style={{ fontSize: '10px', color: '#64748b' }}>проверок</div>
+        </div>
+      </div>
+      {isHighlighted && (
+        <div style={{ fontSize: '10px', color: '#4ade80', marginTop: '4px' }}>⚡ Сейчас проверяется!</div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [eventCount, setEventCount] = useState(0);
+  const [inputChanged, setInputChanged] = useState(false);
+  const [checks, setChecks] = useState({
+    root: 0, header: 0, sidebar: 0, userCard: 0, list: 0, footer: 0,
+    onPushCard: 0, onPushList: 0,
+  });
+  const [highlighted, setHighlighted] = useState({});
+  const [scenario, setScenario] = useState('button');
+
+  const defaultComponents = [
+    { key: 'root', label: 'AppComponent', strategy: 'Default' },
+    { key: 'header', label: 'HeaderComponent', strategy: 'Default' },
+    { key: 'sidebar', label: 'SidebarComponent', strategy: 'Default' },
+    { key: 'userCard', label: 'UserCardComponent', strategy: 'Default' },
+    { key: 'list', label: 'ListComponent', strategy: 'Default' },
+    { key: 'footer', label: 'FooterComponent', strategy: 'Default' },
+  ];
+
+  const onPushComponents = [
+    { key: 'root', label: 'AppComponent', strategy: 'Default' },
+    { key: 'header', label: 'HeaderComponent (OP)', strategy: 'OnPush' },
+    { key: 'sidebar', label: 'SidebarComponent (OP)', strategy: 'OnPush' },
+    { key: 'onPushCard', label: 'UserCardComponent (OP)', strategy: 'OnPush' },
+    { key: 'onPushList', label: 'ListComponent (OP)', strategy: 'OnPush' },
+    { key: 'footer', label: 'FooterComponent (OP)', strategy: 'OnPush' },
+  ];
+
+  const triggerEvent = useCallback(() => {
+    const newCount = eventCount + 1;
+    setEventCount(newCount);
+
+    if (scenario === 'button') {
+      // Default: все компоненты проверяются
+      setChecks(prev => ({
+        root: prev.root + 1,
+        header: prev.header + 1,
+        sidebar: prev.sidebar + 1,
+        userCard: prev.userCard + 1,
+        list: prev.list + 1,
+        footer: prev.footer + 1,
+        onPushCard: prev.onPushCard + 1, // OnPush тоже проверяет root
+        onPushList: prev.onPushList + 1,
+      }));
+      const allKeys = [...defaultComponents, ...onPushComponents].map(c => c.key);
+      const h = {};
+      allKeys.forEach(k => h[k] = true);
+      setHighlighted(h);
+      setTimeout(() => setHighlighted({}), 600);
+    } else {
+      // Input change: OnPush проверяет только изменившийся компонент
+      setChecks(prev => ({
+        ...prev,
+        root: prev.root + 1,
+        header: prev.header + 1,
+        sidebar: prev.sidebar + 1,
+        userCard: prev.userCard + 1,
+        list: prev.list + 1,
+        footer: prev.footer + 1,
+        onPushCard: prev.onPushCard + 1,
+        // onPushList НЕ проверяется — его @Input не изменился
+      }));
+      const h = {};
+      defaultComponents.forEach(c => h[c.key] = true);
+      ['root', 'onPushCard'].forEach(k => h[k] = true);
+      setHighlighted(h);
+      setTimeout(() => setHighlighted({}), 600);
+    }
+  }, [eventCount, scenario]);
+
+  const totalDefault = checks.root + checks.header + checks.sidebar + checks.userCard + checks.list + checks.footer;
+  const totalOnPush = checks.root + checks.header + checks.sidebar + checks.onPushCard + checks.onPushList + checks.footer;
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>⚡ Change Detection Visualizer</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>Default vs OnPush strategy</div>
+        </div>
+
+        {/* Controls */}
+        <div style={{
+          background: '#1e293b', borderRadius: '12px', padding: '16px',
+          marginBottom: '20px', display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap',
+        }}>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {[
+              { key: 'button', label: '🖱️ Клик/таймер (любое событие)' },
+              { key: 'input', label: '📥 @Input изменился' },
+            ].map(s => (
+              <button key={s.key} onClick={() => setScenario(s.key)} style={{
+                padding: '6px 12px', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                background: scenario === s.key ? ANGULAR_RED : '#334155',
+                color: 'white', fontSize: '12px',
+              }}>{s.label}</button>
+            ))}
+          </div>
+          <button onClick={triggerEvent} style={{
+            marginLeft: 'auto', padding: '8px 20px', borderRadius: '8px',
+            border: 'none', cursor: 'pointer', background: '#4ade80',
+            color: '#0f172a', fontWeight: 'bold', fontSize: '14px',
+          }}>
+            🚀 Запустить событие ({eventCount})
+          </button>
+          <button onClick={() => { setChecks({ root: 0, header: 0, sidebar: 0, userCard: 0, list: 0, footer: 0, onPushCard: 0, onPushList: 0 }); setEventCount(0); }} style={{
+            padding: '8px 14px', borderRadius: '8px', border: 'none',
+            cursor: 'pointer', background: '#334155', color: '#94a3b8', fontSize: '13px',
+          }}>Сброс</button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+          {/* Default */}
+          <div>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              marginBottom: '12px',
+            }}>
+              <div style={{ color: '#f87171', fontWeight: 'bold', fontSize: '14px' }}>❌ Default Strategy</div>
+              <div style={{ color: '#f87171', fontSize: '12px' }}>{totalDefault} проверок</div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {defaultComponents.map(c => (
+                <ComponentBox key={c.key} {...c} checkCount={checks[c.key]} isHighlighted={!!highlighted[c.key]} />
+              ))}
+            </div>
+          </div>
+
+          {/* OnPush */}
+          <div>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              marginBottom: '12px',
+            }}>
+              <div style={{ color: '#4ade80', fontWeight: 'bold', fontSize: '14px' }}>✅ OnPush Strategy</div>
+              <div style={{ color: '#4ade80', fontSize: '12px' }}>{totalOnPush} проверок</div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {onPushComponents.map(c => (
+                <ComponentBox key={c.key + '_op'} {...c} checkCount={c.key === 'root' ? checks.root : c.key === 'onPushCard' ? checks.onPushCard : c.key === 'onPushList' ? checks.onPushList : checks[c.key.replace('(OP)', '').trim()]} isHighlighted={!!highlighted[c.key]} />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Stats */}
+        {eventCount > 0 && (
+          <div style={{
+            marginTop: '20px', background: '#1e293b', borderRadius: '12px', padding: '16px',
+            display: 'flex', gap: '24px', justifyContent: 'center',
+          }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: '28px', fontWeight: 'bold', color: '#f87171' }}>{totalDefault}</div>
+              <div style={{ fontSize: '12px', color: '#94a3b8' }}>Default проверок</div>
+            </div>
+            <div style={{ textAlign: 'center', display: 'flex', alignItems: 'center' }}>
+              <div style={{ fontSize: '24px' }}>vs</div>
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: '28px', fontWeight: 'bold', color: '#4ade80' }}>{totalOnPush}</div>
+              <div style={{ fontSize: '12px', color: '#94a3b8' }}>OnPush проверок</div>
+            </div>
+            {totalDefault > 0 && (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '28px', fontWeight: 'bold', color: ANGULAR_RED }}>
+                  -{Math.round((1 - totalOnPush / totalDefault) * 100)}%
+                </div>
+                <div style={{ fontSize: '12px', color: '#94a3b8' }}>меньше работы</div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

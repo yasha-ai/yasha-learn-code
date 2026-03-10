@@ -1,0 +1,346 @@
+---
+title: "6. Code Splitting"
+sidebar:
+  order: 6
+---
+import { Playground } from '@components/Playground'
+
+
+**Code splitting** — одна из самых мощных возможностей Webpack. Она позволяет разбить ваш код на несколько бандлов (чанков) и загружать их по требованию, значительно улучшая время первоначальной загрузки приложения.
+
+## Зачем нужен Code Splitting?
+
+Без code splitting всё приложение загружается в одном гигантском бандле:
+- Пользователь ждёт загрузки всего кода, даже если открыл только главную страницу
+- Страница `/dashboard` и `/settings` загружаются при открытии `/home`
+- Редко используемые фичи тормозят первый рендер
+
+С code splitting загружается только необходимый код:
+```
+bundle.js (500 KB) → main.js (80 KB) + vendor.js (120 KB)
+                     + dashboard.js (60 KB — по требованию)
+                     + settings.js (40 KB — по требованию)
+```
+
+## Способы 1: Entry Points (статический)
+
+```js
+module.exports = {
+  entry: {
+    main: './src/index.js',
+    admin: './src/admin.js',
+  },
+  output: {
+    filename: '[name].[contenthash].js',
+  },
+};
+// Создаст main.js и admin.js — но общие зависимости дублируются!
+```
+
+Чтобы избежать дублирования общих зависимостей:
+```js
+entry: {
+  main: { import: './src/index.js', dependOn: 'shared' },
+  admin: { import: './src/admin.js', dependOn: 'shared' },
+  shared: ['react', 'react-dom'],
+}
+```
+
+## Способ 2: SplitChunksPlugin (автоматический)
+
+```js
+optimization: {
+  splitChunks: {
+    chunks: 'all',          // 'async' | 'initial' | 'all'
+    minSize: 20000,          // Минимальный размер чанка (байты)
+    maxSize: 244000,         // Максимальный размер чанка
+    minChunks: 1,            // Минимальное количество модулей-потребителей
+    cacheGroups: {
+      vendors: {
+        test: /[\\/]node_modules[\\/]/,
+        name: 'vendors',
+        chunks: 'all',
+        priority: -10,
+      },
+      default: {
+        minChunks: 2,
+        reuseExistingChunk: true,
+        priority: -20,
+      },
+    },
+  },
+}
+```
+
+## Способ 3: Dynamic Import (ленивая загрузка)
+
+Самый гибкий способ — динамические импорты через `import()`:
+
+```js
+// Вместо:
+import HeavyComponent from './HeavyComponent';
+
+// Используйте:
+const HeavyComponent = React.lazy(() => import('./HeavyComponent'));
+// Webpack автоматически создаёт отдельный чанк!
+```
+
+С маршрутизацией React:
+```jsx
+import { lazy, Suspense } from 'react';
+import { Routes, Route } from 'react-router-dom';
+
+const Home = lazy(() => import('./pages/Home'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Settings = lazy(() => import('./pages/Settings'));
+
+function App() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/settings" element={<Settings />} />
+      </Routes>
+    </Suspense>
+  );
+}
+```
+
+## Magic Comments для контроля чанков
+
+```js
+// Имя чанка
+import(/* webpackChunkName: "my-chunk" */ './module')
+
+// Prefetch — браузер загрузит в idle time
+import(/* webpackPrefetch: true */ './module')
+
+// Preload — браузер загрузит параллельно с parent
+import(/* webpackPreload: true */ './module')
+
+// Комбинация
+import(
+  /* webpackChunkName: "dashboard" */
+  /* webpackPrefetch: true */
+  './pages/Dashboard'
+)
+```
+
+## runtimeChunk
+
+```js
+optimization: {
+  runtimeChunk: 'single', // Webpack runtime в отдельном файле
+  // Предотвращает инвалидацию хешей при изменении любого файла
+}
+```
+
+Ниже — интерактивный визуализатор code splitting. Посмотрите как разные стратегии влияют на структуру чанков.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const PURPLE = '#a78bfa';
+
+type Strategy = 'none' | 'entry' | 'splitChunks' | 'dynamic';
+
+interface Chunk {
+  name: string;
+  size: number;
+  type: 'initial' | 'async' | 'runtime';
+  color: string;
+  modules: string[];
+  loadTime: number;
+}
+
+const STRATEGIES: Record<Strategy, { label: string; desc: string; chunks: Chunk[] }> = {
+  none: {
+    label: 'Без splitting',
+    desc: 'Всё в одном бандле — долгая первоначальная загрузка',
+    chunks: [
+      { name: 'main.js', size: 580, type: 'initial', color: WEBPACK_COLOR, modules: ['react', 'react-dom', 'lodash', 'axios', 'App', 'Home', 'Dashboard', 'Settings', 'utils'], loadTime: 2800 },
+    ],
+  },
+  entry: {
+    label: 'Entry Split',
+    desc: 'Ручное разделение по точкам входа',
+    chunks: [
+      { name: 'main.js', size: 120, type: 'initial', color: WEBPACK_COLOR, modules: ['App', 'Home', 'utils'], loadTime: 650 },
+      { name: 'admin.js', size: 180, type: 'initial', color: ACCENT, modules: ['Dashboard', 'Settings', 'AdminPanel'], loadTime: 900 },
+      { name: 'shared.js', size: 280, type: 'initial', color: SUCCESS, modules: ['react', 'react-dom', 'axios'], loadTime: 1200 },
+    ],
+  },
+  splitChunks: {
+    label: 'SplitChunksPlugin',
+    desc: 'Автоматическое разделение vendor и общих модулей',
+    chunks: [
+      { name: 'main.js', size: 85, type: 'initial', color: WEBPACK_COLOR, modules: ['App', 'Home', 'utils'], loadTime: 450 },
+      { name: 'vendors.js', size: 280, type: 'initial', color: ACCENT, modules: ['react', 'react-dom', 'axios', 'lodash'], loadTime: 1100 },
+      { name: 'common.js', size: 45, type: 'initial', color: SUCCESS, modules: ['shared-utils', 'constants'], loadTime: 250 },
+      { name: 'runtime.js', size: 8, type: 'runtime', color: MUTED, modules: ['webpack-runtime'], loadTime: 50 },
+    ],
+  },
+  dynamic: {
+    label: 'Dynamic Import',
+    desc: 'Ленивая загрузка страниц — оптимальная стратегия для SPA',
+    chunks: [
+      { name: 'main.js', size: 65, type: 'initial', color: WEBPACK_COLOR, modules: ['App', 'Router', 'Suspense'], loadTime: 320 },
+      { name: 'vendors.js', size: 240, type: 'initial', color: ACCENT, modules: ['react', 'react-dom', 'react-router'], loadTime: 980 },
+      { name: 'home.chunk.js', size: 28, type: 'async', color: SUCCESS, modules: ['Home', 'HomeUtils'], loadTime: 140 },
+      { name: 'dashboard.chunk.js', size: 72, type: 'async', color: PURPLE, modules: ['Dashboard', 'Charts', 'DataTable'], loadTime: 360 },
+      { name: 'settings.chunk.js', size: 44, type: 'async', color: '#fb923c', modules: ['Settings', 'FormComponents'], loadTime: 220 },
+      { name: 'runtime.js', size: 8, type: 'runtime', color: MUTED, modules: ['webpack-runtime'], loadTime: 50 },
+    ],
+  },
+};
+
+export default function App() {
+  const [strategy, setStrategy] = useState<Strategy>('none');
+  const [activeChunk, setActiveChunk] = useState<string | null>(null);
+  const [loading, setLoading] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState<Set<string>>(new Set());
+
+  const data = STRATEGIES[strategy];
+
+  useEffect(() => {
+    setActiveChunk(null);
+    setLoaded(new Set());
+    setLoading(null);
+  }, [strategy]);
+
+  const totalSize = data.chunks.reduce((acc, c) => acc + c.size, 0);
+  const initialSize = data.chunks.filter(c => c.type === 'initial').reduce((acc, c) => acc + c.size, 0);
+  const initialLoadTime = Math.max(...data.chunks.filter(c => c.type === 'initial').map(c => c.loadTime));
+
+  const loadChunk = (name: string) => {
+    if (loaded.has(name)) return;
+    setLoading(name);
+    setTimeout(() => {
+      setLoaded(prev => new Set([...prev, name]));
+      setLoading(null);
+    }, data.chunks.find(c => c.name === name)?.loadTime! / 4 + 200);
+  };
+
+  const maxSize = Math.max(...data.chunks.map(c => c.size));
+
+  const TYPE_LABELS = { initial: 'Initial', async: 'Async (lazy)', runtime: 'Runtime' };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>✂️ Code Splitting Visualizer</div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Сравните стратегии code splitting</div>
+        </div>
+
+        {/* Strategy selector */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 24 }}>
+          {(Object.entries(STRATEGIES) as [Strategy, typeof STRATEGIES[Strategy]][]).map(([key, val]) => (
+            <div
+              key={key}
+              onClick={() => setStrategy(key)}
+              style={{
+                background: strategy === key ? '#0f2744' : CARD, border: \`2px solid \${strategy === key ? WEBPACK_COLOR : 'transparent'}\`,
+                borderRadius: 10, padding: '12px', cursor: 'pointer', transition: 'all 0.2s', textAlign: 'center',
+              }}
+            >
+              <div style={{ fontSize: 12, color: strategy === key ? WEBPACK_COLOR : TEXT, fontWeight: 700, marginBottom: 4 }}>{val.label}</div>
+              <div style={{ fontSize: 10, color: MUTED }}>{val.chunks.length} chunk{val.chunks.length !== 1 ? 's' : ''}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, color: ACCENT, marginBottom: 16 }}>💡 {data.desc}</div>
+
+          {/* Stats */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
+            {[
+              { label: 'Всего KB', value: totalSize, color: WEBPACK_COLOR },
+              { label: 'Initial KB', value: initialSize, color: SUCCESS },
+              { label: 'Первая загрузка', value: (initialLoadTime / 1000).toFixed(1) + 's', color: ACCENT, noUnit: true },
+            ].map(stat => (
+              <div key={stat.label} style={{ background: '#0a0f1e', borderRadius: 8, padding: '12px', textAlign: 'center' }}>
+                <div style={{ fontSize: 22, color: stat.color, fontWeight: 700 }}>{stat.noUnit ? stat.value : \`\${stat.value} KB\`}</div>
+                <div style={{ fontSize: 11, color: MUTED }}>{stat.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Chunk bars */}
+          <div style={{ fontSize: 11, color: MUTED, marginBottom: 12, textTransform: 'uppercase' }}>Чанки</div>
+          {data.chunks.map(chunk => (
+            <div
+              key={chunk.name}
+              onClick={() => setActiveChunk(activeChunk === chunk.name ? null : chunk.name)}
+              style={{ marginBottom: 10, cursor: 'pointer' }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                <div style={{ width: 10, height: 10, borderRadius: '50%', background: chunk.color, flexShrink: 0 }} />
+                <div style={{ fontSize: 12, color: chunk.type === 'async' ? chunk.color : TEXT, flex: 1 }}>{chunk.name}</div>
+                <div style={{ fontSize: 10, color: MUTED, background: '#0a0f1e', padding: '2px 8px', borderRadius: 4 }}>
+                  {TYPE_LABELS[chunk.type]}
+                </div>
+                <div style={{ fontSize: 12, color: TEXT, minWidth: 60, textAlign: 'right' }}>{chunk.size} KB</div>
+                {chunk.type === 'async' && (
+                  <button
+                    onClick={e => { e.stopPropagation(); loadChunk(chunk.name); }}
+                    disabled={loaded.has(chunk.name) || loading === chunk.name}
+                    style={{
+                      padding: '3px 10px', background: loaded.has(chunk.name) ? SUCCESS : (loading === chunk.name ? MUTED : chunk.color),
+                      color: BG, border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 10, fontWeight: 700, fontFamily: 'monospace', minWidth: 70,
+                    }}
+                  >
+                    {loaded.has(chunk.name) ? '✓ Loaded' : loading === chunk.name ? '⟳...' : 'Lazy Load'}
+                  </button>
+                )}
+              </div>
+              <div style={{ background: '#0a0f1e', borderRadius: 4, overflow: 'hidden', height: 8 }}>
+                <div style={{ height: '100%', background: chunk.color, width: \`\${(chunk.size / maxSize) * 100}%\`, transition: 'width 0.5s', opacity: chunk.type === 'async' && !loaded.has(chunk.name) ? 0.4 : 1 }} />
+              </div>
+              {activeChunk === chunk.name && (
+                <div style={{ background: '#0a0f1e', borderRadius: 8, padding: '10px 12px', marginTop: 6 }}>
+                  <div style={{ fontSize: 10, color: MUTED, marginBottom: 6 }}>Модули в чанке:</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {chunk.modules.map(m => (
+                      <span key={m} style={{ fontSize: 10, background: '#1e293b', color: chunk.color, padding: '2px 8px', borderRadius: 4 }}>{m}</span>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 10, color: MUTED, marginTop: 6 }}>Время загрузки: ~{chunk.loadTime} мс</div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Comparison bar */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+          <div style={{ fontSize: 11, color: MUTED, marginBottom: 12, textTransform: 'uppercase' }}>Сравнение Initial Bundle Size</div>
+          {(Object.entries(STRATEGIES) as [Strategy, typeof STRATEGIES[Strategy]][]).map(([key, val]) => {
+            const initSize = val.chunks.filter(c => c.type === 'initial').reduce((acc, c) => acc + c.size, 0);
+            const maxInit = 580;
+            return (
+              <div key={key} style={{ marginBottom: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: 11 }}>
+                  <span style={{ color: strategy === key ? WEBPACK_COLOR : TEXT }}>{val.label}</span>
+                  <span style={{ color: strategy === key ? WEBPACK_COLOR : MUTED }}>{initSize} KB</span>
+                </div>
+                <div style={{ background: '#0a0f1e', borderRadius: 4, overflow: 'hidden', height: 8 }}>
+                  <div style={{ height: '100%', background: strategy === key ? WEBPACK_COLOR : '#334155', width: \`\${(initSize / maxInit) * 100}%\`, transition: 'width 0.5s' }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

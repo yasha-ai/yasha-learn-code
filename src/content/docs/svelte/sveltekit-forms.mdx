@@ -1,0 +1,868 @@
+---
+title: "24. SvelteKit: Form Actions"
+sidebar:
+  order: 24
+---
+import { Playground } from '@components/Playground'
+
+
+## 📝 SvelteKit Form Actions: Формы без JavaScript (почти)
+
+Привет! 👋 Формы — это основа веба. И SvelteKit сделал работу с ними **элегантной и надёжной**. Form Actions — это серверные обработчики форм, которые работают даже без JavaScript! А с `use:enhance` они становятся молниеносными.
+
+Думай о Form Actions как о старом добром PHP обработчике форм, только на стероидах 💪. Простота без JS, скорость с JS, типобезопасность всегда.
+
+---
+
+## 🎯 Что такое Form Actions
+
+Form Actions — это экспортируемые функции в `+page.server.ts`, которые обрабатывают `POST` запросы. Они живут рядом с load функцией и имеют доступ ко всему серверному окружению.
+
+```typescript
+// src/routes/login/+page.server.ts
+import type { Actions, PageServerLoad } from './$types';
+import { fail, redirect } from '@sveltejs/kit';
+
+// load и actions могут быть в одном файле:
+export const load: PageServerLoad = async ({ locals }) => {
+  if (locals.user) {
+    redirect(307, '/dashboard');
+  }
+  return {};
+};
+
+// Дефолтное action (когда одно):
+export const actions: Actions = {
+  default: async ({ request, cookies, locals }) => {
+    const data = await request.formData();
+    const email = data.get('email') as string;
+    const password = data.get('password') as string;
+
+    // Валидация:
+    if (!email || !email.includes('@')) {
+      return fail(400, {
+        email,
+        error: 'Введите корректный email',
+      });
+    }
+
+    if (!password || password.length < 8) {
+      return fail(400, {
+        email,
+        error: 'Пароль должен быть минимум 8 символов',
+      });
+    }
+
+    // Проверяем пользователя:
+    const user = await db.user.findUnique({ where: { email } });
+
+    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+      return fail(401, {
+        email,
+        error: 'Неверный email или пароль',
+      });
+    }
+
+    // Создаём сессию:
+    const session = await createSession(user.id);
+    cookies.set('session', session.token, {
+      path: '/',
+      httpOnly: true,
+      secure: true,
+      maxAge: 60 * 60 * 24 * 7, // 7 дней
+      sameSite: 'strict',
+    });
+
+    redirect(303, '/dashboard');
+  },
+};
+```
+
+```svelte
+<!-- src/routes/login/+page.svelte -->
+<script lang="ts">
+  import type { PageData, ActionData } from './$types';
+
+  // data — из load функции
+  // form — результат Action (null если ещё не отправляли)
+  let { data, form }: { data: PageData; form: ActionData } = $props();
+</script>
+
+<!-- Форма без use:enhance — работает БЕЗ JavaScript! -->
+<form method="POST">
+  <label>
+    Email
+    <input
+      type="email"
+      name="email"
+      value={form?.email ?? ''}
+      class:error={form?.error}
+    />
+  </label>
+
+  <label>
+    Пароль
+    <input type="password" name="password" />
+  </label>
+
+  {#if form?.error}
+    <p class="error">{form.error}</p>
+  {/if}
+
+  <button type="submit">Войти</button>
+</form>
+```
+
+---
+
+## 📛 Именованные actions
+
+Когда на одной странице несколько форм — используй именованные actions:
+
+```typescript
+// src/routes/settings/+page.server.ts
+import type { Actions } from './$types';
+import { fail } from '@sveltejs/kit';
+
+export const actions: Actions = {
+  // Обновление профиля:
+  updateProfile: async ({ request, locals }) => {
+    const data = await request.formData();
+    const name = data.get('name') as string;
+    const bio = data.get('bio') as string;
+
+    if (!name?.trim()) {
+      return fail(400, { updateProfile: { error: 'Имя обязательно' } });
+    }
+
+    await db.user.update({
+      where: { id: locals.user!.id },
+      data: { name, bio },
+    });
+
+    return { updateProfile: { success: true } };
+  },
+
+  // Смена пароля:
+  changePassword: async ({ request, locals }) => {
+    const data = await request.formData();
+    const currentPassword = data.get('current') as string;
+    const newPassword = data.get('new') as string;
+
+    const user = await db.user.findUnique({
+      where: { id: locals.user!.id },
+    });
+
+    if (!(await verifyPassword(currentPassword, user!.passwordHash))) {
+      return fail(400, { changePassword: { error: 'Неверный текущий пароль' } });
+    }
+
+    if (newPassword.length < 8) {
+      return fail(400, { changePassword: { error: 'Пароль минимум 8 символов' } });
+    }
+
+    await db.user.update({
+      where: { id: locals.user!.id },
+      data: { passwordHash: await hashPassword(newPassword) },
+    });
+
+    return { changePassword: { success: true, message: 'Пароль изменён!' } };
+  },
+
+  // Удаление аккаунта:
+  deleteAccount: async ({ request, locals, cookies }) => {
+    const data = await request.formData();
+    const confirm = data.get('confirm');
+
+    if (confirm !== 'DELETE') {
+      return fail(400, { deleteAccount: { error: 'Введите DELETE для подтверждения' } });
+    }
+
+    await db.user.delete({ where: { id: locals.user!.id } });
+    cookies.delete('session', { path: '/' });
+
+    redirect(303, '/goodbye');
+  },
+};
+```
+
+```svelte
+<!-- src/routes/settings/+page.svelte -->
+<script lang="ts">
+  import type { ActionData } from './$types';
+  let { form }: { form: ActionData } = $props();
+</script>
+
+<!-- Именованное action — ?/updateProfile в action -->
+<form method="POST" action="?/updateProfile">
+  <input name="name" placeholder="Имя" />
+  <textarea name="bio" placeholder="О себе"></textarea>
+  {#if form?.updateProfile?.error}
+    <p class="error">{form.updateProfile.error}</p>
+  {/if}
+  {#if form?.updateProfile?.success}
+    <p class="success">✅ Профиль обновлён!</p>
+  {/if}
+  <button type="submit">Сохранить профиль</button>
+</form>
+
+<form method="POST" action="?/changePassword">
+  <input type="password" name="current" placeholder="Текущий пароль" />
+  <input type="password" name="new" placeholder="Новый пароль" />
+  {#if form?.changePassword?.error}
+    <p class="error">{form.changePassword.error}</p>
+  {/if}
+  <button type="submit">Сменить пароль</button>
+</form>
+
+<form method="POST" action="?/deleteAccount">
+  <input name="confirm" placeholder='Введите "DELETE"' />
+  {#if form?.deleteAccount?.error}
+    <p class="error">{form.deleteAccount.error}</p>
+  {/if}
+  <button type="submit" class="danger">Удалить аккаунт</button>
+</form>
+```
+
+---
+
+## ⚡ use:enhance: прогрессивное улучшение
+
+`use:enhance` превращает обычную HTML форму в молниеносную SPA-форму:
+
+```svelte
+<script lang="ts">
+  import { enhance } from '$app/forms';
+  import type { ActionData } from './$types';
+
+  let { form }: { form: ActionData } = $props();
+  let isSubmitting = $state(false);
+</script>
+
+<!-- С use:enhance — AJAX запрос, без перезагрузки страницы -->
+<form
+  method="POST"
+  use:enhance={({ formElement, formData, action, cancel, submitter }) => {
+    // Запускается ДО отправки:
+    isSubmitting = true;
+
+    // Можно отменить отправку:
+    // if (!isValid) { cancel(); return; }
+
+    // Можно модифицировать данные:
+    // formData.append('timestamp', Date.now().toString());
+
+    // Возвращаем callback который запускается ПОСЛЕ:
+    return async ({ result, update }) => {
+      isSubmitting = false;
+
+      if (result.type === 'success') {
+        // Показываем уведомление:
+        showToast('Сохранено!');
+      }
+
+      // update() обновляет form store и вызывает invalidateAll()
+      await update();
+    };
+  }}
+>
+  <input name="email" type="email" />
+  <input name="password" type="password" />
+  <button type="submit" disabled={isSubmitting}>
+    {isSubmitting ? 'Входим...' : 'Войти'}
+  </button>
+</form>
+```
+
+**Минимальный use:enhance (без кастомизации):**
+
+```svelte
+<form method="POST" use:enhance>
+  <!-- SvelteKit автоматически: -->
+  <!-- 1. Перехватит submit -->
+  <!-- 2. Отправит AJAX запрос -->
+  <!-- 3. Обновит form store -->
+  <!-- 4. Вызовет invalidateAll() если успех -->
+  <!-- 5. Покажет ошибки если fail() -->
+</form>
+```
+
+---
+
+## 🎁 ActionResult и applyAction
+
+```svelte
+<script lang="ts">
+  import { enhance, applyAction, deserialize } from '$app/forms';
+  import type { ActionResult } from '@sveltejs/kit';
+
+  // ActionResult — union type для всех возможных результатов:
+  type ActionResult =
+    | { type: 'success'; status: number; data?: Record<string, unknown> }
+    | { type: 'failure'; status: number; data?: Record<string, unknown> }
+    | { type: 'redirect'; status: number; location: string }
+    | { type: 'error'; status?: number; error: any };
+
+  // Ручная обработка result:
+  function handleResult(result: ActionResult) {
+    if (result.type === 'success') {
+      console.log('Успех!', result.data);
+    } else if (result.type === 'failure') {
+      console.log('Ошибка:', result.data?.error);
+    } else if (result.type === 'redirect') {
+      // applyAction применяет результат как SvelteKit
+      applyAction(result); // Перейдёт по redirect URL
+    } else if (result.type === 'error') {
+      console.error('Серверная ошибка:', result.error);
+    }
+  }
+</script>
+
+<form
+  method="POST"
+  use:enhance={() => async ({ result }) => {
+    // Полный контроль над результатом:
+    if (result.type === 'redirect') {
+      await applyAction(result); // Применяем redirect
+    } else {
+      await applyAction(result); // Обновляем form store
+    }
+  }}
+>
+```
+
+---
+
+## ✅ Валидация форм
+
+```typescript
+// src/lib/validation.ts — общая библиотека валидации
+export interface ValidationError {
+  field: string;
+  message: string;
+}
+
+export function validateEmail(email: string): ValidationError | null {
+  if (!email) return { field: 'email', message: 'Email обязателен' };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { field: 'email', message: 'Неверный формат email' };
+  }
+  return null;
+}
+
+export function validatePassword(password: string): ValidationError | null {
+  if (!password) return { field: 'password', message: 'Пароль обязателен' };
+  if (password.length < 8) return { field: 'password', message: 'Минимум 8 символов' };
+  if (!/[A-Z]/.test(password)) return { field: 'password', message: 'Нужна заглавная буква' };
+  if (!/[0-9]/.test(password)) return { field: 'password', message: 'Нужна цифра' };
+  return null;
+}
+
+// В action:
+export const actions: Actions = {
+  default: async ({ request }) => {
+    const data = await request.formData();
+    const email = data.get('email') as string;
+    const password = data.get('password') as string;
+
+    const errors: Record<string, string> = {};
+
+    const emailError = validateEmail(email);
+    if (emailError) errors[emailError.field] = emailError.message;
+
+    const passwordError = validatePassword(password);
+    if (passwordError) errors[passwordError.field] = passwordError.message;
+
+    if (Object.keys(errors).length > 0) {
+      return fail(400, { errors, values: { email } });
+    }
+
+    // Продолжаем...
+  },
+};
+```
+
+```svelte
+<!-- Форма с полевой валидацией: -->
+<script lang="ts">
+  import type { ActionData } from './$types';
+  let { form }: { form: ActionData } = $props();
+</script>
+
+<form method="POST" use:enhance>
+  <div class:has-error={form?.errors?.email}>
+    <label>Email</label>
+    <input
+      name="email"
+      type="email"
+      value={form?.values?.email ?? ''}
+    />
+    {#if form?.errors?.email}
+      <span class="field-error">{form.errors.email}</span>
+    {/if}
+  </div>
+
+  <div class:has-error={form?.errors?.password}>
+    <label>Пароль</label>
+    <input name="password" type="password" />
+    {#if form?.errors?.password}
+      <span class="field-error">{form.errors.password}</span>
+    {/if}
+  </div>
+
+  <button type="submit">Отправить</button>
+</form>
+```
+
+---
+
+## 📁 Загрузка файлов
+
+```typescript
+// src/routes/upload/+page.server.ts
+import type { Actions } from './$types';
+import { fail } from '@sveltejs/kit';
+import { writeFile } from 'fs/promises';
+import { join } from 'path';
+
+export const actions: Actions = {
+  default: async ({ request, locals }) => {
+    const data = await request.formData();
+    const file = data.get('avatar') as File;
+
+    if (!file || file.size === 0) {
+      return fail(400, { error: 'Файл не выбран' });
+    }
+
+    if (file.size > 5 * 1024 * 1024) { // 5MB
+      return fail(400, { error: 'Файл слишком большой (макс. 5MB)' });
+    }
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      return fail(400, { error: 'Только JPEG, PNG и WebP изображения' });
+    }
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const filename = `${locals.user!.id}-${Date.now()}.${file.type.split('/')[1]}`;
+    const uploadPath = join('static', 'uploads', filename);
+
+    await writeFile(uploadPath, buffer);
+
+    await db.user.update({
+      where: { id: locals.user!.id },
+      data: { avatarUrl: `/uploads/${filename}` },
+    });
+
+    return { success: true, avatarUrl: `/uploads/${filename}` };
+  },
+};
+```
+
+```svelte
+<form method="POST" enctype="multipart/form-data" use:enhance>
+  <input
+    type="file"
+    name="avatar"
+    accept="image/*"
+  />
+  <button type="submit">Загрузить аватар</button>
+</form>
+```
+
+---
+
+## 🚀 Оптимистичный UI
+
+```svelte
+<script lang="ts">
+  import { enhance } from '$app/forms';
+
+  interface Todo {
+    id: string;
+    text: string;
+    done: boolean;
+  }
+
+  let { data } = $props();
+  let todos = $state<Todo[]>(data.todos);
+
+  function addTodo(event: SubmitEvent) {
+    const form = event.target as HTMLFormElement;
+    const text = new FormData(form).get('text') as string;
+
+    // Оптимистично добавляем TODO сразу:
+    const tempId = 'temp-' + Date.now();
+    todos = [...todos, { id: tempId, text, done: false }];
+
+    return async ({ result, update }: any) => {
+      if (result.type === 'failure') {
+        // Откатываем если ошибка:
+        todos = todos.filter(t => t.id !== tempId);
+      } else if (result.type === 'success') {
+        // Заменяем временный ID на реальный:
+        todos = todos.map(t =>
+          t.id === tempId ? { ...t, id: result.data.id } : t
+        );
+      }
+      await update({ reset: true }); // Сбрасываем форму
+    };
+  }
+
+  function toggleTodo(id: string) {
+    // Оптимистичное переключение:
+    todos = todos.map(t => t.id === id ? { ...t, done: !t.done } : t);
+
+    return async ({ result }: any) => {
+      if (result.type === 'failure') {
+        // Откатываем:
+        todos = todos.map(t => t.id === id ? { ...t, done: !t.done } : t);
+      }
+    };
+  }
+</script>
+
+<form method="POST" action="?/addTodo" use:enhance={addTodo}>
+  <input name="text" placeholder="Новое задание..." />
+  <button type="submit">Добавить</button>
+</form>
+
+{#each todos as todo (todo.id)}
+  <form method="POST" action="?/toggleTodo" use:enhance={toggleTodo(todo.id)}>
+    <input type="hidden" name="id" value={todo.id} />
+    <button type="submit" class:done={todo.done}>
+      {todo.done ? '✅' : '⬜'} {todo.text}
+    </button>
+  </form>
+{/each}
+```
+
+---
+
+## 🆚 SvelteKit Form Actions vs Next.js Server Actions
+
+```
+Характеристика          SvelteKit Form Actions    Next.js Server Actions
+──────────────────────────────────────────────────────────────────────
+Работают без JS         ✅ Да (нативные формы)     ⚠️ Частично
+Progressive enhancement ✅ use:enhance              ✅ useFormState
+Файл                    +page.server.ts            Любой Server Component
+TypeScript              ✅ Автовывод типов          ✅ Явные типы
+Файлы (upload)          ✅ FormData из коробки      ✅ FormData из коробки
+Валидация               Ручная / Zod               Ручная / Zod
+Реактивный state        $page.form                 useFormState/useActionState
+Оптимистичный UI        use:enhance callback        useOptimistic
+```
+
+---
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useRef, FormEvent } from "react";
+
+const SVELTE_ORANGE = "#ff3e00";
+const SVELTE_YELLOW = "#ffba00";
+const BG = "#0f172a";
+const BG2 = "#1e293b";
+const BG3 = "#334155";
+
+type Tab = "default" | "named" | "enhance" | "optimistic";
+
+const tabs = [
+  { id: "default" as Tab, label: "Default Action", emoji: "📝" },
+  { id: "named" as Tab, label: "Named Actions", emoji: "📛" },
+  { id: "enhance" as Tab, label: "use:enhance", emoji: "⚡" },
+  { id: "optimistic" as Tab, label: "Оптимистичный UI", emoji: "🚀" },
+];
+
+// Default Action — симуляция логина
+function DefaultDemo() {
+  const [formState, setFormState] = useState<{ error?: string; success?: boolean } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setFormState(null);
+    await new Promise((r) => setTimeout(r, 700));
+
+    if (!email.includes("@")) {
+      setFormState({ error: "Введите корректный email" });
+    } else if (password.length < 8) {
+      setFormState({ error: "Пароль минимум 8 символов" });
+    } else if (email === "admin@test.com" && password === "password123") {
+      setFormState({ success: true });
+    } else {
+      setFormState({ error: "Неверный email или пароль" });
+    }
+
+    setLoading(false);
+  };
+
+  return (
+    <div>
+      <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+        // export const actions = {"{ default: async ({ request }) => { ... } }"}
+      </div>
+      <div style={{ fontFamily: "monospace", fontSize: "10px", color: "#475569", marginBottom: "12px" }}>
+        💡 Подсказка: email=admin@test.com пароль=password123
+      </div>
+
+      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        <div>
+          <label style={{ fontSize: "12px", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Email</label>
+          <input
+            type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+            placeholder="admin@test.com"
+            style={{ width: "100%", padding: "8px 12px", background: BG3, border: \`1px solid \${formState?.error && !email.includes("@") ? "#f87171" : "#475569"}\`, borderRadius: "6px", color: "#e2e8f0", fontSize: "13px", boxSizing: "border-box" }}
+          />
+        </div>
+        <div>
+          <label style={{ fontSize: "12px", color: "#94a3b8", display: "block", marginBottom: "4px" }}>Пароль</label>
+          <input
+            type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+            placeholder="password123"
+            style={{ width: "100%", padding: "8px 12px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px", boxSizing: "border-box" }}
+          />
+        </div>
+
+        {formState?.error && (
+          <div style={{ background: "#f8717122", border: "1px solid #f87171", borderRadius: "6px", padding: "8px 12px", fontSize: "12px", color: "#f87171" }}>
+            ❌ {formState.error}
+          </div>
+        )}
+        {formState?.success && (
+          <div style={{ background: "#34d39922", border: "1px solid #34d399", borderRadius: "6px", padding: "8px 12px", fontSize: "12px", color: "#34d399" }}>
+            ✅ Успешный вход! redirect(303, '/dashboard')
+          </div>
+        )}
+
+        <button type="submit" disabled={loading} style={{ background: loading ? "#475569" : SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "10px", cursor: loading ? "not-allowed" : "pointer", fontSize: "13px", fontWeight: "bold", transition: "all 0.2s" }}>
+          {loading ? "⏳ Проверяем..." : "Войти"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+// Named Actions
+function NamedDemo() {
+  const [activeForm, setActiveForm] = useState<"profile" | "password">("profile");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<Record<string, { success?: boolean; error?: string }>>({});
+  const [name, setName] = useState("Яша");
+
+  const submit = async (action: string, isValid: boolean) => {
+    setLoading(true);
+    await new Promise((r) => setTimeout(r, 600));
+
+    if (isValid) {
+      setResult((prev) => ({ ...prev, [action]: { success: true } }));
+    } else {
+      setResult((prev) => ({ ...prev, [action]: { error: "Ошибка валидации" } }));
+    }
+
+    setLoading(false);
+  };
+
+  return (
+    <div>
+      <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+        // action="?/updateProfile" | action="?/changePassword"
+      </div>
+
+      <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
+        {(["profile", "password"] as const).map((f) => (
+          <button key={f} onClick={() => setActiveForm(f)} style={{ flex: 1, padding: "6px", border: \`1px solid \${activeForm === f ? SVELTE_ORANGE : "#475569"}\`, borderRadius: "6px", background: activeForm === f ? \`\${SVELTE_ORANGE}22\` : BG3, cursor: "pointer", color: "#e2e8f0", fontSize: "12px" }}>
+            {f === "profile" ? "👤 Профиль" : "🔒 Пароль"}
+          </button>
+        ))}
+      </div>
+
+      {activeForm === "profile" && (
+        <div>
+          <input
+            value={name} onChange={(e) => setName(e.target.value)}
+            placeholder="Имя"
+            style={{ width: "100%", padding: "8px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px", marginBottom: "8px", boxSizing: "border-box" }}
+          />
+          <textarea
+            placeholder="О себе..."
+            style={{ width: "100%", padding: "8px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px", height: "60px", resize: "none", marginBottom: "8px", boxSizing: "border-box" }}
+          />
+          <button onClick={() => submit("profile", name.trim().length > 0)} disabled={loading} style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "6px", padding: "8px", cursor: "pointer", fontSize: "12px" }}>
+            Сохранить профиль
+          </button>
+          {result.profile?.success && <div style={{ color: "#34d399", fontSize: "12px", marginTop: "6px" }}>✅ Профиль обновлён!</div>}
+        </div>
+      )}
+
+      {activeForm === "password" && (
+        <div>
+          <input type="password" placeholder="Текущий пароль" style={{ width: "100%", padding: "8px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px", marginBottom: "8px", boxSizing: "border-box" }} />
+          <input type="password" placeholder="Новый пароль" style={{ width: "100%", padding: "8px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px", marginBottom: "8px", boxSizing: "border-box" }} />
+          <button onClick={() => submit("password", true)} disabled={loading} style={{ width: "100%", background: BG3, color: "#e2e8f0", border: "1px solid #475569", borderRadius: "6px", padding: "8px", cursor: "pointer", fontSize: "12px" }}>
+            Сменить пароль
+          </button>
+          {result.password?.success && <div style={{ color: "#34d399", fontSize: "12px", marginTop: "6px" }}>✅ Пароль изменён!</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// use:enhance demo
+function EnhanceDemo() {
+  const [mode, setMode] = useState<"without" | "with">("without");
+  const [loading, setLoading] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [loadTime, setLoadTime] = useState<number | null>(null);
+
+  const simulate = async () => {
+    setLoading(true);
+    setSubmitted(false);
+    const start = Date.now();
+    await new Promise((r) => setTimeout(r, mode === "without" ? 1200 : 200));
+    setLoadTime(Date.now() - start);
+    setLoading(false);
+    setSubmitted(true);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
+        {(["without", "with"] as const).map((m) => (
+          <button key={m} onClick={() => { setMode(m); setSubmitted(false); setLoadTime(null); }} style={{ flex: 1, padding: "8px", border: \`1px solid \${mode === m ? (m === "with" ? "#34d399" : "#f87171") : "#475569"}\`, borderRadius: "6px", background: mode === m ? (m === "with" ? "#34d39922" : "#f8717122") : BG3, cursor: "pointer", color: "#e2e8f0", fontSize: "12px" }}>
+            {m === "without" ? "❌ Без enhance" : "✅ С use:enhance"}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ background: BG3, borderRadius: "8px", padding: "10px", marginBottom: "12px", fontSize: "11px", fontFamily: "monospace" }}>
+        {mode === "without" ? (
+          <span style={{ color: "#f87171" }}>
+            {'<form method="POST">'}<br/>
+            {'  // Полная перезагрузка страницы!'}<br/>
+            {'</form>'}
+          </span>
+        ) : (
+          <span style={{ color: "#34d399" }}>
+            {'<form method="POST" use:enhance>'}<br/>
+            {'  // AJAX запрос, без перезагрузки!'}<br/>
+            {'</form>'}
+          </span>
+        )}
+      </div>
+
+      <button onClick={simulate} disabled={loading} style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "10px", cursor: loading ? "not-allowed" : "pointer", fontSize: "13px" }}>
+        {loading ? (mode === "without" ? "🐢 Перезагружается страница..." : "⚡ Отправляем AJAX...") : "📤 Отправить форму"}
+      </button>
+
+      {submitted && loadTime && (
+        <div style={{ marginTop: "10px", background: BG, borderRadius: "8px", padding: "10px", border: \`1px solid \${mode === "with" ? "#34d399" : "#f87171"}44\` }}>
+          <div style={{ fontSize: "13px", fontWeight: "bold", color: mode === "with" ? "#34d399" : "#f87171" }}>
+            ⏱️ {loadTime}ms
+          </div>
+          <div style={{ fontSize: "12px", color: "#94a3b8", marginTop: "4px" }}>
+            {mode === "without" ? "Страница полностью перезагрузилась" : "Только данные обновились, страница осталась!"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Optimistic UI demo
+interface Todo { id: string; text: string; done: boolean; temp?: boolean; }
+
+function OptimisticDemo() {
+  const [todos, setTodos] = useState<Todo[]>([
+    { id: "1", text: "Изучить SvelteKit", done: true },
+    { id: "2", text: "Написать Form Actions", done: false },
+  ]);
+  const [input, setInput] = useState("");
+
+  const addTodo = async () => {
+    if (!input.trim()) return;
+    const tempId = "temp-" + Date.now();
+
+    setTodos((prev) => [...prev, { id: tempId, text: input, done: false, temp: true }]);
+    setInput("");
+
+    await new Promise((r) => setTimeout(r, 800));
+
+    const succeeded = Math.random() > 0.2;
+    if (succeeded) {
+      setTodos((prev) => prev.map((t) => t.id === tempId ? { ...t, id: "real-" + Date.now(), temp: false } : t));
+    } else {
+      setTodos((prev) => prev.filter((t) => t.id !== tempId));
+      alert("Ошибка! Откат оптимистичного обновления");
+    }
+  };
+
+  const toggleTodo = async (id: string) => {
+    setTodos((prev) => prev.map((t) => t.id === id ? { ...t, done: !t.done } : t));
+    await new Promise((r) => setTimeout(r, 400));
+    const succeeded = Math.random() > 0.1;
+    if (!succeeded) {
+      setTodos((prev) => prev.map((t) => t.id === id ? { ...t, done: !t.done } : t));
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+        // Добавление — 20% шанс ошибки (откат!) | Переключение — 10% шанс ошибки
+      </div>
+
+      <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
+        <input
+          value={input} onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addTodo()}
+          placeholder="Новая задача..."
+          style={{ flex: 1, padding: "8px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px" }}
+        />
+        <button onClick={addTodo} style={{ background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "6px", padding: "8px 14px", cursor: "pointer", fontSize: "13px" }}>+</button>
+      </div>
+
+      {todos.map((todo) => (
+        <div key={todo.id} onClick={() => !todo.temp && toggleTodo(todo.id)} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 10px", background: todo.temp ? \`\${SVELTE_YELLOW}11\` : BG3, borderRadius: "6px", marginBottom: "6px", cursor: todo.temp ? "not-allowed" : "pointer", border: \`1px solid \${todo.temp ? SVELTE_YELLOW + "44" : "#475569"}\`, transition: "all 0.2s", opacity: todo.temp ? 0.7 : 1 }}>
+          <span style={{ fontSize: "16px" }}>{todo.temp ? "⏳" : todo.done ? "✅" : "⬜"}</span>
+          <span style={{ flex: 1, fontSize: "13px", color: todo.done && !todo.temp ? "#64748b" : "#e2e8f0", textDecoration: todo.done && !todo.temp ? "line-through" : "none" }}>{todo.text}</span>
+          {todo.temp && <span style={{ fontSize: "10px", color: SVELTE_YELLOW }}>сохранение...</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("default");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "20px", fontFamily: "system-ui, sans-serif", color: "#e2e8f0" }}>
+      <div style={{ maxWidth: "500px", margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: "20px" }}>
+          <div style={{ fontSize: "26px", fontWeight: "bold", color: SVELTE_ORANGE }}>Form Actions</div>
+          <div style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>SvelteKit серверные формы 📝</div>
+        </div>
+
+        <div style={{ display: "flex", gap: "4px", marginBottom: "16px", background: BG2, padding: "4px", borderRadius: "10px" }}>
+          {tabs.map((tab) => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "7px 2px", border: "none", borderRadius: "7px", cursor: "pointer", background: activeTab === tab.id ? SVELTE_ORANGE : "transparent", color: activeTab === tab.id ? "#fff" : "#94a3b8", fontSize: "10px", fontWeight: activeTab === tab.id ? "bold" : "normal", transition: "all 0.15s" }}>
+              {tab.emoji} {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: BG2, borderRadius: "12px", padding: "16px", border: "1px solid #1e293b" }}>
+          {activeTab === "default" && <DefaultDemo />}
+          {activeTab === "named" && <NamedDemo />}
+          {activeTab === "enhance" && <EnhanceDemo />}
+          {activeTab === "optimistic" && <OptimisticDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

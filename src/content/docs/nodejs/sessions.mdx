@@ -1,0 +1,303 @@
+---
+title: "18. Sessions и Cookies"
+sidebar:
+  order: 18
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-sessions.png)
+
+Сессии и куки — альтернатива JWT. Удобны для веб-приложений, где сервер хранит состояние пользователя.
+
+## Cookie — основы
+
+```bash
+npm install cookie-parser
+```
+
+```javascript
+const cookieParser = require('cookie-parser');
+
+// Подключаем (нужен для чтения кук)
+app.use(cookieParser(process.env.COOKIE_SECRET)); // секрет для подписанных кук
+
+// Установка куки
+app.get('/set-cookie', (req, res) => {
+  // Простая кука
+  res.cookie('language', 'ru');
+
+  // С опциями
+  res.cookie('theme', 'dark', {
+    maxAge: 30 * 24 * 60 * 60 * 1000,  // 30 дней в мс
+    httpOnly: false,    // доступна из JS (нужна для темы)
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+  });
+
+  // Подписанная кука (защита от подделки)
+  res.cookie('userId', '42', {
+    signed: true,       // подписывается с cookie.secret
+    httpOnly: true,
+    secure: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  });
+
+  res.json({ message: 'Куки установлены!' });
+});
+
+// Чтение куки
+app.get('/read-cookie', (req, res) => {
+  console.log(req.cookies);          // { language: 'ru', theme: 'dark' }
+  console.log(req.signedCookies);    // { userId: '42' }
+
+  const theme = req.cookies.theme;
+  const userId = req.signedCookies.userId;  // автоматически проверяет подпись
+
+  res.json({ theme, userId });
+});
+
+// Удаление куки
+app.get('/clear', (req, res) => {
+  res.clearCookie('theme');
+  res.clearCookie('userId');
+  res.json({ message: 'Куки удалены' });
+});
+```
+
+## Настройки безопасности куки
+
+```javascript
+// Лучшие практики для auth куки
+res.cookie('session', sessionId, {
+  httpOnly: true,     // ❗ ВСЕГДА для auth кук — недоступна из JavaScript
+  secure: true,       // ❗ ВСЕГДА в production — только HTTPS
+  sameSite: 'strict', // Защита от CSRF (strict/lax/none)
+  
+  // sameSite: 'strict' — кука не отправляется при переходе с другого сайта
+  // sameSite: 'lax'    — кука не отправляется для POST с другого сайта
+  // sameSite: 'none'   — отправляется всегда (нужен secure: true)
+  
+  maxAge: 24 * 60 * 60 * 1000,  // 1 день (вместо expires)
+  path: '/',
+  domain: process.env.COOKIE_DOMAIN || undefined,
+});
+```
+
+## express-session — серверные сессии
+
+```bash
+npm install express-session connect-redis ioredis
+```
+
+```javascript
+const session = require('express-session');
+const Redis = require('ioredis');
+const RedisStore = require('connect-redis').default;
+
+// Подключаем Redis для хранения сессий
+const redisClient = new Redis(process.env.REDIS_URL);
+const store = new RedisStore({ client: redisClient });
+
+app.use(session({
+  store,
+  secret: process.env.SESSION_SECRET,  // для подписи session ID
+  resave: false,                        // не пересохранять если не изменилась
+  saveUninitialized: false,             // не создавать пустые сессии
+  
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 24 * 60 * 60 * 1000,  // 1 день
+  },
+  
+  // Имя куки (по умолчанию 'connect.sid')
+  name: 'sid',
+}));
+```
+
+## Работа с сессией
+
+```javascript
+// Авторизация через сессию
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = await db.user.findUnique({ where: { email } });
+
+  if (!user || !await bcrypt.compare(password, user.passwordHash)) {
+    return res.status(401).json({ error: 'Неверный email или пароль' });
+  }
+
+  // Сохраняем данные в сессии
+  req.session.userId = user.id;
+  req.session.role = user.role;
+  req.session.loginAt = Date.now();
+
+  // Принудительно сохраняем (обычно автоматически)
+  req.session.save((err) => {
+    if (err) return next(err);
+    res.json({ message: 'Вход выполнен' });
+  });
+});
+
+// Middleware проверки сессии
+function sessionAuth(req, res, next) {
+  if (!req.session.userId) {
+    return res.status(401).json({ error: 'Не авторизован' });
+  }
+  next();
+}
+
+// Защищённый роут
+app.get('/profile', sessionAuth, async (req, res) => {
+  const user = await db.user.findUnique({
+    where: { id: req.session.userId }
+  });
+  res.json({ data: user });
+});
+
+// Выход
+app.post('/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ error: 'Ошибка выхода' });
+    res.clearCookie('sid');
+    res.json({ message: 'Вышли из системы' });
+  });
+});
+
+// Информация о сессии
+app.get('/session-info', sessionAuth, (req, res) => {
+  res.json({
+    userId: req.session.userId,
+    role: req.session.role,
+    loginAt: req.session.loginAt,
+    sessionId: req.session.id,  // осторожно — не отправляй в реальном API!
+  });
+});
+```
+
+## Flash сообщения
+
+```bash
+npm install connect-flash
+```
+
+```javascript
+const flash = require('connect-flash');
+app.use(flash());
+
+// Установить flash сообщение
+app.post('/login', async (req, res) => {
+  // ...логика входа...
+  if (success) {
+    req.flash('success', 'Добро пожаловать!');
+    res.redirect('/dashboard');
+  } else {
+    req.flash('error', 'Неверные данные');
+    res.redirect('/login');
+  }
+});
+
+// Читать flash сообщения
+app.get('/dashboard', (req, res) => {
+  const messages = req.flash();
+  res.render('dashboard', {
+    success: messages.success?.[0],
+    error: messages.error?.[0],
+  });
+});
+```
+
+## JWT vs Sessions
+
+```
+JWT                              Sessions
+───────────────────────────────  ──────────────────────────────
+Stateless (нет хранилища)        Stateful (Redis, БД)
+Масштабируется легко             Нужен shared storage
+Нельзя отозвать (до истечения)   Можно отозвать немедленно
+Подходит для API, мобильных      Подходит для веб-приложений
+Токен в localStorage/header      Session ID в httpOnly cookie
+Уязвим если украдут токен        Более безопасный
+```
+
+**Рекомендация:** 
+- API для мобильных → JWT
+- Веб-приложение с сервером → Sessions
+- Нужна отзываемость → Sessions или JWT + blacklist в Redis
+
+## Практика
+
+1. Настрой `cookie-parser` и создай роут, устанавливающий несколько кук с разными настройками
+2. Настрой `express-session` с Redis хранилищем
+3. Реализуй вход/выход через сессию
+4. Создай middleware `sessionAuth` для защиты роутов
+5. Сравни: реализуй одно и то же через JWT и через сессии — почувствуй разницу
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+export default function App() {
+  const [session, setSession] = useState(null);
+  const [cookies, setCookies] = useState({});
+  const [log, setLog] = useState([]);
+
+  const add = (msg, color = "#e2e8f0") => setLog(prev => [...prev.slice(-6), { msg, color }]);
+
+  const login = () => {
+    const sid = "sess_" + Math.random().toString(36).slice(2, 10);
+    setSession({ id: sid, user: "Alice", role: "admin", views: 0 });
+    setCookies({ "connect.sid": sid, "preferences": "dark" });
+    add("POST /login → Set-Cookie: connect.sid=" + sid, "#10b981");
+    add("Сессия создана на сервере (в Redis/Memory)", "#10b981");
+  };
+
+  const visit = () => {
+    if (!session) { add("✕ Нет сессии — редирект на /login", "#ef4444"); return; }
+    setSession(prev => ({ ...prev, views: prev.views + 1 }));
+    add("GET /dashboard → Cookie: connect.sid=" + session.id, "#3b82f6");
+    add("✓ Сессия найдена, views: " + (session.views + 1), "#10b981");
+  };
+
+  const logout = () => {
+    add("POST /logout → req.session.destroy()", "#f59e0b");
+    add("Set-Cookie: connect.sid=; Max-Age=0", "#f59e0b");
+    setSession(null);
+    setCookies({});
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Sessions & Cookies</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        <button onClick={login} disabled={!!session} style={{ padding: "5px 10px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Login</button>
+        <button onClick={visit} style={{ padding: "5px 10px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Visit page</button>
+        <button onClick={logout} style={{ padding: "5px 10px", background: "#ef4444", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Logout</button>
+      </div>
+      {session && (
+        <div style={{ background: "#1e293b", padding: 10, borderRadius: 6, marginBottom: 8, fontSize: 12 }}>
+          <div style={{ color: "#f59e0b" }}>Session Store:</div>
+          <pre style={{ color: "#e2e8f0", margin: "4px 0 0", fontSize: 11 }}>{JSON.stringify(session, null, 2)}</pre>
+        </div>
+      )}
+      <div style={{ background: "#1e293b", padding: 10, borderRadius: 6, marginBottom: 8, fontSize: 12 }}>
+        <div style={{ color: "#a78bfa" }}>Cookies:</div>
+        {Object.entries(cookies).map(([k, v]) => (
+          <div key={k} style={{ color: "#e2e8f0", fontSize: 11 }}>{k}={v}</div>
+        ))}
+        {Object.keys(cookies).length === 0 && <div style={{ color: "#475569", fontSize: 11 }}>пусто</div>}
+      </div>
+      <div style={{ background: "#0f172a", padding: 10, borderRadius: 6, minHeight: 40 }}>
+        {log.map((l, i) => <div key={i} style={{ fontSize: 11, color: l.color }}>{l.msg}</div>)}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

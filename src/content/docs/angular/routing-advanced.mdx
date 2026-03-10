@@ -1,0 +1,538 @@
+---
+title: "65. Маршрутизация: продвинутая"
+---
+import { Playground } from '@components/Playground'
+
+
+## 🚀 Маршрутизация в Angular: Продвинутый уровень
+
+Базовую маршрутизацию освоили — теперь ныряем глубже! Вложенные маршруты, именованные аутлеты, события роутера, lazy loading... Всё это превращает Angular Router из простого навигатора в мощную архитектурную систему. 💪
+
+---
+
+### 🪆 Вложенные маршруты (children)
+
+Вложенные маршруты — это как папки внутри папок 📁. Родительский компонент имеет свой `<router-outlet>`, и дочерние маршруты рендерятся именно туда:
+
+```typescript
+// app.routes.ts
+export const routes: Routes = [
+  {
+    path: 'admin',
+    component: AdminLayoutComponent, // Шапка + сайдбар
+    children: [
+      { path: '', redirectTo: 'dashboard', pathMatch: 'full' },
+      { path: 'dashboard', component: DashboardComponent },  // /admin/dashboard
+      { path: 'users', component: UsersComponent },          // /admin/users
+      {
+        path: 'settings',
+        component: SettingsComponent,
+        children: [
+          { path: '', redirectTo: 'profile', pathMatch: 'full' },
+          { path: 'profile', component: ProfileSettingsComponent },   // /admin/settings/profile
+          { path: 'security', component: SecuritySettingsComponent }, // /admin/settings/security
+        ]
+      }
+    ]
+  }
+];
+```
+
+```typescript
+// admin-layout.component.ts
+@Component({
+  template: `
+    <div class="admin-layout">
+      <nav class="sidebar">
+        <a routerLink="dashboard" routerLinkActive="active">Dashboard</a>
+        <a routerLink="users" routerLinkActive="active">Users</a>
+        <a routerLink="settings" routerLinkActive="active">Settings</a>
+      </nav>
+      <main>
+        <!-- Дочерние маршруты рендерятся здесь -->
+        <router-outlet />
+      </main>
+    </div>
+  `
+})
+export class AdminLayoutComponent {}
+```
+
+---
+
+### 🔀 Named Outlets (Именованные аутлеты)
+
+Иногда нужно рендерить несколько независимых областей одновременно. Например, основной контент + боковая панель помощи:
+
+```html
+<!-- app.component.html -->
+<router-outlet />                  <!-- primary outlet -->
+<router-outlet name="sidebar" />  <!-- named outlet -->
+```
+
+```typescript
+// Навигация в именованный аутлет
+this.router.navigate([{
+  outlets: {
+    primary: ['products'],
+    sidebar: ['help', 'products-guide']
+  }
+}]);
+// URL: /products(sidebar:help/products-guide)
+
+// Закрыть именованный аутлет
+this.router.navigate([{ outlets: { sidebar: null } }]);
+```
+
+```typescript
+// В маршрутах — указываем outlet
+export const routes: Routes = [
+  { path: 'help/:topic', component: HelpComponent, outlet: 'sidebar' },
+];
+```
+
+---
+
+### 🔑 Параметры маршрута: углублённо
+
+```typescript
+// Обязательный параметр: /users/:id
+{ path: 'users/:id', component: UserComponent }
+
+// Несколько параметров: /users/:userId/posts/:postId
+{ path: 'users/:userId/posts/:postId', component: PostComponent }
+
+// Чтение в компоненте
+@Component({...})
+export class PostComponent implements OnInit {
+  post$: Observable<Post>;
+
+  constructor(private route: ActivatedRoute, private service: PostService) {}
+
+  ngOnInit() {
+    // Реактивный подход: обновляется при изменении параметров
+    this.post$ = this.route.paramMap.pipe(
+      switchMap(params => {
+        const userId = params.get('userId')!;
+        const postId = params.get('postId')!;
+        return this.service.getPost(userId, postId);
+      })
+    );
+  }
+}
+
+// Matrix параметры: /users;sort=name;dir=asc
+// Используются для параметров сегмента, не всего URL
+<a [routerLink]="['/users', { sort: 'name', dir: 'asc' }]">Users</a>
+// Чтение: this.route.snapshot.params['sort']
+```
+
+---
+
+### 📡 Router Events: индикатор загрузки
+
+Роутер Angular генерирует события на каждом шаге навигации. Это идеально для глобального индикатора загрузки:
+
+```typescript
+// app.component.ts
+@Component({
+  template: `
+    <!-- Полоска загрузки вверху страницы -->
+    <div class="loading-bar" *ngIf="loading$ | async"></div>
+    <router-outlet />
+  `
+})
+export class AppComponent {
+  loading$: Observable<boolean>;
+
+  constructor(private router: Router) {
+    this.loading$ = router.events.pipe(
+      filter(e =>
+        e instanceof NavigationStart ||
+        e instanceof NavigationEnd ||
+        e instanceof NavigationError ||
+        e instanceof NavigationCancel
+      ),
+      map(e => e instanceof NavigationStart),
+      distinctUntilChanged()
+    );
+  }
+}
+
+// Все события роутера:
+// NavigationStart      — начало навигации
+// RouteConfigLoadStart — начало загрузки lazy chunk
+// RouteConfigLoadEnd   — загрузка chunk завершена
+// RoutesRecognized     — маршрут распознан
+// GuardsCheckStart     — начало проверки guards
+// GuardsCheckEnd       — guards проверены
+// ResolveStart         — начало резолвера данных
+// ResolveEnd           — данные резолвера получены
+// NavigationEnd        — навигация завершена ✅
+// NavigationError      — ошибка навигации ❌
+// NavigationCancel     — навигация отменена (guard вернул false)
+```
+
+---
+
+### 🦥 Lazy Loading маршрутов
+
+Lazy loading позволяет загружать части приложения только когда пользователь к ним обращается. Для Standalone компонентов:
+
+```typescript
+// app.routes.ts
+export const routes: Routes = [
+  { path: '', component: HomeComponent },
+
+  // Lazy loading отдельного компонента (Angular 15+)
+  {
+    path: 'admin',
+    loadComponent: () =>
+      import('./admin/admin.component').then(m => m.AdminComponent)
+  },
+
+  // Lazy loading целого набора маршрутов
+  {
+    path: 'shop',
+    loadChildren: () =>
+      import('./shop/shop.routes').then(m => m.SHOP_ROUTES)
+  },
+
+  // Lazy loading NgModule (классический подход)
+  {
+    path: 'reports',
+    loadChildren: () =>
+      import('./reports/reports.module').then(m => m.ReportsModule)
+  }
+];
+
+// shop/shop.routes.ts
+export const SHOP_ROUTES: Routes = [
+  { path: '', component: ShopHomeComponent },
+  { path: 'products', component: ProductsComponent },
+  { path: 'cart', component: CartComponent },
+];
+```
+
+---
+
+### ⚡ Стратегии предзагрузки
+
+Lazy loading отлично, но иногда хочется предзагрузить модули заранее, пока пользователь не перешёл к ним:
+
+```typescript
+import { PreloadAllModules, NoPreloading } from '@angular/router';
+
+// app.config.ts
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideRouter(
+      routes,
+      withPreloading(PreloadAllModules) // Предзагружает все lazy модули сразу
+      // withPreloading(NoPreloading)   // Не предзагружает (по умолчанию)
+    )
+  ]
+};
+
+// Собственная стратегия предзагрузки
+@Injectable({ providedIn: 'root' })
+export class SelectivePreloadingStrategy implements PreloadingStrategy {
+  preload(route: Route, load: () => Observable<any>): Observable<any> {
+    // Предзагружаем только маршруты с data.preload: true
+    return route.data?.['preload'] ? load() : EMPTY;
+  }
+}
+
+// В маршрутах
+{ path: 'shop', data: { preload: true }, loadChildren: () => import('./shop/shop.routes') }
+```
+
+---
+
+### 🗄️ Route Resolver: данные до навигации
+
+Resolver загружает данные ДО того, как компонент появится на экране. Пользователь не видит пустой шаблон — всё загружается "за кулисами":
+
+```typescript
+// product.resolver.ts
+export const productResolver: ResolveFn<Product> = (route) => {
+  const id = route.paramMap.get('id')!;
+  return inject(ProductsService).getById(+id).pipe(
+    catchError(() => {
+      inject(Router).navigate(['/not-found']);
+      return EMPTY;
+    })
+  );
+};
+
+// В маршруте
+{
+  path: 'products/:id',
+  component: ProductDetailComponent,
+  resolve: { product: productResolver }
+}
+
+// В компоненте — данные уже доступны!
+@Component({...})
+export class ProductDetailComponent {
+  product = this.route.snapshot.data['product'] as Product;
+  // Или реактивно:
+  product$ = this.route.data.pipe(map(data => data['product'] as Product));
+
+  constructor(private route: ActivatedRoute) {}
+}
+```
+
+---
+
+### 📜 scrollPositionRestoration
+
+Angular Router может автоматически восстанавливать позицию прокрутки при навигации:
+
+```typescript
+// app.config.ts
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideRouter(
+      routes,
+      withInMemoryScrolling({
+        scrollPositionRestoration: 'enabled', // восстанавливать позицию
+        anchorScrolling: 'enabled',           // прокрутка к #fragment
+      })
+    )
+  ]
+};
+```
+
+---
+
+### Практика
+
+Попробуйте концепцию в интерактивном редакторе:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState } from 'react';
+
+// В Angular: это симуляция вложенных маршрутов (children) в Admin Panel
+// parent route: /admin  →  AdminLayoutComponent (с sidebar)
+// child routes: /admin/dashboard, /admin/users, /admin/settings/*
+
+const SIDEBAR_ITEMS = [
+  { id: 'dashboard', label: '📊 Dashboard' },
+  { id: 'users', label: '👥 Users' },
+  { id: 'settings', label: '⚙️ Settings', children: ['profile', 'security', 'notifications'] },
+];
+
+function DashboardContent() {
+  const stats = [
+    { label: 'Пользователей', value: '1,234', color: '#3b82f6' },
+    { label: 'Выручка', value: '$56K', color: '#10b981' },
+    { label: 'Заказов', value: '789', color: '#f59e0b' },
+  ];
+  return (
+    <div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: '#e2e8f0', marginBottom: 16 }}>📊 Dashboard</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 16 }}>
+        {stats.map(s => (
+          <div key={s.label} style={{ background: '#0f172a', borderRadius: 8, padding: 14, textAlign: 'center', border: '1px solid #334155' }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: s.color }}>{s.value}</div>
+            <div style={{ color: '#64748b', fontSize: 11, marginTop: 4 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, fontSize: 11, color: '#475569', lineHeight: 1.7 }}>
+        // children route:<br />
+        // {'{ path: "dashboard", component: DashboardComponent }'}
+      </div>
+    </div>
+  );
+}
+
+function UsersContent() {
+  const users = [
+    { name: 'Alice Admin', role: 'admin', color: '#7c3aed' },
+    { name: 'Bob User', role: 'user', color: '#1d4ed8' },
+    { name: 'Charlie Dev', role: 'developer', color: '#065f46' },
+  ];
+  return (
+    <div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: '#e2e8f0', marginBottom: 16 }}>👥 Users</div>
+      {users.map(u => (
+        <div key={u.name} style={{ background: '#0f172a', borderRadius: 7, padding: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 10, border: '1px solid #1e293b' }}>
+          <div style={{ width: 32, height: 32, borderRadius: '50%', background: u.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>
+            {u.name[0]}
+          </div>
+          <div>
+            <div style={{ color: '#e2e8f0', fontWeight: 600, fontSize: 13 }}>{u.name}</div>
+            <div style={{ color: '#64748b', fontSize: 11 }}>{u.role}</div>
+          </div>
+        </div>
+      ))}
+      <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, fontSize: 11, color: '#475569', lineHeight: 1.7, marginTop: 12 }}>
+        // children route:<br />
+        // {'{ path: "users", component: UsersComponent }'}
+      </div>
+    </div>
+  );
+}
+
+function SettingsContent({ activeSubPage, setActiveSubPage }) {
+  const subPages = {
+    profile: (
+      <div>
+        <div style={{ color: '#e2e8f0', fontWeight: 700, marginBottom: 12 }}>👤 Профиль</div>
+        {['Имя: Alice Admin', 'Email: alice@example.com', 'Аватар: 🧑‍💼'].map(f => (
+          <div key={f} style={{ color: '#94a3b8', fontSize: 13, padding: '6px 0', borderBottom: '1px solid #1e293b' }}>{f}</div>
+        ))}
+      </div>
+    ),
+    security: (
+      <div>
+        <div style={{ color: '#e2e8f0', fontWeight: 700, marginBottom: 12 }}>🔒 Безопасность</div>
+        {['Пароль: ••••••••', '2FA: Включено ✅', 'Активных сессий: 2'].map(f => (
+          <div key={f} style={{ color: '#94a3b8', fontSize: 13, padding: '6px 0', borderBottom: '1px solid #1e293b' }}>{f}</div>
+        ))}
+      </div>
+    ),
+    notifications: (
+      <div>
+        <div style={{ color: '#e2e8f0', fontWeight: 700, marginBottom: 12 }}>🔔 Уведомления</div>
+        {['Email: Включено ✅', 'Push: Выключено ❌', 'SMS: Включено ✅'].map(f => (
+          <div key={f} style={{ color: '#94a3b8', fontSize: 13, padding: '6px 0', borderBottom: '1px solid #1e293b' }}>{f}</div>
+        ))}
+      </div>
+    ),
+  };
+  return (
+    <div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: '#e2e8f0', marginBottom: 14 }}>⚙️ Settings</div>
+      {/* Sub-navigation — вложенные children маршруты */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        {['profile', 'security', 'notifications'].map(sub => (
+          <button
+            key={sub}
+            onClick={() => setActiveSubPage(sub)}
+            style={{
+              padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12,
+              background: activeSubPage === sub ? '#dd0031' : '#0f172a',
+              color: activeSubPage === sub ? 'white' : '#64748b',
+              fontWeight: activeSubPage === sub ? 700 : 400,
+            }}
+          >
+            {sub}
+          </button>
+        ))}
+      </div>
+      {activeSubPage && (
+        <div style={{ background: '#0f172a', borderRadius: 8, padding: 14, border: '1px solid #1e293b', marginBottom: 12 }}>
+          {subPages[activeSubPage]}
+        </div>
+      )}
+      <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, fontSize: 11, color: '#475569', lineHeight: 1.7 }}>
+        // settings children routes:<br />
+        // {'{ path: "profile", component: ProfileSettingsComponent }'}<br />
+        // {'{ path: "security", component: SecuritySettingsComponent }'}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [activePage, setActivePage] = useState('dashboard');
+  const [activeSubPage, setActiveSubPage] = useState('profile');
+
+  // В Angular: Router обновляет URL автоматически
+  const getUrl = () => {
+    if (activePage === 'settings') return '/admin/settings/' + activeSubPage;
+    return '/admin/' + activePage;
+  };
+
+  const handleSidebarClick = (id) => {
+    setActivePage(id);
+    if (id === 'settings') setActiveSubPage('profile');
+  };
+
+  const renderContent = () => {
+    if (activePage === 'dashboard') return <DashboardContent />;
+    if (activePage === 'users') return <UsersContent />;
+    if (activePage === 'settings') return <SettingsContent activeSubPage={activeSubPage} setActiveSubPage={setActiveSubPage} />;
+    return null;
+  };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0', display: 'flex', flexDirection: 'column' }}>
+      {/* Top navbar */}
+      <div style={{ background: '#020617', padding: '10px 16px', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center' }}>
+        <span style={{ color: '#dd0031', fontWeight: 700, fontSize: 15 }}>⚡ Admin Panel</span>
+        <div style={{ marginLeft: 'auto', fontSize: 11, color: '#475569' }}>
+          🌐 localhost:4200
+          <span style={{ color: '#dd0031', marginLeft: 6, fontWeight: 700 }}>{getUrl()}</span>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flex: 1 }}>
+        {/* Sidebar — AdminLayoutComponent содержит sidebar + router-outlet */}
+        <div style={{ width: 190, background: '#080f1f', borderRight: '1px solid #1e293b', padding: '16px 8px', flexShrink: 0 }}>
+          <div style={{ fontSize: 10, color: '#334155', marginBottom: 12, padding: '0 8px', letterSpacing: 1 }}>НАВИГАЦИЯ</div>
+
+          {SIDEBAR_ITEMS.map(item => (
+            <div key={item.id}>
+              <button
+                onClick={() => handleSidebarClick(item.id)}
+                style={{
+                  width: '100%', textAlign: 'left', padding: '9px 10px',
+                  borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 13, marginBottom: 2,
+                  background: activePage === item.id ? '#1e293b' : 'transparent',
+                  color: activePage === item.id ? '#dd0031' : '#94a3b8',
+                  borderLeft: activePage === item.id ? '3px solid #dd0031' : '3px solid transparent',
+                  fontWeight: activePage === item.id ? 700 : 400,
+                }}
+              >
+                {item.label}
+              </button>
+
+              {/* Вложенные дочерние маршруты Settings */}
+              {item.children && activePage === item.id && (
+                <div style={{ paddingLeft: 14, marginBottom: 4 }}>
+                  {item.children.map(child => (
+                    <button
+                      key={child}
+                      onClick={() => setActiveSubPage(child)}
+                      style={{
+                        width: '100%', textAlign: 'left', padding: '6px 10px',
+                        borderRadius: 5, border: 'none', cursor: 'pointer', fontSize: 12, marginBottom: 1,
+                        background: activeSubPage === child ? '#334155' : 'transparent',
+                        color: activeSubPage === child ? '#e2e8f0' : '#475569',
+                      }}
+                    >
+                      {child}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+
+          <div style={{ marginTop: 20, padding: '8px', fontSize: 10, color: '#1e293b', borderTop: '1px solid #1e293b', lineHeight: 1.6 }}>
+            // AdminLayoutComponent<br />
+            // содержит sidebar +<br />
+            // &lt;router-outlet&gt;
+          </div>
+        </div>
+
+        {/* Main content area — router-outlet для дочерних маршрутов */}
+        <div style={{ flex: 1, padding: 20 }}>
+          <div style={{ fontSize: 10, color: '#1e293b', marginBottom: 14 }}>
+            // &lt;router-outlet&gt; — дочерние маршруты рендерятся здесь
+          </div>
+          {renderContent()}
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,451 @@
+---
+title: "31. Streaming SSR"
+sidebar:
+  order: 31
+---
+import { Playground } from '@components/Playground'
+
+
+Streaming SSR — это техника серверного рендеринга, при которой HTML отправляется клиенту **частями по мере готовности**, а не целиком после того, как все данные загружены. Solid.js поддерживает потоковую передачу из коробки через `renderToStream`.
+
+## Проблема классического SSR
+
+В классическом SSR (`renderToString`) клиент ждёт, пока сервер:
+1. Получит запрос
+2. Загрузит **все** данные для страницы (API, БД)
+3. Сгенерирует полный HTML
+4. Отправит ответ
+
+Если один из API-запросов медленный — весь пользователь ждёт:
+
+```
+Клиент запрашивает страницу
+         │
+         ▼
+Сервер: загружает данные (500мс)...............
+         │
+         ▼
+Сервер: рендерит HTML ─────────────────────────→ Клиент получает HTML (500мс задержки)
+```
+
+## Streaming SSR: постепенная отдача
+
+При потоковом SSR клиент сразу получает "скелет" страницы, а контент подгружается по мере готовности:
+
+```
+Клиент запрашивает страницу
+         │
+         ▼  0мс
+Сервер: → <html><head>...</head><body>... (отправляет сразу!)
+         │  50мс
+         ▼
+Сервер: → <header>...</header><nav>... (готово, отправляем)
+         │  200мс
+         ▼
+Сервер: → <article>...</article> (загружен из БД, отправляем)
+         │  500мс
+         ▼
+Сервер: → <aside>рекомендации...</aside></body></html> (последний блок)
+```
+
+## `renderToStream` vs `renderToString`
+
+```tsx
+import { renderToString, renderToStream } from 'solid-js/web';
+
+// Классический SSR — ждёт всех данных
+const html = await renderToString(() => <App />);
+res.send(html);
+
+// Streaming SSR — отдаёт HTML по мере готовности
+const stream = renderToStream(() => <App />);
+// stream — это Node.js ReadableStream
+stream.pipe(res);
+
+// С заголовками (чтобы браузер не буферизовал)
+res.setHeader('Content-Type', 'text/html');
+res.setHeader('Transfer-Encoding', 'chunked');
+renderToStream(() => <App />).pipe(res);
+```
+
+## Suspense + Streaming = магия
+
+Ключевая концепция: `<Suspense>` определяет **границы потока**. Каждый Suspense отдаётся независимо:
+
+```tsx
+function Page() {
+  return (
+    <html>
+      <body>
+        {/* Этот блок придёт сразу — нет async данных */}
+        <Header />
+        <nav>...</nav>
+
+        {/* Этот блок придёт, когда загрузится статья (200мс) */}
+        <Suspense fallback={<ArticleSkeleton />}>
+          <Article />
+        </Suspense>
+
+        {/* Этот блок придёт последним (500мс) */}
+        <Suspense fallback={<SidebarSkeleton />}>
+          <Sidebar />
+        </Suspense>
+      </body>
+    </html>
+  );
+}
+```
+
+При потоковом SSR браузер:
+1. Получает статичный HTML немедленно, показывает скелетон
+2. Получает chunk с `<Article>` через 200мс, заменяет скелетон
+3. Получает chunk с `<Sidebar>` через 500мс, заменяет скелетон
+
+## Lazy-компоненты в потоке
+
+```tsx
+import { lazy } from 'solid-js';
+import { Suspense } from 'solid-js';
+
+// Lazy-компонент разделяет код (code splitting) и интегрируется со Streaming
+const HeavyChart = lazy(() => import('./HeavyChart'));
+
+function Dashboard() {
+  return (
+    <div>
+      <QuickStats />  {/* Приходит первым */}
+
+      <Suspense fallback={<div>Загрузка графика...</div>}>
+        <HeavyChart />  {/* Приходит когда JS-бандл загружен */}
+      </Suspense>
+    </div>
+  );
+}
+```
+
+## Прогрессивная гидратация
+
+Solid.js поддерживает **out-of-order streaming** — Suspense-блоки могут разрешаться в любом порядке, не только последовательно:
+
+```tsx
+// Сервер отправляет блоки в порядке готовности:
+// 1. Сначала <Header> (0мс)
+// 2. Потом <Sidebar> (100мс) — хотя стоит ПОСЛЕ <Article> в JSX!
+// 3. Потом <Article> (300мс)
+function Page() {
+  return (
+    <>
+      <Header />
+      <Suspense fallback={<ArticleSkeleton />}>
+        <Article />       {/* 300мс */}
+      </Suspense>
+      <Suspense fallback={<SidebarSkeleton />}>
+        <Sidebar />       {/* 100мс — придёт первым из двух! */}
+      </Suspense>
+    </>
+  );
+}
+```
+
+Под капотом Solid вставляет `<script>` теги, которые манипулируют DOM для замены скелетонов в правильные позиции.
+
+## Конфигурация в SolidStart
+
+```tsx
+// app.config.ts
+import { defineConfig } from '@solidjs/start/config';
+
+export default defineConfig({
+  server: {
+    // Включаем streaming
+    experimental: {
+      asyncContext: true,
+    }
+  }
+});
+
+// src/routes/index.tsx — streaming работает автоматически с Suspense
+export default function Home() {
+  return (
+    <main>
+      <h1>Мой сайт</h1>
+      <Suspense fallback={<p>Загрузка постов...</p>}>
+        <PostList />
+      </Suspense>
+    </main>
+  );
+}
+```
+
+## Метрики производительности
+
+| Метрика | `renderToString` | `renderToStream` |
+|---|---|---|
+| **TTFB** (Time to First Byte) | После загрузки всех данных | Немедленно |
+| **FCP** (First Contentful Paint) | После всего HTML | После первого chunk |
+| **LCP** (Largest Contentful Paint) | После всего HTML | Зависит от расположения |
+| **TTI** (Time to Interactive) | После гидратации | Progressive |
+| **Сложность** | Проще | Требует настройки |
+
+## Интерактивный пример
+
+Симуляция потокового SSR — наблюдай, как HTML-чанки прибывают один за другим:
+
+<Playground client:visible
+  template="react"
+  files={{
+    'App.tsx': `import { useState, useEffect, useRef, useCallback } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const YELLOW = '#fbbf24';
+const PURPLE = '#a78bfa';
+
+// Симулируемые блоки страницы
+interface PageBlock {
+  id: string;
+  label: string;
+  delay: number;  // мс до прибытия
+  color: string;
+  size: number;   // высота в px
+  isSuspense: boolean;
+  htmlPreview: string;
+}
+
+const BLOCKS: PageBlock[] = [
+  { id: 'shell',   label: '<html><head>',    delay: 0,   color: MUTED,       size: 36,  isSuspense: false, htmlPreview: '<!DOCTYPE html><html><head><title>...</title></head><body>' },
+  { id: 'header',  label: '<Header>',        delay: 30,  color: SOLID_BLUE,  size: 48,  isSuspense: false, htmlPreview: '<header><nav>Логотип • Меню</nav></header>' },
+  { id: 'hero',    label: '<Hero>',          delay: 80,  color: SOLID_BLUE,  size: 56,  isSuspense: false, htmlPreview: '<section class="hero"><h1>Заголовок</h1></section>' },
+  { id: 'sidebar', label: '<Sidebar>',       delay: 120, color: GREEN,       size: 44,  isSuspense: true,  htmlPreview: '<aside><!-- Sidebar данные загружены за 120мс --></aside>' },
+  { id: 'article', label: '<Article>',       delay: 280, color: ORANGE,      size: 52,  isSuspense: true,  htmlPreview: '<article><!-- Статья из БД — 280мс --></article>' },
+  { id: 'related', label: '<Related>',       delay: 420, color: YELLOW,      size: 44,  isSuspense: true,  htmlPreview: '<section><!-- Рекомендации из AI — 420мс --></section>' },
+  { id: 'close',   label: '</body></html>',  delay: 430, color: MUTED,       size: 36,  isSuspense: false, htmlPreview: '</body></html>' },
+];
+
+// Симуляция блокирующего SSR
+const BLOCKING_DELAY = 430; // ждёт самый медленный блок
+
+function BlockCard({ block, arrived, streaming }: { block: PageBlock; arrived: boolean; streaming: boolean }) {
+  const isWaiting = !arrived && streaming;
+  return (
+    <div style={{
+      height: block.size,
+      borderRadius: '6px',
+      border: '1px solid ' + (arrived ? block.color + '66' : BORDER),
+      background: arrived ? block.color + '15' : CARD,
+      display: 'flex', alignItems: 'center', gap: '10px',
+      padding: '0 14px',
+      transition: 'all .3s ease',
+      position: 'relative',
+      overflow: 'hidden',
+    }}>
+      {arrived && (
+        <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: '3px', background: block.color, borderRadius: '3px 0 0 3px' }} />
+      )}
+      <div style={{ width: 10, height: 10, borderRadius: '50%', background: arrived ? block.color : BORDER, flexShrink: 0, transition: 'background .3s' }} />
+      <span style={{ fontSize: '12px', fontFamily: 'monospace', color: arrived ? block.color : MUTED, fontWeight: arrived ? 600 : 400 }}>
+        {block.label}
+        {block.isSuspense && <span style={{ marginLeft: 6, fontSize: '10px', opacity: 0.7 }}>{'<Suspense>'}</span>}
+      </span>
+      {isWaiting && (
+        <span style={{ marginLeft: 'auto', fontSize: '11px', color: MUTED, fontStyle: 'italic' }}>ожидание…</span>
+      )}
+      {arrived && (
+        <span style={{ marginLeft: 'auto', fontSize: '11px', color: block.color }}>{block.delay}мс</span>
+      )}
+    </div>
+  );
+}
+
+function Timeline({ arrivedAt, mode }: { arrivedAt: Record<string, number>; mode: 'streaming' | 'blocking' }) {
+  const maxDelay = BLOCKING_DELAY;
+  return (
+    <div style={{ padding: '12px', background: BG, borderRadius: '8px', border: '1px solid ' + BORDER }}>
+      <div style={{ fontSize: '11px', color: MUTED, marginBottom: '8px' }}>Временная шкала ({mode === 'blocking' ? 'блокирующий' : 'потоковый'} SSR)</div>
+      <div style={{ position: 'relative', height: '24px' }}>
+        <div style={{ position: 'absolute', left: 0, top: '50%', right: 0, height: '1px', background: BORDER }} />
+        <div style={{ position: 'absolute', left: 0, top: '50%', height: '2px', background: mode === 'streaming' ? SOLID_BLUE : ORANGE, transition: 'width .1s linear', width: Math.min(100, (Object.keys(arrivedAt).length / BLOCKS.length) * 100) + '%' }} />
+        {BLOCKS.map(b => {
+          const x = (b.delay / maxDelay) * 100;
+          const arrived = b.id in arrivedAt;
+          return (
+            <div key={b.id} style={{ position: 'absolute', left: x + '%', top: '50%', transform: 'translate(-50%, -50%)', width: 8, height: 8, borderRadius: '50%', background: arrived ? b.color : BORDER, border: '1px solid ' + (arrived ? b.color : MUTED), transition: 'background .3s' }} />
+          );
+        })}
+        <span style={{ position: 'absolute', left: 0, top: '100%', marginTop: '4px', fontSize: '10px', color: MUTED }}>0мс</span>
+        <span style={{ position: 'absolute', right: 0, top: '100%', marginTop: '4px', fontSize: '10px', color: MUTED }}>{maxDelay}мс</span>
+        {mode === 'blocking' && (
+          <span style={{ position: 'absolute', right: 0, bottom: '100%', marginBottom: '4px', fontSize: '10px', color: ORANGE }}>FCP здесь ↑</span>
+        )}
+        {mode === 'streaming' && (
+          <span style={{ position: 'absolute', left: '7%', bottom: '100%', marginBottom: '4px', fontSize: '10px', color: GREEN }}>FCP здесь ↑</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HtmlLog({ blocks, arrived }: { blocks: PageBlock[]; arrived: Set<string> }) {
+  const arrivedBlocks = blocks.filter(b => arrived.has(b.id));
+  return (
+    <div style={{ background: '#0d1117', borderRadius: '8px', padding: '10px 12px', fontFamily: 'monospace', fontSize: '10px', color: GREEN, maxHeight: '120px', overflowY: 'auto', border: '1px solid ' + BORDER }}>
+      <div style={{ color: MUTED, marginBottom: '4px' }}>// HTML stream (входящие чанки):</div>
+      {arrivedBlocks.map(b => (
+        <div key={b.id} style={{ color: b.color, marginBottom: '2px' }}>
+          {'> '}{b.htmlPreview}
+        </div>
+      ))}
+      {arrivedBlocks.length === 0 && <div style={{ color: MUTED }}>Нажми "Запустить"...</div>}
+    </div>
+  );
+}
+
+export default function App() {
+  const [mode, setMode] = useState<'streaming' | 'blocking'>('streaming');
+  const [running, setRunning] = useState(false);
+  const [arrivedIds, setArrivedIds] = useState<Set<string>>(new Set());
+  const [arrivedAt, setArrivedAt] = useState<Record<string, number>>({});
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [fcpTime, setFcpTime] = useState<number | null>(null);
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const ticker = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const reset = useCallback(() => {
+    timers.current.forEach(clearTimeout);
+    if (ticker.current) clearInterval(ticker.current);
+    setArrivedIds(new Set());
+    setArrivedAt({});
+    setStartTime(null);
+    setElapsed(0);
+    setFcpTime(null);
+    setRunning(false);
+  }, []);
+
+  const run = useCallback(() => {
+    reset();
+    const start = Date.now();
+    setStartTime(start);
+    setRunning(true);
+    ticker.current = setInterval(() => setElapsed(Date.now() - start), 16);
+
+    if (mode === 'streaming') {
+      // Streaming: каждый блок приходит по мере готовности
+      BLOCKS.forEach(block => {
+        const t = setTimeout(() => {
+          setArrivedIds(prev => new Set([...prev, block.id]));
+          setArrivedAt(prev => ({ ...prev, [block.id]: Date.now() - start }));
+          // FCP = первый видимый контент (header)
+          if (block.id === 'header') setFcpTime(Date.now() - start);
+        }, block.delay);
+        timers.current.push(t);
+      });
+      const end = setTimeout(() => {
+        setRunning(false);
+        if (ticker.current) clearInterval(ticker.current);
+      }, BLOCKING_DELAY + 50);
+      timers.current.push(end);
+    } else {
+      // Blocking: все блоки приходят сразу после самого медленного
+      const t = setTimeout(() => {
+        const all = new Set(BLOCKS.map(b => b.id));
+        const atMap: Record<string, number> = {};
+        BLOCKS.forEach(b => { atMap[b.id] = BLOCKING_DELAY; });
+        setArrivedIds(all);
+        setArrivedAt(atMap);
+        setFcpTime(BLOCKING_DELAY);
+        setRunning(false);
+        if (ticker.current) clearInterval(ticker.current);
+      }, BLOCKING_DELAY);
+      timers.current.push(t);
+    }
+  }, [mode, reset]);
+
+  const total = arrivedIds.size;
+  const pct = Math.round((total / BLOCKS.length) * 100);
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 680, margin: '0 auto' }}>
+        <h1 style={{ margin: '0 0 4px', fontSize: '20px' }}>Streaming SSR Симуляция</h1>
+        <p style={{ margin: '0 0 16px', color: MUTED, fontSize: '13px' }}>Наблюдай, как HTML-чанки прибывают по мере готовности</p>
+
+        {/* Controls */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+          <button onClick={() => { reset(); setMode('streaming'); }}
+            style={{ padding: '7px 14px', background: mode === 'streaming' ? SOLID_BLUE : CARD, border: '1px solid ' + (mode === 'streaming' ? SOLID_BLUE : BORDER), borderRadius: '8px', color: TEXT, cursor: 'pointer', fontSize: '13px', fontWeight: mode === 'streaming' ? 600 : 400 }}>
+            🌊 Streaming SSR
+          </button>
+          <button onClick={() => { reset(); setMode('blocking'); }}
+            style={{ padding: '7px 14px', background: mode === 'blocking' ? ORANGE + '33' : CARD, border: '1px solid ' + (mode === 'blocking' ? ORANGE : BORDER), borderRadius: '8px', color: mode === 'blocking' ? ORANGE : TEXT, cursor: 'pointer', fontSize: '13px', fontWeight: mode === 'blocking' ? 600 : 400 }}>
+            🧱 Blocking SSR
+          </button>
+          <button onClick={running ? reset : run}
+            style={{ padding: '7px 18px', background: running ? RED + '22' : GREEN + '22', border: '1px solid ' + (running ? RED + '44' : GREEN + '44'), borderRadius: '8px', color: running ? RED : GREEN, cursor: 'pointer', fontSize: '13px', fontWeight: 600, marginLeft: 'auto' }}>
+            {running ? '⏹ Стоп' : '▶ Запустить'}
+          </button>
+        </div>
+
+        {/* Stats */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '14px' }}>
+          {[
+            { label: 'Прошло', value: elapsed + 'мс', color: TEXT },
+            { label: 'FCP', value: fcpTime !== null ? fcpTime + 'мс' : '—', color: fcpTime !== null ? (mode === 'streaming' ? GREEN : ORANGE) : MUTED },
+            { label: 'Чанков', value: total + ' / ' + BLOCKS.length, color: SOLID_BLUE },
+          ].map(s => (
+            <div key={s.label} style={{ background: CARD, borderRadius: '8px', padding: '10px 12px', border: '1px solid ' + BORDER, textAlign: 'center' }}>
+              <div style={{ fontSize: '18px', fontWeight: 700, color: s.color }}>{s.value}</div>
+              <div style={{ fontSize: '11px', color: MUTED, marginTop: '2px' }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Progress */}
+        <div style={{ marginBottom: '14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: MUTED, marginBottom: '4px' }}>
+            <span>Получено HTML</span><span>{pct}%</span>
+          </div>
+          <div style={{ height: '4px', background: BORDER, borderRadius: '2px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', background: mode === 'streaming' ? SOLID_BLUE : ORANGE, width: pct + '%', transition: 'width .1s' }} />
+          </div>
+        </div>
+
+        {/* Blocks */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: '14px' }}>
+          {BLOCKS.map(b => (
+            <BlockCard key={b.id} block={b} arrived={arrivedIds.has(b.id)} streaming={mode === 'streaming'} />
+          ))}
+        </div>
+
+        {/* Timeline */}
+        <div style={{ marginBottom: '14px' }}>
+          <Timeline arrivedAt={arrivedAt} mode={mode} />
+        </div>
+
+        {/* HTML Log */}
+        <HtmlLog blocks={BLOCKS} arrived={arrivedIds} />
+
+        {/* Comparison note */}
+        {total === BLOCKS.length && (
+          <div style={{ marginTop: '12px', padding: '12px 14px', background: mode === 'streaming' ? GREEN + '10' : ORANGE + '10', borderRadius: '8px', border: '1px solid ' + (mode === 'streaming' ? GREEN + '33' : ORANGE + '33'), fontSize: '12px', color: MUTED, lineHeight: 1.6 }}>
+            {mode === 'streaming'
+              ? <><span style={{ color: GREEN, fontWeight: 600 }}>✓ Streaming SSR: </span>FCP через {fcpTime}мс — пользователь видел скелетон сразу, контент подгружался постепенно.</>
+              : <><span style={{ color: ORANGE, fontWeight: 600 }}>⚠ Blocking SSR: </span>FCP через {fcpTime}мс — пользователь ждал {BLOCKING_DELAY}мс ничего, затем получил всё сразу.</>
+            }
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const RED = '#f87171';
+`
+  }}
+/>

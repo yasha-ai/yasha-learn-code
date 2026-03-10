@@ -1,0 +1,114 @@
+---
+title: "30. Migrations: Zero-Downtime"
+sidebar:
+  order: 30
+---
+import { Playground } from '@components/Playground'
+
+Обновление БД без остановки сервиса.
+
+## Стратегия Expand-Migrate-Contract
+
+### Phase 1: Expand
+
+Добавляем новую структуру, не удаляя старую.
+
+```sql
+-- Добавляем новую колонку
+ALTER TABLE users ADD COLUMN full_name VARCHAR(200);
+
+-- Триггер для синхронизации
+CREATE TRIGGER sync_full_name
+BEFORE INSERT OR UPDATE ON users
+FOR EACH ROW
+EXECUTE FUNCTION update_full_name();
+```
+
+### Phase 2: Migrate
+
+Приложение использует оба поля одновременно.
+
+```typescript
+// Читаем из старого, пишем в оба
+await db.query(`
+  UPDATE users 
+  SET full_name = first_name || ' ' || last_name,
+      first_name = $1, 
+      last_name = $2
+  WHERE id = $3
+`, [firstName, lastName, userId]);
+```
+
+### Phase 3: Contract
+
+Удаляем старую структуру после миграции всех данных.
+
+```sql
+-- Удаляем старые колонки
+ALTER TABLE users DROP COLUMN first_name;
+ALTER TABLE users DROP COLUMN last_name;
+```
+
+## Безопасное переименование
+
+```sql
+-- 1. Создать VIEW с новым именем
+CREATE VIEW new_table_name AS SELECT * FROM old_table_name;
+
+-- 2. Переключить приложение на VIEW
+
+-- 3. Переименовать таблицу
+ALTER TABLE old_table_name RENAME TO new_table_name;
+DROP VIEW new_table_name;
+```
+
+## 💡 Best Practices
+
+1. **Backward compatible миграции**
+2. **Используйте feature flags** для переключения
+3. **Тестируйте rollback**
+4. **Мониторьте производительность** после миграции
+5. **Blue-Green deployments** для критичных изменений
+
+---
+
+**Поздравляем!** Вы завершили курс по базам данных! 🎉
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.js": `// JavaScript-эквивалент zero-downtime миграций
+// Стратегия: постепенное изменение без остановки сервиса
+
+let schema = { users: ["id", "name", "email"] };
+let data = [
+  { id: 1, name: "Алиса", email: "alice@mail.ru" },
+  { id: 2, name: "Борис", email: "boris@mail.ru" },
+];
+
+console.log("=== Zero-Downtime Migration ===");
+
+// Шаг 1: Добавить новое поле (nullable)
+console.log("\\nШаг 1: ADD COLUMN full_name (nullable)");
+schema.users.push("full_name");
+data = data.map(d => ({ ...d, full_name: null }));
+console.log("Данные:", data);
+
+// Шаг 2: Backfill — заполнить данные
+console.log("\\nШаг 2: Backfill данных");
+data = data.map(d => ({ ...d, full_name: d.name }));
+console.log("Данные:", data);
+
+// Шаг 3: Код читает оба поля
+console.log("\\nШаг 3: Код использует full_name || name");
+const getName = (user) => user.full_name || user.name;
+console.log(getName(data[0]));
+
+// Шаг 4: Удалить старое поле (когда всё работает)
+console.log("\\nШаг 4: DROP COLUMN name");
+data = data.map(({ name, ...rest }) => rest);
+console.log("Финальные данные:", data);
+console.log("\\nРезультат: миграция без простоя!");
+`
+  }}
+/>

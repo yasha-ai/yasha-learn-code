@@ -1,0 +1,619 @@
+---
+title: "12. Сервисы"
+sidebar:
+  order: 12
+---
+import { Playground } from '@components/Playground'
+
+
+## 🔧 Сервисы в Angular
+
+Представь, что компонент — это официант в ресторане 🍽️. Его задача — принять заказ и принести блюдо. Готовит же **повар на кухне**. Сервисы в Angular — это и есть повара: они содержат бизнес-логику, работают с данными и ничего не знают об интерфейсе.
+
+---
+
+### 🎯 Зачем нужны сервисы?
+
+| Без сервисов ❌ | С сервисами ✅ |
+|---------------|--------------|
+| Логика в компонентах | Логика изолирована |
+| Дублирование кода | Переиспользование |
+| Сложное тестирование | Легко мокировать |
+| Нет общего состояния | Синглтон-состояние |
+| Компоненты знают всё | Разделение ответственности |
+
+Сервисы используются для:
+
+- 📡 **Запросов к API** — вся HTTP-логика живёт здесь
+- 🗃️ **Общего состояния** — текущий пользователь, настройки, корзина
+- 🔧 **Утилит** — логирование, форматирование, вспомогательные функции
+- 🔔 **Уведомлений** — тосты, диалоги, алерты
+
+---
+
+### 📌 @Injectable() — создание сервиса
+
+```typescript
+import { Injectable } from '@angular/core';
+
+@Injectable({
+  providedIn: 'root' // 👈 Angular создаст один экземпляр на всё приложение
+})
+export class UserService {
+  private currentUser: User | null = null;
+
+  getUser(): User | null {
+    return this.currentUser;
+  }
+
+  setUser(user: User): void {
+    this.currentUser = user;
+  }
+
+  isLoggedIn(): boolean {
+    return this.currentUser !== null;
+  }
+
+  logout(): void {
+    this.currentUser = null;
+  }
+}
+```
+
+Создать сервис через Angular CLI:
+
+```bash
+ng generate service services/user
+ng g s services/user
+```
+
+CLI создаст `user.service.ts` и `user.service.spec.ts` (тест) автоматически.
+
+---
+
+### 🌍 providedIn: 'root' — синглтон на весь app
+
+`providedIn: 'root'` — самый популярный вариант. Angular создаёт **один экземпляр** сервиса для всего приложения. HeaderComponent, DashboardComponent и ProfileComponent — все получат один и тот же объект.
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class CartService {
+  private items: CartItem[] = [];
+
+  addItem(product: Product): void {
+    const existing = this.items.find(i => i.id === product.id);
+    if (existing) {
+      existing.quantity++;
+    } else {
+      this.items.push({ ...product, quantity: 1 });
+    }
+  }
+
+  removeItem(productId: number): void {
+    this.items = this.items.filter(i => i.id !== productId);
+  }
+
+  getTotal(): number {
+    return this.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  }
+
+  getCount(): number {
+    return this.items.reduce((sum, item) => sum + item.quantity, 0);
+  }
+
+  clear(): void {
+    this.items = [];
+  }
+}
+```
+
+> 💡 Angular применяет **tree-shaking**: если сервис не используется ни в одном компоненте, он вообще не попадёт в итоговый бандл. Магия!
+
+---
+
+### 🏢 Все варианты providedIn
+
+```typescript
+// Синглтон на уровне корневого инжектора (по умолчанию)
+@Injectable({ providedIn: 'root' })
+export class GlobalService {}
+
+// Новый экземпляр для каждого lazy-loaded модуля
+@Injectable({ providedIn: 'any' })
+export class ModuleService {}
+
+// Предоставляем в конкретном NgModule
+@Injectable({ providedIn: FeatureModule })
+export class FeatureService {}
+```
+
+```typescript
+// Предоставление в NgModule — старый стиль
+@NgModule({
+  providers: [OrderService] // доступен всем компонентам модуля
+})
+export class OrderModule {}
+
+// Предоставление в компоненте — новый экземпляр для каждого компонента!
+@Component({
+  selector: 'app-form',
+  providers: [FormStateService], // 👈 Только этот компонент и его потомки
+  template: `...`
+})
+export class FormComponent {
+  constructor(private formState: FormStateService) {}
+}
+```
+
+---
+
+### 🏗️ Паттерн синглтона — аналогия
+
+Представь базу знаний в офисе 📚. Она **одна на всю компанию**. Любой сотрудник (компонент) подходит к ней и берёт нужную информацию. Никто не создаёт свою копию — все работают с одним экземпляром.
+
+```typescript
+// Это ОДИН объект UserService в памяти браузера
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  private _token: string | null = null;
+  private _user: User | null = null;
+
+  // HeaderComponent вызывает это
+  // ProfileComponent вызывает это
+  // DashboardComponent вызывает это
+  // — все читают ОДНО и то же состояние! 🎯
+  get user(): User | null { return this._user; }
+  get isAuthenticated(): boolean { return !!this._token; }
+  get token(): string | null { return this._token; }
+
+  login(credentials: LoginDto): Observable<void> {
+    return this.http.post<AuthResponse>('/api/auth/login', credentials).pipe(
+      tap(response => {
+        this._token = response.token;
+        this._user = response.user;
+        localStorage.setItem('token', response.token);
+      }),
+      map(() => undefined)
+    );
+  }
+
+  logout(): void {
+    this._token = null;
+    this._user = null;
+    localStorage.removeItem('token');
+  }
+}
+```
+
+---
+
+### 🔗 Композиция сервисов
+
+Сервисы могут зависеть от других сервисов — Angular DI разрешает всю цепочку зависимостей автоматически:
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class LoggingService {
+  private prefix = '[APP]';
+
+  log(message: string): void {
+    console.log(this.prefix, new Date().toISOString(), message);
+  }
+
+  error(message: string, err?: unknown): void {
+    console.error(this.prefix, '❌', message, err);
+  }
+
+  warn(message: string): void {
+    console.warn(this.prefix, '⚠️', message);
+  }
+}
+
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  // 👇 Angular сам найдёт и создаст эти зависимости
+  constructor(
+    private http: HttpClient,
+    private logger: LoggingService,   // 👈 Сервис в сервисе!
+    private storage: StorageService   // 👈 И ещё один
+  ) {}
+
+  loadProfile(): Observable<User> {
+    this.logger.log('Loading user profile...');
+
+    return this.http.get<User>('/api/profile').pipe(
+      tap(user => {
+        this.logger.log('Profile loaded: ' + user.name);
+        this.storage.set('user', user);
+      }),
+      catchError(err => {
+        this.logger.error('Failed to load profile', err);
+        return throwError(() => err);
+      })
+    );
+  }
+}
+```
+
+---
+
+### 💼 Реальные примеры сервисов
+
+#### NotificationService — всплывающие уведомления
+
+```typescript
+export interface Notification {
+  id: number;
+  type: 'success' | 'error' | 'info' | 'warn';
+  message: string;
+  duration?: number;
+}
+
+@Injectable({ providedIn: 'root' })
+export class NotificationService {
+  private notifications$ = new BehaviorSubject<Notification[]>([]);
+
+  get all$(): Observable<Notification[]> {
+    return this.notifications$.asObservable();
+  }
+
+  success(message: string, duration = 3000): void {
+    this.show({ type: 'success', message, duration });
+  }
+
+  error(message: string, duration = 5000): void {
+    this.show({ type: 'error', message, duration });
+  }
+
+  private show(notification: Omit<Notification, 'id'>): void {
+    const id = Date.now();
+    const current = this.notifications$.getValue();
+    this.notifications$.next([...current, { ...notification, id }]);
+
+    // Авто-удаление через указанное время
+    setTimeout(() => this.dismiss(id), notification.duration ?? 3000);
+  }
+
+  dismiss(id: number): void {
+    const current = this.notifications$.getValue();
+    this.notifications$.next(current.filter(n => n.id !== id));
+  }
+}
+```
+
+#### StorageService — обёртка над localStorage
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class StorageService {
+  get<T>(key: string): T | null {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) as T : null;
+    } catch {
+      return null;
+    }
+  }
+
+  set<T>(key: string, value: T): void {
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  remove(key: string): void {
+    localStorage.removeItem(key);
+  }
+
+  clear(): void {
+    localStorage.clear();
+  }
+
+  has(key: string): boolean {
+    return localStorage.getItem(key) !== null;
+  }
+}
+```
+
+#### LoggingService — уровни логирования
+
+```typescript
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+@Injectable({ providedIn: 'root' })
+export class LoggingService {
+  private level: LogLevel = environment.production ? 'warn' : 'debug';
+
+  debug(message: string, data?: unknown): void {
+    if (this.shouldLog('debug')) console.debug('[DEBUG]', message, data ?? '');
+  }
+
+  info(message: string, data?: unknown): void {
+    if (this.shouldLog('info')) console.info('[INFO]', message, data ?? '');
+  }
+
+  warn(message: string, data?: unknown): void {
+    if (this.shouldLog('warn')) console.warn('[WARN]', message, data ?? '');
+  }
+
+  error(message: string, err?: unknown): void {
+    console.error('[ERROR]', message, err ?? '');
+    // В продакшене — отправка в Sentry/Bugsnag
+  }
+
+  private shouldLog(level: LogLevel): boolean {
+    const levels: LogLevel[] = ['debug', 'info', 'warn', 'error'];
+    return levels.indexOf(level) >= levels.indexOf(this.level);
+  }
+}
+```
+
+---
+
+### 🌐 HttpClient в сервисах (превью)
+
+Обычно HTTP-запросы делаются именно в сервисах, а не в компонентах:
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class ProductService {
+  private readonly apiUrl = environment.apiUrl + '/products';
+
+  constructor(private http: HttpClient) {}
+
+  getAll(): Observable<Product[]> {
+    return this.http.get<Product[]>(this.apiUrl);
+  }
+
+  getById(id: number): Observable<Product> {
+    return this.http.get<Product>(this.apiUrl + '/' + id);
+  }
+
+  create(product: Omit<Product, 'id'>): Observable<Product> {
+    return this.http.post<Product>(this.apiUrl, product);
+  }
+
+  update(id: number, changes: Partial<Product>): Observable<Product> {
+    return this.http.patch<Product>(this.apiUrl + '/' + id, changes);
+  }
+
+  delete(id: number): Observable<void> {
+    return this.http.delete<void>(this.apiUrl + '/' + id);
+  }
+}
+```
+
+> 📖 Полный разбор HttpClient — в уроке [14. HttpClient](/angular/http-client/)
+
+---
+
+### ✅ Лучшие практики
+
+```typescript
+// ❌ Плохо: логика в компоненте
+@Component({ template: `<li *ngFor="let u of users">{{ u.name }}</li>` })
+export class BadComponent implements OnInit {
+  users: User[] = [];
+
+  // HTTP и бизнес-логика прямо в компоненте — нельзя переиспользовать и тяжело тестировать!
+  constructor(private http: HttpClient) {}
+
+  ngOnInit(): void {
+    this.http.get<User[]>('/api/users').subscribe(u => (this.users = u));
+  }
+}
+
+// ✅ Хорошо: тонкий компонент делегирует сервису
+@Component({ template: `<li *ngFor="let u of users$ | async">{{ u.name }}</li>` })
+export class GoodComponent {
+  // Компонент ТОЛЬКО отображает данные
+  users$ = this.userService.getAll();
+
+  constructor(private userService: UserService) {}
+}
+```
+
+> 🎯 **Принцип**: Компонент управляет **отображением**, сервис управляет **данными и логикой**. Если метод не связан с DOM — ему не место в компоненте.
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useState, createContext, useContext } from 'react';
+
+// В Angular: @Injectable({ providedIn: 'root' }) export class UserService {}
+// React Context здесь = Angular DI синглтон-сервис
+// Оба компонента получают ОДИН экземпляр UserService
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+
+// === Симуляция Angular UserService ===
+const UserServiceCtx = createContext(null);
+
+function UserServiceProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const [logs, setLogs] = useState([
+    { time: '--:--:--', msg: 'UserService инициализирован (providedIn: root)', type: 'info' }
+  ]);
+
+  const addLog = (msg, type) => {
+    const time = new Date().toLocaleTimeString();
+    setLogs(prev => [...prev.slice(-5), { time, msg, type: type || 'info' }]);
+  };
+
+  // this.userService.login(name, role) из любого компонента
+  const login = (name, role) => {
+    addLog('login("' + name + '") вызван из HeaderComponent', 'action');
+    setUser({ name, role, loginTime: new Date().toLocaleTimeString() });
+    addLog('Состояние обновлено: user = { name: "' + name + '" }', 'success');
+  };
+
+  // this.userService.logout() из любого компонента
+  const logout = () => {
+    addLog('logout() вызван из HeaderComponent', 'action');
+    setUser(null);
+    addLog('Состояние обновлено: user = null', 'warn');
+  };
+
+  // get isLoggedIn(): boolean { return !!this.user; }
+  const isLoggedIn = user !== null;
+
+  return (
+    <UserServiceCtx.Provider value={{ user, isLoggedIn, login, logout, logs }}>
+      {children}
+    </UserServiceCtx.Provider>
+  );
+}
+
+// Аналог constructor(private userService: UserService) {}
+function useUserService() {
+  return useContext(UserServiceCtx);
+}
+
+// === HeaderComponent ===
+// @Component({ selector: 'app-header' })
+// constructor(private userService: UserService) {}
+function HeaderComponent() {
+  const { user, isLoggedIn, login, logout } = useUserService();
+  const [showForm, setShowForm] = useState(false);
+  const [name, setName] = useState('Яша');
+  const [role, setRole] = useState('developer');
+
+  return (
+    <div style={{ background: '#0d1117', border: '1px solid ' + BORDER, borderRadius: '8px', padding: '14px 16px', marginBottom: '10px' }}>
+      <div style={{ color: '#475569', fontSize: '10px', fontWeight: 700, letterSpacing: '0.12em', marginBottom: '8px' }}>APP-HEADER COMPONENT</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ color: RED, fontWeight: 700, fontSize: '15px' }}>🔴 MyApp</div>
+        <div>
+          {isLoggedIn ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '13px', color: '#94a3b8' }}>
+                👤 {user.name}
+                <span style={{ background: '#1e3a5f', color: '#60a5fa', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', marginLeft: '6px' }}>{user.role}</span>
+              </span>
+              <button onClick={logout} style={{ background: 'transparent', color: '#64748b', border: '1px solid ' + BORDER, borderRadius: '6px', padding: '5px 12px', cursor: 'pointer', fontSize: '12px' }}>
+                Выйти
+              </button>
+            </div>
+          ) : (
+            <button onClick={() => setShowForm(!showForm)} style={{ background: RED, color: 'white', border: 'none', borderRadius: '6px', padding: '6px 14px', cursor: 'pointer', fontSize: '13px', fontWeight: 600 }}>
+              {showForm ? 'Отмена' : 'Войти'}
+            </button>
+          )}
+        </div>
+      </div>
+      {showForm && !isLoggedIn && (
+        <div style={{ marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Имя пользователя"
+            style={{ background: BG, border: '1px solid ' + BORDER, color: '#e2e8f0', borderRadius: '6px', padding: '6px 10px', fontSize: '13px', width: '130px', outline: 'none' }}
+          />
+          <select
+            value={role}
+            onChange={e => setRole(e.target.value)}
+            style={{ background: BG, border: '1px solid ' + BORDER, color: '#e2e8f0', borderRadius: '6px', padding: '6px 10px', fontSize: '13px', outline: 'none' }}
+          >
+            <option value="developer">developer</option>
+            <option value="admin">admin</option>
+            <option value="viewer">viewer</option>
+          </select>
+          <button onClick={() => { login(name, role); setShowForm(false); }} style={{ background: RED, color: 'white', border: 'none', borderRadius: '6px', padding: '6px 14px', cursor: 'pointer', fontSize: '13px', fontWeight: 600 }}>
+            ✓ Войти
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// === DashboardComponent ===
+// @Component({ selector: 'app-dashboard' })
+// constructor(private userService: UserService) {}  ← ТОТ ЖЕ сервис!
+function DashboardComponent() {
+  // Тот же UserService — то же состояние, что и в HeaderComponent
+  const { user, isLoggedIn } = useUserService();
+
+  return (
+    <div style={{ background: CARD, border: '1px solid ' + BORDER, borderRadius: '8px', padding: '14px 16px', marginBottom: '10px' }}>
+      <div style={{ color: '#475569', fontSize: '10px', fontWeight: 700, letterSpacing: '0.12em', marginBottom: '10px' }}>APP-DASHBOARD COMPONENT</div>
+      {isLoggedIn ? (
+        <div>
+          <div style={{ color: '#22c55e', fontWeight: 600, marginBottom: '10px', fontSize: '13px' }}>
+            ✅ Читает тот же UserService:
+          </div>
+          <div style={{ background: BG, borderRadius: '6px', padding: '12px', fontFamily: 'monospace', fontSize: '12px', marginBottom: '12px', border: '1px solid ' + BORDER }}>
+            <div style={{ color: '#475569', marginBottom: '4px' }}>// this.userService.user</div>
+            <div><span style={{ color: '#7dd3fc' }}>name</span>: <span style={{ color: '#a3e635' }}>"{user.name}"</span></div>
+            <div><span style={{ color: '#7dd3fc' }}>role</span>: <span style={{ color: '#a3e635' }}>"{user.role}"</span></div>
+            <div><span style={{ color: '#7dd3fc' }}>loginTime</span>: <span style={{ color: '#fbbf24' }}>"{user.loginTime}"</span></div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+            {[
+              { title: 'Профиль', icon: '👤', bg: '#1e3a5f', color: '#60a5fa' },
+              { title: 'Задачи', icon: '📋', bg: '#14532d', color: '#22c55e' },
+              { title: user.role === 'admin' ? 'Админка' : 'Отчёты', icon: user.role === 'admin' ? '🔑' : '📊', bg: '#581c87', color: '#a78bfa' },
+              { title: 'Настройки', icon: '⚙️', bg: '#7c2d12', color: '#fb923c' },
+            ].map(item => (
+              <div key={item.title} style={{ background: item.bg + '40', border: '1px solid ' + item.bg, borderRadius: '6px', padding: '10px', cursor: 'pointer' }}>
+                <div style={{ fontSize: '18px' }}>{item.icon}</div>
+                <div style={{ color: item.color, fontSize: '12px', fontWeight: 600, marginTop: '4px' }}>{item.title}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div style={{ textAlign: 'center', padding: '24px', color: '#334155' }}>
+          <div style={{ fontSize: '36px', marginBottom: '8px' }}>🔒</div>
+          <div style={{ fontSize: '13px', color: '#475569' }}>userService.isLoggedIn = false</div>
+          <div style={{ fontSize: '12px', marginTop: '4px', color: '#334155' }}>Войдите через Header Component выше</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Лог вызовов сервиса
+function ServiceLogsPanel() {
+  const { logs } = useUserService();
+  const colors = { info: '#475569', action: '#fbbf24', success: '#22c55e', warn: '#f87171' };
+  return (
+    <div style={{ background: '#050a0f', border: '1px solid ' + BORDER, borderRadius: '8px', padding: '14px 16px' }}>
+      <div style={{ color: '#475569', fontSize: '10px', fontWeight: 700, letterSpacing: '0.12em', marginBottom: '10px' }}>📋 USERSERVICE ACTIVITY LOG</div>
+      {logs.map((log, i) => (
+        <div key={i} style={{ fontFamily: 'monospace', fontSize: '11px', padding: '3px 0', borderBottom: '1px solid #0f172a', display: 'flex', gap: '8px' }}>
+          <span style={{ color: '#334155', minWidth: '60px' }}>{log.time}</span>
+          <span style={{ color: colors[log.type] || '#475569' }}>{log.msg}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// === AppComponent — корень приложения ===
+// В Angular: bootstrapApplication(AppComponent, { providers: [UserService] })
+export default function App() {
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui', color: '#e2e8f0' }}>
+      <div style={{ color: RED, fontWeight: 700, fontSize: '13px', letterSpacing: '0.05em', marginBottom: '4px' }}>
+        🔧 Angular Services — Singleton через DI
+      </div>
+      <div style={{ fontSize: '12px', color: '#475569', marginBottom: '14px' }}>
+        Два компонента → один UserService → одно состояние
+      </div>
+      <div style={{ background: '#0d1117', border: '1px dashed #1e3a5f', borderRadius: '8px', padding: '10px 14px', marginBottom: '14px', fontSize: '11px', color: '#475569' }}>
+        <span style={{ color: '#60a5fa' }}>UserServiceProvider</span> = Angular Root Injector (providedIn: 'root')
+        — <strong style={{ color: '#e2e8f0' }}>один</strong> экземпляр для всего дерева компонентов
+      </div>
+      {/* В Angular это корневой AppModule/AppComponent с инжектируемым UserService */}
+      <UserServiceProvider>
+        <HeaderComponent />
+        <DashboardComponent />
+        <ServiceLogsPanel />
+      </UserServiceProvider>
+    </div>
+  );
+}
+` }} />

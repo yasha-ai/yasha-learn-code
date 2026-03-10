@@ -1,0 +1,437 @@
+---
+title: "12. Безопасность в real-time"
+sidebar:
+  order: 12
+---
+
+import { Playground } from "@components/Playground"
+
+Real-time соединения создают новые векторы атак. Разберём угрозы и защиту.
+
+## Аутентификация WebSocket/Socket.io
+
+WebSocket не отправляет куки автоматически на кросс-доменных запросах. Нужна явная аутентификация:
+
+```javascript
+// ❌ НЕПРАВИЛЬНО: нет проверки
+io.on('connection', (socket) => {
+  socket.on('send-message', (data) => {
+    io.emit('message', data); // Кто угодно может писать!
+  });
+});
+
+// ✅ ПРАВИЛЬНО: middleware с JWT
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth.token
+    || socket.handshake.headers.authorization?.replace('Bearer ', '');
+
+  if (!token) {
+    return next(new Error('Unauthorized: токен не предоставлен'));
+  }
+
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    socket.data.userId = payload.sub;
+    socket.data.username = payload.username;
+    socket.data.role = payload.role;
+    next();
+  } catch (err) {
+    next(new Error('Unauthorized: невалидный токен'));
+  }
+});
+
+// Клиент
+const socket = io('wss://example.com', {
+  auth: {
+    token: localStorage.getItem('accessToken'),
+  },
+});
+
+// Обработка ошибки авторизации
+socket.on('connect_error', (err) => {
+  if (err.message === 'Unauthorized: токен не предоставлен') {
+    // Перенаправить на логин
+    window.location.href = '/login';
+  }
+});
+```
+
+## Refresh Token для WebSocket
+
+JWT истекают. Нужно обновлять токен без разрыва соединения:
+
+```javascript
+// Клиент
+socket.on('token_expired', async () => {
+  try {
+    const newToken = await refreshAccessToken();
+    socket.auth.token = newToken;
+    socket.disconnect().connect(); // Переподключиться с новым токеном
+  } catch (err) {
+    window.location.href = '/login';
+  }
+});
+
+// Сервер: проверять токен и уведомлять об истечении
+io.use(async (socket, next) => {
+  const decoded = jwt.verify(token, secret);
+  const expiresIn = decoded.exp - Date.now() / 1000;
+  
+  if (expiresIn < 300) { // Истекает через 5 минут
+    socket.emit('token_expires_soon', { expiresIn });
+  }
+  
+  next();
+});
+```
+
+## Rate Limiting — защита от спама
+
+```javascript
+// В памяти (для одного сервера)
+const rateLimit = new Map(); // socketId → { count, resetAt }
+
+function checkRateLimit(socketId, limit = 10, windowMs = 1000) {
+  const now = Date.now();
+  const state = rateLimit.get(socketId) || { count: 0, resetAt: now + windowMs };
+  
+  if (now > state.resetAt) {
+    state.count = 0;
+    state.resetAt = now + windowMs;
+  }
+  
+  state.count++;
+  rateLimit.set(socketId, state);
+  
+  return state.count <= limit;
+}
+
+io.on('connection', (socket) => {
+  socket.on('send-message', (data, callback) => {
+    // Не более 10 сообщений в секунду
+    if (!checkRateLimit(socket.id, 10, 1000)) {
+      return callback?.({ error: 'Rate limit exceeded' });
+    }
+    // ...
+  });
+});
+
+// Redis для нескольких серверов
+const { RateLimiterRedis } = require('rate-limiter-flexible');
+
+const rateLimiter = new RateLimiterRedis({
+  storeClient: redisClient,
+  keyPrefix: 'ws_rl',
+  points: 10,           // 10 действий
+  duration: 1,          // за 1 секунду
+  blockDuration: 10,    // блокировать на 10 секунд после превышения
+});
+
+io.on('connection', (socket) => {
+  socket.on('send-message', async (data, callback) => {
+    try {
+      await rateLimiter.consume(socket.data.userId);
+    } catch {
+      socket.emit('rate-limited', { retryAfter: 10 });
+      return callback?.({ error: 'Too many requests' });
+    }
+    // ...
+  });
+});
+```
+
+## Валидация данных
+
+```javascript
+const { z } = require('zod');
+
+// Схемы для всех событий
+const schemas = {
+  'send-message': z.object({
+    text: z.string().min(1).max(2000),
+    roomId: z.string().uuid(),
+  }),
+  
+  'join-room': z.object({
+    roomId: z.string().uuid(),
+    password: z.string().optional(),
+  }),
+  
+  'update-status': z.object({
+    status: z.enum(['online', 'away', 'busy']),
+  }),
+};
+
+// Middleware для валидации
+function withValidation(eventName, handler) {
+  return async (data, callback) => {
+    const schema = schemas[eventName];
+    if (!schema) return handler(data, callback);
+    
+    const result = schema.safeParse(data);
+    if (!result.success) {
+      return callback?.({ 
+        error: 'Validation error', 
+        details: result.error.errors 
+      });
+    }
+    
+    return handler(result.data, callback);
+  };
+}
+
+io.on('connection', (socket) => {
+  socket.on('send-message', withValidation('send-message', (data, callback) => {
+    // data гарантированно валидна
+    processMessage(data);
+  }));
+});
+```
+
+## CORS для Socket.io
+
+```javascript
+const io = new Server(httpServer, {
+  cors: {
+    origin: (origin, callback) => {
+      const allowedOrigins = [
+        'https://myapp.com',
+        'https://www.myapp.com',
+        process.env.NODE_ENV === 'development' ? 'http://localhost:3000' : null,
+      ].filter(Boolean);
+
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS: ${origin} не разрешён`));
+      }
+    },
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+});
+```
+
+## Авторизация на уровне комнат
+
+```javascript
+// ❌ Плохо: клиент сам указывает к какой комнате присоединиться
+socket.on('join-room', ({ roomId }) => {
+  socket.join(roomId); // Любой может войти куда угодно!
+});
+
+// ✅ Хорошо: проверяем доступ на сервере
+socket.on('join-room', async ({ roomId }, callback) => {
+  const userId = socket.data.userId;
+  
+  // Проверить что комната существует и пользователь имеет доступ
+  const room = await db.room.findUnique({
+    where: { id: roomId },
+    include: {
+      members: { where: { userId } },
+    },
+  });
+
+  if (!room) {
+    return callback({ error: 'Комната не найдена' });
+  }
+
+  if (room.type === 'private' && room.members.length === 0) {
+    return callback({ error: 'Нет доступа к этой комнате' });
+  }
+
+  socket.join(roomId);
+  callback({ success: true });
+});
+```
+
+## Защита от XSS в чате
+
+```javascript
+// Сервер — sanitize входящие данные
+const { JSDOM } = require('jsdom');
+const createDOMPurify = require('dompurify');
+const { window } = new JSDOM('');
+const DOMPurify = createDOMPurify(window);
+
+socket.on('send-message', ({ text }) => {
+  // Очистить HTML теги
+  const sanitized = DOMPurify.sanitize(text, {
+    ALLOWED_TAGS: [], // Только чистый текст
+    ALLOWED_ATTR: [],
+  });
+  
+  // Или использовать простую функцию
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+  
+  io.to(roomId).emit('new-message', { text: escaped });
+});
+
+// Клиент — React автоматически экранирует JSX
+// Опасно:
+<div dangerouslySetInnerHTML={{ __html: message.text }} />
+
+// Безопасно:
+<div>{message.text}</div>
+```
+
+## Логирование и аудит
+
+```javascript
+// Логировать важные события
+io.on('connection', (socket) => {
+  const { userId, username } = socket.data;
+  
+  logger.info('ws:connect', {
+    socketId: socket.id,
+    userId,
+    username,
+    ip: socket.handshake.address,
+    userAgent: socket.handshake.headers['user-agent'],
+  });
+
+  socket.on('disconnect', (reason) => {
+    logger.info('ws:disconnect', { socketId: socket.id, userId, reason });
+  });
+
+  // Логировать подозрительную активность
+  socket.onAny((event, ...args) => {
+    const isKnownEvent = ['send-message', 'join-room', 'typing'].includes(event);
+    if (!isKnownEvent) {
+      logger.warn('ws:unknown-event', { socketId: socket.id, userId, event });
+    }
+  });
+});
+```
+
+## Чеклист безопасности
+
+```
+Аутентификация:
+  ✅ JWT в auth.token (не в query string!)
+  ✅ Проверка токена в middleware ПЕРЕД любыми событиями
+  ✅ Обновление токена без разрыва соединения
+  ✅ Логаут = disconnect все сокеты пользователя
+
+Авторизация:
+  ✅ Проверять доступ при join-room
+  ✅ Не доверять данным от клиента (userId, role)
+  ✅ Использовать socket.data для хранения авторизованных данных
+
+Валидация:
+  ✅ Zod/Joi для всех входящих событий
+  ✅ Лимит длины сообщений
+  ✅ Санитизация HTML
+
+Rate Limiting:
+  ✅ Лимит событий в секунду
+  ✅ Лимит подключений с одного IP
+  ✅ Блокировка при превышении
+
+HTTPS/WSS:
+  ✅ Только WSS в продакшене (wss://)
+  ✅ CORS только для разрешённых доменов
+  ✅ HSTS заголовки
+
+Мониторинг:
+  ✅ Логировать все подключения/отключения
+  ✅ Алерты на необычную активность
+  ✅ Rate limit метрики в Prometheus
+```
+
+## Задания
+
+1. Добавь JWT аутентификацию с middleware к существующему Socket.io серверу
+2. Реализуй rate limiter: не более 5 сообщений в секунду на пользователя
+3. Напиши middleware для логирования всех неизвестных событий
+4. Проведи аудит безопасности: что будет, если не валидировать roomId?
+
+## Итог
+
+Безопасность real-time = аутентификация (JWT middleware) + авторизация (проверка доступа) + валидация (Zod) + rate limiting + HTTPS. Не доверяй клиенту ничему. Логируй всё важное. Поздравляю — ты прошёл весь курс WebSockets & Real-time!
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+export default function App() {
+  const [token, setToken] = useState("");
+  const [log, setLog] = useState([]);
+  const [rateCount, setRateCount] = useState(0);
+
+  const add = (msg, ok) => setLog(prev => [...prev.slice(-6), { msg, ok, time: new Date().toLocaleTimeString() }]);
+
+  const connectWithToken = () => {
+    if (!token) {
+      add("❌ Нет токена — соединение отклонено (401)", false);
+      return;
+    }
+    if (token === "valid-jwt-token") {
+      add("✓ Токен валиден — WebSocket открыт", true);
+      add("✓ wss:// шифрование активно", true);
+    } else {
+      add("❌ Невалидный токен — соединение закрыто", false);
+    }
+  };
+
+  const sendMessage = () => {
+    setRateCount(prev => {
+      const next = prev + 1;
+      if (next > 5) {
+        add("❌ Rate limit: слишком много сообщений (отключён)", false);
+        return 0;
+      }
+      add("→ Сообщение #" + next + " отправлено", true);
+      return next;
+    });
+  };
+
+  const tryXSS = () => {
+    const payload = '<script>alert("xss")</script>';
+    add("→ Попытка: " + payload, false);
+    add("✓ Sanitized: &lt;script&gt;alert(...)&lt;/script&gt;", true);
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>WebSocket Security</h3>
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 4 }}>JWT токен (введи "valid-jwt-token"):</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={token} onChange={e => setToken(e.target.value)} placeholder="Bearer token..."
+            style={{ flex: 1, padding: "6px 10px", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, fontSize: 12 }} />
+          <button onClick={connectWithToken}
+            style={{ padding: "5px 12px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>
+            Connect
+          </button>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        <button onClick={sendMessage} style={{ padding: "5px 10px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>
+          Отправить (rate limit: 5)
+        </button>
+        <button onClick={tryXSS} style={{ padding: "5px 10px", background: "#f59e0b", color: "#000", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>
+          Попробовать XSS
+        </button>
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {log.map((l, i) => (
+          <div key={i} style={{ fontSize: 12, color: l.ok ? "#10b981" : "#ef4444" }}>
+            <span style={{ color: "#475569" }}>{l.time}</span> {l.msg}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

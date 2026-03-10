@@ -1,0 +1,268 @@
+---
+title: "21. Fixtures и Page Objects"
+sidebar:
+  order: 20
+---
+import { Playground } from '@components/Playground'
+
+
+![Fixtures](/lessons/playwright-fixtures.png)
+
+## Fixtures в Playwright
+
+Fixtures — переиспользуемые настройки и состояния для тестов (аналог beforeEach, но мощнее).
+
+```typescript
+// fixtures.ts
+import { test as base, expect, Page } from '@playwright/test';
+import { LoginPage } from './pages/LoginPage';
+import { DashboardPage } from './pages/DashboardPage';
+
+// Расширяем базовый test
+type MyFixtures = {
+  loginPage: LoginPage;
+  dashboardPage: DashboardPage;
+  authenticatedPage: Page;
+};
+
+export const test = base.extend<MyFixtures>({
+  // Fixture: страница логина
+  loginPage: async ({ page }, use) => {
+    const loginPage = new LoginPage(page);
+    await use(loginPage);
+  },
+
+  // Fixture: уже залогиненный пользователь
+  authenticatedPage: async ({ browser }, use) => {
+    const context = await browser.newContext({
+      storageState: './auth.json', // сохранённая сессия
+    });
+    const page = await context.newPage();
+    await use(page);
+    await context.close();
+  },
+});
+
+export { expect };
+```
+
+```typescript
+// auth.spec.ts
+import { test, expect } from './fixtures';
+
+test('login and view dashboard', async ({ loginPage, page }) => {
+  await loginPage.goto();
+  await loginPage.login('alice@test.com', 'password123');
+  await expect(page).toHaveURL('/dashboard');
+});
+
+// Используем authenticatedPage — логин уже сделан
+test('view profile (authenticated)', async ({ authenticatedPage: page }) => {
+  await page.goto('/profile');
+  await expect(page.getByRole('heading', { name: 'Profile' })).toBeVisible();
+});
+```
+
+## Сохранение состояния авторизации
+
+```typescript
+// auth.setup.ts — выполняется один раз
+import { test as setup } from '@playwright/test';
+
+setup('authenticate', async ({ page }) => {
+  await page.goto('/login');
+  await page.fill('[name="email"]', 'alice@test.com');
+  await page.fill('[name="password"]', 'password123');
+  await page.click('[type="submit"]');
+  await page.waitForURL('/dashboard');
+
+  // Сохранить cookies + localStorage
+  await page.context().storageState({ path: './auth.json' });
+});
+```
+
+```typescript
+// playwright.config.ts
+export default defineConfig({
+  projects: [
+    {
+      name: 'setup',
+      testMatch: /.*\.setup\.ts/,
+    },
+    {
+      name: 'authenticated tests',
+      dependencies: ['setup'],
+      use: {
+        storageState: './auth.json', // использовать сохранённую сессию
+      },
+    },
+  ],
+});
+```
+
+## Page Object Model (полный пример)
+
+```typescript
+// pages/BasePage.ts
+export class BasePage {
+  constructor(protected page: Page) {}
+
+  async waitForPageLoad() {
+    await this.page.waitForLoadState('networkidle');
+  }
+
+  async takeScreenshot(name: string) {
+    await this.page.screenshot({ path: `screenshots/${name}.png` });
+  }
+}
+
+// pages/ProductsPage.ts
+import { Page, Locator, expect } from '@playwright/test';
+import { BasePage } from './BasePage';
+
+export class ProductsPage extends BasePage {
+  readonly searchInput: Locator;
+  readonly productCards: Locator;
+  readonly sortSelect: Locator;
+  readonly cartButton: Locator;
+
+  constructor(page: Page) {
+    super(page);
+    this.searchInput = page.getByPlaceholder('Search products...');
+    this.productCards = page.locator('[data-testid="product-card"]');
+    this.sortSelect = page.getByRole('combobox', { name: /sort/i });
+    this.cartButton = page.getByRole('link', { name: /cart/i });
+  }
+
+  async goto() {
+    await this.page.goto('/products');
+    await this.waitForPageLoad();
+  }
+
+  async search(query: string) {
+    await this.searchInput.fill(query);
+    await this.searchInput.press('Enter');
+    await this.waitForPageLoad();
+  }
+
+  async sortBy(option: string) {
+    await this.sortSelect.selectOption(option);
+    await this.waitForPageLoad();
+  }
+
+  async addToCart(productName: string) {
+    const product = this.productCards.filter({ hasText: productName });
+    await product.getByRole('button', { name: /add to cart/i }).click();
+  }
+
+  async getProductNames(): Promise<string[]> {
+    return this.productCards.locator('.product-name').allTextContents();
+  }
+
+  async expectProductCount(count: number) {
+    await expect(this.productCards).toHaveCount(count);
+  }
+}
+
+// tests/e2e/products.spec.ts
+import { test, expect } from '../fixtures';
+import { ProductsPage } from '../pages/ProductsPage';
+
+test('product search works', async ({ page }) => {
+  const productsPage = new ProductsPage(page);
+  await productsPage.goto();
+
+  await productsPage.search('iPhone');
+  const names = await productsPage.getProductNames();
+
+  expect(names.every(n => n.toLowerCase().includes('iphone'))).toBe(true);
+});
+
+test('cart gets updated', async ({ page }) => {
+  const productsPage = new ProductsPage(page);
+  await productsPage.goto();
+
+  await productsPage.addToCart('iPhone 15');
+
+  await expect(page.getByTestId('cart-count')).toHaveText('1');
+});
+```
+
+## Параллельное выполнение
+
+```typescript
+// Тесты в файле выполняются параллельно
+test.describe.parallel('product tests', () => {
+  test('first test', async ({ page }) => { ... });
+  test('second test', async ({ page }) => { ... });
+});
+
+// Серийное выполнение (когда тесты зависят друг от друга)
+test.describe.serial('checkout flow', () => {
+  test('step 1: add to cart', async ({ page }) => { ... });
+  test('step 2: checkout', async ({ page }) => { ... });
+  test('step 3: confirm', async ({ page }) => { ... });
+});
+```
+
+## Практические задания
+
+1. Создай Page Object для корзины (CartPage) со всеми методами
+2. Настрой fixture для аутентифицированного пользователя
+3. Напиши полный checkout flow через Page Objects
+
+## Итоги
+
+- Fixtures — переиспользуемые setup/teardown
+- Сохранённая авторизация экономит время (один login на все тесты)
+- Page Object Model = читаемость + переиспользование
+- test.extend() позволяет добавить любые кастомные fixtures
+
+<Playground client:visible template="vanilla" files={{
+  '/index.js': `// Пример тестового кода (для запуска используйте Playwright)
+// Fixtures и Page Object Model
+
+console.log('=== Custom Fixtures ===\n');
+
+console.log(\`// fixtures.ts
+import { test as base } from '@playwright/test';
+
+type MyFixtures = {
+  authenticatedPage: Page;
+  todoPage: TodoPage;
+};
+
+export const test = base.extend<MyFixtures>({
+  authenticatedPage: async ({ page }, use) => {
+    await page.goto('/login');
+    await page.getByLabel('Email').fill('test@dev.com');
+    await page.getByLabel('Пароль').fill('secret');
+    await page.getByRole('button', { name: 'Войти' }).click();
+    await use(page);
+  },
+
+  todoPage: async ({ page }, use) => {
+    await use(new TodoPage(page));
+  },
+});\`);
+
+console.log('\n=== Page Object Model ===\n');
+
+console.log(\`class TodoPage {
+  constructor(page) {
+    this.page = page;
+    this.input = page.getByPlaceholder('Новая задача');
+    this.list = page.getByRole('list');
+  }
+
+  async addTodo(text) {
+    await this.input.fill(text);
+    await this.input.press('Enter');
+  }
+
+  async getTodos() {
+    return this.list.getByRole('listitem').allTextContents();
+  }
+}\`);
+`
+}} />

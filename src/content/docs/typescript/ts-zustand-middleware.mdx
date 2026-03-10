@@ -1,0 +1,265 @@
+---
+title: "57. Zustand Middleware с TypeScript"
+sidebar:
+  order: 57
+---
+import { Playground } from '@components/Playground'
+
+
+## TypeScript: Zustand Middleware с TypeScript
+
+Привет, коллеги-волшебники кода! Сегодня мы погрузимся в одну из самых мощных, но иногда недооцененных фишек Zustand – Middleware. Если вы уже освоили базовые принципы управления состоянием с Zustand, то пришло время поднять свой скилл на новый уровень, научившись перехватывать, модифицировать и расширять логику работы вашего стора.
+
+Представьте, что ваш Zustand стор – это оживленная фабрика. Обычные экшены – это заказы, которые поступают на склад, обрабатываются и отправляются на конвейер, где из них создается конечный продукт – новое состояние. Middleware – это специальные станции контроля качества или модификации на этом конвейере. Они могут логировать каждый "заказ", изменять его содержимое перед обработкой, откладывать его выполнение или даже полностью блокировать, если он не соответствует требованиям. Звучит мощно, правда? Давайте разберемся, как это работает на практике.
+
+### Что такое Middleware в Zustand?
+
+Middleware в Zustand – это функции высшего порядка, которые оборачивают вашу логику обновления состояния. Они позволяют вам выполнять код до или после того, как состояние будет изменено, а также получить доступ к текущему состоянию, функции `set` (для изменения состояния) и `get` (для получения текущего состояния).
+
+Zustand использует `create` функцию, которая принимает `StateCreator`. Middleware же позволяет вам обернуть этот `StateCreator`.
+
+Базовая сигнатура middleware выглядит примерно так (мы ее скоро типизируем):
+
+```typescript
+(set, get, api) => next => state => state
+```
+
+Где:
+*   `set`, `get`, `api`: Эти параметры предоставляются "внешним" контекстом Zustand.
+*   `next`: Это следующая функция в цепочке middleware или, в конечном итоге, сам `set` из вашего `StateCreator`. Вы должны ее вызвать, чтобы продолжить выполнение.
+*   `state`: Это функция, которая принимает частичное состояние для обновления.
+
+На первый взгляд, это может выглядеть пугающе, но на самом деле это просто композиция функций.
+
+### Создаем свое Middleware: Логирование
+
+Давайте начнем с простого, но очень полезного примера: middleware для логирования всех изменений состояния. Это бесценно для отладки.
+
+```typescript
+import { create, StateCreator, StoreApi } from 'zustand';
+
+// 1. Определение типа состояния нашего стора
+interface BearState {
+  bears: number;
+  increasePopulation: () => void;
+  decreasePopulation: () => void;
+}
+
+// 2. Создаем наш логгер-middleware
+// Правильно типизируем middleware для нашего состояния
+type LoggerMiddleware<T extends object> = (
+  config: StateCreator<T>
+) => StateCreator<T>;
+
+const logMiddleware: LoggerMiddleware<BearState> = (config) => (set, get, api) => {
+  return config(
+    (args) => {
+      console.log('  🔥 Происходит действие:', args); // Логируем до изменения состояния
+      set(args); // Вызываем оригинальный set для изменения состояния
+      console.log('  ✅ Новое состояние:', get()); // Логируем после изменения состояния
+    },
+    get,
+    api
+  );
+};
+
+// 3. Создаем стор, применяя middleware
+const useBearStore = create<BearState>()(
+  logMiddleware(
+    (set) => ({
+      bears: 0,
+      increasePopulation: () => set((state) => ({ bears: state.bears + 1 })),
+      decreasePopulation: () => set((state) => ({ bears: state.bears - 1 })),
+    })
+  )
+);
+
+// Пример использования (вы можете запустить это в браузере или Node.js)
+// useBearStore.getState().increasePopulation(); // Выведет логи в консоль
+// useBearStore.getState().increasePopulation();
+// useBearStore.getState().decreasePopulation();
+```
+
+В этом примере `logMiddleware` оборачивает исходный `StateCreator`. Когда вызывается `set` внутри экшена, наш логгер перехватывает его, выводит информацию, затем вызывает оригинальный `set`, и только потом выводит новое состояние.
+
+### Продвинутые Сценарии: Цепочки Middleware и Дополнительная Логика
+
+Middleware раскрывает свой потенциал, когда мы начинаем их комбинировать и встраивать более сложную логику.
+
+Представим, что нам нужно:
+1.  Логировать все действия (как выше).
+2.  Добавить метку времени к определенным действиям.
+3.  Использовать встроенный `devtools` для отладки в браузере.
+
+```typescript
+import { create, StateCreator, StoreApi } from 'zustand';
+import { devtools, persist } from 'zustand/middleware'; // Импортируем devtools
+
+interface TaskState {
+  tasks: { id: string; text: string; completed: boolean; createdAt?: number }[];
+  addTask: (text: string) => void;
+  toggleTask: (id: string) => void;
+}
+
+// 1. Наш логгер-middleware (с улучшенной типизацией)
+type ZustandMiddleware<T extends object> = (config: StateCreator<T, [], []>) => StateCreator<T, [], []>;
+
+const logger: ZustandMiddleware<TaskState> = (config) => (set, get, api) => {
+  return config(
+    (args) => {
+      console.groupCollapsed('🚀 Действие!');
+      console.log('  ➡️ Предыдущее состояние:', get());
+      console.log('  ➡️ Вызов:', args);
+      set(args);
+      console.log('  ✅ Новое состояние:', get());
+      console.groupEnd();
+    },
+    get,
+    api
+  );
+};
+
+// 2. Middleware для добавления метки времени при создании задачи
+const addTimestamp: ZustandMiddleware<TaskState> = (config) => (set, get, api) => {
+  return config(
+    (partial, replace) => {
+      // Здесь мы проверяем, является ли частичное обновление объектом
+      // и содержит ли оно функцию addTask или является ли это результатом addTask
+      if (typeof partial === 'function') {
+        // Если partial это функция, вызываем ее, чтобы получить новое состояние
+        const newState = partial(get());
+        // Проверяем, если newState содержит tasks и мы добавляем новую задачу
+        if (Array.isArray(newState.tasks) && newState.tasks.length > get().tasks.length) {
+          const newTask = newState.tasks[newState.tasks.length - 1];
+          if (!newTask.createdAt) {
+            newTask.createdAt = Date.now(); // Добавляем метку времени
+          }
+        }
+        return set(newState, replace); // Применяем измененное состояние
+      }
+
+      // Если partial это объект, пытаемся модифицировать напрямую
+      if ('tasks' in partial && Array.isArray(partial.tasks) && partial.tasks.length > get().tasks.length) {
+        const newTask = partial.tasks[partial.tasks.length - 1];
+        if (typeof newTask === 'object' && newTask !== null && !newTask.createdAt) {
+          (newTask as any).createdAt = Date.now();
+        }
+      }
+      return set(partial, replace);
+    },
+    get,
+    api
+  );
+};
+
+// 3. Создаем стор, применяя несколько middleware
+const useTaskStore = create<TaskState>()(
+  devtools( // Встроенный middleware для DevTools
+    logger( // Наш кастомный логгер
+      addTimestamp( // Наш кастомный middleware для метки времени
+        (set) => ({
+          tasks: [],
+          addTask: (text: string) =>
+            set((state) => ({
+              tasks: [...state.tasks, { id: Math.random().toString(36).substring(7), text, completed: false }],
+            })),
+          toggleTask: (id: string) =>
+            set((state) => ({
+              tasks: state.tasks.map((task) =>
+                task.id === id ? { ...task, completed: !task.completed } : task
+              ),
+            })),
+        })
+      )
+    ),
+    { name: 'Task Store' } // Имя для DevTools
+  )
+);
+
+// Пример использования
+// useTaskStore.getState().addTask('Изучить Zustand Middleware');
+// useTaskStore.getState().addTask('Написать домашку по TS');
+// useTaskStore.getState().toggleTask(useTaskStore.getState().tasks[0].id);
+
+// Обратите внимание на порядок: devtools оборачивает logger, который оборачивает addTimestamp.
+// Выполнение идет от самого внешнего к внутреннему, а затем обратно.
+// set -> devtools -> logger -> addTimestamp -> ваш StateCreator -> изменение состояния
+```
+
+В этом примере `addTimestamp` демонстрирует более сложную логику, где мы анализируем изменения состояния, чтобы инжектировать дополнительные данные. Обратите внимание, что `partial` в функции `set` может быть как объектом, так и функцией, возвращающей объект, поэтому важно обрабатывать оба случая.
+
+### Типичные Ошибки и их Решения
+
+1.  **Забыли вызвать `set` или `next`**: Если ваше middleware не вызывает `set` (в контексте `config` внутри middleware) или `next` (если вы пишете middleware в стиле `(set, get, api) => next => state => state`), то состояние просто не будет обновляться.
+    *   **Решение**: Всегда убеждайтесь, что цепочка вызовов `set` или `next` продолжается.
+
+2.  **Неправильная типизация**: Особенно актуально для продвинутых случаев. Если вы не указываете правильные дженерики или типы для `StateCreator`, TypeScript может "потерять" информацию о вашем состоянии внутри middleware.
+    *   **Решение**: Используйте `StateCreator<T, [], []>` или `StateCreator<T, Mwa, Mwb>` для типизации `config` внутри вашего middleware, где `T` - это тип вашего состояния, а `Mwa` и `Mwb` - типы middleware, которые вы ожидаете снаружи и внутри соответственно (для простых случаев `[]` достаточно). А также используйте `typeof partial === 'function'` для безопасного доступа к частичным обновлениям.
+
+3.  **Неверный порядок Middleware**: Порядок имеет значение! Middleware, находящиеся "ближе" к `create`, выполняются первыми. Если `persist` стоит после `devtools`, то `devtools` увидит состояние до того, как оно будет загружено из `localStorage`.
+    *   **Решение**: Обдумывайте, какое middleware должно перехватывать первым. Например, `devtools` обычно идет самым внешним, чтобы видеть все изменения, проходящие через остальные middleware.
+
+### 🎯 Практика
+
+Ваш черед, Яша! Создайте следующие middleware для нашего `TaskState` (из примера выше) и скомбинируйте их.
+
+1.  **`undoRedoMiddleware`**: Реализуйте middleware, которое отслеживает историю изменений `tasks` и позволяет выполнять "отмену" (undo) и "повтор" (redo) последнего действия. Добавьте в `TaskState` новые экшены: `undo` и `redo`, а также свойства `pastTasks`, `futureTasks`.
+2.  **`debounceMiddleware`**: Создайте middleware, которое откладывает выполнение определенного экшена (например, `addTask`) на заданное время, если он вызывается слишком часто. Только последнее из серии быстрых вызовов должно быть выполнено.
+3.  **`validationMiddleware`**: Middleware, которое проверяет, что текст задачи не пустой и не содержит запрещенных слов (например, "badword"). Если валидация не проходит, экшен `addTask` не должен изменять состояние, а middleware должно вывести сообщение в консоль.
+4.  **Комбинация**: Примените все три ваших middleware вместе с `devtools`. Убедитесь, что `devtools` видит финальное состояние после всех преобразований и что порядок middleware логичен.
+
+### 💡 Совет
+
+Zustand middleware – это мощный инструмент, но используйте его с умом. Как правило, middleware должны быть ответственны за одну конкретную вещь (логирование, персистирование, аутентификация и т.д.). Избегайте создания "монстр-middleware", которые делают слишком много. Если логика становится слишком сложной, возможно, стоит пересмотреть архитектуру вашего стора или разбить сложное middleware на несколько более простых, сфокусированных функций. И всегда уделяйте внимание типизации – это ваш лучший друг в мире TypeScript!
+
+
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Zustand Middleware Example</title>
+  <style>
+    body { background-color: #282c34; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+    button { background-color: #61dafb; border: none; padding: 10px 20px; cursor: pointer; color: #282c34; }
+  </style>
+</head>
+<body>
+  <h1>Counter</h1>
+  <div id="counter">0</div>
+  <button id="increment">Increment</button>
+
+  <script type="module">
+    import { create } from 'zustand';
+
+    const log = (config) => (set, get, api) => config(args => {
+      console.log("  applying", args)
+      set(args)
+    }, get, api)
+
+    const useStore = create(log((set) => ({
+      count: 0,
+      increment: () => set((state) => ({ count: state.count + 1 })),
+    })));
+
+    const counterEl = document.getElementById('counter');
+    const incrementBtn = document.getElementById('increment');
+
+    useStore.subscribe((state) => {
+      counterEl.textContent = state.count.toString();
+    });
+
+    incrementBtn.addEventListener('click', () => {
+      useStore.getState().increment();
+    });
+  <\/script>
+</body>
+</html>
+`
+  }}
+/>

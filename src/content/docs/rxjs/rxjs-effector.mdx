@@ -1,0 +1,449 @@
+---
+title: "19. RxJS vs Effector"
+sidebar:
+  order: 20
+---
+import { Playground } from '@components/Playground'
+
+
+## RxJS vs Effector: Битва реактивностей ⚔️
+
+Привет! Яша здесь. Два мощных инструмента реактивного программирования — RxJS и Effector. Один — универсальная библиотека потоков, другой — state manager с чётким API. Сравним философию, подходы и когда что выбирать. Спойлер: оба хороши, просто для разных задач.
+
+---
+
+### 1. 🧠 Философия: разные подходы к одной проблеме
+
+**RxJS** — это библиотека **потоков данных**. Фокус на операторах, цепочках преобразований, управлении асинхронностью. Думай о трубах и операторах как водопровод: данные текут, преобразуются, комбинируются.
+
+**Effector** — это **state manager** с чётко разделёнными концепциями: `Event`, `Store`, `Effect`. Думай о нём как о конечном автомате: события запускают переходы состояний.
+
+```typescript
+// Effector-концепции и их RxJS-аналоги:
+
+// Event (Effector) ≈ Subject (RxJS)
+// — триггер, представляет намерение
+const buttonClicked = createEvent<void>();   // Effector
+const buttonClicked$ = new Subject<void>();  // RxJS
+
+// Store (Effector) ≈ BehaviorSubject (RxJS)
+// — хранит текущее значение
+const $counter = createStore(0);                    // Effector
+const counter$ = new BehaviorSubject(0);            // RxJS
+
+// Effect (Effector) ≈ Subject + mergeMap (RxJS)
+// — обёртка над async-операцией с состояниями
+const fetchUser = createEffect(async (id: number) => {
+  return await api.getUser(id);                     // Effector
+});
+const fetchUser$ = new Subject<number>();
+const userResult$ = fetchUser$.pipe(
+  mergeMap(id => from(api.getUser(id)))             // RxJS
+);
+```
+
+---
+
+### 2. 🔄 Обновление стора: on() vs scan()
+
+В Effector обновление стора — декларативное с `on()`:
+
+```typescript
+// ── Effector ──────────────────────────────────────────────────
+import { createStore, createEvent, combine } from 'effector';
+
+const increment   = createEvent();
+const decrement   = createEvent();
+const reset       = createEvent();
+const addAmount   = createEvent<number>();
+
+const $count = createStore(0)
+  .on(increment,          state => state + 1)
+  .on(decrement,          state => state - 1)
+  .on(reset,              () => 0)
+  .on(addAmount,          (state, amount) => state + amount);
+
+// Derived store (вычисляемый)
+const $doubled  = $count.map(n => n * 2);
+const $isEven   = $count.map(n => n % 2 === 0);
+
+// Подписка
+$count.watch(count => console.log('count:', count));
+```
+
+```typescript
+// ── RxJS (тот же результат) ────────────────────────────────────
+import { Subject, merge, BehaviorSubject } from 'rxjs';
+import { scan, map, distinctUntilChanged, share } from 'rxjs/operators';
+
+const increment$  = new Subject<void>();
+const decrement$  = new Subject<void>();
+const reset$      = new Subject<void>();
+const addAmount$  = new Subject<number>();
+
+type CountAction =
+  | { type: 'INC' }
+  | { type: 'DEC' }
+  | { type: 'RESET' }
+  | { type: 'ADD'; amount: number };
+
+const count$ = merge(
+  increment$.pipe(map(() => ({ type: 'INC'    as const }))),
+  decrement$.pipe(map(() => ({ type: 'DEC'    as const }))),
+  reset$    .pipe(map(() => ({ type: 'RESET'  as const }))),
+  addAmount$.pipe(map(amount => ({ type: 'ADD' as const, amount }))),
+).pipe(
+  scan((state, action) => {
+    switch (action.type) {
+      case 'INC':   return state + 1;
+      case 'DEC':   return state - 1;
+      case 'RESET': return 0;
+      case 'ADD':   return state + action.amount;
+    }
+  }, 0),
+  share() // многоразовый поток
+);
+
+// Derived streams
+const doubled$  = count$.pipe(map(n => n * 2), distinctUntilChanged());
+const isEven$   = count$.pipe(map(n => n % 2 === 0), distinctUntilChanged());
+```
+
+---
+
+### 3. 🌐 Асинхронные эффекты: Effect vs mergeMap
+
+Effector Effect автоматически создаёт `.pending`, `.done`, `.fail` события:
+
+```typescript
+// ── Effector Effect ───────────────────────────────────────────
+import { createEffect, createStore } from 'effector';
+
+interface User { id: number; name: string; }
+
+const fetchUserFx = createEffect(async (id: number): Promise<User> => {
+  const res = await fetch(\`/api/users/\${id}\`);
+  if (!res.ok) throw new Error('Not found');
+  return res.json();
+});
+
+const $user    = createStore<User | null>(null).on(fetchUserFx.done, (_, { result }) => result);
+const $loading = createStore(false)
+  .on(fetchUserFx.pending, (_, pending) => pending);
+const $error   = createStore<string | null>(null)
+  .on(fetchUserFx.fail, (_, { error }) => error.message)
+  .on(fetchUserFx,      () => null); // сбрасываем при новом вызове
+
+// Запуск:
+fetchUserFx(42);
+```
+
+```typescript
+// ── RxJS (аналог Effect) ──────────────────────────────────────
+import { Subject, BehaviorSubject } from 'rxjs';
+import { switchMap, map, catchError, startWith, share } from 'rxjs/operators';
+
+interface EffectState<T> {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+}
+
+const fetchUser$   = new Subject<number>();
+const userState$   = new BehaviorSubject<EffectState<User>>({
+  data: null, loading: false, error: null
+});
+
+fetchUser$.pipe(
+  switchMap(id =>
+    from(fetch(\`/api/users/\${id}\`).then(r => {
+      if (!r.ok) throw new Error('Not found');
+      return r.json() as Promise<User>;
+    })).pipe(
+      map(data  => ({ data, loading: false, error: null })),
+      startWith({ data: null, loading: true,  error: null }),
+      catchError(err => [{ data: null, loading: false, error: err.message }])
+    )
+  )
+).subscribe(userState$);
+
+// Запуск:
+fetchUser$.next(42);
+```
+
+---
+
+### 4. 🤔 Когда что выбирать?
+
+| Критерий | RxJS | Effector |
+|----------|------|---------|
+| **Гибкость** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
+| **Предсказуемость** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Кривая обучения** | Высокая | Средняя |
+| **Сложные потоки** | ✅ Нативно | ⚠️ С трудом |
+| **Управление состоянием** | ⚠️ Вручную | ✅ Нативно |
+| **DevTools** | Нет | Встроенные |
+| **SSR** | Нужна настройка | ✅ Из коробки |
+| **Размер бандла** | ~48KB | ~10KB |
+
+**Выбирай RxJS, если:**
+- Сложная обработка потоков событий (WebSocket, real-time)
+- Нужны все операторы (debounce, throttle, zip, combineLatest)
+- Работаешь с Angular (RxJS там встроен)
+- Уже есть RxJS в стеке
+
+**Выбирай Effector, если:**
+- Нужен чёткий, предсказуемый state manager
+- Команда предпочитает декларативный API
+- Важны DevTools и TypeScript из коробки
+- SSR и серверный рендеринг
+
+---
+
+### ⚠️ Типичные ошибки
+
+**Ошибка: пытаться симулировать Effector на RxJS без архитектуры**
+
+```typescript
+// ❌ Хаотичный код без структуры
+const a$ = new Subject();
+const b$ = new Subject();
+// ... 50 subjects без имён и типов
+
+// ✅ Чёткая доменная структура как в Effector
+namespace UserDomain {
+  export const fetch   = new Subject<number>();
+  export const logout  = new Subject<void>();
+  export const state$  = new BehaviorSubject<UserState>(initial);
+}
+```
+
+---
+
+### 🔗 Смотри также
+
+- [3. Subjects: горячие потоки](/rxjs/subjects/) — Subject и BehaviorSubject
+- [7. mergeMap и switchMap](/rxjs/mergeMap-switchMap/) — обработка async
+- [19. RxJS как стейт-менеджер](/rxjs/react-state/) — BehaviorSubject store
+- [21. RxJS + MobX](/rxjs/rxjs-mobx/) — ещё одно сравнение
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/effector-sim.ts": `// Симуляция концепций Effector с помощью RxJS
+import { Subject, BehaviorSubject, merge, Observable } from 'rxjs';
+import { scan, map, distinctUntilChanged, switchMap, startWith, catchError, share } from 'rxjs/operators';
+import { from } from 'rxjs';
+
+// ── "Event" — Subject как событие ─────────────────────────────
+export function createEvent<T = void>() {
+  const subject = new Subject<T>();
+  const event = (payload: T) => subject.next(payload);
+  event.observable$ = subject.asObservable();
+  return event;
+}
+
+// ── "Store" — BehaviorSubject с методом on() ──────────────────
+export function createStore<T>(initial: T) {
+  const state$ = new BehaviorSubject<T>(initial);
+  const handlers: Array<{ event$: Observable<any>; handler: (s: T, p: any) => T }> = [];
+
+  const store = {
+    $: state$.pipe(distinctUntilChanged()) as Observable<T>,
+    getValue: () => state$.getValue(),
+    on<P>(event: { observable$: Observable<P> }, handler: (state: T, payload: P) => T) {
+      handlers.push({ event$: event.observable$, handler });
+      event.observable$.subscribe(payload => {
+        state$.next(handler(state$.getValue(), payload));
+      });
+      return store;
+    },
+    map: <R>(fn: (state: T) => R) => state$.pipe(map(fn), distinctUntilChanged()),
+  };
+
+  return store;
+}
+
+// ── "Effect" — Subject с loading/done/fail потоками ────────────
+export function createEffect<Params, Result>(fn: (params: Params) => Promise<Result>) {
+  const trigger$ = new Subject<Params>();
+
+  interface EffectResult { done: Result | null; fail: Error | null; pending: boolean; }
+
+  const result$ = trigger$.pipe(
+    switchMap(params =>
+      from(fn(params)).pipe(
+        map(result => ({ done: result, fail: null, pending: false })),
+        startWith({ done: null, fail: null, pending: true }),
+        catchError(err => [{ done: null, fail: err, pending: false }])
+      )
+    ),
+    share()
+  );
+
+  const pending$ = result$.pipe(map(r => r.pending), distinctUntilChanged());
+  const done$    = new Subject<Result>();
+  const fail$    = new Subject<Error>();
+
+  result$.subscribe(r => {
+    if (!r.pending && r.done !== null) done$.next(r.done!);
+    if (!r.pending && r.fail !== null) fail$.next(r.fail!);
+  });
+
+  const effect = (params: Params) => trigger$.next(params);
+  effect.pending$ = pending$;
+  effect.done$    = done$.asObservable();
+  effect.fail$    = fail$.asObservable();
+
+  return effect;
+}
+`,
+    "/App.tsx": `import { useState, useEffect, useCallback } from 'react';
+import { Observable } from 'rxjs';
+import { createEvent, createStore, createEffect } from './effector-sim';
+
+// ── Хелпер-хук ────────────────────────────────────────────────
+function useStore<T>(obs$: Observable<T>, init: T): T {
+  const [v, set] = useState<T>(init);
+  useEffect(() => {
+    const sub = obs$.subscribe(set as any);
+    return () => sub.unsubscribe();
+  }, []);
+  return v;
+}
+
+// ── Симуляция загрузки данных ──────────────────────────────────
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// Effector-like: Events
+const increment   = createEvent<void>();
+const decrement   = createEvent<void>();
+const reset       = createEvent<void>();
+
+// Effector-like: Store
+const $counter = createStore(0)
+  .on(increment, s => s + 1)
+  .on(decrement, s => s - 1)
+  .on(reset,     () => 0);
+
+const $doubled = $counter.map(n => n * 2);
+const $isEven  = $counter.map(n => n % 2 === 0);
+
+// Effector-like: Effect
+const fetchDataFx = createEffect(async (id: number) => {
+  await delay(1200); // имитация запроса
+  if (id > 5) throw new Error('ID слишком большой!');
+  return { id, name: \`Пользователь #\${id}\`, score: Math.floor(Math.random() * 100) };
+});
+
+// Секция счётчика
+function CounterSection() {
+  const count   = useStore($counter.$, 0);
+  const doubled = useStore($doubled,   0);
+  const isEven  = useStore($isEven,    true);
+
+  return (
+    <div style={{ background: '#1a1a2e', padding: 16, borderRadius: 8, marginBottom: 16 }}>
+      <div style={{ fontSize: 12, color: '#888', marginBottom: 10 }}>
+        💡 Event + Store (симуляция Effector через RxJS)
+      </div>
+      <div style={{ textAlign: 'center', marginBottom: 12 }}>
+        <div style={{ fontSize: 48, fontFamily: 'monospace', color: isEven ? '#00ff88' : '#f39c12' }}>
+          {count}
+        </div>
+        <div style={{ fontSize: 13, color: '#666' }}>
+          × 2 = <span style={{ color: '#aaa' }}>{doubled}</span>
+          &nbsp;•&nbsp;
+          <span style={{ color: isEven ? '#00ff88' : '#f39c12' }}>{isEven ? 'чётное' : 'нечётное'}</span>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+        {[
+          { label: '−', fn: decrement, color: '#e94560' },
+          { label: '0', fn: reset,     color: '#888'    },
+          { label: '+', fn: increment, color: '#00ff88' },
+        ].map(({ label, fn, color }) => (
+          <button key={label} onClick={() => fn()}
+            style={{ background: 'transparent', border: \`1px solid \${color}\`,
+              color, width: 44, height: 44, borderRadius: 8, cursor: 'pointer', fontSize: 18 }}>
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Секция эффекта
+function EffectSection() {
+  const [pending, setPending]   = useState(false);
+  const [result,  setResult]    = useState<any>(null);
+  const [error,   setError]     = useState<string | null>(null);
+  const [userId,  setUserId]    = useState(1);
+
+  useEffect(() => {
+    const subs = [
+      fetchDataFx.pending$.subscribe(setPending),
+      fetchDataFx.done$   .subscribe(r => { setResult(r); setError(null); }),
+      fetchDataFx.fail$   .subscribe(e => { setError(e.message); setResult(null); }),
+    ];
+    return () => subs.forEach(s => s.unsubscribe());
+  }, []);
+
+  return (
+    <div style={{ background: '#1a1a2e', padding: 16, borderRadius: 8 }}>
+      <div style={{ fontSize: 12, color: '#888', marginBottom: 10 }}>
+        ⚡ Effect (симуляция: pending/done/fail автоматически)
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <input type="number" value={userId} min={1} max={10}
+          onChange={e => setUserId(Number(e.target.value))}
+          style={{ width: 60, background: '#0d0d1a', border: '1px solid #333',
+            color: '#fff', padding: '6px 10px', borderRadius: 6, fontSize: 13 }} />
+        <button onClick={() => fetchDataFx(userId)}
+          disabled={pending}
+          style={{ flex: 1, background: pending ? '#333' : '#e94560', border: 'none',
+            color: '#fff', padding: '8px 16px', borderRadius: 6, cursor: pending ? 'not-allowed' : 'pointer', fontSize: 13 }}>
+          {pending ? '⏳ Загружаю...' : 'Загрузить пользователя'}
+        </button>
+      </div>
+      {error  && <div style={{ color: '#e94560', fontSize: 13, padding: 8, background: '#2a0a10', borderRadius: 4 }}>❌ {error}</div>}
+      {result && !error && (
+        <div style={{ fontSize: 13, padding: 8, background: '#0a2a1a', borderRadius: 4, color: '#00ff88' }}>
+          ✅ {result.name} • score: {result.score}
+        </div>
+      )}
+      <div style={{ marginTop: 8, fontSize: 11, color: '#444' }}>
+        Попробуй ID {'>'} 5 — будет ошибка
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <div style={{ background: '#0d0d1a', minHeight: '100vh', padding: 24,
+      fontFamily: 'system-ui, sans-serif', color: '#e0e0e0' }}>
+      <h2 style={{ color: '#e94560', marginBottom: 4 }}>⚔️ RxJS vs Effector</h2>
+      <p style={{ color: '#888', fontSize: 12, marginBottom: 20 }}>
+        Концепции Effector (Event/Store/Effect) реализованы через RxJS
+      </p>
+      <CounterSection />
+      <EffectSection />
+      <div style={{ marginTop: 16, padding: 12, background: '#1a1a2e', borderRadius: 8, fontSize: 12, color: '#666' }}>
+        💡 <b style={{ color: '#aaa' }}>Вывод:</b> RxJS мощнее, но требует больше кода. 
+        Effector лаконичнее для state management. В реальном проекте — используй Effector 
+        если нужен стейт-менеджер, RxJS — если нужны сложные потоки событий.
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

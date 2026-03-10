@@ -1,0 +1,645 @@
+---
+title: "22. Тестирование"
+sidebar:
+  order: 22
+---
+import { Playground } from '@components/Playground'
+
+
+## 🧪 Тестирование Solid.js
+
+Привет! 👋 Тестирование Solid.js — это приятный опыт, потому что библиотека `@solidjs/testing-library` следует тем же принципам, что и React Testing Library: тестируй поведение, а не реализацию.
+
+Думай о тестах для Solid как о самоходных сценариях: ты описываешь что пользователь делает, и проверяешь что видит на экране. Никаких прямых проверок внутреннего состояния — только наблюдаемые результаты.
+
+---
+
+## 🛠️ Настройка: Vitest + @solidjs/testing-library
+
+```bash
+npm install -D vitest @solidjs/testing-library @testing-library/jest-dom jsdom
+npm install -D vite-plugin-solid
+```
+
+```typescript
+// vite.config.ts
+import { defineConfig } from 'vite';
+import solid from 'vite-plugin-solid';
+
+export default defineConfig({
+  plugins: [solid()],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./vitest.setup.ts'],
+    transformMode: { web: [/\.[jt]sx?$/] },
+  },
+});
+```
+
+```typescript
+// vitest.setup.ts
+import '@testing-library/jest-dom';
+```
+
+```typescript
+// tsconfig.json — убедись что jest-dom типы подключены
+{
+  "compilerOptions": {
+    "types": ["vitest/globals", "@testing-library/jest-dom"]
+  }
+}
+```
+
+---
+
+## ⚡ Тестирование компонентов
+
+```tsx
+// Counter.tsx — компонент для тестирования
+import { createSignal, Component } from 'solid-js';
+
+interface CounterProps {
+  initialCount?: number;
+  step?: number;
+}
+
+export const Counter: Component<CounterProps> = (props) => {
+  const [count, setCount] = createSignal(props.initialCount ?? 0);
+  const step = () => props.step ?? 1;
+
+  return (
+    <div>
+      <span data-testid="count">{count()}</span>
+      <button onClick={() => setCount(n => n - step())}>−</button>
+      <button onClick={() => setCount(n => n + step())}>+</button>
+      <button onClick={() => setCount(props.initialCount ?? 0)}>Сброс</button>
+    </div>
+  );
+};
+```
+
+```tsx
+// Counter.test.tsx
+import { render, screen, fireEvent } from '@solidjs/testing-library';
+import { Counter } from './Counter';
+
+describe('Counter', () => {
+  it('показывает начальное значение 0', () => {
+    render(() => <Counter />);
+    expect(screen.getByTestId('count')).toHaveTextContent('0');
+  });
+
+  it('увеличивает счётчик по клику', () => {
+    render(() => <Counter />);
+    fireEvent.click(screen.getByText('+'));
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+  });
+
+  it('уменьшает счётчик по клику', () => {
+    render(() => <Counter initialCount={5} />);
+    fireEvent.click(screen.getByText('−'));
+    expect(screen.getByTestId('count')).toHaveTextContent('4');
+  });
+
+  it('использует кастомный step', () => {
+    render(() => <Counter step={5} />);
+    fireEvent.click(screen.getByText('+'));
+    expect(screen.getByTestId('count')).toHaveTextContent('5');
+  });
+
+  it('сбрасывает к начальному значению', () => {
+    render(() => <Counter initialCount={10} />);
+    fireEvent.click(screen.getByText('+'));
+    fireEvent.click(screen.getByText('Сброс'));
+    expect(screen.getByTestId('count')).toHaveTextContent('10');
+  });
+});
+```
+
+---
+
+## 🔬 Тестирование сигналов с renderHook
+
+```tsx
+// useCounter.ts — хук с сигналами
+import { createSignal, createMemo } from 'solid-js';
+
+export function createCounter(initial = 0) {
+  const [count, setCount] = createSignal(initial);
+  const doubled = createMemo(() => count() * 2);
+  const isEven = createMemo(() => count() % 2 === 0);
+
+  return {
+    count,
+    doubled,
+    isEven,
+    increment: () => setCount(n => n + 1),
+    decrement: () => setCount(n => n - 1),
+    reset: () => setCount(initial),
+  };
+}
+```
+
+```tsx
+// useCounter.test.ts
+import { renderHook, act } from '@solidjs/testing-library';
+import { createCounter } from './useCounter';
+
+describe('createCounter', () => {
+  it('инициализируется с начальным значением', () => {
+    const { result } = renderHook(() => createCounter(5));
+    expect(result.count()).toBe(5);
+  });
+
+  it('вычисляет doubled и isEven корректно', () => {
+    const { result } = renderHook(() => createCounter(4));
+    expect(result.doubled()).toBe(8);
+    expect(result.isEven()).toBe(true);
+  });
+
+  it('обновляет значения реактивно', () => {
+    const { result } = renderHook(() => createCounter(0));
+
+    act(() => result.increment());
+    expect(result.count()).toBe(1);
+    expect(result.doubled()).toBe(2);
+    expect(result.isEven()).toBe(false);
+
+    act(() => result.increment());
+    expect(result.isEven()).toBe(true);
+  });
+
+  it('сбрасывает к начальному значению', () => {
+    const { result } = renderHook(() => createCounter(10));
+    act(() => result.increment());
+    act(() => result.increment());
+    act(() => result.reset());
+    expect(result.count()).toBe(10);
+  });
+});
+```
+
+---
+
+## 🌊 Асинхронное тестирование с createResource
+
+```tsx
+// UserProfile.tsx
+import { createResource, Show, Component } from 'solid-js';
+
+interface User { id: number; name: string; email: string; }
+
+async function fetchUser(id: number): Promise<User> {
+  const res = await fetch(\`/api/users/\${id}\`);
+  if (!res.ok) throw new Error('User not found');
+  return res.json();
+}
+
+export const UserProfile: Component<{ userId: number }> = (props) => {
+  const [user] = createResource(() => props.userId, fetchUser);
+
+  return (
+    <div>
+      <Show when={user.loading}>
+        <div data-testid="loading">Загрузка...</div>
+      </Show>
+      <Show when={user.error}>
+        <div data-testid="error">{user.error?.message}</div>
+      </Show>
+      <Show when={user()}>
+        {(u) => (
+          <div data-testid="user">
+            <h2>{u().name}</h2>
+            <p>{u().email}</p>
+          </div>
+        )}
+      </Show>
+    </div>
+  );
+};
+```
+
+```tsx
+// UserProfile.test.tsx
+import { render, screen, waitFor } from '@solidjs/testing-library';
+import { vi } from 'vitest';
+import { UserProfile } from './UserProfile';
+
+// Мокируем глобальный fetch
+const mockFetch = vi.fn();
+global.fetch = mockFetch;
+
+describe('UserProfile', () => {
+  beforeEach(() => mockFetch.mockReset());
+
+  it('показывает загрузку, потом данные', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 1, name: 'Яша', email: 'yasha@test.com' }),
+    });
+
+    render(() => <UserProfile userId={1} />);
+
+    // Сначала — состояние загрузки
+    expect(screen.getByTestId('loading')).toBeInTheDocument();
+
+    // Потом — данные пользователя
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Яша')).toBeInTheDocument();
+    expect(screen.queryByTestId('loading')).not.toBeInTheDocument();
+  });
+
+  it('показывает ошибку при неудачном запросе', async () => {
+    mockFetch.mockResolvedValue({ ok: false });
+
+    render(() => <UserProfile userId={999} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('error')).toBeInTheDocument();
+    });
+    expect(screen.getByText('User not found')).toBeInTheDocument();
+  });
+});
+```
+
+---
+
+## 🏪 Тестирование сторов
+
+```tsx
+// store.test.ts — тестируем createStore напрямую
+import { createRoot } from 'solid-js';
+import { createStore } from 'solid-js/store';
+
+interface CartStore {
+  items: { id: number; name: string; qty: number; price: number }[];
+}
+
+function createCartStore() {
+  const [store, setStore] = createStore<CartStore>({ items: [] });
+
+  return {
+    items: () => store.items,
+    total: () => store.items.reduce((s, i) => s + i.qty * i.price, 0),
+    addItem: (item: CartStore['items'][0]) => {
+      const existing = store.items.findIndex(i => i.id === item.id);
+      if (existing >= 0) {
+        setStore('items', existing, 'qty', n => n + item.qty);
+      } else {
+        setStore('items', [...store.items, item]);
+      }
+    },
+    removeItem: (id: number) => {
+      setStore('items', items => items.filter(i => i.id !== id));
+    },
+  };
+}
+
+describe('CartStore', () => {
+  it('добавляет товары и считает сумму', () => {
+    createRoot(() => {
+      const cart = createCartStore();
+      cart.addItem({ id: 1, name: 'Книга', qty: 2, price: 500 });
+      expect(cart.items()).toHaveLength(1);
+      expect(cart.total()).toBe(1000);
+    });
+  });
+
+  it('увеличивает qty для существующего товара', () => {
+    createRoot(() => {
+      const cart = createCartStore();
+      cart.addItem({ id: 1, name: 'Книга', qty: 1, price: 500 });
+      cart.addItem({ id: 1, name: 'Книга', qty: 2, price: 500 });
+      expect(cart.items()[0].qty).toBe(3);
+    });
+  });
+});
+```
+
+---
+
+## ⚠️ Типичные ловушки при тестировании
+
+```tsx
+// ❌ Тест реализации, а не поведения
+it('плохой тест', () => {
+  const [count, setCount] = createSignal(0);
+  setCount(5);
+  // Проверяем внутренний state — это антипаттерн!
+  expect(count()).toBe(5); // Работает, но хрупко
+});
+
+// ✅ Тест через UI
+it('хороший тест', () => {
+  render(() => <Counter />);
+  fireEvent.click(screen.getByText('+'));
+  fireEvent.click(screen.getByText('+'));
+  expect(screen.getByTestId('count')).toHaveTextContent('2');
+});
+
+// ❌ Забыли cleanup — утечка между тестами
+it('без cleanup', () => {
+  render(() => <App />); // render из @solidjs/testing-library авто-cleanup!
+});
+
+// ✅ @solidjs/testing-library автоматически чистит после каждого теста
+
+// ❌ Неправильный selectByText с реактивным текстом
+// Если текст меняется — используй waitFor
+it('async проблема', () => {
+  render(() => <AsyncComp />);
+  // ❌ Элемент ещё не появился!
+  expect(screen.getByText('Данные')).toBeInTheDocument();
+});
+
+// ✅ waitFor для асинхронного контента
+it('async правильно', async () => {
+  render(() => <AsyncComp />);
+  await waitFor(() => {
+    expect(screen.getByText('Данные')).toBeInTheDocument();
+  });
+});
+```
+
+---
+
+## 🎯 Playground: симуляция тест-раннера
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from "react";
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const RED = '#ef4444';
+
+// Симуляция сигнала для демонстрации
+function useSignal<T>(initial: T) {
+  const [value, setValue] = useState(initial);
+  return [() => value, setValue] as const;
+}
+
+function useMemo<T>(fn: () => T, deps: unknown[]) {
+  const [value, setValue] = useState<T>(fn);
+  useEffect(() => { setValue(fn()); }, deps);
+  return () => value;
+}
+
+// Система тестирования
+type TestStatus = 'pending' | 'running' | 'pass' | 'fail';
+
+interface TestCase {
+  id: string;
+  name: string;
+  group: string;
+  fn: () => boolean | Promise<boolean>;
+  status: TestStatus;
+  duration?: number;
+  error?: string;
+}
+
+// Тесты для счётчика
+function createCounterTests() {
+  const [count, setCount] = useSignal(0);
+  const doubled = useMemo(() => count() * 2, [count()]);
+  const isEven = useMemo(() => count() % 2 === 0, [count()]);
+
+  return [
+    {
+      id: 't1',
+      name: 'инициализируется с 0',
+      group: 'Counter',
+      fn: () => count() === 0,
+    },
+    {
+      id: 't2',
+      name: 'increment увеличивает на 1',
+      group: 'Counter',
+      fn: () => {
+        setCount(0);
+        setCount(n => n + 1);
+        return count() === 1;
+      },
+    },
+    {
+      id: 't3',
+      name: 'doubled вычисляется реактивно',
+      group: 'Counter',
+      fn: () => {
+        setCount(5);
+        return doubled() === 10;
+      },
+    },
+    {
+      id: 't4',
+      name: 'isEven правильно определяет чётность',
+      group: 'Counter',
+      fn: () => {
+        setCount(4);
+        const even = isEven();
+        setCount(3);
+        const odd = !isEven();
+        return even && odd;
+      },
+    },
+    {
+      id: 't5',
+      name: 'reset возвращает к 0',
+      group: 'Counter',
+      fn: () => {
+        setCount(10);
+        setCount(0);
+        return count() === 0;
+      },
+    },
+    {
+      id: 't6',
+      name: '❌ ожидает 99 — специально провальный',
+      group: 'Counter',
+      fn: () => {
+        setCount(5);
+        return count() === 99; // Намеренно неверно
+      },
+    },
+    {
+      id: 't7',
+      name: 'async: ждёт данные пользователя',
+      group: 'UserResource',
+      fn: async () => {
+        await new Promise(r => setTimeout(r, 300));
+        return true; // Симуляция успешного async теста
+      },
+    },
+    {
+      id: 't8',
+      name: 'async: обрабатывает ошибку',
+      group: 'UserResource',
+      fn: async () => {
+        await new Promise(r => setTimeout(r, 200));
+        return true;
+      },
+    },
+  ] as (TestCase & { fn: () => boolean | Promise<boolean> })[];
+}
+
+function TestRow({ test, onRun }: { test: TestCase; onRun: () => void }) {
+  const icons = { pending: '○', running: '⟳', pass: '✓', fail: '✗' };
+  const colors = { pending: MUTED, running: SOLID_LIGHT, pass: GREEN, fail: RED };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', background: test.status === 'fail' ? RED + '11' : test.status === 'pass' ? GREEN + '11' : 'transparent', borderRadius: '6px', marginBottom: '3px', cursor: test.status === 'pending' ? 'pointer' : 'default' }}
+      onClick={test.status === 'pending' ? onRun : undefined}>
+      <span style={{ color: colors[test.status], fontFamily: 'monospace', fontSize: '14px', width: '16px', display: 'inline-block', animation: test.status === 'running' ? 'spin 0.5s linear infinite' : 'none' }}>
+        {icons[test.status]}
+      </span>
+      <span style={{ flex: 1, color: test.status === 'fail' ? RED : test.status === 'pass' ? GREEN : TEXT, fontSize: '12px', fontFamily: 'monospace' }}>
+        {test.name}
+      </span>
+      {test.duration !== undefined && (
+        <span style={{ color: MUTED, fontSize: '10px' }}>{test.duration}ms</span>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const initialTests = createCounterTests();
+  const [tests, setTests] = useState<TestCase[]>(initialTests.map(t => ({ ...t, status: 'pending' as TestStatus })));
+  const [running, setRunning] = useState(false);
+  const [totalTime, setTotalTime] = useState<number | null>(null);
+
+  const passed = tests.filter(t => t.status === 'pass').length;
+  const failed = tests.filter(t => t.status === 'fail').length;
+  const pending = tests.filter(t => t.status === 'pending').length;
+
+  const groups = [...new Set(initialTests.map(t => t.group))];
+
+  const runTest = async (id: string) => {
+    const test = initialTests.find(t => t.id === id);
+    if (!test) return;
+
+    setTests(prev => prev.map(t => t.id === id ? { ...t, status: 'running' } : t));
+    const start = Date.now();
+
+    await new Promise(r => setTimeout(r, 100 + Math.random() * 200));
+
+    try {
+      const result = await test.fn();
+      const duration = Date.now() - start;
+      setTests(prev => prev.map(t => t.id === id ? { ...t, status: result ? 'pass' : 'fail', duration } : t));
+    } catch (err) {
+      setTests(prev => prev.map(t => t.id === id ? { ...t, status: 'fail', duration: Date.now() - start, error: String(err) } : t));
+    }
+  };
+
+  const runAll = async () => {
+    if (running) return;
+    setRunning(true);
+    const start = Date.now();
+
+    setTests(prev => prev.map(t => ({ ...t, status: 'pending' as TestStatus, duration: undefined })));
+    await new Promise(r => setTimeout(r, 100));
+
+    for (const test of initialTests) {
+      await runTest(test.id);
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    setTotalTime(Date.now() - start);
+    setRunning(false);
+  };
+
+  const reset = () => {
+    setTests(initialTests.map(t => ({ ...t, status: 'pending' as TestStatus, duration: undefined })));
+    setTotalTime(null);
+  };
+
+  return (
+    <div style={{ background: BG, color: TEXT, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ maxWidth: '520px', margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold', color: SOLID_BLUE }}>
+            🧪 Тест-раннер Solid.js
+          </div>
+          <div style={{ color: MUTED, fontSize: '12px', marginTop: '4px' }}>
+            Симуляция Vitest + @solidjs/testing-library
+          </div>
+        </div>
+
+        {/* Панель управления */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+          <button onClick={runAll} disabled={running}
+            style={{ flex: 1, background: running ? MUTED : SOLID_BLUE, color: '#fff', border: 'none', borderRadius: '8px', padding: '10px', cursor: running ? 'not-allowed' : 'pointer', fontSize: '14px', fontWeight: 'bold' }}>
+            {running ? '⟳ Запуск тестов...' : '▶ Запустить все'}
+          </button>
+          <button onClick={reset} disabled={running}
+            style={{ background: CARD, color: MUTED, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '10px 14px', cursor: running ? 'not-allowed' : 'pointer', fontSize: '14px' }}>
+            ↺
+          </button>
+        </div>
+
+        {/* Статус */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+          <div style={{ flex: 1, background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${GREEN}44\`, textAlign: 'center' }}>
+            <div style={{ color: GREEN, fontSize: '18px', fontWeight: 'bold' }}>{passed}</div>
+            <div style={{ color: MUTED, fontSize: '11px' }}>Пройдено</div>
+          </div>
+          <div style={{ flex: 1, background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${RED}44\`, textAlign: 'center' }}>
+            <div style={{ color: RED, fontSize: '18px', fontWeight: 'bold' }}>{failed}</div>
+            <div style={{ color: MUTED, fontSize: '11px' }}>Упало</div>
+          </div>
+          <div style={{ flex: 1, background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${BORDER}\`, textAlign: 'center' }}>
+            <div style={{ color: MUTED, fontSize: '18px', fontWeight: 'bold' }}>{pending}</div>
+            <div style={{ color: MUTED, fontSize: '11px' }}>Ожидает</div>
+          </div>
+        </div>
+
+        {/* Тесты по группам */}
+        {groups.map(group => (
+          <div key={group} style={{ background: CARD, borderRadius: '10px', padding: '12px', marginBottom: '10px', border: \`1px solid \${BORDER}\` }}>
+            <div style={{ color: SOLID_LIGHT, fontSize: '12px', fontWeight: 'bold', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span>📁</span> {group}
+              <span style={{ color: MUTED, fontWeight: 'normal', fontSize: '11px', marginLeft: 'auto' }}>
+                {tests.filter(t => t.group === group && t.status === 'pass').length}/
+                {tests.filter(t => t.group === group).length}
+              </span>
+            </div>
+            {tests.filter(t => t.group === group).map(test => (
+              <TestRow key={test.id} test={test} onRun={() => runTest(test.id)} />
+            ))}
+          </div>
+        ))}
+
+        {/* Итог */}
+        {totalTime !== null && !running && (
+          <div style={{ background: failed > 0 ? RED + '11' : GREEN + '11', borderRadius: '10px', padding: '12px', border: \`1px solid \${failed > 0 ? RED : GREEN}44\`, textAlign: 'center' }}>
+            <div style={{ color: failed > 0 ? RED : GREEN, fontSize: '14px', fontWeight: 'bold' }}>
+              {failed > 0 ? \`❌ \${failed} тест(ов) упали\` : '✅ Все тесты прошли!'}
+            </div>
+            <div style={{ color: MUTED, fontSize: '11px', marginTop: '4px' }}>
+              {passed + failed} тестов за {totalTime}ms
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: '14px', padding: '10px', background: SOLID_BLUE + '11', borderRadius: '8px', border: \`1px solid \${SOLID_BLUE}33\`, color: SOLID_LIGHT, fontSize: '11px' }}>
+          💡 Кликни на отдельный тест (серый) чтобы запустить его одиночно
+        </div>
+
+        <style>{\`
+          @keyframes spin { to { transform: rotate(360deg); } }
+        \`}</style>
+      </div>
+    </div>
+  );
+}
+` }}
+/>

@@ -1,0 +1,406 @@
+---
+title: "2. GitHub Actions: основы"
+sidebar:
+  order: 2
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/devops-github-actions.png)
+
+**GitHub Actions** — встроенная платформа CI/CD в GitHub. Автоматизируй тесты, деплой и всё что хочешь при push, PR или по расписанию.
+
+## Как это работает
+
+```
+GitHub repo
+    │
+    ├── .github/
+    │   └── workflows/
+    │       ├── ci.yml       ← workflow файл
+    │       └── deploy.yml
+    │
+    └── ... твой код
+```
+
+При событии (push, PR и т.д.) GitHub запускает runners — виртуальные машины, которые выполняют твои команды.
+
+## Базовая структура workflow
+
+```yaml
+# .github/workflows/ci.yml
+name: CI Pipeline
+
+on:                    # когда запускать
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:                  # что делать
+  test:
+    runs-on: ubuntu-latest   # на какой ОС
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+```
+
+## Ключевые концепции
+
+### Triggers (on:)
+
+```yaml
+on:
+  push:                          # при пуше
+    branches: [main, develop]
+  pull_request:                  # при PR
+    branches: [main]
+  schedule:                      # по расписанию (cron)
+    - cron: '0 9 * * 1-5'       # каждый рабочий день в 9:00
+  workflow_dispatch:             # ручной запуск
+  release:                       # при создании релиза
+    types: [published]
+```
+
+### Jobs и Steps
+
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint              # запускается ПОСЛЕ lint
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm test
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [lint, test]      # ждёт обоих
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - run: echo "Deploying!"
+```
+
+### Популярные actions
+
+```yaml
+# Checkout репозиторий
+- uses: actions/checkout@v4
+
+# Setup Node.js
+- uses: actions/setup-node@v4
+  with:
+    node-version: '20'
+    cache: 'npm'
+
+# Setup Python
+- uses: actions/setup-python@v5
+  with:
+    python-version: '3.12'
+
+# Кэширование
+- uses: actions/cache@v4
+  with:
+    path: ~/.npm
+    key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+
+# Upload артефакты
+- uses: actions/upload-artifact@v4
+  with:
+    name: build-output
+    path: dist/
+
+# Download артефакты
+- uses: actions/download-artifact@v4
+  with:
+    name: build-output
+```
+
+## Практика: CI для Node.js приложения
+
+```yaml
+# .github/workflows/ci.yml
+name: Node.js CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test on Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test -- --coverage
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.node-version }}
+          path: coverage/
+```
+
+## Переменные и контекст
+
+```yaml
+steps:
+  - name: Show context info
+    run: |
+      echo "Repo: ${{ github.repository }}"
+      echo "Branch: ${{ github.ref_name }}"
+      echo "Commit: ${{ github.sha }}"
+      echo "Actor: ${{ github.actor }}"
+      echo "Event: ${{ github.event_name }}"
+      echo "Runner OS: ${{ runner.os }}"
+```
+
+## Условное выполнение
+
+```yaml
+steps:
+  - name: Deploy to production
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    run: npm run deploy:prod
+
+  - name: Deploy to staging
+    if: github.ref == 'refs/heads/develop'
+    run: npm run deploy:staging
+
+  - name: Notify on failure
+    if: failure()
+    run: curl -X POST ${{ secrets.SLACK_WEBHOOK }} -d '{"text":"Build failed!"}'
+```
+
+## Работа с secrets
+
+```yaml
+steps:
+  - name: Deploy with secrets
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      API_KEY: ${{ secrets.API_KEY }}
+    run: npm run deploy
+```
+
+Secrets добавляются в: **Settings → Secrets and variables → Actions**
+
+## Практика: Полный CI/CD workflow
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    name: CI Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+      - name: Save build
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: .next/
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: ci
+    environment: production   # требует апрув в Settings
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: .next/
+
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: '--prod'
+```
+
+## Бесплатные лимиты GitHub Actions
+
+```
+Public repos:    Unlimited
+Private repos:   2,000 минут/месяц (бесплатный план)
+                 50,000 минут/месяц (Pro)
+
+Runners:
+ubuntu-latest   — 1x множитель
+windows-latest  — 2x множитель  
+macos-latest    — 10x множитель
+```
+
+## Ключевые моменты
+
+- Workflows хранятся в `.github/workflows/*.yml`
+- `on:` определяет триггеры запуска
+- `jobs:` содержат `steps:` с командами
+- `needs:` задаёт зависимости между jobs
+- Secrets хранятся в настройках репозитория
+- `uses:` подключает готовые actions из маркетплейса
+- `if:` позволяет условно выполнять шаги
+- Matrix strategy запускает job для разных конфигураций
+
+## Интерактивный пример
+
+Визуальный конструктор GitHub Actions workflow:
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": {
+      code: `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0f172a; color: #e2e8f0; padding: 20px; }
+h3 { color: #818cf8; margin-bottom: 12px; }
+.workflow { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
+.trigger { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.trigger button { background: #312e81; color: #818cf8; border: 1px solid #4338ca; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.trigger button.active { background: #4338ca; color: #fff; }
+.steps { display: flex; flex-direction: column; gap: 8px; }
+.step { display: flex; align-items: center; gap: 10px; background: #0f172a; border-radius: 8px; padding: 10px 14px; border-left: 3px solid #334155; transition: all .3s; }
+.step.running { border-left-color: #eab308; }
+.step.done { border-left-color: #22c55e; }
+.step .icon { width: 20px; text-align: center; }
+.step .name { flex: 1; font-size: 13px; }
+.step .time { color: #64748b; font-size: 11px; }
+.run-btn { margin-top: 14px; background: #22c55e; color: #0f172a; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 13px; }
+.yaml { margin-top: 14px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; font-size: 11px; color: #94a3b8; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h3>GitHub Actions Workflow</h3>
+<div class="workflow">
+  <div class="trigger" id="triggers"></div>
+  <div class="steps" id="steps"></div>
+  <button class="run-btn" onclick="runWorkflow()">▶ Run workflow</button>
+</div>
+<div class="yaml" id="yaml"></div>
+<script>
+const triggers = ["push", "pull_request", "schedule"];
+let activeTrigger = "push";
+const stepsData = [
+  { name: "Checkout code", icon: "📥", time: "2s" },
+  { name: "Setup Node.js", icon: "⚙️", time: "5s" },
+  { name: "Install deps", icon: "📦", time: "12s" },
+  { name: "Run tests", icon: "🧪", time: "8s" },
+  { name: "Build", icon: "🔨", time: "15s" },
+  { name: "Deploy", icon: "🚀", time: "10s" },
+];
+const trigEl = document.getElementById("triggers");
+triggers.forEach(t => {
+  const btn = document.createElement("button");
+  btn.textContent = "on: " + t;
+  btn.className = t === activeTrigger ? "active" : "";
+  btn.onclick = () => { activeTrigger = t; renderTriggers(); updateYaml(); };
+  trigEl.appendChild(btn);
+});
+function renderTriggers() {
+  trigEl.querySelectorAll("button").forEach(b => {
+    b.className = b.textContent === "on: " + activeTrigger ? "active" : "";
+  });
+}
+const stepsEl = document.getElementById("steps");
+stepsData.forEach(s => {
+  const div = document.createElement("div");
+  div.className = "step";
+  div.innerHTML = "<span class=\\"icon\\">" + s.icon + "</span><span class=\\"name\\">" + s.name + "</span><span class=\\"time\\">" + s.time + "</span>";
+  stepsEl.appendChild(div);
+});
+function updateYaml() {
+  document.getElementById("yaml").textContent =
+    "name: CI/CD Pipeline\\non: " + activeTrigger + "\\njobs:\\n  build:\\n    runs-on: ubuntu-latest\\n    steps:" +
+    stepsData.map(s => "\\n      - name: " + s.name).join("");
+}
+function runWorkflow() {
+  const els = stepsEl.querySelectorAll(".step");
+  els.forEach(e => { e.className = "step"; });
+  let i = 0;
+  const interval = setInterval(() => {
+    if (i > 0) els[i-1].className = "step done";
+    if (i < els.length) { els[i].className = "step running"; i++; }
+    else { clearInterval(interval); }
+  }, 600);
+}
+updateYaml();
+<\/script>
+</body>
+</html>`,
+      active: true,
+    },
+  }}
+/>

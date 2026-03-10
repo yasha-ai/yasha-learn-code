@@ -1,0 +1,551 @@
+---
+title: "49. PWA с Angular"
+sidebar:
+  order: 51
+---
+import { Playground } from '@components/Playground'
+
+
+## 📱 Progressive Web App с Angular
+
+PWA (Progressive Web App) — это веб-приложение, которое работает как нативное: устанавливается на устройство, работает офлайн, получает push-уведомления и загружается мгновенно. Angular PWA — это встроенная поддержка через Service Worker 🚀
+
+---
+
+## Установка
+
+```bash
+ng add @angular/pwa
+```
+
+Команда автоматически:
+- Устанавливает `@angular/service-worker`
+- Создаёт `ngsw-config.json`
+- Добавляет `manifest.webmanifest`
+- Регистрирует Service Worker в `app.config.ts`
+- Добавляет метатеги в `index.html`
+
+---
+
+## ngsw-config.json — конфигурация Service Worker
+
+```json
+{
+  "$schema": "./node_modules/@angular/service-worker/config/schema.json",
+  "index": "/index.html",
+  "assetGroups": [
+    {
+      "name": "app",
+      "installMode": "prefetch",
+      "updateMode": "prefetch",
+      "resources": {
+        "files": [
+          "/favicon.ico",
+          "/index.html",
+          "/manifest.webmanifest",
+          "/*.css",
+          "/*.js"
+        ]
+      }
+    },
+    {
+      "name": "assets",
+      "installMode": "lazy",
+      "updateMode": "prefetch",
+      "resources": {
+        "files": [
+          "/assets/**",
+          "/*.(svg|cur|jpg|jpeg|png|apng|webp|avif|gif|otf|ttf|woff|woff2)"
+        ]
+      }
+    }
+  ],
+  "dataGroups": [
+    {
+      "name": "api-freshness",
+      "urls": ["/api/news", "/api/products"],
+      "cacheConfig": {
+        "strategy": "freshness",
+        "maxSize": 100,
+        "maxAge": "3d",
+        "timeout": "10s"
+      }
+    },
+    {
+      "name": "api-performance",
+      "urls": ["/api/categories", "/api/config"],
+      "cacheConfig": {
+        "strategy": "performance",
+        "maxSize": 10,
+        "maxAge": "1d"
+      }
+    }
+  ],
+  "navigationUrls": [
+    "/**",
+    "!/**/*.*",
+    "!/**/*__*",
+    "!/**/*__*/**"
+  ]
+}
+```
+
+---
+
+## Стратегии кеширования
+
+### prefetch — заранее
+
+Все ресурсы загружаются сразу при установке Service Worker. Идеально для критического JS/CSS:
+
+```json
+{ "installMode": "prefetch" }
+```
+
+### lazy — по требованию
+
+Ресурсы кешируются при первом обращении. Для изображений и второстепенных файлов:
+
+```json
+{ "installMode": "lazy" }
+```
+
+### performance — сначала кеш
+
+Запросы к API отдаются из кеша немедленно, фоново обновляются:
+
+```json
+{
+  "strategy": "performance",
+  "maxSize": 50,
+  "maxAge": "1h"
+}
+```
+
+### freshness — сначала сеть
+
+Сначала идём в сеть, если нет ответа за timeout — берём из кеша:
+
+```json
+{
+  "strategy": "freshness",
+  "maxSize": 100,
+  "maxAge": "3d",
+  "timeout": "5s"
+}
+```
+
+---
+
+## manifest.webmanifest
+
+```json
+{
+  "name": "Мой Angular App",
+  "short_name": "MyApp",
+  "theme_color": "#dd0031",
+  "background_color": "#0f172a",
+  "display": "standalone",
+  "scope": "/",
+  "start_url": "/",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "assets/icons/icon-72x72.png",
+      "sizes": "72x72",
+      "type": "image/png",
+      "purpose": "maskable any"
+    },
+    {
+      "src": "assets/icons/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable any"
+    },
+    {
+      "src": "assets/icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Добавить товар",
+      "url": "/products/new",
+      "icons": [{ "src": "assets/icons/add.png", "sizes": "96x96" }]
+    }
+  ]
+}
+```
+
+---
+
+## Service Worker — обновления приложения
+
+```typescript
+// services/sw-update.service.ts
+import { Injectable } from '@angular/core';
+import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
+import { filter } from 'rxjs/operators';
+
+@Injectable({ providedIn: 'root' })
+export class SwUpdateService {
+  constructor(private swUpdate: SwUpdate) {}
+
+  initialize() {
+    if (!this.swUpdate.isEnabled) {
+      console.log('Service Worker не активен (dev mode)');
+      return;
+    }
+
+    // Подписываемся на события обновления
+    this.swUpdate.versionUpdates
+      .pipe(filter((evt): evt is VersionReadyEvent => evt.type === 'VERSION_READY'))
+      .subscribe(evt => {
+        console.log(`Текущая версия: ${evt.currentVersion.hash}`);
+        console.log(`Новая версия: ${evt.latestVersion.hash}`);
+
+        // Спрашиваем пользователя
+        const shouldUpdate = confirm(
+          '🚀 Доступна новая версия приложения. Обновить сейчас?'
+        );
+
+        if (shouldUpdate) {
+          this.swUpdate.activateUpdate().then(() => {
+            window.location.reload();
+          });
+        }
+      });
+
+    // Периодическая проверка обновлений (каждые 6 часов)
+    setInterval(() => {
+      this.swUpdate.checkForUpdate();
+    }, 6 * 60 * 60 * 1000);
+  }
+}
+
+// app.component.ts
+@Component({...})
+export class AppComponent {
+  constructor(swUpdateService: SwUpdateService) {
+    swUpdateService.initialize();
+  }
+}
+```
+
+---
+
+## Push Notifications
+
+```typescript
+// services/push-notification.service.ts
+import { Injectable } from '@angular/core';
+import { SwPush } from '@angular/service-worker';
+
+@Injectable({ providedIn: 'root' })
+export class PushNotificationService {
+  readonly VAPID_PUBLIC_KEY = 'YOUR_VAPID_PUBLIC_KEY';
+
+  constructor(private swPush: SwPush) {}
+
+  async subscribeToNotifications() {
+    if (!this.swPush.isEnabled) {
+      throw new Error('Service Worker Push не поддерживается');
+    }
+
+    try {
+      const subscription = await this.swPush.requestSubscription({
+        serverPublicKey: this.VAPID_PUBLIC_KEY,
+      });
+
+      // Отправляем подписку на сервер
+      await this.sendSubscriptionToServer(subscription);
+
+      console.log('✅ Push-уведомления подключены');
+      return subscription;
+    } catch (error) {
+      console.error('❌ Ошибка подписки:', error);
+      throw error;
+    }
+  }
+
+  listenToNotifications() {
+    return this.swPush.messages;
+  }
+
+  listenToClicks() {
+    return this.swPush.notificationClicks;
+  }
+
+  private async sendSubscriptionToServer(sub: PushSubscription) {
+    await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sub),
+    });
+  }
+}
+```
+
+---
+
+## Add to Home Screen (A2HS)
+
+```typescript
+// services/install-prompt.service.ts
+import { Injectable } from '@angular/core';
+import { BehaviorSubject } from 'rxjs';
+
+@Injectable({ providedIn: 'root' })
+export class InstallPromptService {
+  private deferredPrompt: any = null;
+  canInstall$ = new BehaviorSubject<boolean>(false);
+
+  constructor() {
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault(); // Не показываем браузерный промпт
+      this.deferredPrompt = e;
+      this.canInstall$.next(true);
+    });
+
+    window.addEventListener('appinstalled', () => {
+      this.deferredPrompt = null;
+      this.canInstall$.next(false);
+      console.log('✅ Приложение установлено!');
+    });
+  }
+
+  async install() {
+    if (!this.deferredPrompt) return;
+
+    this.deferredPrompt.prompt();
+    const { outcome } = await this.deferredPrompt.userChoice;
+
+    if (outcome === 'accepted') {
+      console.log('Пользователь установил приложение');
+    } else {
+      console.log('Пользователь отклонил установку');
+    }
+
+    this.deferredPrompt = null;
+    this.canInstall$.next(false);
+  }
+}
+```
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useState } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+
+type Feature = 'offline' | 'install' | 'push' | 'cache' | 'update';
+
+const features: Record<Feature, {
+  label: string;
+  icon: string;
+  description: string;
+  config: string;
+  status: 'active' | 'inactive' | 'pending';
+}> = {
+  offline: {
+    label: 'Offline Support',
+    icon: '📶',
+    description: 'Приложение работает без интернета. Service Worker отдаёт кешированные ресурсы.',
+    config: '"installMode": "prefetch"',
+    status: 'active',
+  },
+  install: {
+    label: 'Add to Home Screen',
+    icon: '📲',
+    description: 'Пользователь может установить PWA на устройство. beforeinstallprompt',
+    config: '"display": "standalone"',
+    status: 'inactive',
+  },
+  push: {
+    label: 'Push Notifications',
+    icon: '🔔',
+    description: 'SwPush.requestSubscription() + VAPID keys',
+    config: 'swPush.requestSubscription({ serverPublicKey })',
+    status: 'inactive',
+  },
+  cache: {
+    label: 'API Caching',
+    icon: '💾',
+    description: 'HTTP запросы кешируются по стратегии performance или freshness',
+    config: '"strategy": "performance", "maxAge": "1d"',
+    status: 'active',
+  },
+  update: {
+    label: 'Background Updates',
+    icon: '🔄',
+    description: 'SwUpdate.versionUpdates — автообновление при новом деплое',
+    config: 'swUpdate.versionUpdates.pipe(filter(VERSION_READY))',
+    status: 'pending',
+  },
+};
+
+const strategies = [
+  { name: 'prefetch', color: SUCCESS, description: 'Загружает при установке SW', use: 'Критический JS/CSS' },
+  { name: 'lazy', color: '#3b82f6', description: 'Кеширует при первом обращении', use: 'Изображения, шрифты' },
+  { name: 'performance', color: WARN, description: 'Сначала кеш, фоном обновляет', use: 'Справочники, конфиг' },
+  { name: 'freshness', color: '#8b5cf6', description: 'Сначала сеть, fallback на кеш', use: 'Новости, лента' },
+];
+
+export default function App() {
+  const [activeFeature, setActiveFeature] = useState<Feature>('offline');
+  const [featureStates, setFeatureStates] = useState(
+    Object.fromEntries(Object.entries(features).map(([k, v]) => [k, v.status])) as Record<Feature, string>
+  );
+  const [swLog, setSwLog] = useState<string[]>([]);
+  const [networkMode, setNetworkMode] = useState<'online' | 'offline'>('online');
+  const [cacheHits, setCacheHits] = useState(0);
+
+  const addLog = (msg: string) => setSwLog(p => [msg, ...p.slice(0, 7)]);
+
+  const toggleFeature = (f: Feature) => {
+    const newStatus = featureStates[f] === 'active' ? 'inactive' : 'active';
+    setFeatureStates(s => ({ ...s, [f]: newStatus }));
+    addLog(\`SW: \${f} → \${newStatus}\`);
+
+    if (f === 'install' && newStatus === 'active') {
+      addLog('📲 beforeinstallprompt intercepted');
+      addLog('📲 deferredPrompt.prompt() called');
+    }
+    if (f === 'push' && newStatus === 'active') {
+      addLog('🔔 Requesting notification permission...');
+      setTimeout(() => addLog('🔔 Permission granted ✅'), 600);
+      setTimeout(() => addLog('🔔 swPush.requestSubscription() → VAPID keys'), 1200);
+    }
+  };
+
+  const simulateRequest = (url: string) => {
+    if (networkMode === 'offline') {
+      if (featureStates.cache === 'active') {
+        setCacheHits(n => n + 1);
+        addLog(\`📦 CACHE HIT: \${url} (offline mode)\`);
+      } else {
+        addLog(\`❌ FAILED: \${url} — offline, no cache\`);
+      }
+    } else {
+      addLog(\`🌐 NETWORK: GET \${url} 200 OK\`);
+      if (featureStates.cache === 'active') {
+        addLog(\`💾 Cached: \${url} → SW cache\`);
+      }
+    }
+  };
+
+  const simulateUpdate = () => {
+    addLog('🔍 Checking for SW updates...');
+    setTimeout(() => addLog('📦 New version detected: v2.0.1'), 500);
+    setTimeout(() => {
+      setFeatureStates(s => ({ ...s, update: 'active' }));
+      addLog('✅ Update ready — VERSION_READY event fired');
+    }, 1000);
+    setTimeout(() => addLog('🔄 User accepted update → activateUpdate()'), 1500);
+  };
+
+  const statusColor = (s: string) => s === 'active' ? SUCCESS : s === 'pending' ? WARN : '#475569';
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'sans-serif', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem', fontFamily: 'monospace' }}>📱 PWA Feature Explorer</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem', fontFamily: 'monospace' }}>
+        @angular/pwa + ngsw-config.json + SwUpdate + SwPush
+      </p>
+
+      {/* Network toggle */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem 1rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: '0.82rem' }}>
+          Network: <span style={{ color: networkMode === 'online' ? SUCCESS : RED, fontWeight: 700 }}>{networkMode === 'online' ? '🌐 Online' : '📴 Offline'}</span>
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Cache hits: <b style={{ color: SUCCESS }}>{cacheHits}</b></span>
+          <button onClick={() => setNetworkMode(m => m === 'online' ? 'offline' : 'online')} style={{ padding: '0.35rem 0.75rem', background: networkMode === 'online' ? CARD : RED + '30', border: \`1px solid \${networkMode === 'online' ? BORDER : RED}\`, color: networkMode === 'online' ? '#94a3b8' : RED, borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600 }}>
+            Toggle {networkMode === 'online' ? '→ Offline' : '→ Online'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        {/* Features */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase', fontFamily: 'monospace' }}>PWA Features</div>
+          {(Object.entries(features) as [Feature, typeof features[Feature]][]).map(([key, f]) => (
+            <div key={key} onClick={() => setActiveFeature(key)} style={{ padding: '0.5rem 0.6rem', marginBottom: '0.3rem', background: activeFeature === key ? BG : 'transparent', border: \`1px solid \${activeFeature === key ? RED : BORDER}\`, borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span style={{ fontSize: '1.1rem' }}>{f.icon}</span>
+                  <span style={{ fontSize: '0.78rem', fontWeight: 600, color: activeFeature === key ? '#e2e8f0' : '#94a3b8' }}>{f.label}</span>
+                </div>
+                <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: statusColor(featureStates[key]), display: 'inline-block' }} />
+                  <button onClick={e => { e.stopPropagation(); toggleFeature(key); }} style={{ padding: '0.15rem 0.5rem', background: featureStates[key] === 'active' ? SUCCESS + '20' : '#334155', border: \`1px solid \${featureStates[key] === 'active' ? SUCCESS : BORDER}\`, color: featureStates[key] === 'active' ? SUCCESS : '#475569', borderRadius: '3px', cursor: 'pointer', fontSize: '0.65rem' }}>
+                    {featureStates[key] === 'active' ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Feature detail */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase', fontFamily: 'monospace' }}>{features[activeFeature].icon} {features[activeFeature].label}</div>
+          <p style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '0.75rem', lineHeight: 1.5 }}>{features[activeFeature].description}</p>
+          <div style={{ background: BG, borderRadius: '4px', padding: '0.5rem 0.75rem', marginBottom: '0.75rem', fontSize: '0.72rem', color: '#94a3b8', fontFamily: 'monospace', borderLeft: \`2px solid \${RED}\` }}>
+            {features[activeFeature].config}
+          </div>
+
+          {activeFeature === 'cache' && (
+            <div>
+              <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.5rem' }}>Simulate requests:</div>
+              {['/api/products', '/api/users', '/api/config'].map(url => (
+                <button key={url} onClick={() => simulateRequest(url)} style={{ display: 'block', width: '100%', padding: '0.35rem 0.5rem', background: BG, border: \`1px solid \${BORDER}\`, color: '#94a3b8', borderRadius: '4px', cursor: 'pointer', fontSize: '0.72rem', marginBottom: '0.25rem', textAlign: 'left', fontFamily: 'monospace' }}>
+                  GET {url}
+                </button>
+              ))}
+            </div>
+          )}
+          {activeFeature === 'update' && (
+            <button onClick={simulateUpdate} style={{ width: '100%', padding: '0.45rem', background: WARN + '20', border: \`1px solid \${WARN}\`, color: WARN, borderRadius: '4px', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600 }}>
+              🔄 Simulate New Deployment
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Cache strategies */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
+        <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase', fontFamily: 'monospace' }}>ngsw-config.json — Caching Strategies</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+          {strategies.map(s => (
+            <div key={s.name} style={{ padding: '0.5rem 0.6rem', background: BG, border: \`1px solid \${s.color}40\`, borderRadius: '6px' }}>
+              <div style={{ color: s.color, fontWeight: 700, fontSize: '0.78rem', fontFamily: 'monospace', marginBottom: '0.2rem' }}>{s.name}</div>
+              <div style={{ color: '#64748b', fontSize: '0.7rem' }}>{s.description}</div>
+              <div style={{ color: '#475569', fontSize: '0.68rem', marginTop: '0.2rem' }}>Use: {s.use}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* SW log */}
+      <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', maxHeight: '100px', overflowY: 'auto', fontFamily: 'monospace' }}>
+        <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.35rem' }}>Service Worker Log</div>
+        {swLog.length === 0
+          ? <div style={{ color: '#334155', fontSize: '0.78rem' }}>// Toggle features to see SW events...</div>
+          : swLog.map((l, i) => <div key={i} style={{ fontSize: '0.75rem', marginBottom: '0.1rem', color: i === 0 ? SUCCESS : '#475569' }}>{l}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,385 @@
+---
+title: "9. Network Performance"
+sidebar:
+  order: 8
+---
+import { Playground } from '@components/Playground'
+
+
+Сетевые запросы — одно из главных узких мест. Каждый запрос = задержка DNS + TCP + TLS + TTFB.
+
+## HTTP/2 и HTTP/3
+
+```
+HTTP/1.1:  Один запрос за раз, очередь
+HTTP/2:    Мультиплексирование — много запросов в одном соединении
+HTTP/3:    UDP вместо TCP, лучше при потерях пакетов
+```
+
+**Проверка:** Chrome DevTools → Network → Protocol колонка
+
+## Resource Hints
+
+```html
+<!-- DNS Prefetch — заранее резолвим DNS -->
+<link rel="dns-prefetch" href="//api.example.com">
+<link rel="dns-prefetch" href="//fonts.googleapis.com">
+<link rel="dns-prefetch" href="//cdn.example.com">
+
+<!-- Preconnect — TCP + TLS рукопожатие заранее -->
+<link rel="preconnect" href="https://api.example.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+<!-- Preload — загружаем критический ресурс заранее -->
+<link rel="preload" href="/fonts/main.woff2" as="font" crossorigin>
+<link rel="preload" href="/hero.webp" as="image" fetchpriority="high">
+<link rel="preload" href="/critical.css" as="style">
+<link rel="preload" href="/main.js" as="script">
+
+<!-- Prefetch — загружаем следующую страницу -->
+<link rel="prefetch" href="/about.html">
+<link rel="prefetch" href="/assets/next-page-bundle.js">
+
+<!-- Modulepreload — для ES-модулей -->
+<link rel="modulepreload" href="/app.js">
+```
+
+## Сжатие
+
+### Gzip / Brotli на сервере
+
+```nginx
+# Nginx — Gzip
+gzip on;
+gzip_comp_level 6;
+gzip_types text/plain text/css application/javascript application/json;
+
+# Nginx — Brotli (быстрее и лучше сжимает)
+brotli on;
+brotli_comp_level 6;
+brotli_types text/plain text/css application/javascript;
+```
+
+```javascript
+// Next.js — автоматически
+// Compress включён по умолчанию
+
+// Express
+const compression = require('compression');
+app.use(compression({ level: 6 }));
+```
+
+**Результат:** JS/CSS файлы сжимаются в 3-5 раз!
+
+## Кэширование HTTP
+
+```nginx
+# Nginx — правильные Cache-Control заголовки
+location /assets/ {
+  # Статика с хешем в имени — кэшируем навсегда
+  add_header Cache-Control "public, max-age=31536000, immutable";
+}
+
+location /api/ {
+  # API — без кэша или короткий
+  add_header Cache-Control "no-cache, no-store, must-revalidate";
+}
+
+location = /index.html {
+  # HTML — проверяем актуальность
+  add_header Cache-Control "no-cache";
+}
+```
+
+```javascript
+// Service Worker — продвинутое кэширование
+const CACHE_NAME = 'app-v1';
+const STATIC_ASSETS = ['/', '/styles.css', '/app.js'];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS))
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    caches.match(event.request).then(cached => {
+      return cached || fetch(event.request).then(response => {
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, response.clone()));
+        return response;
+      });
+    })
+  );
+});
+```
+
+## Оптимизация API запросов
+
+### GraphQL — только нужные поля
+
+```javascript
+// ❌ REST — получаем всё
+GET /api/users/123 → { id, name, email, avatar, bio, settings, posts, ... }
+
+// ✅ GraphQL — только нужное
+query {
+  user(id: "123") {
+    name
+    avatar
+  }
+}
+```
+
+### Request Batching
+
+```javascript
+// ❌ 10 отдельных запросов
+for (const id of userIds) {
+  await fetch(`/api/users/${id}`); // 10 round trips!
+}
+
+// ✅ Один батч-запрос
+const users = await fetch('/api/users/batch', {
+  method: 'POST',
+  body: JSON.stringify({ ids: userIds }),
+});
+
+// ✅ DataLoader (для GraphQL/Node.js)
+const loader = new DataLoader(async (ids) => {
+  const users = await db.user.findMany({ where: { id: { in: ids } } });
+  return ids.map(id => users.find(u => u.id === id));
+});
+```
+
+### Request Deduplication
+
+```javascript
+// Кэшируем одинаковые запросы
+const requestCache = new Map();
+
+async function fetchWithCache(url) {
+  if (requestCache.has(url)) {
+    return requestCache.get(url); // возвращаем существующий Promise!
+  }
+  
+  const promise = fetch(url).then(r => r.json());
+  requestCache.set(url, promise);
+  
+  // Очищаем после успешной загрузки
+  promise.then(() => requestCache.delete(url));
+  
+  return promise;
+}
+
+// При параллельных вызовах
+fetchWithCache('/api/user'); // создаёт запрос
+fetchWithCache('/api/user'); // возвращает тот же Promise — один запрос!
+```
+
+## Стриминг ответов
+
+```javascript
+// Server-Sent Events для обновлений в реальном времени
+const eventSource = new EventSource('/api/stream');
+
+eventSource.addEventListener('update', (e) => {
+  updateUI(JSON.parse(e.data));
+});
+
+// WebSocket для двунаправленной связи
+const ws = new WebSocket('wss://api.example.com/ws');
+
+ws.addEventListener('message', ({ data }) => {
+  updateUI(JSON.parse(data));
+});
+
+// Next.js App Router — Response Streaming
+export default async function Page() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <SlowDataComponent /> {/* Стримится как готово */}
+    </Suspense>
+  );
+}
+```
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html>
+<head>
+  <title>Network Performance Demo</title>
+  <style>
+    body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+    h1 { color: #89b4fa; }
+    h2 { color: #cba6f7; margin: 20px 0 10px; font-size: 16px; }
+    .demo { background: #313244; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin: 4px; }
+    .result { margin: 8px 0; padding: 8px; border-radius: 4px; background: #1e1e2e; font-family: monospace; font-size: 13px; }
+    .good { color: #a6e3a1; }
+    .bad { color: #f38ba8; }
+    .warn { color: #f9e2af; }
+    .timeline { display: flex; height: 40px; border-radius: 6px; overflow: hidden; margin: 8px 0; font-size: 11px; }
+    .tl-segment { display: flex; align-items: center; justify-content: center; }
+    .progress { background: #45475a; border-radius: 4px; height: 8px; margin: 4px 0; }
+    .progress-bar { height: 100%; border-radius: 4px; transition: width 0.5s; }
+  </style>
+</head>
+<body>
+  <h1>Network Performance</h1>
+
+  <div class="demo">
+    <h2>1. Параллельные vs Последовательные запросы</h2>
+    <button onclick="sequentialRequests()">❌ Последовательные (медленно)</button>
+    <button onclick="parallelRequests()">✅ Параллельные (быстро)</button>
+    <div class="result" id="request-result">Нажмите кнопку для теста</div>
+  </div>
+
+  <div class="demo">
+    <h2>2. Кэширование запросов (Request Deduplication)</h2>
+    <button onclick="testDedup()">Сделать 5 одинаковых запросов</button>
+    <div class="result" id="dedup-result">Нажмите для теста</div>
+  </div>
+
+  <div class="demo">
+    <h2>3. Размер данных: С и без оптимизации</h2>
+    <button onclick="showDataComparison()">Показать сравнение</button>
+    <div id="data-comparison"></div>
+  </div>
+
+  <div class="demo">
+    <h2>4. Waterfall диаграмма загрузки</h2>
+    <div id="waterfall"></div>
+    <button onclick="simulateWaterfall()">Симулировать загрузку страницы</button>
+  </div>
+
+  <script>
+    // Симуляция API с задержкой
+    function mockFetch(url, delay = 200 + Math.random() * 300) {
+      return new Promise(resolve => 
+        setTimeout(() => resolve({ url, data: 'mock response' }), delay)
+      );
+    }
+
+    // 1. Sequential vs Parallel
+    async function sequentialRequests() {
+      const urls = ['/api/user', '/api/posts', '/api/comments', '/api/settings'];
+      const el = document.getElementById('request-result');
+      el.textContent = '⏳ Делаем последовательные запросы...';
+      
+      const start = performance.now();
+      for (const url of urls) {
+        await mockFetch(url, 300);
+      }
+      const time = performance.now() - start;
+      
+      el.innerHTML = \`<span class="bad">❌ Последовательно: \${time.toFixed(0)}ms (\${urls.length} запросов × ~300ms каждый)</span>\`;
+    }
+
+    async function parallelRequests() {
+      const urls = ['/api/user', '/api/posts', '/api/comments', '/api/settings'];
+      const el = document.getElementById('request-result');
+      el.textContent = '⏳ Делаем параллельные запросы...';
+      
+      const start = performance.now();
+      await Promise.all(urls.map(url => mockFetch(url, 300)));
+      const time = performance.now() - start;
+      
+      el.innerHTML = \`<span class="good">✅ Параллельно: \${time.toFixed(0)}ms (все запросы одновременно!)</span>\`;
+    }
+
+    // 2. Deduplication
+    const requestCache = new Map();
+    let networkCallCount = 0;
+
+    async function dedupFetch(url) {
+      if (requestCache.has(url)) {
+        return requestCache.get(url);
+      }
+      networkCallCount++;
+      const promise = mockFetch(url, 400);
+      requestCache.set(url, promise);
+      promise.then(() => setTimeout(() => requestCache.delete(url), 2000));
+      return promise;
+    }
+
+    async function testDedup() {
+      const el = document.getElementById('dedup-result');
+      networkCallCount = 0;
+      requestCache.clear();
+      
+      el.textContent = '⏳ 5 одновременных вызовов /api/user...';
+      const start = performance.now();
+      
+      await Promise.all([
+        dedupFetch('/api/user'),
+        dedupFetch('/api/user'),
+        dedupFetch('/api/user'),
+        dedupFetch('/api/user'),
+        dedupFetch('/api/user'),
+      ]);
+      
+      const time = performance.now() - start;
+      el.innerHTML = \`
+        <div>5 вызовов dedupFetch('/api/user')</div>
+        <div class="good">✅ Реальных сетевых запросов: \${networkCallCount} (!)
+        <div>Время: \${time.toFixed(0)}ms (как один запрос)</div>
+      \`;
+    }
+
+    // 3. Data comparison
+    function showDataComparison() {
+      const scenarios = [
+        { name: 'REST без оптимизации', fields: 50, size: '15 KB', color: '#f38ba8' },
+        { name: 'REST с field selection', fields: 8, size: '2.4 KB', color: '#f9e2af' },
+        { name: 'GraphQL (только нужное)', fields: 3, size: '0.8 KB', color: '#a6e3a1' },
+      ];
+      
+      document.getElementById('data-comparison').innerHTML = scenarios.map(s => \`
+        <div style="margin: 8px 0; display: flex; align-items: center; gap: 12px;">
+          <span style="width: 200px; font-size: 13px;">\${s.name}</span>
+          <div style="flex: 1; background: #45475a; border-radius: 4px; height: 24px; overflow: hidden;">
+            <div style="background: \${s.color}; height: 100%; width: \${parseInt(s.size)}%; min-width: 60px; display: flex; align-items: center; padding: 0 8px; font-size: 12px; color: #1e1e2e; font-weight: bold;">\${s.size}</div>
+          </div>
+          <span style="color: #6c7086; font-size: 12px">\${s.fields} полей</span>
+        </div>
+      \`).join('');
+    }
+
+    // 4. Waterfall
+    function simulateWaterfall() {
+      const resources = [
+        { name: 'index.html', start: 0, duration: 15, color: '#89b4fa', type: 'Document' },
+        { name: 'main.css', start: 15, duration: 120, color: '#cba6f7', type: 'Stylesheet' },
+        { name: 'app.js', start: 15, duration: 180, color: '#f9e2af', type: 'Script' },
+        { name: 'hero.webp', start: 135, duration: 90, color: '#a6e3a1', type: 'Image' },
+        { name: 'font.woff2', start: 15, duration: 200, color: '#f38ba8', type: 'Font' },
+        { name: 'analytics.js', start: 300, duration: 80, color: '#6c7086', type: 'Script (async)' },
+      ];
+      
+      const total = Math.max(...resources.map(r => r.start + r.duration));
+      
+      document.getElementById('waterfall').innerHTML = \`
+        <div style="font-size: 12px; color: #6c7086; margin-bottom: 8px;">Загрузка страницы — \${total}ms</div>
+        \${resources.map(r => \`
+          <div style="display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px;">
+            <span style="width: 130px; color: #cdd6f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">\${r.name}</span>
+            <div style="flex: 1; background: #45475a; border-radius: 2px; height: 18px; position: relative;">
+              <div style="position: absolute; left: \${(r.start/total*100).toFixed(1)}%; width: \${(r.duration/total*100).toFixed(1)}%; background: \${r.color}; height: 100%; border-radius: 2px; display: flex; align-items: center; padding-left: 4px; font-size: 10px; color: #1e1e2e; font-weight: bold;">\${r.duration}ms</div>
+            </div>
+            <span style="color: #6c7086; width: 90px; text-align: right;">\${r.type}</span>
+          </div>
+        \`).join('')}
+      \`;
+    }
+
+    simulateWaterfall();
+  </script>
+</body>
+</html>`
+  }}
+/>

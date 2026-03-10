@@ -1,0 +1,309 @@
+---
+title: "9. Docker Compose"
+sidebar:
+  order: 9
+---
+import { Playground } from '@components/Playground'
+
+
+Docker Compose — инструмент для описания и запуска многоконтейнерных Docker-приложений. Вся конфигурация хранится в файле `docker-compose.yml`, что делает её воспроизводимой и документированной.
+
+## Структура docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  frontend:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    networks:
+      - web
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://user:pass@postgres/mydb
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - web
+      - db
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: mydb
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d mydb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db
+
+volumes:
+  postgres_data:
+
+networks:
+  web:
+  db:
+    internal: true
+```
+
+## Основные команды Docker Compose
+
+```bash
+# Запустить все сервисы (в фоне)
+docker compose up -d
+
+# Запустить и пересобрать образы
+docker compose up -d --build
+
+# Остановить и удалить контейнеры
+docker compose down
+
+# Остановить и удалить с томами
+docker compose down -v
+
+# Список запущенных сервисов
+docker compose ps
+
+# Просмотр логов всех сервисов
+docker compose logs -f
+
+# Логи конкретного сервиса
+docker compose logs -f api
+
+# Выполнить команду в сервисе
+docker compose exec api sh
+
+# Пересобрать конкретный образ
+docker compose build api
+
+# Масштабировать сервис
+docker compose up -d --scale api=3
+
+# Перезапустить сервис
+docker compose restart api
+```
+
+## Переменные и .env файлы
+
+```bash
+# .env файл (автоматически загружается)
+POSTGRES_PASSWORD=secret
+NODE_ENV=production
+API_PORT=3000
+```
+
+```yaml
+services:
+  api:
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - PORT=${API_PORT:-3000}  # значение по умолчанию
+    ports:
+      - "${API_PORT:-3000}:3000"
+```
+
+## depends_on и healthcheck
+
+```yaml
+services:
+  api:
+    depends_on:
+      postgres:
+        condition: service_healthy  # ждать готовности
+      redis:
+        condition: service_started  # просто дождаться запуска
+  
+  postgres:
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+```
+
+## Profiles — условный запуск
+
+```yaml
+services:
+  app:
+    image: myapp
+
+  debug-tools:
+    image: nicolaka/netshoot
+    profiles: ["debug"]  # запускается только с --profile debug
+
+  monitoring:
+    image: prom/prometheus
+    profiles: ["monitoring"]
+```
+
+```bash
+docker compose --profile debug up
+docker compose --profile monitoring up
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `export default function App() {
+  const [services, setServices] = React.useState([
+    { id: 's1', name: 'nginx',    image: 'nginx:alpine',    port: '80:80',    deps: [],       net: ['web'],        status: 'stopped', build: false },
+    { id: 's2', name: 'api',      image: 'node:20-alpine',  port: '3000',     deps: ['db'],   net: ['web','back'], status: 'stopped', build: true  },
+    { id: 's3', name: 'db',       image: 'postgres:15',     port: '5432',     deps: [],       net: ['back'],       status: 'stopped', build: false },
+    { id: 's4', name: 'redis',    image: 'redis:7-alpine',  port: '6379',     deps: [],       net: ['back'],       status: 'stopped', build: false },
+  ]);
+  const [running, setRunning] = React.useState(false);
+  const [log, setLog] = React.useState([]);
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const amber = '#f59e0b';
+  const red = '#ef4444';
+
+  const netColors = { web: docker, back: amber };
+  const statusColor = { running: green, stopped: muted, starting: amber, error: red };
+  const statusIcon  = { running: '▶', stopped: '■', starting: '…', error: '✗' };
+
+  const addLog = (msg) => setLog(l => [...l.slice(-8), \`\${new Date().toLocaleTimeString()}  \${msg}\`]);
+
+  const startAll = () => {
+    if (running) return;
+    setRunning(true);
+    const order = [];
+    const visited = new Set();
+    const visit = (id) => {
+      if (visited.has(id)) return;
+      visited.add(id);
+      const svc = services.find(s => s.id === id);
+      svc.deps.forEach(dep => {
+        const depSvc = services.find(s => s.name === dep);
+        if (depSvc) visit(depSvc.id);
+      });
+      order.push(id);
+    };
+    services.forEach(s => visit(s.id));
+
+    setServices(ss => ss.map(s => ({ ...s, status: 'stopped' })));
+    let delay = 0;
+    order.forEach(id => {
+      const svc = services.find(s => s.id === id);
+      setTimeout(() => {
+        setServices(ss => ss.map(s => s.id === id ? { ...s, status: 'starting' } : s));
+        addLog(\`Starting \${svc.name}...\`);
+      }, delay);
+      delay += 800;
+      setTimeout(() => {
+        setServices(ss => ss.map(s => s.id === id ? { ...s, status: 'running' } : s));
+        addLog(\`\${svc.name} is up!\`);
+      }, delay);
+      delay += 200;
+    });
+    setTimeout(() => setRunning(false), delay + 200);
+  };
+
+  const stopAll = () => {
+    setServices(ss => ss.map(s => ({ ...s, status: 'stopped' })));
+    setLog([]);
+  };
+
+  const yaml = \`version: '3.8'
+services:
+\${services.map(s => \`  \${s.name}:
+    image: \${s.image}\${s.build ? '\\n    build: .' : ''}
+    ports: [\"\${s.port}\"]
+    networks: [\${s.net.join(', ')}]
+\${s.deps.length ? \`    depends_on: [\${s.deps.join(', ')}]\` : ''}\`).join('\\n')}
+networks:
+  web:
+  back:
+    internal: true\`;
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        🐙 Docker Compose Визуализатор
+      </h2>
+
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 20 }}>
+        <button onClick={startAll} disabled={running} style={{
+          background: running ? muted : green, border: 'none', borderRadius: 8,
+          padding: '8px 20px', color: '#fff', cursor: running ? 'default' : 'pointer', fontSize: 13, fontWeight: 600,
+        }}>▶ docker compose up</button>
+        <button onClick={stopAll} style={{
+          background: card, border: \`1px solid \${red}55\`, borderRadius: 8,
+          padding: '8px 20px', color: red, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+        }}>■ docker compose down</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 16, maxWidth: 800, margin: '0 auto', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 280 }}>
+          <div style={{ color: muted, fontSize: 12, marginBottom: 10 }}>ГРАФ ЗАВИСИМОСТЕЙ</div>
+
+          {['web', 'back'].map(net => (
+            <div key={net} style={{ background: card, borderRadius: 10, padding: 14, marginBottom: 12, border: \`1px solid \${netColors[net]}44\` }}>
+              <div style={{ color: netColors[net], fontWeight: 700, fontSize: 12, marginBottom: 10 }}>🌐 {net} network</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {services.filter(s => s.net.includes(net)).map(s => (
+                  <div key={s.id} style={{
+                    background: statusColor[s.status] + '22',
+                    border: \`1px solid \${statusColor[s.status]}55\`,
+                    borderRadius: 8, padding: '8px 12px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ color: statusColor[s.status], fontSize: 12 }}>{statusIcon[s.status]}</span>
+                      <span style={{ fontWeight: 700, fontSize: 13 }}>{s.name}</span>
+                    </div>
+                    <div style={{ color: muted, fontSize: 10, marginTop: 3 }}>{s.image}</div>
+                    {s.deps.length > 0 && (
+                      <div style={{ marginTop: 4, fontSize: 10, color: amber }}>depends_on: {s.deps.join(', ')}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {log.length > 0 && (
+            <div style={{ background: '#0d1117', borderRadius: 10, padding: 12, border: '1px solid #ffffff10' }}>
+              <div style={{ color: muted, fontSize: 11, marginBottom: 6 }}>Лог запуска:</div>
+              {log.map((l, i) => (
+                <div key={i} style={{ color: l.includes('up!') ? green : amber, fontSize: 11, fontFamily: 'monospace', marginBottom: 2 }}>{l}</div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div style={{ width: 280, flexShrink: 0 }}>
+          <div style={{ color: muted, fontSize: 12, marginBottom: 8 }}>docker-compose.yml ПРЕДПРОСМОТР</div>
+          <pre style={{
+            background: '#0d1117', borderRadius: 10, padding: 14,
+            fontFamily: 'Monaco, monospace', fontSize: 10, lineHeight: 1.6,
+            color: '#94a3b8', border: '1px solid #ffffff10',
+            overflowX: 'auto', whiteSpace: 'pre', maxHeight: 400, overflowY: 'auto',
+          }}>{yaml}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

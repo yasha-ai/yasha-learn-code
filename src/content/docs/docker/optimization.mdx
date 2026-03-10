@@ -1,0 +1,299 @@
+---
+title: "22. Оптимизация образов"
+sidebar:
+  order: 22
+---
+import { Playground } from '@components/Playground'
+
+
+Размер Docker-образа влияет на скорость развёртывания, потребление дискового пространства и время загрузки. Оптимизация образов — важный навык для production-развёртываний.
+
+## Стратегии уменьшения размера
+
+### 1. Выбор минимального базового образа
+
+```dockerfile
+# Сравнение базовых образов Node.js:
+FROM node:20           # 1.1 GB  — полный Debian
+FROM node:20-slim      # 240 MB  — облегчённый Debian
+FROM node:20-alpine    # 130 MB  — Alpine Linux
+FROM node:20-bookworm-slim  # 240 MB — Debian Bookworm slim
+
+# Для Go и других компилируемых языков:
+FROM scratch           # 0 MB   — пустой образ
+FROM gcr.io/distroless/static  # ~1 MB — только CA certs
+FROM gcr.io/distroless/nodejs20  # ~100 MB — только Node.js runtime
+```
+
+### 2. Multi-stage builds
+
+```dockerfile
+# Этап сборки (всё необходимое для компиляции)
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Финальный образ (только результат)
+FROM node:20-alpine AS production
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY --from=builder /app/dist ./dist
+CMD ["node", "dist/server.js"]
+```
+
+### 3. Правильный .dockerignore
+
+```
+# .dockerignore — исключить из контекста сборки
+node_modules/
+npm-debug.log
+.git/
+.gitignore
+.env
+.env.*
+*.test.js
+*.spec.ts
+coverage/
+.nyc_output/
+dist/
+build/
+docs/
+*.md
+.DS_Store
+.vscode/
+Dockerfile*
+docker-compose*
+```
+
+### 4. Объединение RUN команд
+
+```dockerfile
+# ❌ Три слоя
+RUN apt-get update
+RUN apt-get install -y curl wget git
+RUN rm -rf /var/lib/apt/lists/*
+
+# ✅ Один слой, кеш apt удаляется в том же слое
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      curl \
+      wget \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+### 5. Использование --no-install-recommends
+
+```dockerfile
+# Только необходимые пакеты, без рекомендованных
+RUN apt-get install -y --no-install-recommends curl
+RUN apk add --no-cache curl  # Alpine: --no-cache вместо rm /var/cache/apk
+```
+
+## Анализ размера образа
+
+```bash
+# История слоёв с размерами
+docker history myapp:latest
+
+# Инструмент dive для детального анализа
+dive myapp:latest
+# Показывает:
+# - размер каждого слоя
+# - изменения в файловой системе
+# - эффективность образа (% неизменённых файлов)
+
+# Экспорт и анализ образа
+docker save myapp | tar tv | sort -k5 -rn | head -20
+
+# Сравнение размеров
+docker images | grep myapp
+```
+
+## Чеклист оптимизации
+
+```dockerfile
+# 1. Alpine/distroless базовый образ
+FROM node:20-alpine
+
+# 2. Сначала зависимости (для кеша)
+COPY package*.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+# 3. Потом код
+COPY --chown=node:node . .
+
+# 4. Непривилегированный пользователь
+USER node
+
+# 5. Конкретная версия образа
+FROM node:20.11.0-alpine3.19
+
+# 6. Удалить временные файлы в том же слое
+RUN apk add --no-cache --virtual .build-deps gcc musl-dev && \
+    npm rebuild bcrypt --build-from-source && \
+    apk del .build-deps
+```
+
+## Инструменты анализа
+
+```bash
+# Docker Scout (встроен в Docker Desktop)
+docker scout quickview myapp:latest
+docker scout recommendations myapp:latest
+
+# Trivy — сканирование уязвимостей
+trivy image --severity HIGH,CRITICAL myapp:latest
+
+# dive — анализ слоёв
+brew install dive
+dive myapp:latest
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `export default function App() {
+  const [checked, setChecked] = React.useState({
+    alpine: false, multistage: false, dockerignore: false,
+    mergerun: false, nocache: false, nodev: false, specifictag: false,
+  });
+  const [customBase, setCustomBase] = React.useState('node:20');
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  const baseSizes = {
+    'node:20': 1100, 'node:20-slim': 240, 'node:20-alpine': 130,
+    'gcr.io/distroless/nodejs20': 100, 'scratch': 0,
+  };
+
+  const optimizations = [
+    { key: 'alpine',      label: 'Alpine базовый образ',           saving: 970,  desc: 'node:20 → node:20-alpine: -970MB' },
+    { key: 'multistage',  label: 'Multi-stage build',              saving: 200,  desc: 'Убрать devDependencies и build-tools' },
+    { key: 'dockerignore', label: '.dockerignore',                 saving: 50,   desc: 'Исключить node_modules, .git и др.' },
+    { key: 'mergerun',    label: 'Объединить RUN команды',         saving: 30,   desc: 'Меньше слоёв = меньше overhead' },
+    { key: 'nocache',     label: 'npm cache clean --force',        saving: 20,   desc: 'Очистить npm кеш в одном слое' },
+    { key: 'nodev',       label: 'npm ci --only=production',       saving: 150,  desc: 'Убрать devDependencies из финального образа' },
+    { key: 'specifictag', label: 'Конкретная версия образа',       saving: 0,    desc: 'Безопасность и воспроизводимость' },
+  ];
+
+  const baseSize = baseSizes[customBase] || 1100;
+  const extraSaving = checked.alpine ? 0 : (1100 - baseSize);
+  const totalSaving = Object.entries(checked)
+    .filter(([k, v]) => v && k !== 'alpine')
+    .reduce((sum, [k]) => sum + (optimizations.find(o => o.key === k)?.saving || 0), 0)
+    + (checked.alpine ? optimizations.find(o => o.key === 'alpine')?.saving || 0 : 0);
+
+  const originalSize = 1500;
+  const optimizedSize = Math.max(30, originalSize - totalSaving - extraSaving);
+
+  const toggle = (key) => setChecked(c => ({ ...c, [key]: !c[key] }));
+
+  const layers = [
+    { label: 'Base OS', size: checked.alpine ? 10 : (baseSizes[customBase] || 1100), color: '#8b5cf6' },
+    { label: 'Runtime (Node.js)', size: checked.alpine ? 60 : 0, color: docker },
+    { label: 'Dependencies', size: checked.nodev ? 80 : 200, color: '#f59e0b' },
+    { label: 'devDependencies', size: checked.nodev ? 0 : 150, color: '#ef4444', note: checked.nodev ? null : 'Лишнее!' },
+    { label: 'App Code', size: 5, color: green },
+    { label: 'npm Cache', size: checked.nocache ? 0 : 20, color: '#ef4444', note: checked.nocache ? null : 'Лишнее!' },
+  ].filter(l => l.size > 0);
+
+  const totalLayerSize = layers.reduce((s, l) => s + l.size, 0);
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        📦 Docker Image Оптимизатор
+      </h2>
+
+      <div style={{ display: 'flex', gap: 16, maxWidth: 800, margin: '0 auto', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 14 }}>
+            <div style={{ color: muted, fontSize: 12, marginBottom: 8 }}>БАЗОВЫЙ ОБРАЗ</div>
+            <select value={customBase} onChange={e => setCustomBase(e.target.value)} style={{
+              width: '100%', background: '#0d1117', border: '1px solid #ffffff15', borderRadius: 8,
+              padding: '8px 12px', color: text, fontSize: 12, outline: 'none', marginBottom: 8,
+            }}>
+              {Object.entries(baseSizes).map(([k, v]) => (
+                <option key={k} value={k}>{k} ({v} MB)</option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ background: card, borderRadius: 12, padding: 16 }}>
+            <div style={{ color: muted, fontSize: 12, marginBottom: 10 }}>ОПТИМИЗАЦИИ</div>
+            {optimizations.map(opt => (
+              <div key={opt.key} onClick={() => toggle(opt.key)} style={{
+                display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10,
+                cursor: 'pointer', opacity: opt.key === 'alpine' && customBase !== 'node:20' ? 0.4 : 1,
+              }}>
+                <div style={{
+                  width: 18, height: 18, borderRadius: 4, border: \`2px solid \${checked[opt.key] ? green : muted}\`,
+                  background: checked[opt.key] ? green : 'transparent',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1,
+                }}>
+                  {checked[opt.key] && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700 }}>✓</span>}
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>{opt.label}</div>
+                  <div style={{ fontSize: 11, color: muted }}>{opt.desc}</div>
+                  {opt.saving > 0 && (
+                    <div style={{ color: green, fontSize: 10, marginTop: 1 }}>Экономия: -{opt.saving} MB</div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 14, border: \`1px solid \${green}33\` }}>
+            <div style={{ display: 'flex', gap: 16, textAlign: 'center' }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ color: muted, fontSize: 11 }}>Исходный</div>
+                <div style={{ color: red, fontSize: 28, fontWeight: 700 }}>{originalSize}</div>
+                <div style={{ color: muted, fontSize: 10 }}>MB</div>
+              </div>
+              <div style={{ color: muted, fontSize: 24, alignSelf: 'center' }}>→</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ color: muted, fontSize: 11 }}>Оптимизированный</div>
+                <div style={{ color: green, fontSize: 28, fontWeight: 700 }}>{optimizedSize}</div>
+                <div style={{ color: muted, fontSize: 10 }}>MB</div>
+              </div>
+            </div>
+            <div style={{ background: '#ffffff11', borderRadius: 4, height: 8, marginTop: 12, overflow: 'hidden' }}>
+              <div style={{ background: green, height: '100%', width: \`\${Math.round(optimizedSize / originalSize * 100)}%\`, transition: 'width 0.4s' }} />
+            </div>
+            <div style={{ textAlign: 'center', marginTop: 8, color: green, fontSize: 12, fontWeight: 600 }}>
+              -{Math.round((1 - optimizedSize / originalSize) * 100)}% ({originalSize - optimizedSize} MB экономия)
+            </div>
+          </div>
+
+          <div style={{ background: card, borderRadius: 12, padding: 14 }}>
+            <div style={{ color: muted, fontSize: 12, marginBottom: 10 }}>СЛОИ ОБРАЗА</div>
+            {layers.map((l, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <div style={{ width: 10, height: 10, borderRadius: 2, background: l.color, flexShrink: 0 }} />
+                <span style={{ fontSize: 12, flex: 1 }}>{l.label}</span>
+                {l.note && <span style={{ color: red, fontSize: 10 }}>⚠ {l.note}</span>}
+                <span style={{ color: l.color, fontFamily: 'monospace', fontSize: 12, fontWeight: 600 }}>{l.size} MB</span>
+                <div style={{ background: l.color + '33', borderRadius: 3, height: 6, width: Math.round(l.size / Math.max(totalLayerSize, 1) * 80), minWidth: 4 }} />
+              </div>
+            ))}
+            <div style={{ borderTop: '1px solid #ffffff10', paddingTop: 8, marginTop: 8, textAlign: 'right', color: text, fontWeight: 700, fontSize: 13 }}>
+              Итого: {totalLayerSize} MB
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

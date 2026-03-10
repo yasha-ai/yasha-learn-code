@@ -1,0 +1,308 @@
+---
+title: "6. Формы и Form-компонент"
+sidebar:
+  order: 6
+---
+import { Playground } from '@components/Playground'
+
+
+Remix предоставляет мощный компонент `<Form>`, который расширяет стандартный HTML `<form>`. Он работает нативно без JavaScript, а когда JS доступен — использует fetch для плавных переходов без перезагрузки страницы.
+
+## Компонент Form
+
+```typescript
+import { Form } from "@remix-run/react";
+
+export default function ContactPage() {
+  return (
+    <Form method="post" action="/contact">
+      <label>
+        Имя: <input name="name" required />
+      </label>
+      <label>
+        Email: <input name="email" type="email" required />
+      </label>
+      <textarea name="message" rows={4} />
+      <button type="submit">Отправить</button>
+    </Form>
+  );
+}
+```
+
+## Отличия от обычного form
+
+| Возможность | `<form>` HTML | `<Form>` Remix |
+|-------------|--------------|----------------|
+| Без JS | ✅ | ✅ |
+| SPA-переход | ❌ | ✅ |
+| Pending state | ❌ | ✅ (useNavigation) |
+| Автообновление данных | ❌ | ✅ |
+| Оптимистичный UI | ❌ | ✅ (useFetcher) |
+
+## useSubmit — программная отправка
+
+```typescript
+import { useSubmit, Form } from "@remix-run/react";
+
+export default function SearchForm() {
+  const submit = useSubmit();
+
+  return (
+    <Form method="get" onChange={(e) => {
+      submit(e.currentTarget, { replace: true });
+    }}>
+      <input type="search" name="q" placeholder="Поиск..." />
+    </Form>
+  );
+}
+```
+
+## fetcher.Form — без навигации
+
+`useFetcher` позволяет отправлять формы без навигации по страницам. Идеально для inline-редактирования, добавления в избранное и т.д.:
+
+```typescript
+import { useFetcher } from "@remix-run/react";
+
+function LikeButton({ postId, liked }) {
+  const fetcher = useFetcher();
+  const isLiked = fetcher.formData
+    ? fetcher.formData.get("liked") === "true"
+    : liked;
+
+  return (
+    <fetcher.Form method="post" action="/api/like">
+      <input type="hidden" name="postId" value={postId} />
+      <input type="hidden" name="liked" value={String(!isLiked)} />
+      <button type="submit">
+        {isLiked ? "❤️" : "🤍"}
+      </button>
+    </fetcher.Form>
+  );
+}
+```
+
+## Валидация на клиенте и сервере
+
+```typescript
+// action — серверная валидация (всегда нужна)
+export async function action({ request }) {
+  const data = await request.formData();
+  const errors: Record<string, string> = {};
+
+  const email = data.get("email") as string;
+  if (!email?.includes("@")) {
+    errors.email = "Неверный email";
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return json({ errors }, { status: 400 });
+  }
+
+  // ...
+}
+
+// Компонент
+export default function Form() {
+  const actionData = useActionData<typeof action>();
+
+  return (
+    <Form method="post">
+      <input name="email" />
+      {actionData?.errors?.email && (
+        <span className="error">{actionData.errors.email}</span>
+      )}
+    </Form>
+  );
+}
+```
+
+## Сброс формы
+
+```typescript
+import { useEffect, useRef } from "react";
+import { useFetcher } from "@remix-run/react";
+
+function CommentForm() {
+  const fetcher = useFetcher();
+  const formRef = useRef<HTMLFormElement>(null);
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.ok) {
+      formRef.current?.reset();
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <fetcher.Form ref={formRef} method="post">
+      <textarea name="comment" />
+      <button type="submit">
+        {fetcher.state !== "idle" ? "Отправка..." : "Комментировать"}
+      </button>
+    </fetcher.Form>
+  );
+}
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useRef } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+
+type FormState = "idle" | "submitting" | "success" | "error";
+type ActiveForm = "contact" | "search" | "like";
+
+const validateContact = (data: Record<string, string>) => {
+  const errors: Record<string, string> = {};
+  if (!data.name || data.name.length < 2) errors.name = "Минимум 2 символа";
+  if (!data.email?.includes("@")) errors.email = "Неверный email";
+  if (!data.message || data.message.length < 10) errors.message = "Минимум 10 символов";
+  return errors;
+};
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<ActiveForm>("contact");
+  const [formState, setFormState] = useState<FormState>("idle");
+  const [fields, setFields] = useState({ name: "", email: "", message: "" });
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [liked, setLiked] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [submissions, setSubmissions] = useState<string[]>([]);
+
+  const handleContactSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const errs = validateContact(fields);
+    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+    setErrors({});
+    setFormState("submitting");
+    setTimeout(() => {
+      setSubmissions(p => [...p, \`\${fields.name} (\${fields.email})\`]);
+      setFields({ name: "", email: "", message: "" });
+      setFormState("success");
+      setTimeout(() => setFormState("idle"), 2000);
+    }, 1200);
+  };
+
+  const tabs: { id: ActiveForm; label: string }[] = [
+    { id: "contact", label: "Form (Contact)" },
+    { id: "search", label: "Form (Search)" },
+    { id: "like", label: "fetcher.Form (Like)" },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>📋 Формы в Remix</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "20px" }}>Разные типы форм</p>
+
+      <div style={{ display: "flex", gap: "8px", marginBottom: "24px" }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+            padding: "8px 16px",
+            borderRadius: "8px",
+            border: \`2px solid \${activeTab === t.id ? ACCENT : "#334155"}\`,
+            background: activeTab === t.id ? ACCENT + "22" : CARD,
+            color: activeTab === t.id ? ACCENT : MUTED,
+            cursor: "pointer",
+            fontSize: "13px",
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {activeTab === "contact" && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", maxWidth: "800px" }}>
+          <div style={{ background: CARD, borderRadius: "12px", padding: "24px" }}>
+            <h3 style={{ color: ACCENT, margin: "0 0 20px", fontSize: "15px" }}>{"<Form method=\"post\">"}</h3>
+            <form onSubmit={handleContactSubmit}>
+              {(["name", "email", "message"] as const).map((field) => (
+                <div key={field} style={{ marginBottom: "14px" }}>
+                  <label style={{ display: "block", fontSize: "12px", color: MUTED, marginBottom: "4px", textTransform: "capitalize" }}>
+                    name="{field}"
+                  </label>
+                  {field === "message" ? (
+                    <textarea
+                      value={fields.message}
+                      onChange={e => setFields(p => ({ ...p, message: e.target.value }))}
+                      rows={3}
+                      style={{ width: "100%", padding: "8px 10px", background: BG, border: \`1px solid \${errors[field] ? ERROR : "#334155"}\`, borderRadius: "6px", color: TEXT, fontSize: "13px", outline: "none", resize: "vertical", boxSizing: "border-box" }}
+                    />
+                  ) : (
+                    <input
+                      value={fields[field]}
+                      onChange={e => setFields(p => ({ ...p, [field]: e.target.value }))}
+                      style={{ width: "100%", padding: "8px 10px", background: BG, border: \`1px solid \${errors[field] ? ERROR : "#334155"}\`, borderRadius: "6px", color: TEXT, fontSize: "13px", outline: "none", boxSizing: "border-box" }}
+                    />
+                  )}
+                  {errors[field] && <p style={{ color: ERROR, fontSize: "11px", margin: "4px 0 0" }}>{errors[field]}</p>}
+                </div>
+              ))}
+              <button type="submit" disabled={formState === "submitting"} style={{
+                width: "100%", padding: "10px", background: formState === "success" ? SUCCESS : ACCENT,
+                color: "#fff", border: "none", borderRadius: "8px", cursor: "pointer", fontWeight: 700, fontSize: "13px",
+              }}>
+                {formState === "submitting" ? "⏳ action()..." : formState === "success" ? "✅ Отправлено!" : "Отправить"}
+              </button>
+            </form>
+          </div>
+          <div style={{ background: CARD, borderRadius: "12px", padding: "24px" }}>
+            <h3 style={{ color: ACCENT, margin: "0 0 16px", fontSize: "15px" }}>Отправленные формы</h3>
+            {submissions.length === 0 ? <p style={{ color: MUTED, fontSize: "13px" }}>Нет отправок</p> : submissions.map((s, i) => (
+              <div key={i} style={{ padding: "10px", background: BG, borderRadius: "6px", marginBottom: "8px", fontSize: "13px", borderLeft: \`3px solid \${SUCCESS}\` }}>{s}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeTab === "search" && (
+        <div style={{ maxWidth: "500px", background: CARD, borderRadius: "12px", padding: "24px" }}>
+          <h3 style={{ color: ACCENT, margin: "0 0 16px", fontSize: "15px" }}>{"<Form method=\"get\"> с onChange"}</h3>
+          <p style={{ color: MUTED, fontSize: "13px", marginBottom: "16px" }}>Автоматически отправляет форму при изменении</p>
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Начни вводить..."
+            style={{ width: "100%", padding: "10px 12px", background: BG, border: "1px solid #334155", borderRadius: "8px", color: TEXT, fontSize: "14px", outline: "none", boxSizing: "border-box" }}
+          />
+          {searchQuery && (
+            <div style={{ marginTop: "12px", padding: "10px 14px", background: BG, borderRadius: "8px", fontSize: "13px", color: MUTED, fontFamily: "monospace" }}>
+              GET /search?q={encodeURIComponent(searchQuery)}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "like" && (
+        <div style={{ maxWidth: "400px", background: CARD, borderRadius: "12px", padding: "24px" }}>
+          <h3 style={{ color: ACCENT, margin: "0 0 16px", fontSize: "15px" }}>fetcher.Form — без навигации</h3>
+          <div style={{ background: BG, borderRadius: "10px", padding: "20px", textAlign: "center" }}>
+            <p style={{ color: TEXT, marginBottom: "16px" }}>Статья: "Как работает Remix"</p>
+            <button
+              onClick={() => setLiked(!liked)}
+              style={{
+                padding: "12px 24px",
+                background: liked ? "#ec4899" + "22" : CARD,
+                border: \`2px solid \${liked ? "#ec4899" : "#334155"}\`,
+                borderRadius: "12px",
+                cursor: "pointer",
+                fontSize: "20px",
+                transition: "all 0.2s",
+                transform: liked ? "scale(1.1)" : "scale(1)",
+              }}
+            >
+              {liked ? "❤️" : "🤍"}
+            </button>
+            <p style={{ color: MUTED, fontSize: "12px", marginTop: "12px" }}>
+              fetcher.Form отправляет POST без навигации
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

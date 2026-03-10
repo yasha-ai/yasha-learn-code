@@ -1,0 +1,260 @@
+---
+title: "19. defer и Await"
+sidebar:
+  order: 19
+---
+import { Playground } from '@components/Playground'
+
+
+`defer` позволяет возвращать из loader незавершённые Promise, которые будут стримиться клиенту. Компонент `<Await>` с `<Suspense>` рендерит данные по мере их поступления.
+
+## Проблема, которую решает defer
+
+```
+Без defer:
+  loader ждёт ВСЕ данные → 3000ms задержка → страница появляется целиком
+
+С defer:
+  loader возвращает быстрые данные + Promise → 500ms → базовая страница
+  медленные данные стримятся → 3000ms → секция обновляется
+```
+
+## Базовое использование
+
+```typescript
+import { defer, json } from "@remix-run/node";
+import { Await, useLoaderData } from "@remix-run/react";
+import { Suspense } from "react";
+
+export async function loader() {
+  // Быстрые данные — ждём
+  const criticalData = await getUserData();  // ~100ms
+
+  // Медленные — не ждём, передаём Promise
+  const slowData = getRecommendations();     // ~3000ms, без await!
+
+  return defer({
+    criticalData,   // сразу доступно
+    slowData,       // Promise, стримится
+  });
+}
+
+export default function Page() {
+  const { criticalData, slowData } = useLoaderData<typeof loader>();
+
+  return (
+    <div>
+      {/* Рендерится сразу */}
+      <h1>{criticalData.user.name}</h1>
+
+      {/* Рендерится когда Promise разрешится */}
+      <Suspense fallback={<p>⏳ Загрузка рекомендаций...</p>}>
+        <Await resolve={slowData}>
+          {(data) => (
+            <div>
+              {data.recommendations.map(r => (
+                <RecommendationCard key={r.id} item={r} />
+              ))}
+            </div>
+          )}
+        </Await>
+      </Suspense>
+    </div>
+  );
+}
+```
+
+## Обработка ошибок в defer
+
+```typescript
+<Suspense fallback={<Skeleton />}>
+  <Await
+    resolve={slowData}
+    errorElement={<p>Не удалось загрузить рекомендации</p>}
+  >
+    {(data) => <RecommendationList data={data} />}
+  </Await>
+</Suspense>
+```
+
+## Несколько независимых секций
+
+```typescript
+export async function loader() {
+  const [user, stats, feed, ads] = await Promise.all([
+    getUser(),           // 50ms — ждём
+    getStats(),          // 100ms — ждём
+  ]);
+
+  return defer({
+    user,
+    stats,
+    feed: getFeed(),       // 1500ms — стримим
+    ads: getAds(),         // 2000ms — стримим
+    recommendations: getRecommendations(),  // 3000ms — стримим
+  });
+}
+```
+
+## Когда использовать defer
+
+| Ситуация | Решение |
+|----------|---------|
+| Все данные быстрые | Обычный `json()` |
+| Одна секция медленная | `defer()` для неё |
+| Данные можно показать частично | `defer()` для медленных |
+| Данные критически важны для SEO | `await` + `json()` |
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+
+type DataSection = {
+  name: string;
+  delay: number;
+  deferred: boolean;
+  status: "waiting" | "streaming" | "ready";
+  data: string;
+};
+
+const createSections = (): DataSection[] => [
+  { name: "Данные пользователя", delay: 100, deferred: false, status: "waiting", data: '{ name: "Алексей", plan: "Pro" }' },
+  { name: "Статистика (быстро)", delay: 200, deferred: false, status: "waiting", data: '{ visits: 12450, revenue: 34200 }' },
+  { name: "Лента активности", delay: 1500, deferred: true, status: "waiting", data: '[{ event: "login" }, { event: "purchase" }]' },
+  { name: "Рекомендации", delay: 2500, deferred: true, status: "waiting", data: '[{ product: "Pro Plan" }, { product: "Training" }]' },
+  { name: "Аналитика рекламы", delay: 3000, deferred: true, status: "waiting", data: '{ impressions: 45000, ctr: 0.034 }' },
+];
+
+export default function App() {
+  const [sections, setSections] = useState<DataSection[]>(createSections());
+  const [running, setRunning] = useState(false);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [mode, setMode] = useState<"defer" | "no-defer">("defer");
+
+  const run = () => {
+    const fresh = createSections();
+    setSections(fresh);
+    setRunning(true);
+    setStartTime(Date.now());
+
+    if (mode === "no-defer") {
+      // Wait for all
+      const maxDelay = Math.max(...fresh.map(s => s.delay));
+      setTimeout(() => {
+        setSections(fresh.map(s => ({ ...s, status: "ready" })));
+        setRunning(false);
+      }, maxDelay);
+    } else {
+      // Stream each individually
+      fresh.forEach((section, i) => {
+        // Non-deferred become available first
+        if (!section.deferred) {
+          setTimeout(() => {
+            setSections(prev => prev.map((s, j) => j === i ? { ...s, status: "ready" } : s));
+          }, section.delay);
+        } else {
+          // Deferred: first mark as streaming, then ready
+          setSections(prev => prev.map((s, j) => j === i ? { ...s, status: "streaming" } : s));
+          setTimeout(() => {
+            setSections(prev => prev.map((s, j) => j === i ? { ...s, status: "ready" } : s));
+            if (i === fresh.length - 1) setRunning(false);
+          }, section.delay);
+        }
+      });
+    }
+  };
+
+  const reset = () => {
+    setSections(createSections());
+    setStartTime(null);
+    setRunning(false);
+  };
+
+  const allReady = sections.every(s => s.status === "ready");
+  const nonDeferredReady = sections.filter(s => !s.deferred).every(s => s.status === "ready");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>🌊 defer() и Await</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "20px" }}>Стриминг данных из loader</p>
+
+      <div style={{ display: "flex", gap: "10px", marginBottom: "24px", alignItems: "center" }}>
+        <div style={{ display: "flex", border: "1px solid #334155", borderRadius: "8px", overflow: "hidden" }}>
+          {(["defer", "no-defer"] as const).map(m => (
+            <button key={m} onClick={() => { setMode(m); reset(); }} style={{
+              padding: "8px 16px",
+              background: mode === m ? ACCENT + "33" : "transparent",
+              color: mode === m ? ACCENT : MUTED,
+              border: "none", cursor: "pointer", fontSize: "13px",
+            }}>
+              {m === "defer" ? "С defer()" : "Без defer"}
+            </button>
+          ))}
+        </div>
+        <button onClick={running ? undefined : run} disabled={running} style={{
+          padding: "10px 20px", background: running ? "#334155" : ACCENT,
+          color: "#fff", border: "none", borderRadius: "8px",
+          cursor: running ? "not-allowed" : "pointer", fontWeight: 700,
+        }}>
+          {running ? "⏳ Загрузка..." : "▶ Запустить loader"}
+        </button>
+        <button onClick={reset} style={{ padding: "10px 16px", background: "transparent", color: MUTED, border: "1px solid #334155", borderRadius: "8px", cursor: "pointer" }}>
+          Сбросить
+        </button>
+      </div>
+
+      {mode === "defer" && nonDeferredReady && !allReady && (
+        <div style={{ background: SUCCESS + "11", border: \`1px solid \${SUCCESS}44\`, borderRadius: "10px", padding: "12px 16px", marginBottom: "16px", color: SUCCESS, fontSize: "13px" }}>
+          ✅ Страница уже доступна! Медленные секции стримятся в фоне...
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxWidth: "700px" }}>
+        {sections.map((s, i) => (
+          <div key={i} style={{
+            background: CARD,
+            borderRadius: "10px",
+            padding: "14px 18px",
+            borderLeft: \`4px solid \${s.status === "ready" ? SUCCESS : s.status === "streaming" ? ACCENT : "#334155"}\`,
+            transition: "border-color 0.3s",
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: 600, color: s.status === "ready" ? TEXT : MUTED }}>
+                  {s.status === "ready" ? "✅" : s.status === "streaming" ? "⏳" : "○"} {s.name}
+                </div>
+                {s.status === "ready" && (
+                  <div style={{ fontFamily: "monospace", fontSize: "11px", color: MUTED, marginTop: "4px" }}>
+                    {s.data}
+                  </div>
+                )}
+                {s.status === "streaming" && (
+                  <div style={{ fontSize: "12px", color: ACCENT, marginTop: "4px" }}>
+                    {"<Suspense>"} fallback показывается...
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <span style={{
+                  fontSize: "10px", padding: "2px 8px", borderRadius: "4px",
+                  background: s.deferred ? ACCENT + "22" : SUCCESS + "22",
+                  color: s.deferred ? ACCENT : SUCCESS,
+                }}>
+                  {s.deferred ? "deferred" : "awaited"}
+                </span>
+                <span style={{ color: MUTED, fontSize: "11px" }}>{s.delay}ms</span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+` }} />

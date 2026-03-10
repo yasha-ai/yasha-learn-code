@@ -1,0 +1,334 @@
+---
+title: "20. CI/CD с Docker"
+sidebar:
+  order: 20
+---
+import { Playground } from '@components/Playground'
+
+
+Docker стал стандартом в CI/CD пайплайнах. Контейнеры обеспечивают воспроизводимость — то, что собрано в CI, запускается в продакшене точно так же. GitHub Actions — самая популярная платформа для автоматизации с нативной поддержкой Docker.
+
+## Базовый GitHub Actions Workflow
+
+```yaml
+# .github/workflows/docker.yml
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            myusername/myapp:latest
+            myusername/myapp:${{ github.sha }}
+          cache-from: type=registry,ref=myusername/myapp:buildcache
+          cache-to: type=registry,ref=myusername/myapp:buildcache,mode=max
+```
+
+## Кеширование слоёв в CI
+
+Кеширование критически важно для ускорения CI/CD. BuildKit поддерживает несколько типов кеша:
+
+```yaml
+- name: Build with cache
+  uses: docker/build-push-action@v5
+  with:
+    context: .
+    push: true
+    tags: myapp:latest
+    # Кеш в реестре (рекомендуется)
+    cache-from: type=registry,ref=myapp:buildcache
+    cache-to: type=registry,ref=myapp:buildcache,mode=max
+
+    # Или кеш в GitHub Actions Cache
+    cache-from: type=gha
+    cache-to: type=gha,mode=max
+```
+
+## Полный CI/CD Pipeline: Build → Test → Push → Deploy
+
+```yaml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests in Docker
+        run: |
+          docker compose -f docker-compose.test.yml up \
+            --abort-on-container-exit \
+            --exit-code-from tests
+
+  build-push:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy-staging:
+    needs: build-push
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to staging
+        run: |
+          ssh user@staging-server \
+            "docker compose pull && docker compose up -d"
+
+  deploy-production:
+    needs: build-push
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to production
+        run: |
+          ssh user@prod-server \
+            "docker compose pull && docker compose up -d --no-downtime"
+```
+
+## Сканирование безопасности в CI
+
+```yaml
+- name: Scan image for vulnerabilities
+  uses: aquasecurity/trivy-action@master
+  with:
+    image-ref: 'myapp:${{ github.sha }}'
+    format: 'sarif'
+    output: 'trivy-results.sarif'
+    severity: 'CRITICAL,HIGH'
+    exit-code: '1'  # провалить pipeline при критических CVE
+
+- name: Upload scan results
+  uses: github/codeql-action/upload-sarif@v2
+  with:
+    sarif_file: 'trivy-results.sarif'
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `export default function App() {
+  const [running, setRunning] = React.useState(false);
+  const [jobs, setJobs] = React.useState([
+    { id: 'checkout',   label: 'Checkout',       icon: '📥', status: 'pending', duration: 2  },
+    { id: 'setup',      label: 'Setup Buildx',   icon: '⚙️', status: 'pending', duration: 5  },
+    { id: 'login',      label: 'Docker Login',   icon: '🔐', status: 'pending', duration: 3  },
+    { id: 'lint',       label: 'Lint & TypeCheck',icon: '🔍', status: 'pending', duration: 15 },
+    { id: 'test',       label: 'Run Tests',      icon: '🧪', status: 'pending', duration: 25 },
+    { id: 'build',      label: 'Docker Build',   icon: '🏗️', status: 'pending', duration: 40 },
+    { id: 'scan',       label: 'Security Scan',  icon: '🔒', status: 'pending', duration: 20 },
+    { id: 'push',       label: 'Push to Registry',icon: '📤', status: 'pending', duration: 10 },
+    { id: 'deploy',     label: 'Deploy Staging', icon: '🚀', status: 'pending', duration: 15 },
+  ]);
+  const [totalTime, setTotalTime] = React.useState(0);
+  const [branch, setBranch] = React.useState('main');
+  const [failAt, setFailAt] = React.useState(null);
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  const statusColors = { pending: muted, running: amber, success: green, failed: red, skipped: '#475569' };
+  const statusIcons  = { pending: '○', running: '⏳', success: '✓', failed: '✗', skipped: '—' };
+
+  const reset = () => {
+    setJobs(js => js.map(j => ({ ...j, status: 'pending' })));
+    setTotalTime(0);
+  };
+
+  const startPipeline = () => {
+    if (running) return;
+    reset();
+    setRunning(true);
+    let delay = 0;
+    let elapsed = 0;
+    let failed = false;
+
+    jobs.forEach((job, i) => {
+      if (failed) return;
+      const start = delay;
+      setTimeout(() => {
+        if (failed) return;
+        setJobs(js => js.map(j => j.id === job.id ? { ...j, status: 'running' } : j));
+      }, delay * 100);
+      delay += job.duration;
+      setTimeout(() => {
+        if (failed) {
+          setJobs(js => js.map((j, idx) => idx > i ? { ...j, status: 'skipped' } : j));
+          return;
+        }
+        const shouldFail = failAt === job.id;
+        const newStatus = shouldFail ? 'failed' : 'success';
+        if (shouldFail) failed = true;
+        elapsed += job.duration;
+        setTotalTime(elapsed);
+        setJobs(js => js.map(j => j.id === job.id ? { ...j, status: newStatus } : j));
+        if (i === jobs.length - 1) setRunning(false);
+        if (shouldFail) {
+          setRunning(false);
+          setJobs(js => js.map((j, idx) => idx > i ? { ...j, status: 'skipped' } : j));
+        }
+      }, delay * 100);
+    });
+  };
+
+  const done = jobs.filter(j => j.status === 'success').length;
+  const hasFailed = jobs.some(j => j.status === 'failed');
+  const allDone = jobs.every(j => j.status === 'success');
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        ⚡ CI/CD Pipeline Симулятор
+      </h2>
+
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+        <select value={branch} onChange={e => { setBranch(e.target.value); reset(); }} style={{
+          background: card, border: '1px solid #ffffff15', borderRadius: 8,
+          padding: '7px 12px', color: text, fontSize: 13, outline: 'none',
+        }}>
+          <option value="main">main</option>
+          <option value="develop">develop</option>
+          <option value="feature/auth">feature/auth</option>
+        </select>
+
+        <select value={failAt || ''} onChange={e => { setFailAt(e.target.value || null); reset(); }} style={{
+          background: card, border: '1px solid #ffffff15', borderRadius: 8,
+          padding: '7px 12px', color: text, fontSize: 13, outline: 'none',
+        }}>
+          <option value="">Без сбоев</option>
+          {jobs.map(j => <option key={j.id} value={j.id}>Сбой на: {j.label}</option>)}
+        </select>
+
+        <button onClick={startPipeline} disabled={running} style={{
+          background: running ? muted : docker, border: 'none', borderRadius: 8,
+          padding: '8px 20px', color: '#fff', cursor: running ? 'default' : 'pointer', fontSize: 13, fontWeight: 700,
+        }}>▶ Push to {branch}</button>
+      </div>
+
+      <div style={{ maxWidth: 640, margin: '0 auto' }}>
+        <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 14, border: '1px solid #ffffff10' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14, alignItems: 'center' }}>
+            <div style={{ fontWeight: 700, color: docker, fontSize: 14 }}>
+              🐙 GitHub Actions — {branch}
+            </div>
+            <div style={{ color: muted, fontSize: 12 }}>
+              {totalTime > 0 && \`⏱ \${totalTime}s\`}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {jobs.map((job, i) => (
+              <div key={job.id} style={{
+                display: 'flex', alignItems: 'center', gap: 12,
+                background: job.status === 'running' ? amber + '11' : job.status === 'failed' ? red + '11' : '#ffffff06',
+                borderRadius: 8, padding: '10px 14px',
+                border: \`1px solid \${job.status === 'running' ? amber : job.status === 'failed' ? red : job.status === 'success' ? green : '#ffffff0f'}33\`,
+                transition: 'all 0.3s',
+              }}>
+                <span style={{ fontSize: 20 }}>{job.icon}</span>
+                <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: job.status === 'skipped' ? muted : text }}>{job.label}</span>
+                <span style={{ color: muted, fontSize: 11 }}>{job.duration}s</span>
+                <span style={{
+                  fontWeight: 700, fontSize: 13,
+                  color: statusColors[job.status],
+                }}>{statusIcons[job.status]}</span>
+                {job.status === 'running' && (
+                  <div style={{ width: 40, height: 4, background: '#ffffff11', borderRadius: 2, overflow: 'hidden' }}>
+                    <div style={{ background: amber, height: '100%', width: '60%', animation: 'loading 1s infinite' }} />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {(hasFailed || allDone) && (
+          <div style={{
+            background: (hasFailed ? red : green) + '15',
+            border: \`1px solid \${hasFailed ? red : green}44\`,
+            borderRadius: 10, padding: 14, textAlign: 'center',
+          }}>
+            <div style={{ fontSize: 24 }}>{hasFailed ? '❌' : '🎉'}</div>
+            <div style={{ color: hasFailed ? red : green, fontWeight: 700, fontSize: 15, marginTop: 6 }}>
+              {hasFailed ? 'Pipeline Failed' : 'Pipeline Succeeded!'}
+            </div>
+            <div style={{ color: muted, fontSize: 12, marginTop: 4 }}>
+              {hasFailed
+                ? \`Сбой на шаге "\${jobs.find(j => j.status === 'failed')?.label}". Исправьте ошибки и запустите снова.\`
+                : \`Все \${done} шагов выполнены успешно! Образ задеплоен на \${branch === 'main' ? 'production' : 'staging'}.\`}
+            </div>
+            <button onClick={reset} style={{
+              marginTop: 10, background: card, border: '1px solid #ffffff15', borderRadius: 6,
+              padding: '6px 16px', color: text, cursor: 'pointer', fontSize: 12,
+            }}>Сбросить</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

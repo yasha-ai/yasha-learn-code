@@ -1,0 +1,671 @@
+---
+title: "18. Parallel и Intercepting Routes"
+sidebar:
+  order: 19
+---
+import { Playground } from '@components/Playground'
+
+
+## 🪟 Parallel Routes и Intercepting Routes: продвинутые паттерны
+
+Это одни из самых мощных (и поначалу запутанных!) фич App Router. Parallel Routes позволяют рендерить **несколько страниц одновременно** в одном layout. Intercepting Routes — "перехватывать" навигацию и показывать контент в модальном окне без ухода со страницы. Вместе они создают магию, которую ты видишь в Instagram, Twitter и Pinterest! 🎯
+
+---
+
+### 🔀 Parallel Routes: слоты (@slot)
+
+Parallel Routes определяются папками с символом `@` — это называется **именованные слоты**:
+
+```
+app/
+├── layout.tsx          ← получает все слоты как props
+├── page.tsx            ← дефолтная страница
+├── @team/              ← слот "team"
+│   ├── page.tsx
+│   └── loading.tsx
+├── @analytics/         ← слот "analytics"
+│   ├── page.tsx
+│   └── error.tsx
+└── @notifications/     ← слот "notifications"
+    └── page.tsx
+```
+
+```typescript
+// app/layout.tsx — получает слоты как children и именованные пропсы
+export default function RootLayout({
+  children,
+  team,
+  analytics,
+  notifications,
+}: {
+  children: React.ReactNode;
+  team: React.ReactNode;
+  analytics: React.ReactNode;
+  notifications: React.ReactNode;
+}) {
+  return (
+    <html>
+      <body>
+        <div className="grid grid-cols-3 gap-4">
+          {/* Каждый слот рендерится независимо! */}
+          <div className="col-span-2">{children}</div>
+          <div>
+            {team}
+            {analytics}
+            {notifications}
+          </div>
+        </div>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### 💡 default.tsx: резервный контент
+
+Когда один слот navigates, но другие нет — нужен `default.tsx` как запасной вариант:
+
+```
+app/
+├── layout.tsx
+├── page.tsx
+├── @team/
+│   ├── page.tsx         ← /
+│   ├── settings/
+│   │   └── page.tsx     ← /settings
+│   └── default.tsx      ← показывается когда нет совпадения
+└── @analytics/
+    ├── page.tsx
+    └── default.tsx      ← ОБЯЗАТЕЛЬНО если есть sub-routes в других слотах!
+```
+
+```typescript
+// app/@team/default.tsx
+export default function TeamDefault() {
+  // Пустой компонент или что-то нейтральное
+  return null;
+}
+
+// Или показываем что-то полезное
+export default function AnalyticsDefault() {
+  return (
+    <div className="p-4 text-gray-500">
+      Выберите раздел для просмотра аналитики
+    </div>
+  );
+}
+```
+
+---
+
+### 🎭 Независимые Loading States
+
+Главное преимущество Parallel Routes — каждый слот имеет **независимый** loading state:
+
+```typescript
+// app/@team/loading.tsx — показывается пока загружается команда
+export default function TeamLoading() {
+  return (
+    <div className="animate-pulse space-y-3 p-4">
+      <div className="h-8 bg-gray-200 rounded w-3/4"></div>
+      <div className="h-4 bg-gray-200 rounded"></div>
+      <div className="h-4 bg-gray-200 rounded w-5/6"></div>
+    </div>
+  );
+}
+
+// app/@analytics/loading.tsx — независимо от team!
+export default function AnalyticsLoading() {
+  return (
+    <div className="animate-pulse p-4">
+      <div className="h-32 bg-gray-200 rounded"></div>
+    </div>
+  );
+}
+
+// app/@team/page.tsx — медленный запрос не блокирует @analytics!
+export default async function TeamPage() {
+  await new Promise(r => setTimeout(r, 2000)); // медленно!
+  const team = await getTeam();
+  return <TeamList team={team} />;
+}
+```
+
+---
+
+### ✂️ Intercepting Routes: перехват навигации
+
+Intercepting Routes позволяют показывать маршрут в **контексте** текущей страницы (модальное окно), а при прямом открытии URL — показывать полную страницу.
+
+Синтаксис папок для перехвата:
+
+```
+(.)   — перехватывает маршрут на том же уровне
+(..)  — перехватывает на один уровень выше
+(..)(..) — на два уровня выше
+(...) — перехватывает из корня app/
+```
+
+```
+app/
+├── layout.tsx
+├── page.tsx
+├── photos/
+│   ├── page.tsx              ← /photos — галерея
+│   └── [id]/
+│       └── page.tsx          ← /photos/42 — полная страница фото
+└── @modal/
+    ├── default.tsx            ← null (по умолчанию нет модалки)
+    └── (.)photos/             ← перехватывает /photos/[id]
+        └── [id]/
+            └── page.tsx       ← показывает фото В МОДАЛКЕ
+```
+
+---
+
+### 🖼️ Photo Gallery Modal: полный пример
+
+```typescript
+// app/layout.tsx
+export default function RootLayout({
+  children,
+  modal,
+}: {
+  children: React.ReactNode;
+  modal: React.ReactNode;
+}) {
+  return (
+    <html>
+      <body>
+        {children}
+        {modal}  {/* Модальное окно рендерится поверх */}
+      </body>
+    </html>
+  );
+}
+
+// app/@modal/default.tsx
+export default function ModalDefault() {
+  return null; // нет модалки по умолчанию
+}
+
+// app/photos/page.tsx — галерея
+import Link from 'next/link';
+import { getPhotos } from '@/lib/photos';
+
+export default async function PhotosPage() {
+  const photos = await getPhotos();
+
+  return (
+    <div className="grid grid-cols-3 gap-4 p-4">
+      {photos.map(photo => (
+        <Link
+          key={photo.id}
+          href={`/photos/${photo.id}`}
+          // При клике: перехватывается → показывается модалка
+          // При прямом URL: показывается полная страница
+        >
+          <img
+            src={photo.thumbnail}
+            alt={photo.alt}
+            className="w-full aspect-square object-cover rounded-lg hover:opacity-90 transition"
+          />
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+// app/photos/[id]/page.tsx — ПОЛНАЯ страница фото (при прямом URL)
+export default async function PhotoPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const photo = await getPhoto(id);
+
+  return (
+    <div className="max-w-4xl mx-auto p-8">
+      <img src={photo.url} alt={photo.alt} className="w-full rounded-xl" />
+      <h1 className="text-2xl font-bold mt-4">{photo.title}</h1>
+      <p className="text-gray-600 mt-2">{photo.description}</p>
+    </div>
+  );
+}
+```
+
+---
+
+### 🔮 Intercepting Route Modal
+
+```typescript
+// app/@modal/(.)photos/[id]/page.tsx — МОДАЛЬНОЕ ОКНО
+import { PhotoModal } from '@/components/PhotoModal';
+import { getPhoto } from '@/lib/photos';
+
+export default async function PhotoModalPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const photo = await getPhoto(id);
+
+  return <PhotoModal photo={photo} />;
+}
+
+// components/PhotoModal.tsx
+'use client';
+
+import { useRouter } from 'next/navigation';
+
+export function PhotoModal({ photo }: { photo: Photo }) {
+  const router = useRouter();
+
+  return (
+    <>
+      {/* Затемнение фона — клик закрывает модалку */}
+      <div
+        className="fixed inset-0 bg-black/70 z-40"
+        onClick={() => router.back()}
+      />
+
+      {/* Модальное окно */}
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-auto">
+          <div className="relative">
+            <button
+              onClick={() => router.back()}
+              className="absolute top-4 right-4 w-8 h-8 bg-black/50 rounded-full flex items-center justify-center text-white"
+            >
+              ✕
+            </button>
+            <img
+              src={photo.url}
+              alt={photo.alt}
+              className="w-full rounded-t-2xl"
+            />
+          </div>
+          <div className="p-6">
+            <h2 className="text-2xl font-bold">{photo.title}</h2>
+            <p className="text-gray-600 mt-2">{photo.description}</p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+```
+
+---
+
+### 🔄 Мягкая vs жёсткая навигация
+
+```
+Мягкая навигация (soft navigation):
+  • Клик по <Link href="/photos/42">
+  • Intercepting Route АКТИВЕН
+  • Показывается МОДАЛКА поверх галереи
+  • URL меняется на /photos/42
+  • Кнопка "Назад" возвращает на галерею
+
+Жёсткая навигация (hard navigation):
+  • Прямой ввод URL /photos/42 в браузере
+  • Обновление страницы (F5)
+  • Intercepting Route НЕ активен
+  • Показывается ПОЛНАЯ страница фото
+```
+
+---
+
+### 🎯 Паттерн: Модальное окно для создания
+
+```
+app/
+├── dashboard/
+│   ├── layout.tsx
+│   ├── page.tsx          ← список задач
+│   └── tasks/
+│       └── [id]/
+│           └── page.tsx  ← полная страница задачи
+└── @modal/
+    └── (.)dashboard/tasks/  ← перехватывает /dashboard/tasks/[id]
+        └── [id]/
+            └── page.tsx     ← модальное окно задачи
+```
+
+```typescript
+// app/dashboard/page.tsx
+import Link from 'next/link';
+
+export default async function DashboardPage() {
+  const tasks = await getTasks();
+
+  return (
+    <div>
+      <h1>Задачи</h1>
+      <ul>
+        {tasks.map(task => (
+          <li key={task.id}>
+            {/* Клик открывает модалку */}
+            <Link href={`/dashboard/tasks/${task.id}`}>
+              {task.title}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+---
+
+### 🛠️ Parallel Routes для Dashboard
+
+```
+app/
+└── dashboard/
+    ├── layout.tsx          ← грид из 3 панелей
+    ├── page.tsx
+    ├── @users/
+    │   ├── page.tsx         ← /dashboard
+    │   └── loading.tsx
+    ├── @revenue/
+    │   ├── page.tsx
+    │   └── loading.tsx
+    └── @activity/
+        ├── page.tsx
+        └── loading.tsx
+```
+
+```typescript
+// app/dashboard/layout.tsx
+export default function DashboardLayout({
+  children,
+  users,
+  revenue,
+  activity,
+}: {
+  children: React.ReactNode;
+  users: React.ReactNode;
+  revenue: React.ReactNode;
+  activity: React.ReactNode;
+}) {
+  return (
+    <div className="min-h-screen bg-gray-100 p-6">
+      <h1 className="text-2xl font-bold mb-6">Dashboard</h1>
+      <div className="grid grid-cols-3 gap-6 mb-6">
+        {/* Каждый виджет загружается независимо */}
+        <div className="bg-white rounded-xl p-4 shadow">{users}</div>
+        <div className="bg-white rounded-xl p-4 shadow">{revenue}</div>
+        <div className="bg-white rounded-xl p-4 shadow">{activity}</div>
+      </div>
+      <div className="bg-white rounded-xl p-4 shadow">{children}</div>
+    </div>
+  );
+}
+```
+
+---
+
+### 🎨 Условный рендер Parallel Routes
+
+```typescript
+// Можно показывать разные слоты в зависимости от состояния
+export default function Layout({
+  children,
+  authModal,
+  dashboard,
+}: {
+  children: React.ReactNode;
+  authModal: React.ReactNode;
+  dashboard: React.ReactNode;
+}) {
+  const session = await auth();
+
+  return (
+    <html>
+      <body>
+        {/* Авторизованным — dashboard, остальным — authModal */}
+        {session ? dashboard : authModal}
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+<Playground client:visible
+  template="react"
+  files={{
+    'App.tsx': `import { useState } from 'react';
+
+interface Photo {
+  id: number;
+  title: string;
+  emoji: string;
+  author: string;
+  description: string;
+  color: string;
+  likes: number;
+}
+
+const PHOTOS: Photo[] = [
+  { id: 1, emoji: '🏔️', title: 'Горы на закате', author: 'Яша Иванов', description: 'Потрясающий вид с вершины в 3000м над уровнем моря. Закат окрасил небо в оранжевый.', color: '#f97316', likes: 234 },
+  { id: 2, emoji: '🌊', title: 'Штормовое море', author: 'Маша Петрова', description: 'Шторм у берегов Балтийского моря. Волны достигали 4 метров.', color: '#3b82f6', likes: 187 },
+  { id: 3, emoji: '🌸', title: 'Сакура в цвету', author: 'Коля Сидоров', description: 'Весенняя сакура в японском саду. Лепестки летели как снег.', color: '#ec4899', likes: 412 },
+  { id: 4, emoji: '🦁', title: 'Лев в саванне', author: 'Аня Козлова', description: 'Молодой лев на рассвете в национальном парке Серенгети.', color: '#eab308', likes: 356 },
+  { id: 5, emoji: '🏙️', title: 'Ночной город', author: 'Вася Попов', description: 'Вид с крыши небоскрёба на ночной мегаполис. Огни тянутся до горизонта.', color: '#8b5cf6', likes: 289 },
+  { id: 6, emoji: '🌿', title: 'Лесная тропа', author: 'Лена Смирнова', description: 'Утренний туман в старом сосновом лесу. Тишина и спокойствие.', color: '#22c55e', likes: 143 },
+];
+
+type NavigationType = 'soft' | 'hard';
+
+export default function App() {
+  const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [navType, setNavType] = useState<NavigationType>('soft');
+  const [currentUrl, setCurrentUrl] = useState('/photos');
+  const [widgetLoading, setWidgetLoading] = useState({ a: false, b: false, c: false });
+
+  const navigateToPhoto = (photo: Photo, type: NavigationType) => {
+    setCurrentUrl(\`/photos/\${photo.id}\`);
+
+    if (type === 'soft') {
+      // Soft navigation → Intercepting Route → модалка
+      setSelectedPhoto(photo);
+      setModalOpen(true);
+    } else {
+      // Hard navigation (F5 / прямой URL) → полная страница
+      setSelectedPhoto(photo);
+      setModalOpen(false);
+    }
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setCurrentUrl('/photos');
+    setSelectedPhoto(null);
+  };
+
+  const simulateWidgetLoad = (widget: 'a' | 'b' | 'c') => {
+    setWidgetLoading(prev => ({ ...prev, [widget]: true }));
+    setTimeout(() => {
+      setWidgetLoading(prev => ({ ...prev, [widget]: false }));
+    }, 1500 + Math.random() * 1000);
+  };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'monospace', color: '#e2e8f0', position: 'relative' }}>
+      {/* Header */}
+      <div style={{ background: '#020617', borderBottom: '1px solid #1e293b', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ color: '#171717', background: 'white', borderRadius: 4, padding: '2px 8px', fontWeight: 900, fontSize: 13 }}>N</span>
+        <span style={{ fontWeight: 700 }}>Parallel & Intercepting Routes</span>
+        <span style={{ color: '#4ade80', fontSize: 12 }}>{currentUrl}</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 0 }}>
+        {/* Sidebar — управление */}
+        <div style={{ width: 220, borderRight: '1px solid #1e293b', padding: 12, flexShrink: 0 }}>
+          <div style={{ color: '#64748b', fontSize: 11, marginBottom: 8 }}>🧭 Тип навигации:</div>
+          {(['soft', 'hard'] as NavigationType[]).map(type => (
+            <button
+              key={type}
+              onClick={() => setNavType(type)}
+              style={{
+                width: '100%', padding: '8px 10px', marginBottom: 6, textAlign: 'left',
+                border: \`1px solid \${navType === type ? '#4ade80' : '#334155'}\`,
+                borderRadius: 6, cursor: 'pointer',
+                background: navType === type ? '#052e16' : '#1e293b',
+                color: navType === type ? '#4ade80' : '#64748b', fontSize: 12,
+              }}
+            >
+              {type === 'soft' ? '🔗 Soft (Link клик)' : '⌨️ Hard (прямой URL)'}
+            </button>
+          ))}
+
+          <div style={{ color: '#64748b', fontSize: 10, lineHeight: 1.7, marginTop: 8, padding: 8, background: '#0f172a', borderRadius: 6 }}>
+            {navType === 'soft'
+              ? '→ Intercepting Route активен\n→ Показывается МОДАЛКА\n→ URL меняется'
+              : '→ Intercepting Route неактивен\n→ ПОЛНАЯ страница\n→ Как F5 / новая вкладка'}
+          </div>
+
+          <div style={{ borderTop: '1px solid #1e293b', paddingTop: 12, marginTop: 12 }}>
+            <div style={{ color: '#64748b', fontSize: 11, marginBottom: 8 }}>🪟 Parallel Routes:</div>
+            <div style={{ color: '#64748b', fontSize: 10, lineHeight: 1.7, marginBottom: 8 }}>
+              Независимые слоты (@slot)
+            </div>
+            {['users', 'revenue', 'activity'].map((widget, i) => {
+              const key = ['a', 'b', 'c'][i] as 'a' | 'b' | 'c';
+              const loading = widgetLoading[key];
+              return (
+                <div key={widget} style={{ marginBottom: 6 }}>
+                  <div style={{ color: '#94a3b8', fontSize: 11, marginBottom: 3 }}>@{widget}</div>
+                  <div style={{ background: '#1e293b', borderRadius: 4, padding: '6px 8px', fontSize: 11, color: loading ? '#fbbf24' : '#4ade80', border: '1px solid #334155' }}>
+                    {loading ? '⏳ loading.tsx...' : '✅ Загружен'}
+                  </div>
+                  <button
+                    onClick={() => simulateWidgetLoad(key)}
+                    style={{ marginTop: 3, padding: '3px 8px', background: '#0f172a', border: '1px solid #334155', borderRadius: 3, cursor: 'pointer', color: '#64748b', fontSize: 10 }}
+                  >
+                    Перезагрузить
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Main content */}
+        <div style={{ flex: 1, padding: 16 }}>
+          {/* Если hard navigation — показываем полную страницу */}
+          {navType === 'hard' && selectedPhoto ? (
+            <div style={{ maxWidth: 600, margin: '0 auto' }}>
+              <button
+                onClick={() => { setSelectedPhoto(null); setCurrentUrl('/photos'); }}
+                style={{ padding: '6px 12px', background: '#1e293b', border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', color: '#94a3b8', fontSize: 12, marginBottom: 16 }}
+              >
+                ← Назад к галерее
+              </button>
+              <div style={{ background: selectedPhoto.color + '22', borderRadius: 16, overflow: 'hidden', border: \`1px solid \${selectedPhoto.color}44\` }}>
+                <div style={{ height: 200, background: selectedPhoto.color + '33', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 80 }}>
+                  {selectedPhoto.emoji}
+                </div>
+                <div style={{ padding: 24 }}>
+                  <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 8 }}>{selectedPhoto.title}</h1>
+                  <div style={{ color: '#64748b', fontSize: 12, marginBottom: 12 }}>by {selectedPhoto.author} · ❤️ {selectedPhoto.likes}</div>
+                  <p style={{ color: '#94a3b8', lineHeight: 1.7 }}>{selectedPhoto.description}</p>
+                  <div style={{ marginTop: 16, background: '#0f172a', borderRadius: 8, padding: 10, fontSize: 11, color: '#64748b' }}>
+                    // Hard navigation → app/photos/[id]/page.tsx<br/>
+                    // Intercepting Route НЕ используется
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ color: '#64748b', fontSize: 11, marginBottom: 12 }}>
+                📸 Галерея — нажми на фото {navType === 'soft' ? '(откроет модальное окно)' : '(откроет полную страницу)'}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                {PHOTOS.map(photo => (
+                  <div
+                    key={photo.id}
+                    onClick={() => navigateToPhoto(photo, navType)}
+                    style={{
+                      background: photo.color + '22', borderRadius: 10, overflow: 'hidden',
+                      cursor: 'pointer', border: \`1px solid \${photo.color}44\`,
+                      transition: 'transform 0.2s',
+                    }}
+                  >
+                    <div style={{ height: 80, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 36, background: photo.color + '33' }}>
+                      {photo.emoji}
+                    </div>
+                    <div style={{ padding: 8 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 2 }}>{photo.title}</div>
+                      <div style={{ color: '#64748b', fontSize: 10 }}>❤️ {photo.likes}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Intercepting Route Modal */}
+      {modalOpen && selectedPhoto && (
+        <>
+          <div
+            onClick={closeModal}
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 40 }}
+          />
+          <div style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+            <div style={{ background: '#1e293b', borderRadius: 16, maxWidth: 480, width: '100%', overflow: 'hidden', border: \`1px solid \${selectedPhoto.color}66\` }}>
+              <div style={{ height: 160, background: selectedPhoto.color + '44', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 72, position: 'relative' }}>
+                {selectedPhoto.emoji}
+                <button
+                  onClick={closeModal}
+                  style={{ position: 'absolute', top: 10, right: 10, width: 28, height: 28, background: 'rgba(0,0,0,0.5)', border: 'none', borderRadius: '50%', cursor: 'pointer', color: 'white', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  ✕
+                </button>
+              </div>
+              <div style={{ padding: 20 }}>
+                <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>{selectedPhoto.title}</h2>
+                <div style={{ color: '#64748b', fontSize: 12, marginBottom: 12 }}>by {selectedPhoto.author} · ❤️ {selectedPhoto.likes}</div>
+                <p style={{ color: '#94a3b8', lineHeight: 1.7, marginBottom: 16, fontSize: 13 }}>{selectedPhoto.description}</p>
+                <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, fontSize: 10, color: '#64748b', lineHeight: 1.8 }}>
+                  // Intercepting Route:<br/>
+                  // app/@modal/(.)photos/[id]/page.tsx<br/>
+                  // Soft navigation → модалка поверх галереи<br/>
+                  // Прямой URL → полная страница
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                  <button onClick={closeModal} style={{ flex: 1, padding: '9px 0', background: '#334155', border: 'none', borderRadius: 8, cursor: 'pointer', color: '#94a3b8', fontSize: 13 }}>
+                    ← Назад (router.back())
+                  </button>
+                  <button
+                    onClick={() => { setModalOpen(false); }}
+                    style={{ flex: 1, padding: '9px 0', background: selectedPhoto.color, border: 'none', borderRadius: 8, cursor: 'pointer', color: 'white', fontSize: 13, fontWeight: 700 }}
+                  >
+                    Открыть полностью
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

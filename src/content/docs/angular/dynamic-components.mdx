@@ -1,0 +1,625 @@
+---
+title: "52. Динамические компоненты"
+sidebar:
+  order: 55
+---
+import { Playground } from '@components/Playground'
+
+
+## 55. Динамические компоненты 🎭
+
+Привет! Яша здесь. Динамические компоненты — мощный инструмент Angular для создания диалогов, тостов, вкладок и любого UI, который создаётся не в шаблоне, а в коде. Разберём всё от основ до production-паттернов 🚀
+
+---
+
+### Зачем нужны динамические компоненты
+
+Статический шаблон `<app-toast></app-toast>` не подходит когда:
+- Нужно показать **любое количество** тостов
+- Компонент должен создаваться в **произвольный момент**
+- Родитель не знает заранее **какой компонент** показать
+- Нужен **портал** — рендер в другом месте DOM
+
+Примеры: диалоги, уведомления, динамические формы, plug-in системы.
+
+---
+
+### ViewContainerRef: контейнер для компонентов
+
+```typescript
+import { Component, ViewChild, ViewContainerRef } from '@angular/core';
+import { AlertComponent } from './alert/alert.component';
+
+@Component({
+  selector: 'app-root',
+  template: `
+    <button (click)="addAlert()">Добавить алерт</button>
+
+    <!-- Контейнер — здесь будут рендериться динамические компоненты -->
+    <ng-container #alertContainer></ng-container>
+  `
+})
+export class AppComponent {
+  // ViewContainerRef привязан к ng-container
+  @ViewChild('alertContainer', { read: ViewContainerRef })
+  container!: ViewContainerRef;
+
+  addAlert(): void {
+    // createComponent — современный API (Angular 13+)
+    const componentRef = this.container.createComponent(AlertComponent);
+
+    // Передать @Input через instance
+    componentRef.instance.message = 'Операция выполнена успешно!';
+    componentRef.instance.type = 'success';
+
+    // Подписаться на @Output
+    componentRef.instance.closed.subscribe(() => {
+      componentRef.destroy(); // удалить компонент
+    });
+  }
+}
+```
+
+---
+
+### Передача @Input через setInput (Angular 14+)
+
+```typescript
+// ✅ Современный способ — setInput запускает Change Detection
+const ref = container.createComponent(ToastComponent);
+ref.setInput('message', 'Сохранено!');    // типобезопасно
+ref.setInput('duration', 3000);
+ref.setInput('type', 'success');
+
+// ✅ Альтернатива — напрямую через instance
+ref.instance.message = 'Сохранено!';
+ref.changeDetectorRef.detectChanges(); // нужно вызвать вручную!
+
+// ❌ Устаревший способ (Angular < 13)
+// ComponentFactoryResolver был удалён в Angular 15
+const factory = resolver.resolveComponentFactory(ToastComponent); // deprecated!
+const ref = container.createComponent(factory);
+```
+
+---
+
+### Dialog Service: production-паттерн
+
+```typescript
+// dialog.service.ts
+import {
+  Injectable, ApplicationRef, createComponent,
+  EnvironmentInjector, ComponentRef, Type
+} from '@angular/core';
+
+export interface DialogRef<T> {
+  componentRef: ComponentRef<T>;
+  close: () => void;
+  afterClosed: Promise<unknown>;
+}
+
+@Injectable({ providedIn: 'root' })
+export class DialogService {
+  private dialogs: ComponentRef<unknown>[] = [];
+
+  constructor(
+    private appRef: ApplicationRef,
+    private injector: EnvironmentInjector,
+  ) {}
+
+  open<T>(component: Type<T>, inputs: Partial<T> = {}): DialogRef<T> {
+    // Создаём компонент вне дерева Angular
+    const componentRef = createComponent(component, {
+      environmentInjector: this.injector,
+    });
+
+    // Передаём входные данные
+    for (const [key, value] of Object.entries(inputs)) {
+      componentRef.setInput(key, value);
+    }
+
+    // Добавляем в ApplicationRef для CD
+    this.appRef.attachView(componentRef.hostView);
+
+    // Монтируем в DOM
+    const domElement = (componentRef.hostView as any).rootNodes[0];
+    document.body.appendChild(domElement);
+
+    this.dialogs.push(componentRef);
+
+    let resolveClose: (value: unknown) => void;
+    const afterClosed = new Promise(resolve => resolveClose = resolve);
+
+    const close = () => {
+      this.appRef.detachView(componentRef.hostView);
+      domElement.remove();
+      componentRef.destroy();
+      this.dialogs = this.dialogs.filter(d => d !== componentRef);
+      resolveClose(undefined);
+    };
+
+    return { componentRef, close, afterClosed };
+  }
+
+  closeAll(): void {
+    this.dialogs.forEach(ref => {
+      this.appRef.detachView(ref.hostView);
+      (ref.hostView as any).rootNodes[0]?.remove();
+      ref.destroy();
+    });
+    this.dialogs = [];
+  }
+}
+```
+
+```typescript
+// confirm-dialog.component.ts
+@Component({
+  standalone: true,
+  selector: 'app-confirm-dialog',
+  template: `
+    <div class="overlay">
+      <div class="dialog">
+        <h3>{{ title }}</h3>
+        <p>{{ message }}</p>
+        <div class="actions">
+          <button (click)="onCancel()">Отмена</button>
+          <button class="primary" (click)="onConfirm()">Подтвердить</button>
+        </div>
+      </div>
+    </div>
+  `,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class ConfirmDialogComponent {
+  @Input() title = 'Подтверждение';
+  @Input() message = 'Вы уверены?';
+  @Output() confirmed = new EventEmitter<boolean>();
+
+  onConfirm(): void { this.confirmed.emit(true); }
+  onCancel(): void { this.confirmed.emit(false); }
+}
+
+// Использование в компоненте
+@Component({...})
+export class UserListComponent {
+  constructor(private dialog: DialogService) {}
+
+  async deleteUser(user: User): Promise<void> {
+    const ref = this.dialog.open(ConfirmDialogComponent, {
+      title: 'Удалить пользователя?',
+      message: \`Удалить \${user.name}? Это действие необратимо.\`,
+    });
+
+    const confirmed = await new Promise<boolean>(resolve => {
+      ref.componentRef.instance.confirmed.subscribe(resolve);
+    });
+
+    if (confirmed) {
+      await this.userService.delete(user.id);
+      ref.close();
+    } else {
+      ref.close();
+    }
+  }
+}
+```
+
+---
+
+### Динамический компонент лоадер: plug-in система
+
+```typescript
+// component-registry.ts — регистр компонентов
+import { Type } from '@angular/core';
+
+export interface WidgetConfig {
+  type: string;
+  component: Type<unknown>;
+  inputs?: Record<string, unknown>;
+}
+
+@Injectable({ providedIn: 'root' })
+export class ComponentRegistry {
+  private registry = new Map<string, Type<unknown>>();
+
+  register(type: string, component: Type<unknown>): void {
+    this.registry.set(type, component);
+  }
+
+  get(type: string): Type<unknown> | undefined {
+    return this.registry.get(type);
+  }
+}
+
+// dynamic-widget-host.component.ts
+@Component({
+  selector: 'app-widget-host',
+  template: `<ng-container #host></ng-container>`,
+  standalone: true,
+})
+export class DynamicWidgetHostComponent implements OnChanges {
+  @Input() widgetType!: string;
+  @Input() widgetInputs: Record<string, unknown> = {};
+
+  @ViewChild('host', { read: ViewContainerRef })
+  host!: ViewContainerRef;
+
+  constructor(private registry: ComponentRegistry) {}
+
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['widgetType']) {
+      this.loadWidget();
+    }
+  }
+
+  private loadWidget(): void {
+    this.host.clear();
+    const component = this.registry.get(this.widgetType);
+    if (!component) {
+      console.warn(\`Widget "\${this.widgetType}" not found in registry\`);
+      return;
+    }
+
+    const ref = this.host.createComponent(component);
+    for (const [key, value] of Object.entries(this.widgetInputs)) {
+      ref.setInput(key, value);
+    }
+  }
+}
+```
+
+---
+
+### Динамические формы
+
+```typescript
+// dynamic-form.component.ts
+export interface FieldConfig {
+  name: string;
+  type: 'text' | 'select' | 'date' | 'rating' | 'rich-text';
+  label: string;
+  options?: { value: string; label: string }[];
+}
+
+@Component({
+  selector: 'app-dynamic-form',
+  template: `
+    <form [formGroup]="form">
+      @for (field of fields; track field.name) {
+        <div class="field">
+          <label>{{ field.label }}</label>
+          <ng-container
+            [dynamicField]="field"
+            [formGroup]="form">
+          </ng-container>
+        </div>
+      }
+    </form>
+  `
+})
+export class DynamicFormComponent implements OnInit {
+  @Input() fields: FieldConfig[] = [];
+  form!: FormGroup;
+
+  constructor(
+    private fb: FormBuilder,
+    private vcr: ViewContainerRef,
+    private registry: ComponentRegistry,
+  ) {}
+
+  ngOnInit(): void {
+    const controls: Record<string, FormControl> = {};
+    this.fields.forEach(f => controls[f.name] = new FormControl(''));
+    this.form = this.fb.group(controls);
+  }
+}
+```
+
+---
+
+### ngTemplateOutlet: динамические шаблоны
+
+```typescript
+@Component({
+  template: `
+    <!-- Шаблоны как параметры -->
+    <app-list [itemTemplate]="userTpl" [items]="users"></app-list>
+
+    <ng-template #userTpl let-user>
+      <div class="user-row">{{ user.name }} — {{ user.email }}</div>
+    </ng-template>
+  `
+})
+export class ParentComponent {
+  users = [...];
+}
+
+@Component({
+  selector: 'app-list',
+  template: `
+    @for (item of items; track item.id) {
+      <ng-container
+        [ngTemplateOutlet]="itemTemplate"
+        [ngTemplateOutletContext]="{ $implicit: item }">
+      </ng-container>
+    }
+  `
+})
+export class ListComponent {
+  @Input() items: unknown[] = [];
+  @Input() itemTemplate!: TemplateRef<unknown>;
+}
+```
+
+---
+
+### Порталы через CDK
+
+```typescript
+import { Portal, ComponentPortal, DomPortalOutlet } from '@angular/cdk/portal';
+
+@Injectable({ providedIn: 'root' })
+export class ToastService {
+  private outlet: DomPortalOutlet;
+
+  constructor(
+    private appRef: ApplicationRef,
+    private injector: EnvironmentInjector,
+  ) {
+    // Создаём контейнер в body
+    const container = document.createElement('div');
+    container.id = 'toast-container';
+    document.body.appendChild(container);
+
+    this.outlet = new DomPortalOutlet(
+      container, undefined, this.appRef, this.injector
+    );
+  }
+
+  show(message: string, type: 'success' | 'error' = 'success'): void {
+    const portal = new ComponentPortal(ToastComponent);
+    const ref = this.outlet.attach(portal);
+    ref.setInput('message', message);
+    ref.setInput('type', type);
+
+    setTimeout(() => {
+      this.outlet.detach();
+    }, 3000);
+  }
+}
+```
+
+---
+
+## Playground 🎮
+
+Интерактивный загрузчик динамических компонентов:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const COMPONENT_TYPES = {
+  alert: {
+    label: 'AlertComponent',
+    icon: '🚨',
+    color: '#ef4444',
+    render: ({ message, type }) => (
+      <div style={{
+        padding: '12px 16px', borderRadius: '8px', marginBottom: '8px',
+        background: type === 'error' ? '#7f1d1d20' : type === 'success' ? '#14532d20' : '#1d3a7a20',
+        border: \`1px solid \${type === 'error' ? '#ef4444' : type === 'success' ? '#4ade80' : '#60a5fa'}\`,
+        color: type === 'error' ? '#ef4444' : type === 'success' ? '#4ade80' : '#60a5fa',
+        fontSize: '14px',
+      }}>
+        {type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️'} {message}
+      </div>
+    ),
+  },
+  card: {
+    label: 'UserCardComponent',
+    icon: '👤',
+    color: '#a78bfa',
+    render: ({ name, role }) => (
+      <div style={{
+        padding: '14px', borderRadius: '10px', marginBottom: '8px',
+        background: '#1e293b', border: '1px solid #334155',
+        display: 'flex', alignItems: 'center', gap: '12px',
+      }}>
+        <div style={{
+          width: '40px', height: '40px', borderRadius: '50%',
+          background: '#a78bfa', display: 'flex', alignItems: 'center',
+          justifyContent: 'center', fontSize: '18px',
+        }}>👤</div>
+        <div>
+          <div style={{ color: '#f1f5f9', fontWeight: 'bold' }}>{name}</div>
+          <div style={{ color: '#a78bfa', fontSize: '12px' }}>{role}</div>
+        </div>
+      </div>
+    ),
+  },
+  toast: {
+    label: 'ToastComponent',
+    icon: '🔔',
+    color: '#fbbf24',
+    render: ({ text, duration }) => (
+      <div style={{
+        padding: '12px 16px', borderRadius: '8px', marginBottom: '8px',
+        background: '#1e293b', borderLeft: '4px solid #fbbf24',
+        fontSize: '13px', color: '#f1f5f9',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      }}>
+        <span>🔔 {text}</span>
+        <span style={{ color: '#64748b', fontSize: '11px' }}>⏱ {duration}мс</span>
+      </div>
+    ),
+  },
+  chart: {
+    label: 'MiniChartComponent',
+    icon: '📊',
+    color: '#4ade80',
+    render: ({ title, data }) => {
+      const max = Math.max(...data);
+      return (
+        <div style={{
+          padding: '14px', borderRadius: '10px', marginBottom: '8px',
+          background: '#1e293b', border: '1px solid #334155',
+        }}>
+          <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '8px' }}>{title}</div>
+          <div style={{ display: 'flex', gap: '4px', alignItems: 'flex-end', height: '40px' }}>
+            {data.map((v, i) => (
+              <div key={i} style={{
+                flex: 1, background: '#4ade80', borderRadius: '2px 2px 0 0',
+                height: \`\${(v / max) * 40}px\`, opacity: 0.8,
+              }} />
+            ))}
+          </div>
+        </div>
+      );
+    },
+  },
+};
+
+let idCounter = 0;
+
+const defaultInputs = {
+  alert: { message: 'Операция выполнена!', type: 'success' },
+  card: { name: 'Александр Иванов', role: 'Frontend Developer' },
+  toast: { text: 'Данные сохранены', duration: 3000 },
+  chart: { title: 'Активность за неделю', data: [4, 7, 2, 8, 5, 9, 6] },
+};
+
+export default function App() {
+  const [components, setComponents] = useState([]);
+  const [selectedType, setSelectedType] = useState('alert');
+
+  const addComponent = useCallback(() => {
+    setComponents(prev => [...prev, {
+      id: ++idCounter,
+      type: selectedType,
+      inputs: { ...defaultInputs[selectedType] },
+      createdAt: new Date().toLocaleTimeString(),
+    }]);
+  }, [selectedType]);
+
+  const removeComponent = useCallback((id) => {
+    setComponents(prev => prev.filter(c => c.id !== id));
+  }, []);
+
+  const clearAll = useCallback(() => setComponents([]), []);
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '680px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>🎭 Dynamic Component Loader</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>ViewContainerRef.createComponent()</div>
+        </div>
+
+        {/* Controls */}
+        <div style={{
+          background: '#1e293b', borderRadius: '12px', padding: '16px',
+          marginBottom: '16px',
+        }}>
+          <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>
+            КОМПОНЕНТ ДЛЯ СОЗДАНИЯ
+          </div>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+            {Object.entries(COMPONENT_TYPES).map(([type, cfg]) => (
+              <button key={type} onClick={() => setSelectedType(type)} style={{
+                padding: '8px 14px', borderRadius: '8px', border: 'none',
+                cursor: 'pointer',
+                background: selectedType === type ? cfg.color : '#334155',
+                color: selectedType === type ? '#0f172a' : '#94a3b8',
+                fontWeight: 'bold', fontSize: '13px',
+              }}>
+                {cfg.icon} {type}
+              </button>
+            ))}
+          </div>
+
+          <div style={{
+            background: '#0f172a', borderRadius: '8px', padding: '10px 14px',
+            fontSize: '12px', color: '#a78bfa', marginBottom: '12px', fontFamily: 'monospace',
+          }}>
+            {'const ref = container.createComponent(' + COMPONENT_TYPES[selectedType].label + ');'}
+            <br />
+            {'ref.setInput("...inputs...", value);'}
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button onClick={addComponent} style={{
+              flex: 1, padding: '10px', borderRadius: '8px', border: 'none',
+              cursor: 'pointer', background: ANGULAR_RED, color: 'white',
+              fontWeight: 'bold', fontSize: '14px',
+            }}>
+              ➕ createComponent({COMPONENT_TYPES[selectedType].label})
+            </button>
+            {components.length > 0 && (
+              <button onClick={clearAll} style={{
+                padding: '10px 16px', borderRadius: '8px', border: 'none',
+                cursor: 'pointer', background: '#334155', color: '#94a3b8', fontSize: '13px',
+              }}>
+                🗑️ Очистить
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Container */}
+        <div style={{
+          background: '#1e293b', borderRadius: '12px', padding: '16px',
+          minHeight: '200px',
+          border: '2px dashed #334155',
+        }}>
+          <div style={{
+            color: '#64748b', fontSize: '11px', marginBottom: '12px',
+            display: 'flex', justifyContent: 'space-between',
+          }}>
+            <span>{'<ng-container #dynamicHost>'}</span>
+            <span style={{ color: '#4ade80' }}>{components.length} компонентов</span>
+          </div>
+
+          {components.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#475569', padding: '40px 0', fontSize: '14px' }}>
+              Нажмите «createComponent» — компоненты появятся здесь
+            </div>
+          ) : (
+            components.map(comp => {
+              const cfg = COMPONENT_TYPES[comp.type];
+              return (
+                <div key={comp.id} style={{ position: 'relative' }}>
+                  {cfg.render(comp.inputs)}
+                  <button onClick={() => removeComponent(comp.id)} style={{
+                    position: 'absolute', top: '4px', right: '4px',
+                    background: 'none', border: 'none', color: '#64748b',
+                    cursor: 'pointer', fontSize: '14px', padding: '2px 6px',
+                  }}>
+                    componentRef.destroy() ×
+                  </button>
+                  <div style={{ fontSize: '10px', color: '#475569', textAlign: 'right', marginTop: '-8px', marginBottom: '4px' }}>
+                    создан в {comp.createdAt}
+                  </div>
+                </div>
+              );
+            })
+          )}
+          <div style={{ color: '#64748b', fontSize: '11px', marginTop: '8px' }}>{'</ng-container>'}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

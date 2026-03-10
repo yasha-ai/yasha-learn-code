@@ -1,0 +1,375 @@
+---
+title: "25. Тестирование API"
+sidebar:
+  order: 25
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-testing.png)
+
+Тесты — это страховка от поломок. Без тестов каждый деплой — русская рулетка.
+
+## Инструменты
+
+```bash
+npm install -D vitest supertest
+# vitest — быстрый тест-раннер (от создателей Vite)
+# supertest — HTTP запросы к Express без запуска сервера
+```
+
+## Структура тестов
+
+```
+src/
+├── routes/
+│   └── users.js
+├── services/
+│   └── userService.js
+└── app.js
+
+tests/                          # или __tests__/
+├── routes/
+│   └── users.test.js           # интеграционные
+├── services/
+│   └── userService.test.js     # юнит
+├── setup.js                    # глобальная настройка
+└── helpers.js                  # утилиты для тестов
+```
+
+## Настройка vitest
+
+```javascript
+// vitest.config.js
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    globals: true,          // describe, it, expect без импорта
+    environment: 'node',
+    setupFiles: ['./tests/setup.js'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      exclude: ['node_modules/', 'tests/'],
+    },
+  },
+});
+```
+
+```javascript
+// tests/setup.js — выполняется перед всеми тестами
+import { beforeAll, afterAll, beforeEach } from 'vitest';
+
+beforeAll(async () => {
+  // Подключение к тестовой БД
+  process.env.NODE_ENV = 'test';
+  process.env.DATABASE_URL = 'sqlite::memory:';
+});
+
+beforeEach(async () => {
+  // Очистка БД перед каждым тестом
+  // await db.user.deleteMany();
+});
+
+afterAll(async () => {
+  // Закрываем соединения
+  // await db.$disconnect();
+});
+```
+
+## Юнит-тесты
+
+```javascript
+// services/userService.js
+class UserService {
+  constructor(db) {
+    this.db = db;
+  }
+
+  async create({ name, email, password }) {
+    if (!email.includes('@')) {
+      throw new Error('Некорректный email');
+    }
+    if (password.length < 8) {
+      throw new Error('Пароль слишком короткий');
+    }
+    return this.db.user.create({ data: { name, email, password } });
+  }
+
+  async findById(id) {
+    const user = await this.db.user.findUnique({ where: { id } });
+    if (!user) throw new Error('Пользователь не найден');
+    return user;
+  }
+}
+
+module.exports = UserService;
+```
+
+```javascript
+// tests/services/userService.test.js
+import { describe, it, expect, vi } from 'vitest';
+import UserService from '../../src/services/userService';
+
+describe('UserService', () => {
+  // Мок базы данных
+  const mockDb = {
+    user: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+    },
+  };
+
+  const service = new UserService(mockDb);
+
+  describe('create', () => {
+    it('создаёт пользователя с корректными данными', async () => {
+      const userData = { name: 'Яша', email: 'yasha@mail.com', password: '12345678' };
+      mockDb.user.create.mockResolvedValue({ id: 1, ...userData });
+
+      const user = await service.create(userData);
+
+      expect(user.id).toBe(1);
+      expect(user.name).toBe('Яша');
+      expect(mockDb.user.create).toHaveBeenCalledWith({ data: userData });
+    });
+
+    it('выбрасывает ошибку при некорректном email', async () => {
+      await expect(
+        service.create({ name: 'Яша', email: 'invalid', password: '12345678' })
+      ).rejects.toThrow('Некорректный email');
+    });
+
+    it('выбрасывает ошибку при коротком пароле', async () => {
+      await expect(
+        service.create({ name: 'Яша', email: 'y@mail.com', password: '123' })
+      ).rejects.toThrow('Пароль слишком короткий');
+    });
+  });
+
+  describe('findById', () => {
+    it('возвращает пользователя по ID', async () => {
+      mockDb.user.findUnique.mockResolvedValue({ id: 1, name: 'Яша' });
+
+      const user = await service.findById(1);
+
+      expect(user.name).toBe('Яша');
+    });
+
+    it('выбрасывает ошибку если не найден', async () => {
+      mockDb.user.findUnique.mockResolvedValue(null);
+
+      await expect(service.findById(999)).rejects.toThrow('не найден');
+    });
+  });
+});
+```
+
+## Интеграционные тесты с Supertest
+
+```javascript
+// tests/routes/users.test.js
+import { describe, it, expect, beforeEach } from 'vitest';
+import request from 'supertest';
+import app from '../../src/app';
+
+describe('GET /api/users', () => {
+  it('возвращает список пользователей', async () => {
+    const res = await request(app)
+      .get('/api/users')
+      .expect(200);
+
+    expect(res.body).toHaveProperty('data');
+    expect(Array.isArray(res.body.data)).toBe(true);
+  });
+
+  it('поддерживает пагинацию', async () => {
+    const res = await request(app)
+      .get('/api/users?page=1&limit=5')
+      .expect(200);
+
+    expect(res.body.pagination.limit).toBe(5);
+  });
+});
+
+describe('POST /api/users', () => {
+  it('создаёт пользователя', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .send({ name: 'Яша', email: 'test@mail.com', password: 'password123' })
+      .set('Authorization', `Bearer ${testToken}`)
+      .expect(201);
+
+    expect(res.body.data.name).toBe('Яша');
+    expect(res.body.data.email).toBe('test@mail.com');
+    expect(res.body.data).not.toHaveProperty('password');
+  });
+
+  it('возвращает 400 при невалидных данных', async () => {
+    const res = await request(app)
+      .post('/api/users')
+      .send({ name: '' })
+      .set('Authorization', `Bearer ${testToken}`)
+      .expect(400);
+
+    expect(res.body).toHaveProperty('error');
+  });
+
+  it('возвращает 401 без авторизации', async () => {
+    await request(app)
+      .post('/api/users')
+      .send({ name: 'Яша', email: 'y@m.com', password: '12345678' })
+      .expect(401);
+  });
+
+  it('возвращает 409 при дубликате email', async () => {
+    // Первый раз — успех
+    await request(app)
+      .post('/api/users')
+      .send({ name: 'A', email: 'dup@mail.com', password: '12345678' })
+      .set('Authorization', `Bearer ${testToken}`)
+      .expect(201);
+
+    // Второй раз — конфликт
+    await request(app)
+      .post('/api/users')
+      .send({ name: 'B', email: 'dup@mail.com', password: '12345678' })
+      .set('Authorization', `Bearer ${testToken}`)
+      .expect(409);
+  });
+});
+
+describe('GET /api/users/:id', () => {
+  it('возвращает пользователя', async () => {
+    const res = await request(app).get('/api/users/1').expect(200);
+    expect(res.body.data.id).toBe(1);
+  });
+
+  it('возвращает 404 для несуществующего', async () => {
+    await request(app).get('/api/users/99999').expect(404);
+  });
+});
+```
+
+## Моки и спаи
+
+```javascript
+import { vi, describe, it, expect } from 'vitest';
+
+// Мок модуля
+vi.mock('../../src/db', () => ({
+  db: {
+    user: {
+      findMany: vi.fn().mockResolvedValue([{ id: 1, name: 'Яша' }]),
+      create: vi.fn().mockResolvedValue({ id: 2, name: 'Новый' }),
+    },
+  },
+}));
+
+// Спай на функцию
+const spy = vi.spyOn(console, 'log');
+someFunction();
+expect(spy).toHaveBeenCalledWith('ожидаемый вывод');
+spy.mockRestore();
+
+// Фейковые таймеры
+vi.useFakeTimers();
+setTimeout(() => { /* ... */ }, 1000);
+vi.advanceTimersByTime(1000);
+vi.useRealTimers();
+```
+
+## Скрипты в package.json
+
+```json
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest --ui"
+  }
+}
+```
+
+```bash
+npm test                       # запуск тестов
+npm run test:watch             # перезапуск при изменениях
+npm run test:coverage          # отчёт покрытия
+npx vitest run users.test      # конкретный файл
+```
+
+## Практика
+
+1. Напиши юнит-тесты для сервиса с моком БД
+2. Напиши интеграционные тесты для CRUD роутов через supertest
+3. Протестируй авторизацию: запрос с/без токена, с истёкшим токеном
+4. Протестируй валидацию: пустое тело, невалидный email, короткий пароль
+5. Запусти coverage и добейся покрытия > 80%
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+const tests = [
+  { name: "GET /api/users returns 200", fn: () => ({ pass: true, expect: "status 200", got: "200" }) },
+  { name: "GET /api/users returns array", fn: () => ({ pass: true, expect: "Array.isArray", got: "true" }) },
+  { name: "POST /api/users creates user", fn: () => ({ pass: true, expect: "status 201", got: "201" }) },
+  { name: "POST /api/users validates body", fn: () => ({ pass: true, expect: "status 400 on empty", got: "400" }) },
+  { name: "GET /api/users/:id returns user", fn: () => ({ pass: true, expect: "user.name", got: '"Alice"' }) },
+  { name: "DELETE /api/users/:id returns 200", fn: () => ({ pass: true, expect: "status 200", got: "200" }) },
+  { name: "GET /unknown returns 404", fn: () => ({ pass: true, expect: "status 404", got: "404" }) },
+  { name: "Auth required for POST", fn: () => ({ pass: Math.random() > 0.3, expect: "status 401 without token", got: Math.random() > 0.3 ? "401" : "200" }) },
+];
+
+export default function App() {
+  const [results, setResults] = useState([]);
+  const [running, setRunning] = useState(false);
+
+  const runTests = () => {
+    setResults([]); setRunning(true);
+    tests.forEach((t, i) => {
+      setTimeout(() => {
+        const r = t.fn();
+        setResults(prev => [...prev, { name: t.name, ...r }]);
+        if (i === tests.length - 1) setRunning(false);
+      }, (i + 1) * 300);
+    });
+  };
+
+  const passed = results.filter(r => r.pass).length;
+  const failed = results.filter(r => !r.pass).length;
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>API тестирование</h3>
+      <button onClick={runTests} disabled={running}
+        style={{ padding: "6px 14px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", marginBottom: 12, fontSize: 12 }}>
+        {running ? "Running..." : "npm test"}
+      </button>
+      {results.length > 0 && (
+        <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 8 }}>
+          <span style={{ color: "#10b981" }}>{passed} passed</span>{" "}
+          {failed > 0 && <span style={{ color: "#ef4444" }}>{failed} failed</span>}
+          {" "}<span>({results.length}/{tests.length})</span>
+        </div>
+      )}
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 80 }}>
+        {results.map((r, i) => (
+          <div key={i} style={{ fontSize: 12, marginBottom: 4, display: "flex", gap: 8 }}>
+            <span style={{ color: r.pass ? "#10b981" : "#ef4444" }}>{r.pass ? "✓" : "✕"}</span>
+            <span style={{ color: "#e2e8f0" }}>{r.name}</span>
+            {!r.pass && <span style={{ color: "#ef4444", fontSize: 11 }}>expected {r.expect}, got {r.got}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

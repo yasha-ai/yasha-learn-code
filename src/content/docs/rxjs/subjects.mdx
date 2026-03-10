@@ -1,0 +1,505 @@
+---
+title: "3. Subjects: горячие потоки"
+sidebar:
+  order: 3
+---
+import { Playground } from '@components/Playground'
+
+
+## 📡 Subjects — Горячие потоки и общие состояния
+
+Привет, Яша! 🔥 Сегодня разбираем **Subject** — особый вид Observable, который умеет быть одновременно источником и получателем данных. Это то, что делает RxJS по-настоящему мощным! 💪
+
+---
+
+## Что такое Subject? 🤔
+
+**Subject** — это Observable, который:
+1. Является **горячим** (не создаёт отдельный поток для каждого подписчика)
+2. Может **сам отправлять** значения через `.next()`
+3. Может иметь **несколько подписчиков** — и все получают одно и то же значение
+
+Аналогия: **радиостанция** 📻
+- Observable = DVD (каждый зритель смотрит с начала своего диска)
+- Subject = FM Radio (все слушают одну трансляцию в прямом эфире)
+
+```typescript
+import { Subject } from 'rxjs';
+
+const radio$ = new Subject<string>();
+
+// Два "слушателя" подписываются
+radio$.subscribe(msg => console.log('Слушатель 1:', msg));
+radio$.subscribe(msg => console.log('Слушатель 2:', msg));
+
+// Subject сам отправляет данные!
+radio$.next('🎵 Первая песня');
+// Слушатель 1: 🎵 Первая песня
+// Слушатель 2: 🎵 Первая песня
+
+radio$.next('🎵 Вторая песня');
+// Слушатель 1: 🎵 Вторая песня
+// Слушатель 2: 🎵 Вторая песня
+
+radio$.complete(); // Станция закрылась
+```
+
+---
+
+## Холодные vs Горячие Observable ❄️🔥
+
+```typescript
+import { Observable, Subject, interval } from 'rxjs';
+import { take } from 'rxjs/operators';
+
+// ❄️ ХОЛОДНЫЙ — каждый подписчик получает свой поток с начала
+const cold$ = new Observable(sub => {
+  console.log('Новый поток создан!');
+  sub.next(Math.random()); // Случайное число
+  sub.next(Math.random());
+  sub.complete();
+});
+
+cold$.subscribe(v => console.log('А:', v)); // Новый поток! Своё случайное число
+cold$.subscribe(v => console.log('Б:', v)); // Новый поток! Другое случайное число
+// A: 0.123   <- разные!
+// Б: 0.987   <- разные!
+
+// 🔥 ГОРЯЧИЙ (Subject) — все подписчики получают одни и те же данные
+const hot$ = new Subject<number>();
+hot$.subscribe(v => console.log('А:', v));
+hot$.subscribe(v => console.log('Б:', v));
+
+hot$.next(Math.random()); // Одно значение — оба получают одно и то же!
+// A: 0.456   <- одинаковые!
+// Б: 0.456   <- одинаковые!
+```
+
+---
+
+## Опоздавший подписчик ⏰
+
+```typescript
+import { Subject } from 'rxjs';
+
+const updates$ = new Subject<string>();
+
+updates$.next('Событие 1'); // ← никто не подписан, потеряно!
+
+updates$.subscribe(v => console.log('Подписчик:', v));
+
+updates$.next('Событие 2'); // ✅ Получит
+updates$.next('Событие 3'); // ✅ Получит
+
+// Подписчик: Событие 2
+// Подписчик: Событие 3
+// Событие 1 потеряно навсегда 😢
+```
+
+Это проблема. Её решают **BehaviorSubject** и **ReplaySubject**!
+
+---
+
+## BehaviorSubject — "текущее значение" 📌
+
+**BehaviorSubject** хранит последнее значение и сразу отдаёт его новым подписчикам.
+
+Аналогия: **термостат** 🌡️ — показывает текущую температуру, и любой кто посмотрит — увидит актуальное значение.
+
+```typescript
+import { BehaviorSubject } from 'rxjs';
+
+// Начальное значение ОБЯЗАТЕЛЬНО!
+const temperature$ = new BehaviorSubject<number>(22);
+
+// Подписчик 1 сразу получает текущее значение (22)
+temperature$.subscribe(t => console.log('Термометр 1:', t));
+// Термометр 1: 22
+
+// Температура изменилась
+temperature$.next(25);
+// Термометр 1: 25
+
+// Новый подписчик — сразу получает ПОСЛЕДНЕЕ значение (25)
+temperature$.subscribe(t => console.log('Термометр 2:', t));
+// Термометр 2: 25
+
+// Читаем текущее значение без подписки!
+console.log('Текущая температура:', temperature$.getValue()); // 25
+```
+
+### BehaviorSubject как Store 🏪
+
+```typescript
+import { BehaviorSubject } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+interface CartState {
+  items: string[];
+  total: number;
+}
+
+// Простой стор
+const cart$ = new BehaviorSubject<CartState>({ items: [], total: 0 });
+
+// Производные потоки
+const itemCount$ = cart$.pipe(map(s => s.items.length));
+const isEmpty$ = cart$.pipe(map(s => s.items.length === 0));
+
+// Методы обновления
+function addItem(item: string, price: number) {
+  const current = cart$.getValue();
+  cart$.next({
+    items: [...current.items, item],
+    total: current.total + price
+  });
+}
+
+// Используем
+itemCount$.subscribe(n => console.log('Товаров в корзине:', n));
+cart$.subscribe(s => console.log('Корзина:', s));
+
+addItem('Яблоко', 50);    // Товаров: 1
+addItem('Банан', 30);     // Товаров: 2
+```
+
+---
+
+## ReplaySubject — "перемотка назад" 🔄
+
+**ReplaySubject(N)** запоминает последние N значений и отдаёт их новым подписчикам.
+
+Аналогия: **DVR/TiVo** 📹 — записывает трансляцию, и опоздавший может посмотреть последние N минут.
+
+```typescript
+import { ReplaySubject } from 'rxjs';
+
+// Запоминает последние 3 значения
+const replayBuffer$ = new ReplaySubject<string>(3);
+
+replayBuffer$.next('🎬 Событие 1');
+replayBuffer$.next('🎬 Событие 2');
+replayBuffer$.next('🎬 Событие 3');
+replayBuffer$.next('🎬 Событие 4');
+replayBuffer$.next('🎬 Событие 5');
+
+// Подписываемся ПОСЛЕ всех событий
+replayBuffer$.subscribe(v => console.log('Опоздал, но получил:', v));
+// Опоздал, но получил: 🎬 Событие 3  (только последние 3!)
+// Опоздал, но получил: 🎬 Событие 4
+// Опоздал, но получил: 🎬 Событие 5
+```
+
+```typescript
+// ReplaySubject с временным буфером (500мс)
+const timedReplay$ = new ReplaySubject<number>(100, 500);
+// хранит до 100 значений за последние 500мс
+```
+
+---
+
+## AsyncSubject — только последнее значение при complete 🏁
+
+**AsyncSubject** отдаёт только последнее значение, и только когда вызван `complete()`.
+
+Аналогия: **приз за финиш** 🏆 — получишь результат только когда гонка завершится.
+
+```typescript
+import { AsyncSubject } from 'rxjs';
+
+const async$ = new AsyncSubject<number>();
+
+async$.subscribe(v => console.log('Получили:', v));
+
+async$.next(1); // Не придёт
+async$.next(2); // Не придёт
+async$.next(3); // Не придёт
+
+async$.complete(); // Только теперь!
+// Получили: 3  ← только последнее значение!
+```
+
+> 💡 AsyncSubject похож на Promise — одно финальное значение. Используй его для операций типа "дождись конца загрузки".
+
+---
+
+## Когда что использовать? 📊
+
+| Subject | Запоминает | Когда использовать |
+|---------|------------|-------------------|
+| **Subject** | Ничего | События (клики, WebSocket) |
+| **BehaviorSubject** | Последнее значение | State management, текущий пользователь |
+| **ReplaySubject(N)** | N последних значений | Кэш последних событий, логи |
+| **AsyncSubject** | Только при complete | Одноразовые async операции |
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect } from 'react';
+import { BehaviorSubject } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+// 🏪 Простой стор на BehaviorSubject — тема + счётчик
+interface AppState {
+  count: number;
+  theme: 'dark' | 'light';
+  userName: string;
+}
+
+// Стор живёт вне компонента — это SHARED состояние
+const store$ = new BehaviorSubject<AppState>({
+  count: 0,
+  theme: 'dark',
+  userName: 'Яша'
+});
+
+// Экшены — функции которые обновляют стор
+const actions = {
+  increment: () => {
+    const s = store$.getValue();
+    store$.next({ ...s, count: s.count + 1 });
+  },
+  decrement: () => {
+    const s = store$.getValue();
+    store$.next({ ...s, count: s.count - 1 });
+  },
+  reset: () => {
+    const s = store$.getValue();
+    store$.next({ ...s, count: 0 });
+  },
+  toggleTheme: () => {
+    const s = store$.getValue();
+    store$.next({ ...s, theme: s.theme === 'dark' ? 'light' : 'dark' });
+  },
+  setName: (name: string) => {
+    const s = store$.getValue();
+    store$.next({ ...s, userName: name });
+  }
+};
+
+// Хук для подписки на стор
+function useStore<T>(selector: (s: AppState) => T): T {
+  const [value, setValue] = useState<T>(() => selector(store$.getValue()));
+
+  useEffect(() => {
+    // BehaviorSubject сразу даёт текущее значение!
+    const sub = store$.pipe(map(selector)).subscribe(setValue);
+    return () => sub.unsubscribe(); // 🧹 Очистка
+  }, []);
+
+  return value;
+}
+
+// Компонент-счётчик — подписан только на count
+function Counter() {
+  const count = useStore(s => s.count);
+  const theme = useStore(s => s.theme);
+
+  return (
+    <div style={{
+      background: theme === 'dark' ? '#1e293b' : '#f0f9ff',
+      borderRadius: 16,
+      padding: '24px',
+      textAlign: 'center',
+      border: '1px solid #334155',
+      marginBottom: 16
+    }}>
+      <div style={{ color: '#94a3b8', fontSize: 13, marginBottom: 8 }}>
+        📦 BehaviorSubject значение:
+      </div>
+      <div style={{
+        fontSize: 64,
+        fontWeight: 'bold',
+        color: count > 0 ? '#34d399' : count < 0 ? '#f87171' : '#38bdf8'
+      }}>
+        {count}
+      </div>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 16 }}>
+        <button onClick={actions.decrement} style={btn('#ef4444')}>− Декремент</button>
+        <button onClick={actions.reset} style={btn('#64748b')}>⟳ Сброс</button>
+        <button onClick={actions.increment} style={btn('#22c55e')}>+ Инкремент</button>
+      </div>
+    </div>
+  );
+}
+
+// Компонент темы — подписан только на theme
+function ThemeToggle() {
+  const theme = useStore(s => s.theme);
+
+  return (
+    <div style={{
+      background: '#1e293b',
+      borderRadius: 12,
+      padding: '16px',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 16,
+      border: '1px solid #334155'
+    }}>
+      <div>
+        <div style={{ color: '#e2e8f0', fontWeight: 'bold' }}>
+          {theme === 'dark' ? '🌙 Тёмная тема' : '☀️ Светлая тема'}
+        </div>
+        <div style={{ color: '#64748b', fontSize: 12 }}>
+          BehaviorSubject.getValue() = "{theme}"
+        </div>
+      </div>
+      <button onClick={actions.toggleTheme} style={{
+        padding: '8px 16px',
+        background: theme === 'dark' ? '#fbbf24' : '#1e293b',
+        color: theme === 'dark' ? '#0f172a' : '#e2e8f0',
+        border: 'none',
+        borderRadius: 8,
+        cursor: 'pointer',
+        fontWeight: 'bold'
+      }}>
+        Переключить
+      </button>
+    </div>
+  );
+}
+
+// Компонент имени
+function NameEditor() {
+  const name = useStore(s => s.userName);
+  const [input, setInput] = useState(name);
+
+  return (
+    <div style={{
+      background: '#1e293b',
+      borderRadius: 12,
+      padding: '16px',
+      marginBottom: 16,
+      border: '1px solid #334155'
+    }}>
+      <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 8 }}>
+        ✏️ Имя пользователя (в сторе: "{name}"):
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          style={{
+            flex: 1,
+            padding: '8px 12px',
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: 8,
+            color: '#e2e8f0',
+            fontFamily: 'monospace',
+            fontSize: 14
+          }}
+        />
+        <button onClick={() => actions.setName(input)} style={btn('#7c3aed')}>
+          Обновить
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Лог изменений стора
+function StoreLog() {
+  const [history, setHistory] = useState<string[]>([]);
+
+  useEffect(() => {
+    const sub = store$.subscribe(s => {
+      setHistory(prev => [
+        \`count:\${s.count} | theme:\${s.theme} | name:\${s.userName}\`,
+        ...prev
+      ].slice(0, 6));
+    });
+    return () => sub.unsubscribe();
+  }, []);
+
+  return (
+    <div style={{
+      background: '#1e293b',
+      borderRadius: 12,
+      padding: '16px',
+      border: '1px solid #334155'
+    }}>
+      <div style={{ color: '#64748b', fontSize: 12, marginBottom: 8 }}>
+        📋 История изменений стора (BehaviorSubject):
+      </div>
+      {history.map((h, i) => (
+        <div key={i} style={{
+          fontSize: 12,
+          color: i === 0 ? '#38bdf8' : '#475569',
+          padding: '2px 0',
+          fontFamily: 'monospace'
+        }}>
+          {i === 0 ? '▶ ' : '  '}{h}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Главный компонент
+export default function App() {
+  const name = useStore(s => s.userName);
+  const theme = useStore(s => s.theme);
+
+  return (
+    <div style={{
+      background: '#0f172a',
+      minHeight: '100vh',
+      padding: '24px',
+      fontFamily: 'monospace',
+      color: '#e2e8f0'
+    }}>
+      <h2 style={{ color: '#38bdf8', marginBottom: 4 }}>
+        📡 BehaviorSubject как Store
+      </h2>
+      <p style={{ color: '#94a3b8', marginBottom: 20, fontSize: 13 }}>
+        Привет, {name}! Все компоненты подписаны на один BehaviorSubject
+      </p>
+
+      <Counter />
+      <ThemeToggle />
+      <NameEditor />
+      <StoreLog />
+
+      <div style={{
+        marginTop: 16,
+        padding: '12px 16px',
+        background: '#0c1a2e',
+        borderRadius: 8,
+        borderLeft: '3px solid #38bdf8',
+        fontSize: 12,
+        color: '#94a3b8',
+        lineHeight: 1.6
+      }}>
+        💡 <strong style={{ color: '#38bdf8' }}>BehaviorSubject</strong> — это мини-Redux!
+        Один источник правды. Каждый компонент подписан через <code>useStore()</code>
+        и автоматически обновляется при изменении стора.
+      </div>
+    </div>
+  );
+}
+
+function btn(bg: string): React.CSSProperties {
+  return {
+    padding: '8px 14px',
+    background: bg,
+    color: 'white',
+    border: 'none',
+    borderRadius: 8,
+    cursor: 'pointer',
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
+    fontSize: 13
+  };
+}
+`
+  }}
+/>

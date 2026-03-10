@@ -1,0 +1,264 @@
+---
+title: "8. Вложенные маршруты"
+sidebar:
+  order: 8
+---
+import { Playground } from '@components/Playground'
+
+
+Вложенные маршруты — одна из самых мощных возможностей Remix. Они позволяют создавать сложные UI с несколькими уровнями layouts, при этом каждый уровень загружает свои данные параллельно.
+
+## Outlet — точка монтирования
+
+```typescript
+// app/routes/dashboard.tsx — родительский маршрут
+import { Outlet, NavLink } from "@remix-run/react";
+
+export async function loader() {
+  // Данные для этого уровня
+  const user = await getCurrentUser();
+  return json({ user });
+}
+
+export default function Dashboard() {
+  const { user } = useLoaderData<typeof loader>();
+
+  return (
+    <div className="dashboard">
+      <nav>
+        <p>Привет, {user.name}!</p>
+        <NavLink to="/dashboard">Главная</NavLink>
+        <NavLink to="/dashboard/stats">Статистика</NavLink>
+        <NavLink to="/dashboard/settings">Настройки</NavLink>
+      </nav>
+      <main>
+        {/* Здесь рендерятся дочерние маршруты */}
+        <Outlet />
+      </main>
+    </div>
+  );
+}
+```
+
+## Структура файлов
+
+```
+app/routes/
+  dashboard.tsx              → /dashboard/*  (layout)
+  dashboard._index.tsx       → /dashboard
+  dashboard.stats.tsx        → /dashboard/stats
+  dashboard.settings.tsx     → /dashboard/settings
+  dashboard.users.$id.tsx    → /dashboard/users/:id
+```
+
+## Параллельная загрузка данных
+
+Remix загружает данные всех вложенных маршрутов **параллельно**:
+
+```
+GET /dashboard/stats
+
+Параллельно выполняются:
+  ├── dashboard.tsx loader()       → getCurrentUser()
+  └── dashboard.stats.tsx loader() → getStats()
+
+Результат: самый медленный из двух определяет время загрузки
+(а не их сумма, как было бы при последовательной загрузке!)
+```
+
+## Передача данных родитель → дочерний
+
+Через `useRouteLoaderData`:
+
+```typescript
+// В дочернем маршруте dashboard.stats.tsx
+import { useRouteLoaderData } from "@remix-run/react";
+import type { loader as dashboardLoader } from "./dashboard";
+
+export default function Stats() {
+  // Получаем данные из родительского loader
+  const dashData = useRouteLoaderData<typeof dashboardLoader>("routes/dashboard");
+  const { stats } = useLoaderData<typeof loader>();
+
+  return (
+    <div>
+      <h2>Привет, {dashData?.user.name}!</h2>
+      <p>Ваша статистика...</p>
+    </div>
+  );
+}
+```
+
+## Контекст через Outlet
+
+```typescript
+// Родительский маршрут
+export default function Parent() {
+  const data = useLoaderData();
+  return (
+    <div>
+      <Outlet context={{ theme: "dark", user: data.user }} />
+    </div>
+  );
+}
+
+// Дочерний маршрут
+import { useOutletContext } from "@remix-run/react";
+
+export default function Child() {
+  const { theme, user } = useOutletContext<{ theme: string; user: User }>();
+  return <p>Тема: {theme}, Пользователь: {user.name}</p>;
+}
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const WARN = "#f59e0b";
+
+type Route = "index" | "stats" | "settings" | "user";
+
+const routes: { id: Route; label: string; path: string; data: string }[] = [
+  { id: "index", label: "Главная", path: "/dashboard", data: '{ welcomeMessage: "Добро пожаловать!" }' },
+  { id: "stats", label: "Статистика", path: "/dashboard/stats", data: '{ visits: 12450, conversions: 234 }' },
+  { id: "settings", label: "Настройки", path: "/dashboard/settings", data: '{ theme: "dark", language: "ru" }' },
+  { id: "user", label: "Пользователь", path: "/dashboard/users/42", data: '{ id: 42, name: "Алексей", role: "admin" }' },
+];
+
+const parentData = '{ user: { name: "Алексей", plan: "Pro" } }';
+
+export default function App() {
+  const [activeRoute, setActiveRoute] = useState<Route>("index");
+  const [showParallelLoad, setShowParallelLoad] = useState(false);
+  const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
+
+  const simulateLoad = () => {
+    setShowParallelLoad(true);
+    setLoadingStates({ parent: true, child: true });
+    // Parent finishes first (faster)
+    setTimeout(() => setLoadingStates(p => ({ ...p, parent: false })), 800);
+    // Child finishes second
+    setTimeout(() => setLoadingStates(p => ({ ...p, child: false })), 1400);
+  };
+
+  const currentRoute = routes.find(r => r.id === activeRoute)!;
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>🔗 Вложенные маршруты Remix</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>Каждый уровень имеет свой loader и ErrorBoundary</p>
+
+      <div style={{ maxWidth: "800px" }}>
+        {/* Outer Layout */}
+        <div style={{ border: \`2px solid \${ACCENT}\`, borderRadius: "14px", overflow: "hidden" }}>
+          <div style={{ background: ACCENT + "22", padding: "10px 16px", display: "flex", alignItems: "center", gap: "12px" }}>
+            <span style={{ fontSize: "12px", color: ACCENT, fontFamily: "monospace" }}>dashboard.tsx (layout)</span>
+            <span style={{ fontSize: "11px", color: MUTED, fontFamily: "monospace" }}>loader: {parentData}</span>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "200px 1fr" }}>
+            {/* Sidebar */}
+            <div style={{ background: "#0f1e2e", padding: "16px", borderRight: "1px solid #1e3a5f" }}>
+              <div style={{ color: MUTED, fontSize: "11px", marginBottom: "8px", textTransform: "uppercase" }}>Навигация</div>
+              {routes.map(r => (
+                <div
+                  key={r.id}
+                  onClick={() => setActiveRoute(r.id)}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: "6px",
+                    cursor: "pointer",
+                    background: activeRoute === r.id ? ACCENT + "33" : "transparent",
+                    color: activeRoute === r.id ? ACCENT : MUTED,
+                    fontSize: "13px",
+                    marginBottom: "4px",
+                    transition: "all 0.15s",
+                  }}
+                >
+                  {r.label}
+                </div>
+              ))}
+            </div>
+
+            {/* Outlet area */}
+            <div style={{ padding: "16px" }}>
+              <div style={{ border: \`2px dashed \${WARN}\`, borderRadius: "10px", padding: "16px" }}>
+                <div style={{ fontSize: "11px", color: WARN, fontFamily: "monospace", marginBottom: "10px" }}>
+                  {"<Outlet />"} → {currentRoute.path}
+                </div>
+                <div style={{ background: WARN + "11", borderRadius: "8px", padding: "12px" }}>
+                  <div style={{ fontSize: "12px", color: WARN, marginBottom: "6px" }}>
+                    {currentRoute.label} loader данные:
+                  </div>
+                  <div style={{ fontFamily: "monospace", fontSize: "12px", color: TEXT }}>
+                    {currentRoute.data}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Parallel loading demo */}
+        <div style={{ background: CARD, borderRadius: "12px", padding: "20px", marginTop: "20px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+            <h3 style={{ color: ACCENT, margin: 0, fontSize: "15px" }}>⚡ Параллельная загрузка данных</h3>
+            <button onClick={simulateLoad} style={{
+              padding: "8px 16px", background: ACCENT, color: "#fff", border: "none",
+              borderRadius: "8px", cursor: "pointer", fontSize: "13px",
+            }}>
+              Симулировать
+            </button>
+          </div>
+
+          {showParallelLoad && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <div style={{ fontSize: "12px", color: MUTED, width: "160px", fontFamily: "monospace" }}>dashboard loader()</div>
+                <div style={{ flex: 1, height: "20px", background: "#1e3a5f", borderRadius: "4px", overflow: "hidden" }}>
+                  <div style={{
+                    height: "100%",
+                    background: ACCENT,
+                    width: loadingStates.parent ? "60%" : "100%",
+                    transition: "width 0.8s ease",
+                    borderRadius: "4px",
+                  }} />
+                </div>
+                <span style={{ fontSize: "11px", color: loadingStates.parent ? WARN : SUCCESS }}>
+                  {loadingStates.parent ? "800ms..." : "✅ 800ms"}
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <div style={{ fontSize: "12px", color: MUTED, width: "160px", fontFamily: "monospace" }}>stats loader()</div>
+                <div style={{ flex: 1, height: "20px", background: "#1e3a5f", borderRadius: "4px", overflow: "hidden" }}>
+                  <div style={{
+                    height: "100%",
+                    background: WARN,
+                    width: loadingStates.child ? "40%" : "100%",
+                    transition: "width 1.4s ease",
+                    borderRadius: "4px",
+                  }} />
+                </div>
+                <span style={{ fontSize: "11px", color: loadingStates.child ? WARN : SUCCESS }}>
+                  {loadingStates.child ? "1400ms..." : "✅ 1400ms"}
+                </span>
+              </div>
+              {!loadingStates.parent && !loadingStates.child && (
+                <div style={{ color: SUCCESS, fontSize: "13px", marginTop: "8px" }}>
+                  ✅ Общее время: 1400ms (параллельно, не 2200ms!)
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

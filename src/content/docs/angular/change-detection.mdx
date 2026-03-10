@@ -1,0 +1,438 @@
+---
+title: "63. Change Detection"
+---
+import { Playground } from '@components/Playground'
+
+## ⚡ Change Detection в Angular
+
+Change Detection (CD) — механизм, который отвечает за синхронизацию данных в TypeScript с DOM. Angular должен знать, когда данные изменились, чтобы обновить шаблон.
+
+---
+
+### 🌍 Zone.js и дефолтная стратегия
+
+Angular использует библиотеку **Zone.js**, которая патчит все асинхронные операции браузера:
+
+```javascript
+// Zone.js перехватывает:
+setTimeout(() => { /* Angular запустит CD */ }, 1000)
+Promise.resolve().then(() => { /* Angular запустит CD */ })
+element.addEventListener('click', () => { /* Angular запустит CD */ })
+fetch('/api/data').then(() => { /* Angular запустит CD */ })
+```
+
+При каждом асинхронном событии Zone.js уведомляет Angular → Angular запускает Change Detection **для всего дерева компонентов**.
+
+```
+AppComponent
+├── HeaderComponent         ← проверяется
+├── SidebarComponent        ← проверяется
+│   └── NavItemComponent    ← проверяется
+└── MainComponent           ← проверяется
+    ├── TableComponent      ← проверяется
+    └── ChartComponent      ← проверяется
+```
+
+---
+
+### ChangeDetectionStrategy.Default
+
+Дефолтная стратегия — проверяет компонент **при каждом** цикле CD, независимо от того, изменились ли его данные:
+
+```typescript
+import { Component, ChangeDetectionStrategy } from '@angular/core';
+
+// Default (не указан явно) — проверяется всегда
+@Component({
+  selector: 'app-heavy-list',
+  changeDetection: ChangeDetectionStrategy.Default,
+  template: `
+    <li *ngFor="let item of items">{{ item.name }}</li>
+  `
+})
+export class HeavyListComponent {
+  items: Item[] = [];
+  // Проверяется при любом событии в приложении
+}
+```
+
+---
+
+### 🎯 ChangeDetectionStrategy.OnPush
+
+`OnPush` — компонент проверяется **только** когда:
+
+1. Изменилась ссылка на `@Input` (не мутация!)
+2. Произошло событие внутри компонента
+3. Вручную вызван `markForCheck()` или `detectChanges()`
+4. Использован `async` pipe
+
+```typescript
+import { Component, ChangeDetectionStrategy, Input } from '@angular/core';
+
+@Component({
+  selector: 'app-user-card',
+  changeDetection: ChangeDetectionStrategy.OnPush,  // ← ключевое
+  template: `
+    <div>{{ user.name }} | {{ user.email }}</div>
+  `
+})
+export class UserCardComponent {
+  @Input() user!: User;
+}
+```
+
+```typescript
+// Родительский компонент:
+
+// ❌ Мутация — OnPush НЕ заметит
+this.user.name = 'Новое имя';
+
+// ✅ Новая ссылка — OnPush заметит
+this.user = { ...this.user, name: 'Новое имя' };
+```
+
+---
+
+### 🔧 markForCheck() и detectChanges()
+
+```typescript
+import { Component, ChangeDetectorRef, ChangeDetectionStrategy } from '@angular/core';
+
+@Component({
+  selector: 'app-websocket-feed',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `<div>{{ latestMessage }}</div>`
+})
+export class WebsocketFeedComponent implements OnInit, OnDestroy {
+  latestMessage = '';
+
+  constructor(private cdr: ChangeDetectorRef, private ws: WebSocketService) {}
+
+  ngOnInit() {
+    this.ws.messages$.subscribe(msg => {
+      this.latestMessage = msg;
+      // Данные изменились, но OnPush не знает — говорим Angular проверить
+      this.cdr.markForCheck();  // помечает компонент и его предков для проверки
+    });
+  }
+}
+```
+
+Разница `markForCheck` vs `detectChanges`:
+
+```typescript
+// markForCheck() — отмечает для проверки в СЛЕДУЮЩЕМ цикле CD
+this.cdr.markForCheck();
+
+// detectChanges() — НЕМЕДЛЕННО запускает CD для этого компонента и его детей
+this.cdr.detectChanges();
+
+// detach() — полностью отключает CD для компонента
+this.cdr.detach();
+
+// reattach() — снова подключает CD
+this.cdr.reattach();
+```
+
+---
+
+### 🚰 async pipe — лучший друг OnPush
+
+`async` pipe автоматически вызывает `markForCheck()` при каждом новом значении:
+
+```typescript
+@Component({
+  selector: 'app-users-list',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <!-- async pipe сам вызовет markForCheck() при новом значении -->
+    <div *ngIf="users$ | async as users">
+      <app-user-card
+        *ngFor="let user of users"
+        [user]="user"
+      />
+    </div>
+
+    <!-- Индикатор загрузки -->
+    <div *ngIf="loading$ | async">Загрузка...</div>
+  `
+})
+export class UsersListComponent {
+  users$ = this.userService.getUsers();
+  loading$ = this.loadingService.isLoading$;
+
+  constructor(
+    private userService: UserService,
+    private loadingService: LoadingService
+  ) {}
+}
+```
+
+---
+
+### 📡 Сигналы и Change Detection (Angular 17+)
+
+Сигналы полностью меняют игру — Angular знает точно, какие компоненты нужно обновить:
+
+```typescript
+import { Component, signal, computed } from '@angular/core';
+
+@Component({
+  selector: 'app-counter',
+  // С сигналами не нужен OnPush — Angular сам отслеживает зависимости
+  template: `
+    <div>{{ count() }}</div>
+    <div>{{ doubled() }}</div>
+    <button (click)="increment()">+</button>
+  `
+})
+export class CounterComponent {
+  count = signal(0);
+  doubled = computed(() => this.count() * 2);
+
+  increment() {
+    this.count.update(v => v + 1);
+    // Angular автоматически обновит только компоненты, читающие count()
+  }
+}
+```
+
+---
+
+### 🔍 Отладка Change Detection
+
+```typescript
+// Добавляем логирование в ngDoCheck
+export class DebugComponent implements DoCheck {
+  private checkCount = 0;
+
+  ngDoCheck() {
+    this.checkCount++;
+    if (this.checkCount > 100) {
+      console.warn('⚠️ Слишком много проверок!', this.checkCount);
+    }
+  }
+}
+```
+
+В DevTools Angular:
+
+```javascript
+// В консоли браузера:
+ng.profiler.timeChangeDetection({ record: true })
+// Показывает время каждого цикла CD
+```
+
+---
+
+### 🏆 Лучшие практики
+
+```typescript
+// 1. Используй OnPush везде где возможно
+@Component({ changeDetection: ChangeDetectionStrategy.OnPush })
+
+// 2. Используй async pipe вместо ручных подписок
+template: `{{ data$ | async }}`
+
+// 3. Иммутабельность для @Input
+// ❌ Плохо
+this.items.push(newItem);
+
+// ✅ Хорошо
+this.items = [...this.items, newItem];
+
+// 4. trackBy в *ngFor — избегаем пересоздания DOM
+@Component({
+  template: `
+    <div *ngFor="let item of items; trackBy: trackByFn">{{ item.name }}</div>
+  `
+})
+export class ListComponent {
+  trackByFn(index: number, item: Item) {
+    return item.id; // Angular ре-использует DOM элемент
+  }
+}
+```
+
+---
+
+```mdx-playground
+export default function ChangeDetectionPlayground() {
+  const [cdLog, setCdLog] = React.useState([]);
+  const [strategy, setStrategy] = React.useState('default');
+  const [counter, setCounter] = React.useState(0);
+  const [inputRef, setInputRef] = React.useState('obj_v1');
+  const [mutated, setMutated] = React.useState(false);
+  const [checkCounts, setCheckCounts] = React.useState({ root: 0, sidebar: 0, main: 0, chart: 0, table: 0 });
+
+  const addLog = (msg, color = '#94a3b8') => {
+    setCdLog(prev => [{ msg, color, id: Date.now() + Math.random() }, ...prev].slice(0, 10));
+  };
+
+  const simulateCdCycle = (reason, affectedNodes) => {
+    const allNodes = ['root', 'sidebar', 'main', 'chart', 'table'];
+    const nodesToCheck = strategy === 'default' ? allNodes : affectedNodes;
+
+    addLog(`🔄 Запускаем CD: ${reason}`, '#7dd3fc');
+    setTimeout(() => {
+      setCheckCounts(prev => {
+        const next = { ...prev };
+        nodesToCheck.forEach(n => next[n] = (prev[n] || 0) + 1);
+        return next;
+      });
+      addLog(`✅ Проверено ${nodesToCheck.length} компонентов (${strategy === 'default' ? 'все' : 'только изменившиеся'})`, strategy === 'default' ? '#f59e0b' : '#22c55e');
+    }, 300);
+  };
+
+  const triggerEvent = () => {
+    setCounter(c => c + 1);
+    simulateCdCycle('click event', ['root', 'main']);
+    addLog(`📣 (click) в RootComponent`, '#dd0031');
+  };
+
+  const changeInput = () => {
+    setInputRef('obj_v' + (counter + 2));
+    setMutated(false);
+    simulateCdCycle('@Input ссылка изменилась', ['chart', 'root']);
+    addLog(`📥 @Input новая ссылка → OnPush ЗАМЕТИТ`, '#22c55e');
+  };
+
+  const mutateInput = () => {
+    setMutated(true);
+    simulateCdCycle('мутация объекта', strategy === 'default' ? ['root', 'sidebar', 'main', 'chart', 'table'] : []);
+    if (strategy === 'onpush') {
+      addLog(`⚠️ Мутация объекта — OnPush НЕ заметит!`, '#f87171');
+    } else {
+      addLog(`✅ Default стратегия видит мутацию`, '#f59e0b');
+    }
+  };
+
+  const nodes = [
+    { id: 'root', label: 'AppComponent', x: 100, color: '#7c3aed' },
+    { id: 'sidebar', label: 'SidebarComponent', x: 40, color: '#1d4ed8' },
+    { id: 'main', label: 'MainComponent', x: 160, color: '#1d4ed8' },
+    { id: 'chart', label: 'ChartComponent', x: 130, color: '#dd0031' },
+    { id: 'table', label: 'TableComponent', x: 200, color: '#dd0031' },
+  ];
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: 500, padding: 24, borderRadius: 12, fontFamily: 'system-ui', color: '#e2e8f0' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <span style={{ color: '#dd0031', fontWeight: 700, fontSize: 16 }}>⚡ Change Detection Tree</span>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {['default', 'onpush'].map(s => (
+            <button key={s} onClick={() => { setStrategy(s); setCdLog([]); setCheckCounts({ root: 0, sidebar: 0, main: 0, chart: 0, table: 0 }); }} style={{ background: strategy === s ? '#dd0031' : '#1e293b', color: strategy === s ? 'white' : '#94a3b8', border: `1px solid ${strategy === s ? '#dd0031' : '#334155'}`, padding: '5px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+              {s === 'default' ? 'Default' : 'OnPush'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+        <div>
+          <div style={{ marginBottom: 16 }}>
+            {nodes.map(node => (
+              <div key={node.id} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, paddingLeft: ['sidebar', 'main'].includes(node.id) ? 20 : ['chart', 'table'].includes(node.id) ? 40 : 0 }}>
+                <div style={{ width: 10, height: 10, borderRadius: '50%', background: checkCounts[node.id] > 0 ? node.color : '#334155', transition: 'background 0.3s' }} />
+                <div style={{ flex: 1, background: '#1e293b', borderRadius: 6, padding: '6px 12px', border: `1px solid ${checkCounts[node.id] > 0 ? node.color + '60' : '#334155'}`, transition: 'border-color 0.3s' }}>
+                  <span style={{ fontSize: 12, color: checkCounts[node.id] > 0 ? node.color : '#64748b' }}>{node.label}</span>
+                  {strategy === 'onpush' && (node.id === 'chart' || node.id === 'table') && (
+                    <span style={{ fontSize: 10, color: '#dd0031', marginLeft: 8 }}>OnPush</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: '#64748b', minWidth: 40, textAlign: 'right' }}>
+                  ×{checkCounts[node.id]}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button onClick={triggerEvent} style={{ background: '#dd0031', color: 'white', border: 'none', padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12 }}>
+              🖱️ Click Event
+            </button>
+            <button onClick={changeInput} style={{ background: '#15803d', color: 'white', border: 'none', padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12 }}>
+              📥 Новая ссылка
+            </button>
+            <button onClick={mutateInput} style={{ background: '#92400e', color: 'white', border: 'none', padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12 }}>
+              ⚠️ Мутация
+            </button>
+          </div>
+
+          <div style={{ marginTop: 12, background: '#1e293b', borderRadius: 6, padding: 10, fontSize: 11 }}>
+            <div style={{ color: '#64748b' }}>inputRef: <span style={{ color: '#a3e635' }}>{inputRef}</span>{mutated && <span style={{ color: '#f87171' }}> (мутирован)</span>}</div>
+            <div style={{ color: '#64748b' }}>Стратегия: <span style={{ color: strategy === 'onpush' ? '#22c55e' : '#f59e0b' }}>{strategy === 'default' ? 'Default — проверяет всё дерево' : 'OnPush — только при изменениях'}</span></div>
+          </div>
+        </div>
+
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 14, border: '1px solid #334155' }}>
+          <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 8 }}>📋 CD лог</div>
+          {cdLog.length === 0 && <div style={{ color: '#475569', fontSize: 12 }}>Нажмите кнопки для симуляции...</div>}
+          {cdLog.map(l => (
+            <div key={l.id} style={{ fontSize: 12, color: l.color, marginBottom: 6 }}>{l.msg}</div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.js": `// Демонстрация концепции Change Detection (эквивалент Angular)
+// Angular проверяет ВСЕ компоненты при Default стратегии
+// OnPush — только при изменении @Input или событиях
+
+import { useState, memo } from "react";
+
+// memo = аналог OnPush стратегии в Angular
+const OnPushChild = memo(function OnPushChild({ value }) {
+  const renders = ++OnPushChild.count;
+  return (
+    <div style={{ border: "1px solid #16a34a", borderRadius: 6, padding: 8, marginBottom: 6 }}>
+      <strong style={{ color: "#16a34a" }}>OnPush</strong> (memo) — рендеров: {renders}
+      <div style={{ fontSize: 12 }}>value: {value}</div>
+    </div>
+  );
+});
+OnPushChild.count = 0;
+
+let defaultCount = 0;
+function DefaultChild({ value }) {
+  const renders = ++defaultCount;
+  return (
+    <div style={{ border: "1px solid #dd0031", borderRadius: 6, padding: 8, marginBottom: 6 }}>
+      <strong style={{ color: "#dd0031" }}>Default</strong> — рендеров: {renders}
+      <div style={{ fontSize: 12 }}>value: {value}</div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [count, setCount] = useState(0);
+  const [input, setInput] = useState("hello");
+
+  return (
+    <div style={{ fontFamily: "system-ui", padding: 16 }}>
+      <h3>Change Detection: Default vs OnPush</h3>
+      <button onClick={() => setCount(c => c + 1)}
+        style={{ marginRight: 8, padding: "6px 12px" }}>
+        Trigger CD (count: {count})
+      </button>
+      <input value={input} onChange={e => setInput(e.target.value)}
+        style={{ padding: "4px 8px" }} placeholder="Измени input" />
+      <div style={{ marginTop: 12 }}>
+        <DefaultChild value={count} />
+        <OnPushChild value={input} />
+      </div>
+      <p style={{ fontSize: 12, color: "#666" }}>
+        Default перерисовывается всегда. OnPush (memo) — только при изменении props.
+      </p>
+    </div>
+  );
+}
+` }} />

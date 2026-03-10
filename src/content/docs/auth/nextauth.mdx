@@ -1,0 +1,519 @@
+---
+title: "8. NextAuth.js"
+sidebar:
+  order: 7
+---
+import { Playground } from '@components/Playground'
+
+## Что такое NextAuth.js?
+
+**NextAuth.js (v5 = Auth.js)** — готовая библиотека аутентификации для Next.js. Берёт на себя весь OAuth 2.0 / OIDC flow.
+
+**Что умеет:**
+- 50+ OAuth провайдеров (Google, GitHub, Twitter, ...)
+- Email/password аутентификация (Credentials)
+- Magic Links (Email)
+- Сессии через JWT или Database
+- TypeScript из коробки
+
+## Установка (NextAuth v5)
+
+```bash
+npm install next-auth@beta
+```
+
+```bash
+# Генерация AUTH_SECRET
+openssl rand -base64 32
+```
+
+## Базовая настройка
+
+```typescript
+// auth.ts (в корне проекта)
+import NextAuth from 'next-auth';
+import Google from 'next-auth/providers/google';
+import GitHub from 'next-auth/providers/github';
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  providers: [
+    Google({
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+    }),
+    GitHub({
+      clientId: process.env.GITHUB_ID!,
+      clientSecret: process.env.GITHUB_SECRET!,
+    }),
+  ],
+});
+```
+
+```typescript
+// app/api/auth/[...nextauth]/route.ts
+import { handlers } from '@/auth';
+export const { GET, POST } = handlers;
+```
+
+```bash
+# .env.local
+AUTH_SECRET=your-generated-secret
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GITHUB_ID=...
+GITHUB_SECRET=...
+
+NEXTAUTH_URL=http://localhost:3000
+```
+
+## Credentials Provider (email + password)
+
+```typescript
+import NextAuth from 'next-auth';
+import Credentials from 'next-auth/providers/credentials';
+import bcrypt from 'bcryptjs';
+import { db } from '@/lib/db';
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  providers: [
+    Credentials({
+      credentials: {
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Password', type: 'password' },
+      },
+      async authorize(credentials) {
+        if (!credentials?.email || !credentials?.password) {
+          return null;
+        }
+        
+        const user = await db.user.findUnique({
+          where: { email: credentials.email as string },
+        });
+        
+        if (!user || !user.password) return null;
+        
+        const isValid = await bcrypt.compare(
+          credentials.password as string,
+          user.password
+        );
+        
+        if (!isValid) return null;
+        
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+        };
+      },
+    }),
+  ],
+  pages: {
+    signIn: '/login', // кастомная страница логина
+    error: '/auth/error',
+  },
+});
+```
+
+## Кастомизация session и JWT
+
+```typescript
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  providers: [/* ... */],
+  
+  callbacks: {
+    // Расширяем JWT дополнительными данными
+    async jwt({ token, user, account }) {
+      if (user) {
+        // При первом логине user содержит данные
+        token.id = user.id;
+        token.role = user.role;
+      }
+      
+      if (account?.provider === 'google') {
+        token.googleId = account.providerAccountId;
+      }
+      
+      return token;
+    },
+    
+    // Расширяем session объект
+    async session({ session, token }) {
+      if (token) {
+        session.user.id = token.id as string;
+        session.user.role = token.role as string;
+      }
+      return session;
+    },
+  },
+  
+  session: {
+    strategy: 'jwt', // или 'database'
+    maxAge: 30 * 24 * 60 * 60, // 30 дней
+  },
+});
+```
+
+```typescript
+// Расширяем типы TypeScript
+// types/next-auth.d.ts
+import 'next-auth';
+
+declare module 'next-auth' {
+  interface Session {
+    user: {
+      id: string;
+      role: string;
+    } & DefaultSession['user'];
+  }
+  
+  interface User {
+    role?: string;
+  }
+}
+
+declare module 'next-auth/jwt' {
+  interface JWT {
+    id?: string;
+    role?: string;
+  }
+}
+```
+
+## Использование в компонентах
+
+### Server Components
+
+```typescript
+// app/dashboard/page.tsx
+import { auth } from '@/auth';
+import { redirect } from 'next/navigation';
+
+export default async function DashboardPage() {
+  const session = await auth();
+  
+  if (!session?.user) {
+    redirect('/login');
+  }
+  
+  return (
+    <div>
+      <h1>Привет, {session.user.name}!</h1>
+      <p>Email: {session.user.email}</p>
+      <p>Роль: {session.user.role}</p>
+    </div>
+  );
+}
+```
+
+### Client Components
+
+```typescript
+'use client';
+
+import { useSession, signIn, signOut } from 'next-auth/react';
+
+export function UserMenu() {
+  const { data: session, status } = useSession();
+  
+  if (status === 'loading') return <div>Loading...</div>;
+  
+  if (!session) {
+    return (
+      <button onClick={() => signIn('google')}>
+        Войти через Google
+      </button>
+    );
+  }
+  
+  return (
+    <div>
+      <img src={session.user.image || ''} alt={session.user.name || ''} />
+      <span>{session.user.name}</span>
+      <button onClick={() => signOut({ callbackUrl: '/' })}>
+        Выйти
+      </button>
+    </div>
+  );
+}
+```
+
+### Provider для Client Components
+
+```typescript
+// app/providers.tsx
+'use client';
+
+import { SessionProvider } from 'next-auth/react';
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  return <SessionProvider>{children}</SessionProvider>;
+}
+
+// app/layout.tsx
+import { Providers } from './providers';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        <Providers>{children}</Providers>
+      </body>
+    </html>
+  );
+}
+```
+
+## Защита API Routes
+
+```typescript
+// app/api/posts/route.ts
+import { auth } from '@/auth';
+import { NextResponse } from 'next/server';
+
+export async function GET(req: Request) {
+  const session = await auth();
+  
+  if (!session?.user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  
+  const posts = await db.post.findMany({
+    where: { authorId: session.user.id },
+  });
+  
+  return NextResponse.json(posts);
+}
+```
+
+## Middleware для защиты страниц
+
+```typescript
+// middleware.ts
+import { auth } from '@/auth';
+
+export default auth((req) => {
+  const isAuthenticated = !!req.auth;
+  
+  // Защищённые пути
+  const protectedPaths = ['/dashboard', '/profile', '/admin'];
+  const isProtected = protectedPaths.some(path => 
+    req.nextUrl.pathname.startsWith(path)
+  );
+  
+  if (isProtected && !isAuthenticated) {
+    const loginUrl = new URL('/login', req.url);
+    loginUrl.searchParams.set('callbackUrl', req.url);
+    return Response.redirect(loginUrl);
+  }
+  
+  // Только для авторизованных
+  if (req.nextUrl.pathname.startsWith('/admin')) {
+    if (req.auth?.user?.role !== 'admin') {
+      return Response.redirect(new URL('/403', req.url));
+    }
+  }
+});
+
+export const config = {
+  matcher: ['/((?!api/auth|_next/static|_next/image|favicon.ico).*)'],
+};
+```
+
+## Database Adapter (Prisma)
+
+```bash
+npm install @auth/prisma-adapter
+```
+
+```typescript
+// prisma/schema.prisma
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  role          String    @default("user")
+  accounts      Account[]
+  sessions      Session[]
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  @@unique([identifier, token])
+}
+```
+
+```typescript
+// auth.ts с Prisma адаптером
+import { PrismaAdapter } from '@auth/prisma-adapter';
+import { prisma } from '@/lib/prisma';
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  adapter: PrismaAdapter(prisma),
+  session: { strategy: 'database' }, // теперь сессии в БД
+  providers: [/* ... */],
+});
+```
+
+## Кастомная страница логина
+
+```typescript
+// app/login/page.tsx
+'use client';
+
+import { signIn } from 'next-auth/react';
+import { useSearchParams } from 'next/navigation';
+
+export default function LoginPage() {
+  const searchParams = useSearchParams();
+  const callbackUrl = searchParams.get('callbackUrl') || '/dashboard';
+  const error = searchParams.get('error');
+  
+  return (
+    <div className="flex min-h-screen items-center justify-center">
+      <div className="w-full max-w-md space-y-4 p-8">
+        <h1 className="text-2xl font-bold">Вход</h1>
+        
+        {error && (
+          <div className="rounded bg-red-100 p-3 text-red-700">
+            {error === 'CredentialsSignin' ? 'Неверный email или пароль' : error}
+          </div>
+        )}
+        
+        <button
+          onClick={() => signIn('google', { callbackUrl })}
+          className="flex w-full items-center justify-center gap-3 rounded border p-3"
+        >
+          <GoogleIcon /> Войти через Google
+        </button>
+        
+        <button
+          onClick={() => signIn('github', { callbackUrl })}
+          className="flex w-full items-center justify-center gap-3 rounded border p-3"
+        >
+          <GitHubIcon /> Войти через GitHub
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+## Практические задания
+
+1. Настрой NextAuth.js с Google и GitHub провайдерами
+2. Добавь Credentials провайдер с bcrypt
+3. Настрой Prisma адаптер для хранения сессий в БД
+4. Реализуй middleware для защиты /dashboard маршрутов
+5. Добавь кастомную страницу логина
+
+## Попробуй: Login форма с NextAuth UI
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    '/App.js': `import { useState } from 'react';
+
+export default function App() {
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const signIn = (provider) => {
+    setLoading(true); setError('');
+    setTimeout(() => {
+      setSession({ user: { name: 'John Doe', email: 'john@example.com', image: null }, provider });
+      setLoading(false);
+    }, 800);
+  };
+
+  const signInCredentials = (e) => {
+    e.preventDefault();
+    const email = e.target.email.value;
+    const password = e.target.password.value;
+    if (!email || !password) { setError('Заполни все поля'); return; }
+    if (password.length < 6) { setError('Пароль минимум 6 символов'); return; }
+    setLoading(true); setError('');
+    setTimeout(() => {
+      setSession({ user: { name: email.split('@')[0], email }, provider: 'credentials' });
+      setLoading(false);
+    }, 600);
+  };
+
+  if (session) return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: '#0f0f23', padding: 24, borderRadius: 12, textAlign: 'center', border: '1px solid #22c55e44' }}>
+        <div style={{ width: 60, height: 60, borderRadius: '50%', background: '#22c55e33', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px', fontSize: 28 }}>
+          {session.user.name[0].toUpperCase()}
+        </div>
+        <h2 style={{ margin: '0 0 4px' }}>{session.user.name}</h2>
+        <p style={{ color: '#94a3b8', margin: '0 0 4px' }}>{session.user.email}</p>
+        <p style={{ color: '#64748b', fontSize: 12, margin: '0 0 16px' }}>via {session.provider}</p>
+        <button onClick={() => setSession(null)}
+          style={{ padding: '8px 24px', borderRadius: 6, border: 'none', background: '#ef4444', color: '#fff', cursor: 'pointer' }}>
+          Sign Out
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ width: 320, background: '#0f0f23', padding: 24, borderRadius: 12, border: '1px solid #ffffff1a' }}>
+        <h2 style={{ textAlign: 'center', margin: '0 0 16px' }}>Sign In</h2>
+        {error && <div style={{ background: '#ef444422', color: '#fca5a5', padding: 8, borderRadius: 6, marginBottom: 12, fontSize: 13 }}>{error}</div>}
+        <button onClick={() => signIn('google')} disabled={loading}
+          style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #ffffff1a', background: '#1e293b', color: '#fff', cursor: 'pointer', marginBottom: 8, fontSize: 14 }}>
+          Sign in with Google
+        </button>
+        <button onClick={() => signIn('github')} disabled={loading}
+          style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #ffffff1a', background: '#1e293b', color: '#fff', cursor: 'pointer', marginBottom: 12, fontSize: 14 }}>
+          Sign in with GitHub
+        </button>
+        <div style={{ textAlign: 'center', color: '#64748b', marginBottom: 12, fontSize: 13 }}>or</div>
+        <form onSubmit={signInCredentials}>
+          <input name="email" type="email" placeholder="Email"
+            style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #333', background: '#1a1a2e', color: '#fff', marginBottom: 8, boxSizing: 'border-box' }} />
+          <input name="password" type="password" placeholder="Password"
+            style={{ width: '100%', padding: 10, borderRadius: 6, border: '1px solid #333', background: '#1a1a2e', color: '#fff', marginBottom: 12, boxSizing: 'border-box' }} />
+          <button type="submit" disabled={loading}
+            style={{ width: '100%', padding: 10, borderRadius: 6, border: 'none', background: '#3b82f6', color: '#fff', cursor: 'pointer', fontSize: 14 }}>
+            {loading ? 'Loading...' : 'Sign In'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

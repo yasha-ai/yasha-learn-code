@@ -1,0 +1,287 @@
+---
+title: "3. Query: useQuery и fetching"
+sidebar:
+  order: 3
+---
+import { Playground } from '@components/Playground'
+
+
+## Основной инструмент: хук useQuery
+
+`useQuery` — главный хук TanStack Query для получения данных. Он принимает объект конфигурации
+и возвращает объект с данными, статусом и вспомогательными флагами.
+
+```typescript
+const result = useQuery({
+  queryKey: ['users'],
+  queryFn: () => fetch('/api/users').then(r => r.json()),
+})
+```
+
+## queryKey: Ключ запроса
+
+`queryKey` — массив значений, уникально идентифицирующий запрос в кэше. Это один из самых важных концептов:
+
+```typescript
+// Простой ключ
+useQuery({ queryKey: ['users'], queryFn: getUsers })
+
+// Ключ с параметрами (разные пользователи — разные запросы в кэше)
+useQuery({ queryKey: ['user', userId], queryFn: () => getUser(userId) })
+
+// Ключ с фильтрами
+useQuery({ queryKey: ['users', { status: 'active', page: 1 }], queryFn: getUsers })
+```
+
+При изменении `queryKey` автоматически выполняется новый запрос. Это ключевой механизм реактивности.
+
+## queryFn: Функция получения данных
+
+`queryFn` — асинхронная функция, которая получает данные. Она должна либо вернуть данные, либо выбросить ошибку:
+
+```typescript
+// С fetch
+const queryFn = async () => {
+  const response = await fetch('/api/users')
+  if (!response.ok) throw new Error('Ошибка загрузки')
+  return response.json()
+}
+
+// С axios
+const queryFn = () => axios.get('/api/users').then(r => r.data)
+
+// Получение параметров из контекста
+const queryFn = ({ queryKey }) => {
+  const [_key, userId] = queryKey
+  return getUser(userId)
+}
+```
+
+## Статусы и флаги
+
+`useQuery` возвращает богатый объект с информацией о состоянии запроса:
+
+```typescript
+const {
+  data,           // Данные (undefined до загрузки)
+  error,          // Объект ошибки (null при успехе)
+  status,         // 'pending' | 'error' | 'success'
+  isLoading,      // true только при первой загрузке (нет данных в кэше)
+  isFetching,     // true при любой загрузке (включая фоновую)
+  isError,        // true при ошибке
+  isSuccess,      // true при успехе
+  isPending,      // true пока нет данных
+  refetch,        // Функция принудительного обновления
+  dataUpdatedAt,  // Timestamp последнего обновления
+} = useQuery({ queryKey, queryFn })
+```
+
+## Разница между isLoading и isFetching
+
+- `isLoading` — `true` только при **первой загрузке** (нет данных в кэше)
+- `isFetching` — `true` при **любом активном запросе** (включая фоновые обновления)
+
+Используйте `isFetching` для индикатора фоновой загрузки, `isLoading` — для скелетона при первой загрузке.
+
+## Обработка всех состояний
+
+```tsx
+function UserList() {
+  const { data, isLoading, isError, error, isFetching } = useQuery({
+    queryKey: ['users'],
+    queryFn: getUsers,
+  })
+
+  if (isLoading) return <Skeleton />
+  if (isError) return <ErrorMessage message={error.message} />
+
+  return (
+    <>
+      {isFetching && <RefreshIndicator />}
+      <ul>{data.map(u => <li key={u.id}>{u.name}</li>)}</ul>
+    </>
+  )
+}
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from 'react'
+
+type User = { id: number; name: string; email: string; role: string }
+type Status = 'pending' | 'loading' | 'success' | 'error' | 'empty'
+
+// Симуляция useQuery
+function useSimulatedQuery(scenario: Status, delay = 1500) {
+  const [state, setState] = useState<{
+    status: 'pending' | 'success' | 'error'
+    data: User[] | null
+    error: string | null
+    isFetching: boolean
+  }>({ status: 'pending', data: null, error: null, isFetching: true })
+
+  useEffect(() => {
+    setState({ status: 'pending', data: null, error: null, isFetching: true })
+    const timer = setTimeout(() => {
+      if (scenario === 'error') {
+        setState({ status: 'error', data: null, error: 'Network Error: Failed to fetch /api/users', isFetching: false })
+      } else if (scenario === 'empty') {
+        setState({ status: 'success', data: [], error: null, isFetching: false })
+      } else {
+        setState({
+          status: 'success',
+          data: [
+            { id: 1, name: 'Анна Петрова', email: 'anna@example.com', role: 'admin' },
+            { id: 2, name: 'Иван Иванов', email: 'ivan@example.com', role: 'user' },
+            { id: 3, name: 'Мария Смирнова', email: 'maria@example.com', role: 'editor' },
+            { id: 4, name: 'Дмитрий Козлов', email: 'dmitry@example.com', role: 'user' },
+          ],
+          error: null,
+          isFetching: false,
+        })
+      }
+    }, delay)
+    return () => clearTimeout(timer)
+  }, [scenario, delay])
+
+  return {
+    ...state,
+    isLoading: state.status === 'pending',
+    isError: state.status === 'error',
+    isSuccess: state.status === 'success',
+  }
+}
+
+const SCENARIOS: { id: Status; label: string; color: string; icon: string; desc: string }[] = [
+  { id: 'loading', label: 'Loading', color: '#f97316', icon: '⏳', desc: 'Первая загрузка данных' },
+  { id: 'success', label: 'Success', color: '#22c55e', icon: '✅', desc: 'Данные получены успешно' },
+  { id: 'error', label: 'Error', color: '#ef4444', icon: '❌', desc: 'Ошибка сети или сервера' },
+  { id: 'empty', label: 'Empty', color: '#64748b', icon: '📭', desc: 'Данные получены, но список пуст' },
+]
+
+function QueryStatePanel({ data, status, isLoading, isFetching, isError, error, isSuccess }: any) {
+  const flags = [
+    { name: 'status', value: \`"\${status}"\`, active: true },
+    { name: 'isLoading', value: String(isLoading), active: isLoading },
+    { name: 'isFetching', value: String(isFetching), active: isFetching },
+    { name: 'isError', value: String(isError), active: isError },
+    { name: 'isSuccess', value: String(isSuccess), active: isSuccess },
+    { name: 'data', value: data ? \`[\${data.length} items]\` : 'undefined', active: !!data },
+    { name: 'error', value: error ? \`"\${error}"\` : 'null', active: !!error },
+  ]
+
+  return (
+    <div style={{ background: '#0f172a', borderRadius: '8px', padding: '12px' }}>
+      <p style={{ color: '#64748b', fontSize: '11px', margin: '0 0 8px 0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Состояние useQuery</p>
+      {flags.map(f => (
+        <div key={f.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #1e293b' }}>
+          <span style={{ fontFamily: 'monospace', fontSize: '12px', color: '#94a3b8' }}>{f.name}</span>
+          <span style={{ fontFamily: 'monospace', fontSize: '12px', color: f.active ? '#a5f3fc' : '#475569' }}>{f.value}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export default function App() {
+  const [scenario, setScenario] = useState<Status>('loading')
+  const [queryKey, setQueryKey] = useState(['users'])
+  const { data, status, isLoading, isFetching, isError, isSuccess, error } = useSimulatedQuery(scenario)
+
+  const rerun = () => {
+    setQueryKey([...queryKey])
+    setScenario(scenario)
+  }
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: '24px', fontFamily: 'system-ui, sans-serif', color: '#e2e8f0' }}>
+      <h1 style={{ color: '#ef4444', fontSize: '22px', marginBottom: '4px' }}>useQuery — Все состояния</h1>
+      <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>Выберите сценарий для симуляции</p>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', flexWrap: 'wrap' }}>
+        {SCENARIOS.map(s => (
+          <button
+            key={s.id}
+            onClick={() => setScenario(s.id)}
+            style={{
+              background: scenario === s.id ? s.color + '22' : '#1e293b',
+              border: \`2px solid \${scenario === s.id ? s.color : '#334155'}\`,
+              borderRadius: '8px',
+              padding: '8px 14px',
+              color: scenario === s.id ? s.color : '#94a3b8',
+              cursor: 'pointer',
+              fontSize: '13px',
+              fontWeight: scenario === s.id ? 700 : 400,
+            }}
+          >
+            {s.icon} {s.label}
+          </button>
+        ))}
+        <button onClick={rerun} style={{ background: '#334155', border: 'none', borderRadius: '8px', padding: '8px 14px', color: '#94a3b8', cursor: 'pointer', fontSize: '13px' }}>
+          🔄 Повторить
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ color: '#e2e8f0', fontSize: '14px', marginBottom: '12px' }}>📡 Результат запроса</h3>
+
+          {isLoading && (
+            <div style={{ textAlign: 'center', padding: '40px 0' }}>
+              <div style={{ fontSize: '32px', marginBottom: '12px', animation: 'spin 1s linear infinite' }}>⏳</div>
+              <p style={{ color: '#f97316', fontWeight: 600 }}>Загрузка данных...</p>
+              <p style={{ color: '#64748b', fontSize: '12px' }}>queryFn выполняется</p>
+            </div>
+          )}
+
+          {isError && (
+            <div style={{ background: '#ef444422', border: '1px solid #ef4444', borderRadius: '8px', padding: '16px' }}>
+              <p style={{ color: '#ef4444', fontWeight: 700, marginBottom: '4px' }}>❌ Ошибка запроса</p>
+              <p style={{ color: '#fca5a5', fontSize: '12px' }}>{error}</p>
+              <p style={{ color: '#64748b', fontSize: '11px', marginTop: '8px' }}>TanStack Query автоматически повторит запрос 3 раза</p>
+            </div>
+          )}
+
+          {isSuccess && data && data.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '40px 0', color: '#64748b' }}>
+              <p style={{ fontSize: '32px', marginBottom: '8px' }}>📭</p>
+              <p>Данные получены, но список пуст</p>
+            </div>
+          )}
+
+          {isSuccess && data && data.length > 0 && (
+            <div>
+              {data.map(user => (
+                <div key={user.id} style={{ background: '#0f172a', borderRadius: '8px', padding: '10px 12px', marginBottom: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 600, fontSize: '13px' }}>{user.name}</p>
+                    <p style={{ margin: 0, color: '#64748b', fontSize: '12px' }}>{user.email}</p>
+                  </div>
+                  <span style={{
+                    background: user.role === 'admin' ? '#ef444422' : user.role === 'editor' ? '#a855f722' : '#334155',
+                    color: user.role === 'admin' ? '#ef4444' : user.role === 'editor' ? '#a855f7' : '#94a3b8',
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                  }}>
+                    {user.role}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <QueryStatePanel data={data} status={status} isLoading={isLoading} isFetching={isFetching} isError={isError} isSuccess={isSuccess} error={error} />
+      </div>
+
+      <div style={{ marginTop: '16px', background: '#1e293b', borderRadius: '8px', padding: '12px' }}>
+        <p style={{ color: '#64748b', fontSize: '12px', margin: '0 0 6px 0' }}>queryKey:</p>
+        <code style={{ color: '#a5f3fc', fontSize: '12px' }}>{JSON.stringify(queryKey)}</code>
+      </div>
+
+      <style>{
+        \`@keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }\`
+      }</style>
+    </div>
+  )
+}
+` }} />

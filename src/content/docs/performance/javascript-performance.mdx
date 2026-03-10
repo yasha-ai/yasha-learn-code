@@ -1,0 +1,417 @@
+---
+title: "7. JavaScript Performance"
+sidebar:
+  order: 6
+---
+import { Playground } from '@components/Playground'
+
+
+JavaScript — главная причина медленных сайтов. Даже 50KB нескомпрессированного JS может заморозить браузер на секунды.
+
+## Главные враги производительности
+
+```
+1. Длинные задачи (> 50ms) → блокируют main thread
+2. Memory leaks → растущее потребление памяти
+3. Synchronous XHR → блокирует UI
+4. DOM thrashing → множественные reflow
+5. Лишние re-renders (React) → CPU нагрузка
+```
+
+## Длинные задачи (Long Tasks)
+
+**Anything > 50ms** на main thread = потенциально некомфортный UX.
+
+```javascript
+// ❌ Длинная задача блокирует UI
+function processLargeData(data) {
+  return data.map(item => heavyCompute(item)); // занимает 500ms
+}
+
+// ✅ Разбиваем на чанки
+async function processInChunks(data, chunkSize = 100) {
+  const results = [];
+  
+  for (let i = 0; i < data.length; i += chunkSize) {
+    const chunk = data.slice(i, i + chunkSize);
+    results.push(...chunk.map(item => heavyCompute(item)));
+    
+    // Даём браузеру "подышать"
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  
+  return results;
+}
+
+// ✅ Scheduler API (Chrome 94+)
+async function processWithScheduler(data) {
+  const results = [];
+  
+  for (const item of data) {
+    if (navigator.scheduling?.isInputPending()) {
+      await scheduler.yield(); // уступаем input events
+    }
+    results.push(heavyCompute(item));
+  }
+  
+  return results;
+}
+```
+
+## Web Workers
+
+Для действительно тяжёлых вычислений — выносим в отдельный поток:
+
+```javascript
+// worker.js
+self.addEventListener('message', ({ data }) => {
+  const result = heavyComputation(data);
+  self.postMessage(result);
+});
+
+function heavyComputation(input) {
+  // CPU-интенсивная работа не блокирует UI!
+  let result = 0;
+  for (let i = 0; i < input.iterations; i++) {
+    result += Math.sqrt(i);
+  }
+  return result;
+}
+
+// main.js
+const worker = new Worker('./worker.js');
+
+worker.postMessage({ iterations: 10000000 });
+
+worker.addEventListener('message', ({ data }) => {
+  console.log('Result:', data); // UI не был заблокирован!
+});
+```
+
+## Memoization
+
+```javascript
+// Базовая memoization
+function memoize(fn) {
+  const cache = new Map();
+  
+  return function(...args) {
+    const key = JSON.stringify(args);
+    if (cache.has(key)) return cache.get(key);
+    
+    const result = fn.apply(this, args);
+    cache.set(key, result);
+    return result;
+  };
+}
+
+// Использование
+const expensiveCalc = memoize((n) => {
+  console.log('Computing...');
+  return n * n;
+});
+
+expensiveCalc(5); // "Computing..." → 25
+expensiveCalc(5); // Из кэша → 25 (мгновенно!)
+
+// React: useMemo и useCallback
+const Component = ({ data, onSelect }) => {
+  // Мемоизируем тяжёлые вычисления
+  const processedData = useMemo(() => {
+    return data.map(item => heavyTransform(item));
+  }, [data]); // пересчитываем только когда data изменился
+
+  // Мемоизируем функции
+  const handleSelect = useCallback((id) => {
+    onSelect(id);
+  }, [onSelect]); // не пересоздаём на каждый render
+
+  return <List data={processedData} onSelect={handleSelect} />;
+};
+```
+
+## Debounce и Throttle
+
+```javascript
+// Debounce — откладывает выполнение до паузы
+function debounce(fn, delay) {
+  let timer;
+  return function(...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), delay);
+  };
+}
+
+// Использование: поиск при вводе
+const searchInput = document.getElementById('search');
+searchInput.addEventListener('input', debounce(async (e) => {
+  const results = await fetch(`/api/search?q=${e.target.value}`);
+  // Запрос отправится только через 300ms после паузы
+}, 300));
+
+// Throttle — выполняет не чаще раза в N мс
+function throttle(fn, limit) {
+  let lastRun = 0;
+  return function(...args) {
+    const now = Date.now();
+    if (now - lastRun >= limit) {
+      lastRun = now;
+      return fn.apply(this, args);
+    }
+  };
+}
+
+// Использование: scroll events
+window.addEventListener('scroll', throttle(() => {
+  updateScrollProgress(); // максимум раз в 100ms
+}, 100));
+```
+
+## Event Delegation
+
+```javascript
+// ❌ Отдельный listener на каждый элемент (1000 listeners!)
+document.querySelectorAll('.button').forEach(btn => {
+  btn.addEventListener('click', handler);
+});
+
+// ✅ Один listener на родителя
+document.getElementById('list').addEventListener('click', (e) => {
+  const button = e.target.closest('.button');
+  if (button) {
+    handler(button);
+  }
+});
+```
+
+## Оптимизация циклов
+
+```javascript
+// ❌ Обращение к .length на каждой итерации
+for (let i = 0; i < array.length; i++) {
+  process(array[i]);
+}
+
+// ✅ Кэшируем длину
+for (let i = 0, len = array.length; i < len; i++) {
+  process(array[i]);
+}
+
+// ✅ Для трансформаций — функциональный стиль (JIT-оптимизируется)
+const results = array.map(item => process(item));
+
+// ✅ Для больших массивов — прямой цикл быстрее
+const results = new Array(array.length);
+for (let i = 0, len = array.length; i < len; i++) {
+  results[i] = process(array[i]);
+}
+
+// Бенчмаркинг
+console.time('loop');
+// ... код
+console.timeEnd('loop');
+```
+
+## Memory Leaks
+
+```javascript
+// ❌ Утечка: незакрытый event listener
+function Component() {
+  useEffect(() => {
+    window.addEventListener('resize', handleResize);
+    // Забыли удалить!
+  }, []);
+}
+
+// ✅ Очищаем за собой
+function Component() {
+  useEffect(() => {
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize); // cleanup!
+  }, []);
+}
+
+// ❌ Утечка: closure держит большой объект
+let largeData = fetchBigData(); // 50MB
+const handler = () => {
+  console.log(largeData.id); // closure захватывает всё largeData
+};
+
+// ✅ Захватываем только нужное
+const { id } = fetchBigData();
+const handler = () => {
+  console.log(id); // держим только id, largeData может быть GC
+};
+```
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html>
+<head>
+  <title>JS Performance Demo</title>
+  <style>
+    body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+    h1 { color: #89b4fa; }
+    h2 { color: #cba6f7; margin: 20px 0 10px; font-size: 16px; }
+    .demo { background: #313244; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin: 4px; }
+    button.danger { background: #f38ba8; }
+    .result { margin: 8px 0; padding: 8px; border-radius: 4px; background: #1e1e2e; font-size: 14px; }
+    input { background: #45475a; border: 1px solid #6c7086; color: #cdd6f4; padding: 8px 12px; border-radius: 6px; width: 100%; margin: 8px 0; }
+    .good { color: #a6e3a1; }
+    .bad { color: #f38ba8; }
+    .log { font-family: monospace; font-size: 12px; color: #6c7086; }
+  </style>
+</head>
+<body>
+  <h1>JavaScript Performance</h1>
+
+  <div class="demo">
+    <h2>1. Debounce vs без Debounce</h2>
+    <input id="search-no-debounce" placeholder="Без debounce (каждый символ = запрос)">
+    <p class="log" id="no-debounce-log">Запросов: 0</p>
+    <input id="search-debounce" placeholder="С debounce 300ms (пауза = один запрос)">
+    <p class="log" id="debounce-log">Запросов: 0</p>
+  </div>
+
+  <div class="demo">
+    <h2>2. Длинная задача vs Chunked</h2>
+    <p style="font-size: 13px; color: #6c7086; margin-bottom: 8px">Обработка 1,000,000 элементов. UI заморожен во время "Плохой" версии!</p>
+    <button class="danger" onclick="longTask()">❌ Длинная задача (freezes UI)</button>
+    <button onclick="chunkedTask()">✅ Chunked (UI не замерзает)</button>
+    <div class="result" id="task-result">Нажмите кнопку</div>
+    <div style="margin-top: 8px">
+      Счётчик (обновляется раз в 200ms — замечаете заморозку?):
+      <span id="counter" style="color: #89b4fa; font-weight: bold; font-size: 20px"> 0</span>
+    </div>
+  </div>
+
+  <div class="demo">
+    <h2>3. Memoization</h2>
+    <button onclick="testMemo()">Запустить тест (Fibonacci 35)</button>
+    <div class="result" id="memo-result">Нажмите для теста</div>
+  </div>
+
+  <script>
+    // Debounce demo
+    let noDebounceCount = 0;
+    let debounceCount = 0;
+
+    document.getElementById('search-no-debounce').addEventListener('input', () => {
+      noDebounceCount++;
+      document.getElementById('no-debounce-log').textContent = \`Запросов: \${noDebounceCount} ⚠️ Слишком много!\`;
+    });
+
+    function debounce(fn, delay) {
+      let timer;
+      return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), delay);
+      };
+    }
+
+    document.getElementById('search-debounce').addEventListener('input', debounce(() => {
+      debounceCount++;
+      document.getElementById('debounce-log').textContent = \`Запросов: \${debounceCount} ✅ Только при паузе!\`;
+    }, 300));
+
+    // Counter
+    let counterValue = 0;
+    setInterval(() => {
+      counterValue++;
+      document.getElementById('counter').textContent = counterValue;
+    }, 200);
+
+    // Long task demo
+    function longTask() {
+      const start = performance.now();
+      document.getElementById('task-result').textContent = '⏳ Обработка...';
+      
+      let sum = 0;
+      for (let i = 0; i < 1000000; i++) {
+        sum += Math.sqrt(i);
+      }
+      
+      const time = performance.now() - start;
+      document.getElementById('task-result').innerHTML = 
+        \`<span class="bad">❌ Выполнено за \${time.toFixed(0)}ms. UI был заморожен!</span>\`;
+    }
+
+    async function chunkedTask() {
+      const start = performance.now();
+      document.getElementById('task-result').textContent = '⏳ Chunked обработка...';
+      
+      const CHUNK_SIZE = 50000;
+      let sum = 0;
+      
+      for (let i = 0; i < 1000000; i += CHUNK_SIZE) {
+        for (let j = i; j < Math.min(i + CHUNK_SIZE, 1000000); j++) {
+          sum += Math.sqrt(j);
+        }
+        // Уступаем UI thread
+        await new Promise(r => setTimeout(r, 0));
+        document.getElementById('task-result').textContent = 
+          \`⏳ Обработано: \${Math.min(i + CHUNK_SIZE, 1000000).toLocaleString()} / 1,000,000...\`;
+      }
+      
+      const time = performance.now() - start;
+      document.getElementById('task-result').innerHTML = 
+        \`<span class="good">✅ Выполнено за \${time.toFixed(0)}ms. UI оставался отзывчивым!</span>\`;
+    }
+
+    // Memoization demo
+    let fibCalls = 0;
+    
+    function fibNaive(n) {
+      fibCalls++;
+      if (n <= 1) return n;
+      return fibNaive(n - 1) + fibNaive(n - 2);
+    }
+
+    function memoize(fn) {
+      const cache = new Map();
+      return function(n) {
+        fibCalls++;
+        if (cache.has(n)) return cache.get(n);
+        const result = fn(n);
+        cache.set(n, result);
+        return result;
+      };
+    }
+
+    const fibMemo = memoize(function fib(n) {
+      if (n <= 1) return n;
+      return fibMemo(n - 1) + fibMemo(n - 2);
+    });
+
+    function testMemo() {
+      // Naive
+      fibCalls = 0;
+      const start1 = performance.now();
+      const r1 = fibNaive(35);
+      const t1 = performance.now() - start1;
+      const calls1 = fibCalls;
+
+      // Memoized
+      fibCalls = 0;
+      const start2 = performance.now();
+      const r2 = fibMemo(35);
+      const t2 = performance.now() - start2;
+      const calls2 = fibCalls;
+
+      document.getElementById('memo-result').innerHTML = \`
+        <div>fib(35) = \${r1}</div>
+        <div class="bad">❌ Без memoization: \${t1.toFixed(1)}ms, \${calls1.toLocaleString()} вызовов</div>
+        <div class="good">✅ С memoization: \${t2.toFixed(2)}ms, \${calls2} вызовов</div>
+        <div>Ускорение: \${(t1/t2).toFixed(0)}x быстрее, в \${Math.round(calls1/calls2).toLocaleString()}x меньше вызовов!</div>
+      \`;
+    }
+  </script>
+</body>
+</html>`
+  }}
+/>

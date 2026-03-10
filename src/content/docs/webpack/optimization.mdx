@@ -1,0 +1,386 @@
+---
+title: "11. Оптимизация бандла"
+sidebar:
+  order: 11
+---
+import { Playground } from '@components/Playground'
+
+
+Оптимизация Webpack — это искусство достижения баланса между размером бандла, скоростью загрузки и скоростью сборки. В production режиме Webpack автоматически включает ряд оптимизаций, но для максимального результата нужна ручная настройка.
+
+## Что происходит в mode: 'production'
+
+```js
+// Автоматически включается в production:
+optimization: {
+  minimize: true,           // Минификация JS
+  minimizer: [new TerserPlugin()], // Через TerserPlugin
+  moduleIds: 'deterministic', // Стабильные ID модулей
+  chunkIds: 'deterministic',
+  concatenateModules: true, // Scope hoisting
+  usedExports: true,        // Для tree shaking
+  mangleWasmImports: false,
+}
+```
+
+## TerserPlugin — минификация JavaScript
+
+```bash
+npm install --save-dev terser-webpack-plugin
+```
+
+```js
+const TerserPlugin = require('terser-webpack-plugin');
+
+optimization: {
+  minimize: true,
+  minimizer: [
+    new TerserPlugin({
+      parallel: true,         // Многопоточная минификация
+      terserOptions: {
+        compress: {
+          drop_console: true, // Удалить console.log в production
+          drop_debugger: true,
+          pure_funcs: ['console.info', 'console.debug'],
+        },
+        mangle: {
+          safari10: true,     // Совместимость с Safari 10
+        },
+        format: {
+          comments: false,    // Удалить комментарии
+        },
+      },
+      extractComments: false, // Не создавать .txt с лицензиями
+    }),
+  ],
+}
+```
+
+## CssMinimizerPlugin — минификация CSS
+
+```bash
+npm install --save-dev css-minimizer-webpack-plugin
+```
+
+```js
+const CssMinimizerPlugin = require('css-minimizer-webpack-plugin');
+
+optimization: {
+  minimize: true,
+  minimizer: [
+    new TerserPlugin(),
+    new CssMinimizerPlugin({
+      minimizerOptions: {
+        preset: ['default', {
+          discardComments: { removeAll: true },
+          normalizeWhitespace: true,
+          colormin: true,
+        }],
+      },
+    }),
+  ],
+}
+```
+
+## SplitChunks — детальная настройка
+
+```js
+optimization: {
+  splitChunks: {
+    chunks: 'all',
+    maxInitialRequests: 30,
+    maxAsyncRequests: 30,
+    minSize: 20000,     // 20 KB — минимальный размер чанка
+    maxSize: 244000,    // 244 KB — разбить на меньшие части
+    cacheGroups: {
+      // Все node_modules в один vendor чанк
+      defaultVendors: {
+        test: /[\\/]node_modules[\\/]/,
+        priority: -10,
+        reuseExistingChunk: true,
+        name: 'vendors',
+      },
+      // React в отдельный чанк (кешируется долго)
+      react: {
+        test: /[\\/]node_modules[\\/](react|react-dom|react-router)[\\/]/,
+        name: 'react-vendor',
+        chunks: 'all',
+        priority: 20,
+      },
+      // Общий код (используется в 2+ чанках)
+      common: {
+        name: 'common',
+        minChunks: 2,
+        priority: -20,
+        reuseExistingChunk: true,
+      },
+    },
+  },
+  runtimeChunk: 'single', // Webpack runtime в отдельный файл
+}
+```
+
+## Performance Hints
+
+```js
+performance: {
+  hints: 'warning',           // 'error' | 'warning' | false
+  maxEntrypointSize: 244000,  // 244 KB — предупреждение для entry
+  maxAssetSize: 244000,       // 244 KB — предупреждение для ассетов
+  assetFilter: (assetFilename) => {
+    return /\\.(js|css)$/.test(assetFilename);
+  },
+}
+```
+
+## Persistent Caching (Webpack 5)
+
+Резко ускоряет повторные сборки:
+
+```js
+cache: {
+  type: 'filesystem',    // Кешировать на диск
+  cacheDirectory: path.resolve(__dirname, '.webpack-cache'),
+  buildDependencies: {
+    config: [__filename], // Инвалидировать кеш при изменении конфига
+  },
+}
+// Повторная сборка: 10s → 1s!
+```
+
+## Resolve оптимизации
+
+```js
+resolve: {
+  // Не проверять расширения лишний раз
+  extensions: ['.tsx', '.ts', '.js'], // Только нужные
+  modules: [path.resolve(__dirname, 'src'), 'node_modules'],
+  // Не разрешать симлинки (ускоряет разрешение)
+  symlinks: false,
+}
+```
+
+## Bundle Analysis
+
+```bash
+# Генерация статистики
+npx webpack --json > dist/stats.json
+npx webpack-bundle-analyzer dist/stats.json
+
+# Или через плагин:
+new BundleAnalyzerPlugin({ analyzerMode: 'static' })
+```
+
+Ниже — интерактивная scoreboard оптимизации. Включайте оптимизации и смотрите как меняется размер бандла.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const ERROR = '#f87171';
+
+interface Optimization {
+  id: string;
+  name: string;
+  description: string;
+  jsSaving: number;  // KB
+  cssSaving: number; // KB
+  buildTime: number; // Влияние на скорость сборки (секунды)
+  category: 'js' | 'css' | 'split' | 'cache';
+}
+
+const OPTIMIZATIONS: Optimization[] = [
+  { id: 'terser', name: 'TerserPlugin', description: 'Минификация и удаление мёртвого кода JS', jsSaving: 180, cssSaving: 0, buildTime: 8, category: 'js' },
+  { id: 'dropConsole', name: 'drop_console', description: 'Удалить console.log из production', jsSaving: 15, cssSaving: 0, buildTime: 0, category: 'js' },
+  { id: 'cssMinimizer', name: 'CssMinimizerPlugin', description: 'Минификация CSS файлов', jsSaving: 0, cssSaving: 45, buildTime: 2, category: 'css' },
+  { id: 'splitChunks', name: 'SplitChunksPlugin', description: 'Разделение vendor и общего кода', jsSaving: 30, cssSaving: 0, buildTime: 1, category: 'split' },
+  { id: 'treeShaking', name: 'Tree Shaking', description: 'Устранение неиспользуемых экспортов', jsSaving: 95, cssSaving: 0, buildTime: 3, category: 'js' },
+  { id: 'scopeHoisting', name: 'Scope Hoisting', description: 'Объединение модулей (concatenateModules)', jsSaving: 25, cssSaving: 0, buildTime: 2, category: 'js' },
+  { id: 'compression', name: 'Gzip/Brotli', description: 'Сжатие при отдаче (сервер, не Webpack)', jsSaving: 220, cssSaving: 60, buildTime: 4, category: 'js' },
+  { id: 'persistentCache', name: 'Persistent Cache', description: 'Кеширование на диск (ускоряет rebuild)', jsSaving: 0, cssSaving: 0, buildTime: -25, category: 'cache' },
+  { id: 'parallelTerser', name: 'TerserPlugin parallel', description: 'Многопоточная минификация', jsSaving: 0, cssSaving: 0, buildTime: -8, category: 'js' },
+];
+
+const CATEGORY_COLORS: Record<string, string> = {
+  js: WEBPACK_COLOR,
+  css: '#a78bfa',
+  split: ACCENT,
+  cache: SUCCESS,
+};
+
+const BASE_JS = 580;   // KB
+const BASE_CSS = 120;  // KB
+const BASE_BUILD = 45; // seconds
+
+export default function App() {
+  const [enabled, setEnabled] = useState<Set<string>>(new Set());
+
+  const toggle = (id: string) => {
+    const next = new Set(enabled);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setEnabled(next);
+  };
+
+  const enabledOpts = OPTIMIZATIONS.filter(o => enabled.has(o.id));
+  const jsSaved = enabledOpts.reduce((acc, o) => acc + o.jsSaving, 0);
+  const cssSaved = enabledOpts.reduce((acc, o) => acc + o.cssSaving, 0);
+  const buildTimeDelta = enabledOpts.reduce((acc, o) => acc + o.buildTime, 0);
+
+  const finalJS = Math.max(BASE_JS - jsSaved, 20);
+  const finalCSS = Math.max(BASE_CSS - cssSaved, 5);
+  const finalBuild = Math.max(BASE_BUILD + buildTimeDelta, 3);
+
+  const jsPercent = Math.round((1 - finalJS / BASE_JS) * 100);
+  const cssPercent = Math.round((1 - finalCSS / BASE_CSS) * 100);
+
+  const getScoreColor = (percent: number) => {
+    if (percent >= 60) return SUCCESS;
+    if (percent >= 30) return ACCENT;
+    return ERROR;
+  };
+
+  const enableAll = () => setEnabled(new Set(OPTIMIZATIONS.map(o => o.id)));
+  const resetAll = () => setEnabled(new Set());
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>🚀 Optimization Scorecard</div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Включайте оптимизации и смотрите влияние на размер бандла и скорость сборки</div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '380px 1fr', gap: 24 }}>
+          {/* Optimizations list */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
+              <button onClick={enableAll} style={{ flex: 1, padding: '8px', background: WEBPACK_COLOR, color: BG, border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>Включить всё</button>
+              <button onClick={resetAll} style={{ flex: 1, padding: '8px', background: CARD, color: MUTED, border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', fontSize: 11 }}>Сбросить</button>
+            </div>
+
+            {OPTIMIZATIONS.map(opt => (
+              <div
+                key={opt.id}
+                onClick={() => toggle(opt.id)}
+                style={{
+                  background: enabled.has(opt.id) ? '#0f2744' : CARD,
+                  border: \`2px solid \${enabled.has(opt.id) ? CATEGORY_COLORS[opt.category] : 'transparent'}\`,
+                  borderRadius: 10, padding: '12px 14px', cursor: 'pointer', transition: 'all 0.2s',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                  <div style={{ width: 14, height: 14, borderRadius: 3, border: \`2px solid \${CATEGORY_COLORS[opt.category]}\`, background: enabled.has(opt.id) ? CATEGORY_COLORS[opt.category] : 'transparent', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {enabled.has(opt.id) && <span style={{ fontSize: 9, color: BG, fontWeight: 900 }}>✓</span>}
+                  </div>
+                  <span style={{ fontSize: 13, color: enabled.has(opt.id) ? TEXT : MUTED, fontWeight: enabled.has(opt.id) ? 700 : 400 }}>{opt.name}</span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10, color: CATEGORY_COLORS[opt.category], background: '#0a0f1e', padding: '2px 6px', borderRadius: 4 }}>{opt.category}</span>
+                </div>
+                <div style={{ fontSize: 11, color: MUTED, paddingLeft: 24 }}>{opt.description}</div>
+                <div style={{ display: 'flex', gap: 10, paddingLeft: 24, marginTop: 4 }}>
+                  {opt.jsSaving > 0 && <span style={{ fontSize: 10, color: WEBPACK_COLOR }}>JS -{opt.jsSaving} KB</span>}
+                  {opt.cssSaving > 0 && <span style={{ fontSize: 10, color: '#a78bfa' }}>CSS -{opt.cssSaving} KB</span>}
+                  {opt.buildTime !== 0 && <span style={{ fontSize: 10, color: opt.buildTime > 0 ? ACCENT : SUCCESS }}>build {opt.buildTime > 0 ? '+' : ''}{opt.buildTime}s</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Scorecard */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {/* Score */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+              <div style={{ fontSize: 12, color: MUTED, marginBottom: 16, textTransform: 'uppercase' }}>Итоговый бандл</div>
+
+              {/* JS */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: 12 }}>
+                  <span style={{ color: WEBPACK_COLOR }}>JavaScript</span>
+                  <span>
+                    <span style={{ color: MUTED, textDecoration: 'line-through', marginRight: 8 }}>{BASE_JS} KB</span>
+                    <span style={{ color: getScoreColor(jsPercent), fontWeight: 700 }}>{finalJS} KB</span>
+                    {jsPercent > 0 && <span style={{ color: SUCCESS, marginLeft: 6, fontSize: 11 }}>(-{jsPercent}%)</span>}
+                  </span>
+                </div>
+                <div style={{ background: '#0a0f1e', borderRadius: 4, overflow: 'hidden', height: 12 }}>
+                  <div style={{ height: '100%', background: getScoreColor(jsPercent), width: \`\${(finalJS / BASE_JS) * 100}%\`, transition: 'width 0.5s' }} />
+                </div>
+              </div>
+
+              {/* CSS */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: 12 }}>
+                  <span style={{ color: '#a78bfa' }}>CSS</span>
+                  <span>
+                    <span style={{ color: MUTED, textDecoration: 'line-through', marginRight: 8 }}>{BASE_CSS} KB</span>
+                    <span style={{ color: getScoreColor(cssPercent), fontWeight: 700 }}>{finalCSS} KB</span>
+                    {cssPercent > 0 && <span style={{ color: SUCCESS, marginLeft: 6, fontSize: 11 }}>(-{cssPercent}%)</span>}
+                  </span>
+                </div>
+                <div style={{ background: '#0a0f1e', borderRadius: 4, overflow: 'hidden', height: 12 }}>
+                  <div style={{ height: '100%', background: getScoreColor(cssPercent), width: \`\${(finalCSS / BASE_CSS) * 100}%\`, transition: 'width 0.5s' }} />
+                </div>
+              </div>
+
+              {/* Total */}
+              <div style={{ background: '#0a0f1e', borderRadius: 8, padding: '12px 16px', display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, textAlign: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 10, color: MUTED, marginBottom: 2 }}>Всего</div>
+                  <div style={{ fontSize: 18, color: TEXT, fontWeight: 700 }}>{(finalJS + finalCSS).toFixed(0)} KB</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: MUTED, marginBottom: 2 }}>Gzip ~</div>
+                  <div style={{ fontSize: 18, color: SUCCESS, fontWeight: 700 }}>{Math.round((finalJS + finalCSS) * 0.28)} KB</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: MUTED, marginBottom: 2 }}>Build time</div>
+                  <div style={{ fontSize: 18, color: finalBuild < BASE_BUILD ? SUCCESS : (finalBuild > BASE_BUILD + 10 ? ACCENT : TEXT), fontWeight: 700 }}>{finalBuild}s</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Before/After comparison */}
+            <div style={{ background: CARD, borderRadius: 12, padding: 20 }}>
+              <div style={{ fontSize: 12, color: MUTED, marginBottom: 16, textTransform: 'uppercase' }}>До vs После</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div style={{ background: '#1a0a0a', borderRadius: 8, padding: 12, textAlign: 'center', border: '1px solid #7f1d1d' }}>
+                  <div style={{ fontSize: 10, color: ERROR, marginBottom: 4 }}>До оптимизации</div>
+                  <div style={{ fontSize: 24, color: ERROR, fontWeight: 700 }}>{BASE_JS + BASE_CSS} KB</div>
+                  <div style={{ fontSize: 10, color: MUTED }}>~{Math.round((BASE_JS + BASE_CSS) * 0.28)} KB gzip</div>
+                </div>
+                <div style={{ background: '#0a1a0a', borderRadius: 8, padding: 12, textAlign: 'center', border: '1px solid #14532d' }}>
+                  <div style={{ fontSize: 10, color: SUCCESS, marginBottom: 4 }}>После оптимизации</div>
+                  <div style={{ fontSize: 24, color: SUCCESS, fontWeight: 700 }}>{finalJS + finalCSS} KB</div>
+                  <div style={{ fontSize: 10, color: MUTED }}>~{Math.round((finalJS + finalCSS) * 0.28)} KB gzip</div>
+                </div>
+              </div>
+              {enabled.size > 0 && (
+                <div style={{ textAlign: 'center', marginTop: 12, fontSize: 13, color: SUCCESS, fontWeight: 700 }}>
+                  🎉 Экономия: {BASE_JS + BASE_CSS - finalJS - finalCSS} KB ({Math.round((1 - (finalJS + finalCSS) / (BASE_JS + BASE_CSS)) * 100)}%)
+                </div>
+              )}
+            </div>
+
+            {/* Active optimizations summary */}
+            {enabledOpts.length > 0 && (
+              <div style={{ background: CARD, borderRadius: 12, padding: 16 }}>
+                <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: 'uppercase' }}>Включено ({enabledOpts.length})</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {enabledOpts.map(o => (
+                    <span key={o.id} style={{ fontSize: 10, background: '#0a0f1e', color: CATEGORY_COLORS[o.category], padding: '3px 8px', borderRadius: 4 }}>{o.name}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

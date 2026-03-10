@@ -1,0 +1,754 @@
+---
+title: "24. Паттерны управления состоянием"
+sidebar:
+  order: 24
+---
+import { Playground } from '@components/Playground'
+
+
+## 🏗️ Паттерны управления состоянием в Solid.js
+
+Привет! 👋 Выбор паттерна управления состоянием — это архитектурное решение, которое определяет как данные текут через приложение. Solid.js очень гибок: от простейших локальных сигналов до полноценных Flux-подобных магазинов.
+
+Думай о паттернах состояния как об инструментах в ящике: маленький винтик — обычная отвёртка (локальный сигнал), большой болт — гаечный ключ (service store), а когда нужно всё разобрать — набор инструментов (flux).
+
+---
+
+## 1️⃣ Паттерн: Локальное состояние (Local Signal)
+
+Самый простой и частый случай — состояние, которое нужно только одному компоненту:
+
+```tsx
+import { createSignal, createMemo } from 'solid-js';
+
+// Счётчик — всё внутри компонента
+function Counter() {
+  const [count, setCount] = createSignal(0);
+  const doubled = createMemo(() => count() * 2);
+
+  return (
+    <div>
+      <p>Счётчик: {count()}</p>
+      <p>Удвоенный: {doubled()}</p>
+      <button onClick={() => setCount(n => n + 1)}>+</button>
+    </div>
+  );
+}
+
+// Форма с локальным состоянием
+function LoginForm() {
+  const [email, setEmail] = createSignal('');
+  const [password, setPassword] = createSignal('');
+  const [errors, setErrors] = createSignal<Record<string, string>>({});
+
+  const isValid = createMemo(() =>
+    email().includes('@') && password().length >= 8
+  );
+
+  const handleSubmit = (e: Event) => {
+    e.preventDefault();
+    if (!isValid()) {
+      setErrors({ email: 'Неверный формат', password: 'Минимум 8 символов' });
+      return;
+    }
+    // submit...
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input value={email()} onInput={e => setEmail(e.target.value)} />
+      <input type="password" value={password()} onInput={e => setPassword(e.target.value)} />
+      <button disabled={!isValid()}>Войти</button>
+    </form>
+  );
+}
+```
+
+**Когда использовать:** состояние UI (открыт/закрыт), промежуточные значения форм, локальные вычисления. Не выносить наружу если никто другой не использует.
+
+---
+
+## 2️⃣ Паттерн: Поднятое состояние (Lifted State)
+
+Когда несколько компонентов должны разделять одно состояние — поднимай сигнал в общего родителя:
+
+```tsx
+import { createSignal, Accessor, Setter } from 'solid-js';
+
+// Дочерние компоненты получают accessor и setter через пропсы
+function DisplayPanel({ count }: { count: Accessor<number> }) {
+  return <div>Текущее: {count()}</div>;
+}
+
+function ControlPanel({ setCount }: { setCount: Setter<number> }) {
+  return (
+    <div>
+      <button onClick={() => setCount(0)}>Сброс</button>
+      <button onClick={() => setCount(n => n - 1)}>−</button>
+      <button onClick={() => setCount(n => n + 1)}>+</button>
+    </div>
+  );
+}
+
+function HistoryPanel({ count }: { count: Accessor<number> }) {
+  const [history, setHistory] = createSignal<number[]>([]);
+
+  // Реагируем на изменения count и пишем в историю
+  createEffect(() => {
+    setHistory(h => [...h.slice(-9), count()]);
+  });
+
+  return (
+    <ul>
+      {history().map((v, i) => <li key={i}>{v}</li>)}
+    </ul>
+  );
+}
+
+// Родитель владеет состоянием — "single source of truth"
+function App() {
+  const [count, setCount] = createSignal(0);
+
+  return (
+    <div>
+      <DisplayPanel count={count} />
+      <ControlPanel setCount={setCount} />
+      <HistoryPanel count={count} />
+    </div>
+  );
+}
+```
+
+**Когда использовать:** 2-3 компонента-сиблинга, нет глубокой вложенности, нет необходимости в глобальном доступе.
+
+---
+
+## 3️⃣ Паттерн: Service Store (Singleton)
+
+Для глобального состояния создаём модуль-сервис — синглтон с сигналами и методами:
+
+```tsx
+// stores/userStore.ts
+import { createSignal, createMemo } from 'solid-js';
+import { createStore } from 'solid-js/store';
+
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  role: 'admin' | 'user';
+}
+
+// Создаём сигналы/сторы ОДИН РАЗ на уровне модуля
+const [user, setUser] = createSignal<User | null>(null);
+const [loading, setLoading] = createSignal(false);
+const [error, setError] = createSignal<string | null>(null);
+
+// Вычисляемые значения
+const isLoggedIn = createMemo(() => user() !== null);
+const isAdmin = createMemo(() => user()?.role === 'admin');
+
+// Методы для изменения состояния
+async function login(email: string, password: string) {
+  setLoading(true);
+  setError(null);
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) throw new Error('Неверные данные');
+    const data = await res.json();
+    setUser(data.user);
+  } catch (e) {
+    setError((e as Error).message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+function logout() {
+  setUser(null);
+}
+
+// Экспортируем как объект-сервис
+export const userService = {
+  // Геттеры (не вызываем — передаём как Accessor)
+  user,
+  loading,
+  error,
+  isLoggedIn,
+  isAdmin,
+  // Методы
+  login,
+  logout,
+};
+```
+
+```tsx
+// В компонентах — просто импортируем сервис
+import { userService } from '~/stores/userStore';
+
+function Header() {
+  return (
+    <header>
+      <Show when={userService.isLoggedIn()}>
+        <span>Привет, {userService.user()?.name}!</span>
+        <button onClick={userService.logout}>Выйти</button>
+      </Show>
+    </header>
+  );
+}
+
+function AdminPanel() {
+  return (
+    <Show when={userService.isAdmin()}>
+      <div>Панель администратора</div>
+    </Show>
+  );
+}
+```
+
+**Когда использовать:** глобальное состояние (авторизация, тема, язык), бизнес-логика которая нужна в разных частях приложения.
+
+---
+
+## 4️⃣ Паттерн: Flux-подобный (Actions + Reducer)
+
+Для сложной логики с предсказуемыми переходами состояний:
+
+```tsx
+// stores/cartStore.ts
+import { createStore, produce } from 'solid-js/store';
+
+interface CartItem {
+  id: number;
+  name: string;
+  price: number;
+  qty: number;
+}
+
+interface CartState {
+  items: CartItem[];
+  coupon: string | null;
+  discount: number;
+}
+
+// State
+const [cart, setCart] = createStore<CartState>({
+  items: [],
+  coupon: null,
+  discount: 0,
+});
+
+// Actions (чистые операции)
+const cartActions = {
+  addItem(item: Omit<CartItem, 'qty'>) {
+    const idx = cart.items.findIndex(i => i.id === item.id);
+    if (idx >= 0) {
+      setCart('items', idx, 'qty', n => n + 1);
+    } else {
+      setCart('items', [...cart.items, { ...item, qty: 1 }]);
+    }
+  },
+
+  removeItem(id: number) {
+    setCart('items', items => items.filter(i => i.id !== id));
+  },
+
+  updateQty(id: number, qty: number) {
+    if (qty <= 0) {
+      cartActions.removeItem(id);
+      return;
+    }
+    const idx = cart.items.findIndex(i => i.id === id);
+    if (idx >= 0) setCart('items', idx, 'qty', qty);
+  },
+
+  applyCoupon(code: string) {
+    const coupons: Record<string, number> = {
+      'SOLID10': 0.1,
+      'SOLID20': 0.2,
+    };
+    const discount = coupons[code.toUpperCase()];
+    if (discount) {
+      setCart({ coupon: code, discount });
+    } else {
+      throw new Error('Неверный купон');
+    }
+  },
+
+  clear() {
+    setCart({ items: [], coupon: null, discount: 0 });
+  },
+};
+
+// Вычисляемые значения (Selectors)
+import { createMemo } from 'solid-js';
+
+const subtotal = createMemo(() =>
+  cart.items.reduce((sum, item) => sum + item.price * item.qty, 0)
+);
+
+const total = createMemo(() =>
+  subtotal() * (1 - cart.discount)
+);
+
+const itemCount = createMemo(() =>
+  cart.items.reduce((sum, item) => sum + item.qty, 0)
+);
+
+export { cart, cartActions, subtotal, total, itemCount };
+```
+
+---
+
+## 5️⃣ Паттерн: Оптимистичные обновления (Optimistic Updates)
+
+Обновляем UI немедленно, а при ошибке откатываемся:
+
+```tsx
+import { createSignal } from 'solid-js';
+import { createStore } from 'solid-js/store';
+
+interface Todo {
+  id: number;
+  text: string;
+  completed: boolean;
+  optimistic?: boolean; // помечаем оптимистичные изменения
+}
+
+function createTodosStore() {
+  const [todos, setTodos] = createStore<Todo[]>([]);
+
+  async function toggleTodo(id: number) {
+    const todo = todos.find(t => t.id === id);
+    if (!todo) return;
+
+    // 1. Оптимистично обновляем UI
+    setTodos(t => t.id === id, { completed: !todo.completed, optimistic: true });
+
+    try {
+      // 2. Отправляем запрос на сервер
+      await fetch(`/api/todos/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ completed: !todo.completed }),
+      });
+      // 3. Успех — снимаем метку оптимистичного обновления
+      setTodos(t => t.id === id, 'optimistic', false);
+    } catch {
+      // 4. Ошибка — откатываемся обратно!
+      setTodos(t => t.id === id, { completed: todo.completed, optimistic: false });
+    }
+  }
+
+  async function addTodo(text: string) {
+    // Временный ID для оптимистичного UI
+    const tempId = -Date.now();
+    setTodos([...todos, { id: tempId, text, completed: false, optimistic: true }]);
+
+    try {
+      const res = await fetch('/api/todos', {
+        method: 'POST',
+        body: JSON.stringify({ text }),
+      });
+      const newTodo = await res.json();
+      // Заменяем временный элемент реальным
+      setTodos(t => t.id === tempId, { ...newTodo, optimistic: false });
+    } catch {
+      // Откат — удаляем оптимистичный элемент
+      setTodos(todos.filter(t => t.id !== tempId));
+    }
+  }
+
+  return { todos, toggleTodo, addTodo };
+}
+```
+
+---
+
+## 6️⃣ Паттерн: Undo/Redo
+
+```tsx
+import { createSignal } from 'solid-js';
+
+function createUndoableSignal<T>(initial: T, maxHistory = 50) {
+  const [history, setHistory] = createSignal<T[]>([initial]);
+  const [pointer, setPointer] = createSignal(0);
+
+  const current = () => history()[pointer()];
+
+  const push = (value: T) => {
+    // Убираем "будущие" состояния при новом действии
+    const newHistory = [...history().slice(0, pointer() + 1), value];
+    if (newHistory.length > maxHistory) newHistory.shift();
+    setHistory(newHistory);
+    setPointer(newHistory.length - 1);
+  };
+
+  const undo = () => {
+    if (pointer() > 0) setPointer(p => p - 1);
+  };
+
+  const redo = () => {
+    if (pointer() < history().length - 1) setPointer(p => p + 1);
+  };
+
+  const canUndo = () => pointer() > 0;
+  const canRedo = () => pointer() < history().length - 1;
+
+  return { current, push, undo, redo, canUndo, canRedo };
+}
+
+// Использование
+function TextEditor() {
+  const { current, push, undo, redo, canUndo, canRedo } =
+    createUndoableSignal('');
+
+  return (
+    <div>
+      <button onClick={undo} disabled={!canUndo()}>↩ Undo</button>
+      <button onClick={redo} disabled={!canRedo()}>↪ Redo</button>
+      <textarea
+        value={current()}
+        onInput={(e) => push(e.target.value)}
+      />
+    </div>
+  );
+}
+```
+
+---
+
+## ⚠️ Типичные ловушки
+
+```tsx
+// ❌ Дублирование состояния — две истины
+const [user, setUser] = createSignal<User | null>(null);
+const [userName, setUserName] = createSignal(''); // Дубль!
+// Если setUser(), userName() станет неактуальным
+
+// ✅ Вычисляй производные через createMemo
+const userName = createMemo(() => user()?.name ?? '');
+
+// ❌ Мутация Store напрямую (не через setStore)
+const [store, setStore] = createStore({ items: [] });
+// store.items.push(item); // ❌ — реактивность не сработает!
+setStore('items', [...store.items, item]); // ✅
+
+// ❌ Синглтон-стор создан внутри компонента — пересоздаётся!
+function MyComponent() {
+  // ❌ Создаётся при каждом рендере компонента!
+  const [globalState, setGlobalState] = createSignal(0);
+  return <div>{globalState()}</div>;
+}
+
+// ✅ Синглтон — на уровне модуля
+const [globalState, setGlobalState] = createSignal(0); // ← вне компонента
+function MyComponent() {
+  return <div>{globalState()}</div>; // ✅
+}
+```
+
+---
+
+## 🎯 Playground: Архитектурное сравнение паттернов
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useCallback, useMemo, useRef } from "react";
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const RED = '#ef4444';
+
+type Pattern = 'local' | 'lifted' | 'service' | 'optimistic';
+
+// ===== ПАТТЕРН 1: Локальное состояние =====
+function LocalStateDemo() {
+  const [count, setCount] = useState(0);
+  const [text, setText] = useState('');
+  const doubled = count * 2;
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: BG, borderRadius: '6px', padding: '10px', marginBottom: '10px', fontSize: '11px', color: MUTED }}>
+        // createSignal — только для этого компонента
+      </div>
+      
+      <div style={{ background: CARD, borderRadius: '8px', padding: '12px', marginBottom: '8px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, fontSize: '11px', marginBottom: '8px' }}>Счётчик с memo</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
+          <button onClick={() => setCount(n => n - 1)} style={btnStyle(BG)}>−</button>
+          <span style={{ color: TEXT, fontSize: '20px', fontWeight: 'bold', minWidth: '40px', textAlign: 'center' }}>{count}</span>
+          <button onClick={() => setCount(n => n + 1)} style={btnStyle(SOLID_BLUE)}>+</button>
+          <button onClick={() => setCount(0)} style={btnStyle(BG, MUTED)}>Сброс</button>
+        </div>
+        <div style={{ color: MUTED, fontSize: '11px' }}>doubled = {doubled}</div>
+      </div>
+
+      <div style={{ background: CARD, borderRadius: '8px', padding: '12px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, fontSize: '11px', marginBottom: '6px' }}>Локальная форма</div>
+        <input value={text} onChange={e => setText(e.target.value)}
+          placeholder="Введи текст..."
+          style={{ width: '100%', background: BG, color: TEXT, border: \`1px solid \${BORDER}\`, borderRadius: '6px', padding: '6px', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '12px' }} />
+        <div style={{ color: text.length > 10 ? GREEN : MUTED, fontSize: '11px', marginTop: '4px' }}>
+          {text.length}/20 символов {text.length > 10 ? '✓' : ''}
+        </div>
+      </div>
+
+      <div style={{ marginTop: '8px', padding: '6px', background: GREEN + '11', borderRadius: '6px', border: \`1px solid \${GREEN}33\`, color: GREEN, fontSize: '11px' }}>
+        ✅ Плюс: просто, нет лишних зависимостей<br/>
+        ⚠️ Минус: нельзя шарить между компонентами
+      </div>
+    </div>
+  );
+}
+
+// ===== ПАТТЕРН 2: Поднятое состояние =====
+function LiftedStateDemo() {
+  // Состояние в родителе
+  const [count, setCount] = useState(0);
+  const [log, setLog] = useState<string[]>([]);
+
+  const addLog = (msg: string) => setLog(prev => [...prev.slice(-3), msg]);
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: BG, borderRadius: '6px', padding: '10px', marginBottom: '10px', fontSize: '11px', color: MUTED }}>
+        // Родитель владеет состоянием — дети получают пропсы
+      </div>
+
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', marginBottom: '6px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: MUTED, fontSize: '10px', marginBottom: '4px' }}>DisplayPanel (только читает)</div>
+        <div style={{ fontSize: '28px', fontWeight: 'bold', color: SOLID_BLUE, textAlign: 'center' }}>{count}</div>
+      </div>
+
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', marginBottom: '6px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: MUTED, fontSize: '10px', marginBottom: '6px' }}>ControlPanel (только пишет)</div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          <button onClick={() => { setCount(n => n - 1); addLog(\`count: \${count} → \${count - 1}\`); }} style={btnStyle(BG)}>−</button>
+          <button onClick={() => { setCount(0); addLog('reset → 0'); }} style={btnStyle(BG, MUTED, true)}>Сброс</button>
+          <button onClick={() => { setCount(n => n + 1); addLog(\`count: \${count} → \${count + 1}\`); }} style={btnStyle(SOLID_BLUE)}>+</button>
+        </div>
+      </div>
+
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: MUTED, fontSize: '10px', marginBottom: '4px' }}>HistoryPanel (читает и логирует)</div>
+        {log.length === 0 ? <div style={{ color: MUTED, fontSize: '11px' }}>История пуста...</div> :
+          log.map((l, i) => <div key={i} style={{ color: SOLID_LIGHT, fontSize: '11px' }}>→ {l}</div>)}
+      </div>
+
+      <div style={{ marginTop: '8px', padding: '6px', background: GREEN + '11', borderRadius: '6px', border: \`1px solid \${GREEN}33\`, color: GREEN, fontSize: '11px' }}>
+        ✅ Плюс: единый источник правды, реактивность<br/>
+        ⚠️ Минус: prop drilling при большой вложенности
+      </div>
+    </div>
+  );
+}
+
+// ===== ПАТТЕРН 3: Service Store (Singleton) =====
+// Симуляция синглтон-стора (в Solid — это модульные сигналы)
+const globalStore = (() => {
+  let _count = 0;
+  let _user = { name: 'Яша', role: 'admin' as 'admin' | 'user' };
+  const listeners = new Set<() => void>();
+  const notify = () => listeners.forEach(l => l());
+
+  return {
+    subscribe: (fn: () => void) => { listeners.add(fn); return () => listeners.delete(fn); },
+    getCount: () => _count,
+    getUser: () => _user,
+    increment: () => { _count++; notify(); },
+    decrement: () => { _count--; notify(); },
+    setRole: (role: 'admin' | 'user') => { _user = { ..._user, role }; notify(); },
+  };
+})();
+
+function useGlobalStore() {
+  const [, forceUpdate] = useState(0);
+  useState(() => {
+    const unsub = globalStore.subscribe(() => forceUpdate(n => n + 1));
+    return unsub;
+  });
+  return globalStore;
+}
+
+function ServiceStoreDemo() {
+  const store = useGlobalStore();
+  const count = store.getCount();
+  const user = store.getUser();
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: BG, borderRadius: '6px', padding: '10px', marginBottom: '10px', fontSize: '11px', color: MUTED }}>
+        // Синглтон-сервис — живёт вне компонентов
+      </div>
+
+      <div style={{ background: CARD, borderRadius: '8px', padding: '12px', marginBottom: '8px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: MUTED, fontSize: '10px', marginBottom: '6px' }}>userService.user()</div>
+        <div style={{ color: TEXT, fontSize: '13px', marginBottom: '4px' }}>👤 {user.name}</div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          <button onClick={() => store.setRole('user')} style={{ ...btnStyle(user.role === 'user' ? MUTED : BG, user.role === 'user' ? '#fff' : MUTED), flex: 1 }}>user</button>
+          <button onClick={() => store.setRole('admin')} style={{ ...btnStyle(user.role === 'admin' ? SOLID_BLUE : BG), flex: 1 }}>admin</button>
+        </div>
+        {user.role === 'admin' && <div style={{ color: ORANGE, fontSize: '11px', marginTop: '4px' }}>🛡️ Доступна панель администратора</div>}
+      </div>
+
+      <div style={{ background: CARD, borderRadius: '8px', padding: '12px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: MUTED, fontSize: '10px', marginBottom: '6px' }}>cartService.count()</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <button onClick={store.decrement} style={btnStyle(BG)}>−</button>
+          <span style={{ color: TEXT, fontSize: '20px', fontWeight: 'bold', flex: 1, textAlign: 'center' }}>{count}</span>
+          <button onClick={store.increment} style={btnStyle(SOLID_BLUE)}>+</button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: '8px', padding: '6px', background: GREEN + '11', borderRadius: '6px', border: \`1px solid \${GREEN}33\`, color: GREEN, fontSize: '11px' }}>
+        ✅ Плюс: глобальный доступ, нет prop drilling<br/>
+        ⚠️ Минус: трудно тестировать в изоляции
+      </div>
+    </div>
+  );
+}
+
+// ===== ПАТТЕРН 4: Оптимистичные обновления =====
+interface TodoItem { id: number; text: string; completed: boolean; status: 'ok' | 'pending' | 'error'; }
+
+function OptimisticDemo() {
+  const [todos, setTodos] = useState<TodoItem[]>([
+    { id: 1, text: 'Изучить Solid.js', completed: true, status: 'ok' },
+    { id: 2, text: 'Написать тесты', completed: false, status: 'ok' },
+    { id: 3, text: 'Задеплоить проект', completed: false, status: 'ok' },
+  ]);
+  const [newText, setNewText] = useState('');
+  const [failRate, setFailRate] = useState(0.3);
+
+  const toggle = async (id: number) => {
+    const todo = todos.find(t => t.id === id);
+    if (!todo || todo.status === 'pending') return;
+
+    // 1. Оптимистичное обновление
+    setTodos(prev => prev.map(t => t.id === id ? { ...t, completed: !t.completed, status: 'pending' } : t));
+
+    await new Promise(r => setTimeout(r, 600 + Math.random() * 400));
+
+    if (Math.random() < failRate) {
+      // Откат при ошибке
+      setTodos(prev => prev.map(t => t.id === id ? { ...t, completed: todo.completed, status: 'error' } : t));
+      setTimeout(() => setTodos(prev => prev.map(t => t.id === id ? { ...t, status: 'ok' } : t)), 1500);
+    } else {
+      setTodos(prev => prev.map(t => t.id === id ? { ...t, status: 'ok' } : t));
+    }
+  };
+
+  const addTodo = async () => {
+    if (!newText.trim()) return;
+    const tempId = -Date.now();
+    const text = newText;
+    setNewText('');
+    setTodos(prev => [...prev, { id: tempId, text, completed: false, status: 'pending' }]);
+
+    await new Promise(r => setTimeout(r, 800));
+
+    if (Math.random() < failRate) {
+      setTodos(prev => prev.filter(t => t.id !== tempId));
+    } else {
+      setTodos(prev => prev.map(t => t.id === tempId ? { ...t, id: Date.now(), status: 'ok' } : t));
+    }
+  };
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>
+      <div style={{ background: BG, borderRadius: '6px', padding: '10px', marginBottom: '10px', fontSize: '11px', color: MUTED }}>
+        // Оптимистичное обновление + rollback при ошибке
+      </div>
+
+      <div style={{ marginBottom: '8px' }}>
+        <div style={{ color: MUTED, fontSize: '11px', marginBottom: '4px' }}>Вероятность ошибки сервера: {Math.round(failRate * 100)}%</div>
+        <input type="range" min="0" max="1" step="0.1" value={failRate}
+          onChange={e => setFailRate(Number(e.target.value))}
+          style={{ width: '100%', accentColor: SOLID_BLUE }} />
+      </div>
+
+      <div style={{ marginBottom: '8px', display: 'flex', gap: '6px' }}>
+        <input value={newText} onChange={e => setNewText(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && addTodo()}
+          placeholder="Новая задача..."
+          style={{ flex: 1, background: BG, color: TEXT, border: \`1px solid \${BORDER}\`, borderRadius: '6px', padding: '6px', fontFamily: 'monospace', fontSize: '12px' }} />
+        <button onClick={addTodo} style={btnStyle(SOLID_BLUE)}>+</button>
+      </div>
+
+      <div style={{ maxHeight: '160px', overflow: 'auto' }}>
+        {todos.map(todo => (
+          <div key={todo.id} onClick={() => toggle(todo.id)}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 10px', background: CARD, borderRadius: '8px', marginBottom: '4px', cursor: todo.status === 'pending' ? 'wait' : 'pointer', border: \`1px solid \${todo.status === 'error' ? RED : todo.status === 'pending' ? ORANGE : BORDER}44\`, opacity: todo.status === 'pending' ? 0.7 : 1, transition: 'all 0.2s' }}>
+            <span style={{ color: todo.status === 'pending' ? ORANGE : todo.status === 'error' ? RED : todo.completed ? GREEN : MUTED, fontSize: '14px' }}>
+              {todo.status === 'pending' ? '⟳' : todo.status === 'error' ? '✗' : todo.completed ? '✓' : '○'}
+            </span>
+            <span style={{ flex: 1, color: todo.completed && todo.status !== 'error' ? MUTED : TEXT, textDecoration: todo.completed && todo.status !== 'error' ? 'line-through' : 'none', fontSize: '12px' }}>{todo.text}</span>
+            {todo.status === 'pending' && <span style={{ color: ORANGE, fontSize: '10px' }}>сохраняем...</span>}
+            {todo.status === 'error' && <span style={{ color: RED, fontSize: '10px' }}>откат!</span>}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: '8px', padding: '6px', background: GREEN + '11', borderRadius: '6px', border: \`1px solid \${GREEN}33\`, color: GREEN, fontSize: '11px' }}>
+        ✅ Плюс: мгновенный UX, откат при ошибке<br/>
+        ⚠️ Минус: сложнее реализация и тестирование
+      </div>
+    </div>
+  );
+}
+
+// Helpers
+function btnStyle(bg: string, color = '#fff', full = false): React.CSSProperties {
+  return { background: bg, color, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontSize: '13px', ...(full ? { flex: 1 } : {}) };
+}
+
+// ===== Main =====
+const PATTERNS: { id: Pattern; label: string; icon: string; desc: string }[] = [
+  { id: 'local', label: 'Локальное', icon: '📍', desc: 'createSignal внутри компонента' },
+  { id: 'lifted', label: 'Поднятое', icon: '⬆️', desc: 'Сигнал в родителе' },
+  { id: 'service', label: 'Сервис', icon: '🌐', desc: 'Синглтон-стор' },
+  { id: 'optimistic', label: 'Оптимист.', icon: '⚡', desc: 'Мгновенный UI + откат' },
+];
+
+export default function App() {
+  const [pattern, setPattern] = useState<Pattern>('local');
+
+  return (
+    <div style={{ background: BG, color: TEXT, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ maxWidth: '520px', margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold', color: SOLID_BLUE }}>🏗️ Паттерны состояния</div>
+          <div style={{ color: MUTED, fontSize: '12px', marginTop: '4px' }}>Solid.js State Management Patterns</div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginBottom: '16px' }}>
+          {PATTERNS.map(p => (
+            <button key={p.id} onClick={() => setPattern(p.id)}
+              style={{ background: pattern === p.id ? SOLID_BLUE : CARD, color: pattern === p.id ? '#fff' : MUTED, border: \`1px solid \${pattern === p.id ? SOLID_BLUE : BORDER}\`, borderRadius: '10px', padding: '10px', cursor: 'pointer', textAlign: 'left' }}>
+              <div style={{ fontSize: '16px', marginBottom: '2px' }}>{p.icon} {p.label}</div>
+              <div style={{ fontSize: '10px', opacity: 0.8 }}>{p.desc}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: CARD, borderRadius: '12px', padding: '16px', border: \`1px solid \${BORDER}\` }}>
+          {pattern === 'local' && <LocalStateDemo />}
+          {pattern === 'lifted' && <LiftedStateDemo />}
+          {pattern === 'service' && <ServiceStoreDemo />}
+          {pattern === 'optimistic' && <OptimisticDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }}
+/>

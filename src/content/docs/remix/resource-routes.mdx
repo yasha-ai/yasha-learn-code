@@ -1,0 +1,285 @@
+---
+title: "14. Resource Routes"
+sidebar:
+  order: 14
+---
+import { Playground } from '@components/Playground'
+
+
+Resource Routes — это маршруты без UI-компонента. Они возвращают данные (JSON, PDF, изображения) или обрабатывают запросы (webhooks). Идеально для создания API-эндпоинтов.
+
+## Что такое Resource Route?
+
+Обычный маршрут экспортирует `default` компонент. Resource Route — только `loader` или `action`, без компонента:
+
+```typescript
+// app/routes/api.users.ts
+import { json } from "@remix-run/node";
+
+export async function loader() {
+  const users = await db.user.findMany();
+  return json(users);  // → GET /api/users → JSON
+}
+
+export async function action({ request }) {
+  if (request.method === "POST") {
+    const body = await request.json();
+    const user = await db.user.create({ data: body });
+    return json(user, { status: 201 });
+  }
+  return json({ error: "Method not allowed" }, { status: 405 });
+}
+// НЕТ export default — это делает маршрут "ресурсным"
+```
+
+## JSON API
+
+```typescript
+// app/routes/api.products.ts
+export async function loader({ request }) {
+  const url = new URL(request.url);
+  const category = url.searchParams.get("category");
+  const page = Number(url.searchParams.get("page") ?? "1");
+
+  const products = await db.product.findMany({
+    where: category ? { category } : undefined,
+    skip: (page - 1) * 20,
+    take: 20,
+  });
+
+  return json({ products, page });
+}
+```
+
+## Файловые эндпоинты
+
+```typescript
+// app/routes/download.$filename.ts
+import { createReadStream } from "fs";
+
+export async function loader({ params }) {
+  const file = await getFile(params.filename);
+
+  if (!file) {
+    throw new Response("File not found", { status: 404 });
+  }
+
+  return new Response(file.buffer, {
+    headers: {
+      "Content-Type": file.mimeType,
+      "Content-Disposition": \`attachment; filename="\${params.filename}"\`,
+    },
+  });
+}
+```
+
+## Webhooks
+
+```typescript
+// app/routes/webhooks.stripe.ts
+export async function action({ request }) {
+  const signature = request.headers.get("stripe-signature");
+  const body = await request.text();
+
+  const event = stripe.webhooks.constructEvent(
+    body, signature!, process.env.STRIPE_WEBHOOK_SECRET!
+  );
+
+  switch (event.type) {
+    case "payment_intent.succeeded":
+      await handlePaymentSuccess(event.data.object);
+      break;
+    case "customer.subscription.deleted":
+      await handleSubscriptionCanceled(event.data.object);
+      break;
+  }
+
+  return json({ received: true });
+}
+```
+
+## Server-Sent Events (SSE)
+
+```typescript
+// app/routes/events.ts
+export async function loader({ request }) {
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+
+      const interval = setInterval(() => {
+        controller.enqueue(
+          encoder.encode(\`data: \${JSON.stringify({ time: new Date() })}\n\n\`)
+        );
+      }, 1000);
+
+      request.signal.addEventListener("abort", () => {
+        clearInterval(interval);
+        controller.close();
+      });
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+    },
+  });
+}
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+const WARN = "#f59e0b";
+
+type Endpoint = {
+  method: "GET" | "POST" | "DELETE";
+  path: string;
+  desc: string;
+  response: unknown;
+};
+
+const endpoints: Endpoint[] = [
+  {
+    method: "GET",
+    path: "/api/users",
+    desc: "Список пользователей",
+    response: [
+      { id: 1, name: "Алексей", role: "admin" },
+      { id: 2, name: "Мария", role: "user" },
+    ],
+  },
+  {
+    method: "GET",
+    path: "/api/users?role=admin",
+    desc: "Фильтрация по роли",
+    response: [{ id: 1, name: "Алексей", role: "admin" }],
+  },
+  {
+    method: "POST",
+    path: "/api/users",
+    desc: "Создать пользователя",
+    response: { id: 3, name: "Дмитрий", role: "user", createdAt: new Date().toISOString() },
+  },
+  {
+    method: "GET",
+    path: "/api/export.csv",
+    desc: "Скачать CSV файл",
+    response: "id,name,role\n1,Алексей,admin\n2,Мария,user",
+  },
+  {
+    method: "POST",
+    path: "/webhooks/stripe",
+    desc: "Stripe webhook",
+    response: { received: true },
+  },
+];
+
+const methodColors: Record<string, string> = {
+  GET: SUCCESS,
+  POST: ACCENT,
+  DELETE: ERROR,
+};
+
+export default function App() {
+  const [selected, setSelected] = useState<Endpoint | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [response, setResponse] = useState<{ status: number; data: unknown } | null>(null);
+
+  const call = (ep: Endpoint) => {
+    setSelected(ep);
+    setLoading(true);
+    setResponse(null);
+
+    setTimeout(() => {
+      setLoading(false);
+      setResponse({
+        status: ep.method === "POST" ? 201 : 200,
+        data: ep.response,
+      });
+    }, 700);
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>🔌 Resource Routes</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>Нажми на эндпоинт для симуляции запроса</p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", maxWidth: "900px" }}>
+        <div>
+          <div style={{ fontSize: "12px", color: MUTED, marginBottom: "8px", textTransform: "uppercase" }}>Эндпоинты</div>
+          {endpoints.map((ep, i) => (
+            <div
+              key={i}
+              onClick={() => call(ep)}
+              style={{
+                background: selected === ep ? CARD : "#0f1e2e",
+                border: \`1px solid \${selected === ep ? ACCENT + "44" : "#1e3a5f"}\`,
+                borderRadius: "10px",
+                padding: "12px 16px",
+                cursor: "pointer",
+                marginBottom: "8px",
+                transition: "all 0.15s",
+              }}
+            >
+              <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                <span style={{
+                  padding: "2px 8px",
+                  borderRadius: "4px",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  background: methodColors[ep.method] + "22",
+                  color: methodColors[ep.method],
+                  fontFamily: "monospace",
+                }}>
+                  {ep.method}
+                </span>
+                <span style={{ fontFamily: "monospace", fontSize: "13px", color: TEXT }}>{ep.path}</span>
+              </div>
+              <div style={{ color: MUTED, fontSize: "12px", marginTop: "4px" }}>{ep.desc}</div>
+            </div>
+          ))}
+        </div>
+
+        <div>
+          <div style={{ fontSize: "12px", color: MUTED, marginBottom: "8px", textTransform: "uppercase" }}>Ответ</div>
+          <div style={{ background: CARD, borderRadius: "12px", padding: "20px", minHeight: "200px" }}>
+            {!selected && <p style={{ color: MUTED }}>Выбери эндпоинт слева</p>}
+            {selected && loading && (
+              <div style={{ color: ACCENT }}>
+                ⏳ {selected.method} {selected.path}...
+              </div>
+            )}
+            {selected && !loading && response && (
+              <>
+                <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "12px" }}>
+                  <span style={{ color: methodColors[selected.method], fontFamily: "monospace", fontWeight: 700 }}>
+                    {selected.method} {selected.path}
+                  </span>
+                  <span style={{ background: SUCCESS+"22", color: SUCCESS, padding: "2px 8px", borderRadius: "4px", fontSize: "11px" }}>
+                    {response.status}
+                  </span>
+                </div>
+                <pre style={{ margin: 0, fontFamily: "monospace", fontSize: "11px", color: TEXT, overflow: "auto", background: BG, padding: "12px", borderRadius: "8px" }}>
+                  {typeof response.data === "string"
+                    ? response.data
+                    : JSON.stringify(response.data, null, 2)}
+                </pre>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

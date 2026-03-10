@@ -1,0 +1,506 @@
+---
+title: "18. RxJS как стейт-менеджер"
+sidebar:
+  order: 19
+---
+import { Playground } from '@components/Playground'
+
+
+## RxJS как стейт-менеджер 🏪
+
+Привет! Яша здесь. Redux тяжёлый? Context API теряет в производительности? MobX магия? Попробуй BehaviorSubject — минимальный, предсказуемый и мощный паттерн управления состоянием на чистом RxJS. Никаких дополнительных библиотек!
+
+---
+
+### 1. 🏗️ Паттерн BehaviorSubject Store
+
+Идея проста: `BehaviorSubject` хранит текущее состояние и уведомляет всех подписчиков об изменениях:
+
+```typescript
+import { BehaviorSubject, Observable } from 'rxjs';
+import { map, distinctUntilChanged, pluck } from 'rxjs/operators';
+
+// Тип стейта
+interface AppState {
+  todos: Todo[];
+  filter: 'all' | 'active' | 'done';
+  loading: boolean;
+}
+
+// Действия (типизированный union)
+type Action =
+  | { type: 'ADD_TODO';    payload: string }
+  | { type: 'TOGGLE_TODO'; payload: number }
+  | { type: 'REMOVE_TODO'; payload: number }
+  | { type: 'SET_FILTER';  payload: AppState['filter'] }
+  | { type: 'SET_LOADING'; payload: boolean };
+
+// Начальное состояние
+const initialState: AppState = {
+  todos: [],
+  filter: 'all',
+  loading: false,
+};
+
+// Сам стор
+class TodoStore {
+  private state$ = new BehaviorSubject<AppState>(initialState);
+  private dispatch$ = new Subject<Action>();
+
+  constructor() {
+    // Редьюсер — обрабатывает действия через scan()
+    this.dispatch$.pipe(
+      scan(this.reducer, initialState)
+    ).subscribe(this.state$);
+  }
+
+  // Редьюсер — чистая функция, как в Redux
+  private reducer(state: AppState, action: Action): AppState {
+    switch (action.type) {
+      case 'ADD_TODO':
+        return {
+          ...state,
+          todos: [
+            ...state.todos,
+            { id: Date.now(), text: action.payload, done: false }
+          ],
+        };
+      case 'TOGGLE_TODO':
+        return {
+          ...state,
+          todos: state.todos.map(t =>
+            t.id === action.payload ? { ...t, done: !t.done } : t
+          ),
+        };
+      case 'REMOVE_TODO':
+        return {
+          ...state,
+          todos: state.todos.filter(t => t.id !== action.payload),
+        };
+      case 'SET_FILTER':
+        return { ...state, filter: action.payload };
+      default:
+        return state;
+    }
+  }
+
+  // Публичный API
+  dispatch(action: Action) {
+    this.dispatch$.next(action);
+  }
+
+  // Селекторы — производные Observable
+  get todos$(): Observable<Todo[]> {
+    return this.state$.pipe(
+      map(s => s.todos),
+      distinctUntilChanged()
+    );
+  }
+
+  get filteredTodos$(): Observable<Todo[]> {
+    return this.state$.pipe(
+      map(s => {
+        if (s.filter === 'active') return s.todos.filter(t => !t.done);
+        if (s.filter === 'done')   return s.todos.filter(t =>  t.done);
+        return s.todos;
+      }),
+      distinctUntilChanged()
+    );
+  }
+
+  get completedCount$(): Observable<number> {
+    return this.todos$.pipe(map(todos => todos.filter(t => t.done).length));
+  }
+}
+
+export const store = new TodoStore();
+```
+
+---
+
+### 2. ⚡ Сравнение с Redux
+
+| Концепция | Redux | RxJS Store |
+|-----------|-------|------------|
+| Хранилище | `createStore(reducer)` | `new BehaviorSubject(state)` |
+| Действия | `dispatch(action)` | `subject.next(action)` |
+| Редьюсер | `(state, action) => state` | `scan((state, action) => state)` |
+| Селекторы | `createSelector` | `pipe(map(...), distinctUntilChanged())` |
+| Middleware | `applyMiddleware(thunk)` | `pipe(mergeMap(...))` |
+| DevTools | Redux DevTools | `tap(state => console.log(state))` |
+| Размер | ~7KB | 0KB (уже есть!) |
+
+Главное отличие: в Redux стор — это синхронный объект. В RxJS — это **реактивный поток**. Это значит, что компоненты могут подписываться на _конкретные части_ стейта, а не на весь стор целиком.
+
+---
+
+### 3. 🔌 Подключение к React
+
+```typescript
+import { useEffect, useState, useRef, useMemo } from 'react';
+import { Observable, BehaviorSubject } from 'rxjs';
+import { distinctUntilChanged, map } from 'rxjs/operators';
+
+// Хук для подключения к BehaviorSubject стору
+function useSelector<T, R>(
+  store: BehaviorSubject<T>,
+  selector: (state: T) => R
+): R {
+  const selected$ = useMemo(
+    () => store.pipe(map(selector), distinctUntilChanged()),
+    [store, selector]
+  );
+
+  const [value, setValue] = useState<R>(() => selector(store.getValue()));
+
+  useEffect(() => {
+    const sub = selected$.subscribe(setValue);
+    return () => sub.unsubscribe();
+  }, [selected$]);
+
+  return value;
+}
+
+// Компонент использует только нужный срез стейта
+function TodoCounter() {
+  const total    = useSelector(todoStore, s => s.todos.length);
+  const done     = useSelector(todoStore, s => s.todos.filter(t => t.done).length);
+  const loading  = useSelector(todoStore, s => s.loading);
+
+  return (
+    <div>
+      {loading ? 'Загрузка...' : `${done}/${total} выполнено`}
+    </div>
+  );
+}
+```
+
+`distinctUntilChanged()` — ключевой оператор: компонент не перерендерится, если его срез стейта не изменился.
+
+---
+
+### 4. 🌊 Асинхронные действия через потоки
+
+В отличие от Redux Thunk, в RxJS асинхронность — это просто операторы:
+
+```typescript
+import { Subject, merge, from } from 'rxjs';
+import { mergeMap, map, catchError, startWith } from 'rxjs/operators';
+
+// Действия с эффектами
+const loadTodos$ = new Subject<void>();
+
+// "Эффект" — обрабатывает асинхронный экшен
+const todosEffect$ = loadTodos$.pipe(
+  mergeMap(() =>
+    from(fetch('/api/todos').then(r => r.json())).pipe(
+      map(todos => ({ type: 'LOAD_TODOS_SUCCESS' as const, payload: todos })),
+      startWith({ type: 'SET_LOADING' as const, payload: true }),
+      catchError(err => [{
+        type: 'LOAD_TODOS_ERROR' as const,
+        payload: err.message
+      }])
+    )
+  )
+);
+
+// Подписываемся и диспатчим результаты
+todosEffect$.subscribe(action => store.dispatch(action));
+
+// Вызвать загрузку:
+loadTodos$.next();
+```
+
+---
+
+### ⚠️ Типичные ошибки
+
+**Ошибка 1: Мутировать стейт напрямую**
+
+```typescript
+// ❌ Мутация — подписчики не получат обновление!
+const state = store.getValue();
+state.todos.push({ id: 1, text: 'task', done: false });
+store.next(state); // ссылка та же — distinctUntilChanged пропустит!
+
+// ✅ Всегда создавай новый объект
+store.next({
+  ...state,
+  todos: [...state.todos, { id: 1, text: 'task', done: false }],
+});
+```
+
+**Ошибка 2: Подписываться на весь стор без селектора**
+
+```typescript
+// ❌ Перерендер при ЛЮБОМ изменении стейта
+useEffect(() => {
+  const sub = appStore$.subscribe(state => setTodos(state.todos));
+  return () => sub.unsubscribe();
+}, []);
+
+// ✅ Только релевантные изменения
+useEffect(() => {
+  const sub = appStore$.pipe(
+    map(s => s.todos),
+    distinctUntilChanged()
+  ).subscribe(setTodos);
+  return () => sub.unsubscribe();
+}, []);
+```
+
+---
+
+### 🔗 Смотри также
+
+- [3. Subjects: горячие потоки](/rxjs/subjects/) — BehaviorSubject подробно
+- [18. Кастомные хуки с RxJS](/rxjs/react-hooks/) — хуки useSelector
+- [20. RxJS vs Effector](/rxjs/rxjs-effector/) — сравнение подходов
+- [21. RxJS + MobX](/rxjs/rxjs-mobx/) — MobX-подобные вычисляемые значения
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/store.ts": `import { BehaviorSubject, Subject } from 'rxjs';
+import { scan, map, distinctUntilChanged } from 'rxjs/operators';
+
+export interface Todo {
+  id: number;
+  text: string;
+  done: boolean;
+}
+
+export interface State {
+  todos: Todo[];
+  filter: 'all' | 'active' | 'done';
+  input: string;
+}
+
+export type Action =
+  | { type: 'ADD_TODO' }
+  | { type: 'TOGGLE_TODO'; id: number }
+  | { type: 'REMOVE_TODO'; id: number }
+  | { type: 'SET_FILTER';  filter: State['filter'] }
+  | { type: 'SET_INPUT';   text: string }
+  | { type: 'CLEAR_DONE' };
+
+const init: State = { todos: [], filter: 'all', input: '' };
+
+function reducer(state: State, action: Action): State {
+  switch (action.type) {
+    case 'ADD_TODO':
+      if (!state.input.trim()) return state;
+      return {
+        ...state,
+        todos: [...state.todos, { id: Date.now(), text: state.input.trim(), done: false }],
+        input: '',
+      };
+    case 'TOGGLE_TODO':
+      return { ...state, todos: state.todos.map(t => t.id === action.id ? { ...t, done: !t.done } : t) };
+    case 'REMOVE_TODO':
+      return { ...state, todos: state.todos.filter(t => t.id !== action.id) };
+    case 'SET_FILTER':
+      return { ...state, filter: action.filter };
+    case 'SET_INPUT':
+      return { ...state, input: action.text };
+    case 'CLEAR_DONE':
+      return { ...state, todos: state.todos.filter(t => !t.done) };
+    default:
+      return state;
+  }
+}
+
+// ── Стор ──────────────────────────────────────────────────────
+const dispatch$ = new Subject<Action>();
+export const store$ = new BehaviorSubject<State>(init);
+
+// scan() играет роль редьюсера
+dispatch$.pipe(scan(reducer, init)).subscribe(store$);
+
+export const dispatch = (action: Action) => dispatch$.next(action);
+
+// ── Селекторы ─────────────────────────────────────────────────
+export const filteredTodos$ = store$.pipe(
+  map(s => {
+    if (s.filter === 'active') return s.todos.filter(t => !t.done);
+    if (s.filter === 'done')   return s.todos.filter(t =>  t.done);
+    return s.todos;
+  }),
+  distinctUntilChanged((a, b) => JSON.stringify(a) === JSON.stringify(b))
+);
+
+export const stats$ = store$.pipe(
+  map(s => ({
+    total: s.todos.length,
+    done: s.todos.filter(t => t.done).length,
+    active: s.todos.filter(t => !t.done).length,
+  })),
+  distinctUntilChanged()
+);
+`,
+    "/App.tsx": `import { useState, useEffect, useMemo } from 'react';
+import { Observable } from 'rxjs';
+import { map, distinctUntilChanged } from 'rxjs/operators';
+import { store$, filteredTodos$, stats$, dispatch, Todo, State } from './store';
+
+// ── Хелпер-хук ────────────────────────────────────────────────
+function useStore<T>(obs$: Observable<T>, init: T): T {
+  const [v, set] = useState<T>(init);
+  useEffect(() => {
+    const sub = obs$.subscribe(set);
+    return () => sub.unsubscribe();
+  }, [obs$]);
+  return v;
+}
+
+// ── Компоненты ────────────────────────────────────────────────
+function TodoInput() {
+  const input = useStore(
+    useMemo(() => store$.pipe(map(s => s.input), distinctUntilChanged()), []),
+    ''
+  );
+  return (
+    <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+      <input
+        value={input}
+        onChange={e => dispatch({ type: 'SET_INPUT', text: e.target.value })}
+        onKeyDown={e => e.key === 'Enter' && dispatch({ type: 'ADD_TODO' })}
+        placeholder="Новая задача... (Enter)"
+        style={{
+          flex: 1, background: '#1a1a2e', border: '1px solid #333',
+          color: '#fff', padding: '8px 12px', borderRadius: 6, fontSize: 14,
+          outline: 'none'
+        }}
+      />
+      <button
+        onClick={() => dispatch({ type: 'ADD_TODO' })}
+        style={{
+          background: '#e94560', border: 'none', color: '#fff',
+          padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 14
+        }}
+      >
+        +
+      </button>
+    </div>
+  );
+}
+
+function FilterBar() {
+  const filter = useStore(
+    useMemo(() => store$.pipe(map(s => s.filter), distinctUntilChanged()), []),
+    'all' as State['filter']
+  );
+  const filters: Array<{ val: State['filter']; label: string }> = [
+    { val: 'all',    label: 'Все'      },
+    { val: 'active', label: 'Активные' },
+    { val: 'done',   label: 'Готово'   },
+  ];
+  return (
+    <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+      {filters.map(f => (
+        <button
+          key={f.val}
+          onClick={() => dispatch({ type: 'SET_FILTER', filter: f.val })}
+          style={{
+            background: filter === f.val ? '#e94560' : 'transparent',
+            border: '1px solid #e94560', color: filter === f.val ? '#fff' : '#e94560',
+            padding: '4px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12
+          }}
+        >
+          {f.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TodoList() {
+  const todos = useStore(filteredTodos$, []);
+  if (todos.length === 0)
+    return <div style={{ color: '#555', textAlign: 'center', padding: 24, fontSize: 13 }}>Нет задач 🎉</div>;
+
+  return (
+    <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+      {todos.map(todo => (
+        <li key={todo.id} style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: '#1a1a2e', padding: '8px 12px', borderRadius: 6, marginBottom: 6
+        }}>
+          <input
+            type="checkbox"
+            checked={todo.done}
+            onChange={() => dispatch({ type: 'TOGGLE_TODO', id: todo.id })}
+            style={{ cursor: 'pointer', accentColor: '#00ff88' }}
+          />
+          <span style={{
+            flex: 1, fontSize: 14,
+            textDecoration: todo.done ? 'line-through' : 'none',
+            color: todo.done ? '#555' : '#e0e0e0'
+          }}>
+            {todo.text}
+          </span>
+          <button
+            onClick={() => dispatch({ type: 'REMOVE_TODO', id: todo.id })}
+            style={{ background: 'none', border: 'none', color: '#e94560', cursor: 'pointer', fontSize: 16 }}
+          >
+            ×
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function StatsBar() {
+  const stats = useStore(stats$, { total: 0, done: 0, active: 0 });
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12, fontSize: 12, color: '#666' }}>
+      <span>Всего: <b style={{ color: '#aaa' }}>{stats.total}</b></span>
+      <span>Активных: <b style={{ color: '#f39c12' }}>{stats.active}</b></span>
+      <span>Готово: <b style={{ color: '#00ff88' }}>{stats.done}</b></span>
+      {stats.done > 0 && (
+        <button
+          onClick={() => dispatch({ type: 'CLEAR_DONE' })}
+          style={{ background: 'none', border: 'none', color: '#e94560', cursor: 'pointer', fontSize: 11 }}
+        >
+          Очистить готовые
+        </button>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <div style={{
+      background: '#0d0d1a', minHeight: '100vh', padding: 24,
+      fontFamily: 'system-ui, sans-serif', color: '#e0e0e0'
+    }}>
+      <h2 style={{ color: '#e94560', marginBottom: 4 }}>🏪 RxJS Store</h2>
+      <p style={{ color: '#888', fontSize: 12, marginBottom: 20 }}>
+        BehaviorSubject + scan() + селекторы = полноценный стейт-менеджер
+      </p>
+      <div style={{ maxWidth: 480, margin: '0 auto' }}>
+        <TodoInput />
+        <FilterBar />
+        <TodoList />
+        <StatsBar />
+      </div>
+      <div style={{ marginTop: 24, padding: 12, background: '#1a1a2e', borderRadius: 8, fontSize: 12, color: '#666' }}>
+        💡 Архитектура: <code style={{ color: '#f39c12' }}>dispatch$</code> → 
+        <code style={{ color: '#00ff88' }}> scan(reducer)</code> → 
+        <code style={{ color: '#e94560' }}> BehaviorSubject</code> → 
+        <code style={{ color: '#aaa' }}> селекторы → компоненты</code>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

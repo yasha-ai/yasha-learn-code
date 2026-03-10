@@ -1,0 +1,463 @@
+---
+title: "7. Real-time чат (практика)"
+sidebar:
+  order: 7
+---
+
+import { Playground } from "@components/Playground"
+
+Строим полноценный чат с Socket.io: комнаты, история, индикатор набора, онлайн-статус.
+
+## Архитектура
+
+```
+Клиент (React)          Сервер (Node.js + Socket.io)
+    │                         │
+    │── join-room ──────────→ │
+    │← message-history ───── │
+    │                         │
+    │── send-message ───────→ │
+    │← new-message ─────────→│ → broadcast всем в комнате
+    │                         │
+    │── typing ─────────────→ │
+    │← user-typing ─────────→│ → broadcast остальным
+    │                         │
+    │── disconnect ─────────→ │
+    │← user-left ───────────→│ → broadcast
+```
+
+## Сервер
+
+```javascript
+// server.js
+const express = require('express');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: { origin: 'http://localhost:3000', methods: ['GET', 'POST'] },
+});
+
+// In-memory хранилище (заменить на БД в продакшене)
+const rooms = new Map();     // roomId → { name, messages[], users{} }
+const userSockets = new Map(); // userId → socketId
+
+// Утилиты
+function getRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, {
+      id: roomId,
+      name: `Комната ${roomId}`,
+      messages: [],
+      typing: new Set(),
+    });
+  }
+  return rooms.get(roomId);
+}
+
+function addMessage(roomId, message) {
+  const room = getRoom(roomId);
+  room.messages.push(message);
+  // Хранить только последние 100 сообщений
+  if (room.messages.length > 100) {
+    room.messages = room.messages.slice(-100);
+  }
+  return message;
+}
+
+// Middleware: авторизация
+io.use((socket, next) => {
+  const { username, userId } = socket.handshake.auth;
+  if (!username || !userId) {
+    return next(new Error('Требуется username и userId'));
+  }
+  socket.data.username = username;
+  socket.data.userId = userId;
+  next();
+});
+
+io.on('connection', (socket) => {
+  const { username, userId } = socket.data;
+  userSockets.set(userId, socket.id);
+  
+  console.log(`Подключился: ${username} (${socket.id})`);
+
+  // Присоединиться к комнате
+  socket.on('join-room', ({ roomId }) => {
+    socket.join(roomId);
+    socket.data.roomId = roomId;
+
+    const room = getRoom(roomId);
+
+    // Отправить историю
+    socket.emit('message-history', room.messages.slice(-50));
+
+    // Список онлайн-пользователей в комнате
+    const onlineUsers = [];
+    io.sockets.adapter.rooms.get(roomId)?.forEach((socketId) => {
+      const s = io.sockets.sockets.get(socketId);
+      if (s) {
+        onlineUsers.push({
+          id: s.data.userId,
+          username: s.data.username,
+        });
+      }
+    });
+    io.to(roomId).emit('users-online', onlineUsers);
+
+    // Уведомить остальных
+    socket.to(roomId).emit('user-joined', {
+      userId,
+      username,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Отправить сообщение
+  socket.on('send-message', ({ text }, callback) => {
+    const { roomId, username, userId } = socket.data;
+
+    if (!roomId) {
+      return callback?.({ error: 'Не в комнате' });
+    }
+
+    if (!text?.trim()) {
+      return callback?.({ error: 'Пустое сообщение' });
+    }
+
+    const message = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      userId,
+      username,
+      text: text.trim(),
+      timestamp: new Date().toISOString(),
+    };
+
+    addMessage(roomId, message);
+
+    // Убрать из typing
+    const room = getRoom(roomId);
+    room.typing.delete(userId);
+    socket.to(roomId).emit('user-stopped-typing', { userId });
+
+    // Отправить всем в комнате
+    io.to(roomId).emit('new-message', message);
+
+    // Подтверждение отправителю
+    callback?.({ success: true, messageId: message.id });
+  });
+
+  // Индикатор набора текста
+  socket.on('typing', ({ isTyping }) => {
+    const { roomId, userId, username } = socket.data;
+    if (!roomId) return;
+
+    const room = getRoom(roomId);
+
+    if (isTyping) {
+      room.typing.add(userId);
+      socket.to(roomId).emit('user-typing', { userId, username });
+    } else {
+      room.typing.delete(userId);
+      socket.to(roomId).emit('user-stopped-typing', { userId });
+    }
+  });
+
+  // Прочитать сообщение
+  socket.on('read-message', ({ messageId }) => {
+    const { roomId, userId } = socket.data;
+    socket.to(roomId).emit('message-read', { messageId, userId });
+  });
+
+  // Отключение
+  socket.on('disconnect', (reason) => {
+    const { username, userId, roomId } = socket.data;
+    userSockets.delete(userId);
+
+    if (roomId) {
+      const room = getRoom(roomId);
+      room.typing.delete(userId);
+      socket.to(roomId).emit('user-left', {
+        userId,
+        username,
+        reason,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Обновить список онлайн
+      const onlineUsers = [];
+      io.sockets.adapter.rooms.get(roomId)?.forEach((socketId) => {
+        const s = io.sockets.sockets.get(socketId);
+        if (s) onlineUsers.push({ id: s.data.userId, username: s.data.username });
+      });
+      io.to(roomId).emit('users-online', onlineUsers);
+    }
+
+    console.log(`Отключился: ${username} (${reason})`);
+  });
+});
+
+httpServer.listen(3001, () => console.log('Сервер: http://localhost:3001'));
+```
+
+## React клиент
+
+```jsx
+// hooks/useChat.js
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { io } from 'socket.io-client';
+
+export function useChat({ roomId, userId, username }) {
+  const socketRef = useRef(null);
+  const [messages, setMessages] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [typingUsers, setTypingUsers] = useState([]);
+  const [connected, setConnected] = useState(false);
+  const typingTimerRef = useRef(null);
+
+  useEffect(() => {
+    const socket = io('http://localhost:3001', {
+      auth: { userId, username },
+    });
+
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      setConnected(true);
+      socket.emit('join-room', { roomId });
+    });
+
+    socket.on('disconnect', () => setConnected(false));
+
+    socket.on('message-history', (history) => {
+      setMessages(history);
+    });
+
+    socket.on('new-message', (message) => {
+      setMessages((prev) => [...prev, message]);
+    });
+
+    socket.on('users-online', (onlineUsers) => {
+      setUsers(onlineUsers);
+    });
+
+    socket.on('user-joined', ({ username }) => {
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now(), type: 'system', text: `${username} вошёл в чат` },
+      ]);
+    });
+
+    socket.on('user-left', ({ username }) => {
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now(), type: 'system', text: `${username} вышел из чата` },
+      ]);
+    });
+
+    socket.on('user-typing', ({ userId: uid, username: uname }) => {
+      setTypingUsers((prev) => {
+        if (prev.find((u) => u.id === uid)) return prev;
+        return [...prev, { id: uid, username: uname }];
+      });
+    });
+
+    socket.on('user-stopped-typing', ({ userId: uid }) => {
+      setTypingUsers((prev) => prev.filter((u) => u.id !== uid));
+    });
+
+    return () => socket.disconnect();
+  }, [roomId, userId, username]);
+
+  const sendMessage = useCallback((text) => {
+    return new Promise((resolve, reject) => {
+      socketRef.current?.timeout(5000).emit('send-message', { text }, (err, res) => {
+        if (err || res?.error) reject(err || new Error(res.error));
+        else resolve(res);
+      });
+    });
+  }, []);
+
+  const sendTyping = useCallback((isTyping) => {
+    if (isTyping) {
+      socketRef.current?.emit('typing', { isTyping: true });
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = setTimeout(() => {
+        socketRef.current?.emit('typing', { isTyping: false });
+      }, 3000);
+    } else {
+      clearTimeout(typingTimerRef.current);
+      socketRef.current?.emit('typing', { isTyping: false });
+    }
+  }, []);
+
+  return { messages, users, typingUsers, connected, sendMessage, sendTyping };
+}
+
+// components/Chat.jsx
+import { useState, useRef, useEffect } from 'react';
+import { useChat } from '../hooks/useChat';
+
+export function Chat({ roomId, userId, username }) {
+  const [inputText, setInputText] = useState('');
+  const messagesEndRef = useRef(null);
+  const { messages, users, typingUsers, connected, sendMessage, sendTyping } = useChat({
+    roomId, userId, username,
+  });
+
+  // Автоскролл
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const handleSend = async () => {
+    if (!inputText.trim()) return;
+    try {
+      await sendMessage(inputText);
+      setInputText('');
+    } catch (err) {
+      alert('Ошибка отправки: ' + err.message);
+    }
+  };
+
+  const handleInputChange = (e) => {
+    setInputText(e.target.value);
+    sendTyping(true);
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  return (
+    <div className="chat">
+      <div className="status">
+        {connected ? '🟢 Подключён' : '🔴 Отключён'}
+        <span>Онлайн: {users.length}</span>
+      </div>
+
+      <div className="messages">
+        {messages.map((msg) =>
+          msg.type === 'system' ? (
+            <div key={msg.id} className="system-message">{msg.text}</div>
+          ) : (
+            <div key={msg.id} className={`message ${msg.userId === userId ? 'own' : ''}`}>
+              <span className="author">{msg.username}</span>
+              <span className="text">{msg.text}</span>
+              <span className="time">
+                {new Date(msg.timestamp).toLocaleTimeString()}
+              </span>
+            </div>
+          )
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {typingUsers.length > 0 && (
+        <div className="typing">
+          {typingUsers.map((u) => u.username).join(', ')} печатает...
+        </div>
+      )}
+
+      <div className="input-area">
+        <textarea
+          value={inputText}
+          onChange={handleInputChange}
+          onKeyPress={handleKeyPress}
+          placeholder="Напишите сообщение..."
+          disabled={!connected}
+        />
+        <button onClick={handleSend} disabled={!connected || !inputText.trim()}>
+          Отправить
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+## Задания
+
+1. Добавь поддержку нескольких комнат (переключение между ними)
+2. Реализуй отображение статуса "прочитано" (двойные галочки)
+3. Добавь эмодзи-реакции на сообщения
+4. Сохраняй историю в SQLite через Prisma
+
+## Итог
+
+Полноценный чат — это комнаты, история, typing indicator, онлайн-статус. Всё это на Socket.io реализуется чисто и читаемо. В следующем уроке — push-уведомления для пользователей вне чата.
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState, useRef, useEffect } from "react";
+
+export default function App() {
+  const [messages, setMessages] = useState([
+    { user: "Алиса", text: "Привет! Как дела?", time: "12:01" },
+    { user: "Боб", text: "Отлично! Учу WebSockets", time: "12:02" },
+  ]);
+  const [input, setInput] = useState("");
+  const [typing, setTyping] = useState(false);
+  const [user] = useState("Ты");
+  const bottomRef = useRef(null);
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  const send = () => {
+    if (!input.trim()) return;
+    setMessages(prev => [...prev, { user, text: input, time: new Date().toLocaleTimeString().slice(0,5) }]);
+    const msg = input;
+    setInput("");
+    // Simulate typing indicator + response
+    setTyping(true);
+    setTimeout(() => {
+      setTyping(false);
+      const responses = ["Круто!", "Интересно 🤔", "Согласен!", "Расскажи подробнее", "👍"];
+      setMessages(prev => [...prev, {
+        user: "Алиса", text: responses[Math.floor(Math.random() * responses.length)],
+        time: new Date().toLocaleTimeString().slice(0,5)
+      }]);
+    }, 1200);
+  };
+
+  return (
+    <div style={{ fontFamily: "sans-serif", padding: 16, maxWidth: 400 }}>
+      <h3 style={{ margin: "0 0 12px" }}>💬 Real-time чат</h3>
+      <div style={{ background: "#0f172a", borderRadius: 8, padding: 12, height: 200, overflowY: "auto", marginBottom: 8 }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{ marginBottom: 6, textAlign: m.user === user ? "right" : "left" }}>
+            <div style={{ display: "inline-block", padding: "6px 10px", borderRadius: 8,
+              background: m.user === user ? "#3b82f6" : "#1e293b", color: "#e2e8f0", fontSize: 13, maxWidth: "80%" }}>
+              <div style={{ fontSize: 10, color: "#94a3b8" }}>{m.user} · {m.time}</div>
+              {m.text}
+            </div>
+          </div>
+        ))}
+        {typing && <div style={{ color: "#94a3b8", fontSize: 12, fontStyle: "italic" }}>Алиса печатает...</div>}
+        <div ref={bottomRef} />
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()}
+          placeholder="Сообщение..."
+          style={{ flex: 1, padding: "8px 12px", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6 }} />
+        <button onClick={send}
+          style={{ padding: "8px 16px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}>→</button>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

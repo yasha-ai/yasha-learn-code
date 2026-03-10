@@ -1,0 +1,282 @@
+---
+title: "2. SOLID: Single Responsibility"
+sidebar:
+  order: 2
+---
+import { Playground } from '@components/Playground'
+
+## Design Patterns. Урок: SOLID — Single Responsibility Principle
+
+SOLID — это аббревиатура из пяти принципов, которые делают объектно-ориентированный код гибким и поддерживаемым. Автор — Роберт Мартин, популяризировал — Майкл Фезерс.
+
+**SRP** (Single Responsibility Principle) — **Принцип единственной ответственности**.
+
+> Класс должен иметь только одну причину для изменения.
+
+---
+
+### Что это значит на практике?
+
+Если у класса есть несколько причин для изменения — он делает слишком много. Представь отдел в компании: бухгалтерия считает деньги, HR нанимает людей. Если один человек отвечает и за бухгалтерию, и за HR — это проблема. Любое изменение в одной области затрагивает другую.
+
+```typescript
+// ❌ Нарушение SRP — класс делает три вещи:
+// 1. Хранит данные пользователя
+// 2. Валидирует данные
+// 3. Сохраняет в базу данных
+class User {
+  name: string;
+  email: string;
+
+  constructor(name: string, email: string) {
+    this.name = name;
+    this.email = email;
+  }
+
+  validate(): boolean {
+    return this.name.length > 0 && this.email.includes('@');
+  }
+
+  saveToDatabase(): void {
+    // SQL запрос прямо в классе пользователя?!
+    db.query(`INSERT INTO users (name, email) VALUES ('${this.name}', '${this.email}')`);
+  }
+
+  sendWelcomeEmail(): void {
+    emailService.send(this.email, 'Добро пожаловать!');
+  }
+}
+```
+
+Почему это плохо? Если изменится структура базы данных — меняем класс `User`. Если изменится логика валидации — меняем класс `User`. Если изменится шаблон email — снова меняем `User`. Три разные причины для изменения одного класса.
+
+---
+
+### Правильный подход: разделение ответственностей
+
+```typescript
+// ✅ Каждый класс имеет одну ответственность
+
+// Модель данных — только данные
+class User {
+  constructor(
+    public readonly name: string,
+    public readonly email: string,
+  ) {}
+}
+
+// Валидация — только валидация
+class UserValidator {
+  validate(user: User): ValidationResult {
+    const errors: string[] = [];
+    
+    if (!user.name || user.name.length < 2) {
+      errors.push('Name must be at least 2 characters');
+    }
+    if (!user.email || !user.email.includes('@')) {
+      errors.push('Email is invalid');
+    }
+
+    return { isValid: errors.length === 0, errors };
+  }
+}
+
+// Репозиторий — только работа с БД
+class UserRepository {
+  async save(user: User): Promise<void> {
+    await db.query(
+      'INSERT INTO users (name, email) VALUES ($1, $2)',
+      [user.name, user.email]
+    );
+  }
+
+  async findById(id: string): Promise<User | null> {
+    const row = await db.query('SELECT * FROM users WHERE id = $1', [id]);
+    return row ? new User(row.name, row.email) : null;
+  }
+}
+
+// Email сервис — только отправка писем
+class UserNotificationService {
+  async sendWelcomeEmail(user: User): Promise<void> {
+    await emailService.send({
+      to: user.email,
+      subject: 'Добро пожаловать!',
+      template: 'welcome',
+      data: { name: user.name },
+    });
+  }
+}
+
+// Сервис — оркестрация
+class UserRegistrationService {
+  constructor(
+    private validator: UserValidator,
+    private repository: UserRepository,
+    private notifications: UserNotificationService,
+  ) {}
+
+  async register(name: string, email: string): Promise<User> {
+    const user = new User(name, email);
+    
+    const validation = this.validator.validate(user);
+    if (!validation.isValid) {
+      throw new ValidationError(validation.errors);
+    }
+
+    await this.repository.save(user);
+    await this.notifications.sendWelcomeEmail(user);
+    
+    return user;
+  }
+}
+```
+
+---
+
+### Признаки нарушения SRP
+
+Как понять, что класс нарушает SRP:
+
+1. **Название включает «И»**: `UserManagerAndEmailSender`, `DataFetcherAndProcessor`
+2. **Класс > 200-300 строк** — вероятно, слишком много обязанностей
+3. **Изменения в одной части ломают другую** — они не должны быть связаны
+4. **Тесты приходится писать для очень разных сценариев** в одном тест-файле
+5. **Комментарии типа «// --- Email section ---»** — явное разделение ответственностей внутри одного класса
+
+---
+
+### SRP не означает «один метод»
+
+Распространённое заблуждение: SRP = один метод на класс. Нет. Класс может иметь много методов — главное чтобы все они служили одной цели.
+
+```typescript
+// Все методы UserRepository служат одной цели — работе с данными пользователей
+class UserRepository {
+  async findById(id: string): Promise<User> { ... }
+  async findByEmail(email: string): Promise<User> { ... }
+  async save(user: User): Promise<void> { ... }
+  async update(user: User): Promise<void> { ... }
+  async delete(id: string): Promise<void> { ... }
+  async findAll(filter?: UserFilter): Promise<User[]> { ... }
+}
+```
+
+Это нормально — все методы про «хранение и получение пользователей».
+
+---
+
+### SRP в WordPress плагинах
+
+```php
+// ❌ Плагин-монстр который делает всё
+class MyPlugin {
+  public function register_post_type() { ... }
+  public function send_notification_email() { ... }
+  public function process_payment() { ... }
+  public function generate_pdf() { ... }
+  public function sync_with_crm() { ... }
+}
+
+// ✅ Разделённые классы
+class PostTypeRegistrar {
+  public function register() { ... }
+}
+
+class NotificationService {
+  public function sendEmail(User $user, string $message): void { ... }
+}
+
+class PaymentProcessor {
+  public function process(Order $order): PaymentResult { ... }
+}
+```
+
+---
+
+### Когда НЕ нужно разделять
+
+SRP — не оправдание для создания 100 крошечных классов. Чрезмерное дробление тоже вредит:
+- Если поведение всегда меняется вместе — держи его вместе
+- Не создавай отдельный класс для одной строки кода
+- Ориентируйся на бизнес-логику, а не на технические детали
+
+---
+
+### Практические задания
+
+1. Найди в своём проекте самый большой класс/файл. Перечисли его ответственности. Можно ли разделить?
+
+2. Рефактори следующий класс согласно SRP:
+```typescript
+class BlogPost {
+  title: string;
+  content: string;
+  authorId: string;
+
+  renderToHtml(): string { /* конвертация в HTML */ }
+  saveToDatabase(): void { /* SQL запрос */ }
+  generateSlug(): string { /* создание URL slug */ }
+  countWords(): number { /* подсчёт слов */ }
+  sendToRSSFeed(): void { /* публикация в RSS */ }
+}
+```
+
+3. Создай систему обработки заказов с разделёнными классами: `Order`, `OrderValidator`, `OrderRepository`, `OrderNotificationService`, `OrderService`.
+
+4. Напиши unit-тест для `UserValidator` из примера выше. Обрати внимание насколько легко тестировать изолированный класс.
+
+5. Прочитай статью о SRP на [Refactoring Guru](https://refactoring.guru/ru/solid/single-responsibility) и найди ещё 2 признака нарушения принципа.
+
+---
+
+### Playground: SRP в действии
+
+<Playground client:visible template="vanilla" files={{ '/index.js': `// SRP: каждый класс — одна ответственность
+
+class User {
+  constructor(name, email) {
+    this.name = name;
+    this.email = email;
+  }
+}
+
+class UserValidator {
+  validate(user) {
+    const errors = [];
+    if (!user.name || user.name.length < 2) errors.push("Name too short");
+    if (!user.email || !user.email.includes("@")) errors.push("Invalid email");
+    return { isValid: errors.length === 0, errors };
+  }
+}
+
+class UserRepository {
+  constructor() { this.users = []; }
+  save(user) { this.users.push(user); }
+  findAll() { return this.users; }
+}
+
+// Orchestration service
+class UserService {
+  constructor(validator, repo) {
+    this.validator = validator;
+    this.repo = repo;
+  }
+  register(name, email) {
+    const user = new User(name, email);
+    const result = this.validator.validate(user);
+    if (!result.isValid) throw new Error(result.errors.join(", "));
+    this.repo.save(user);
+    return user;
+  }
+}
+
+// Demo
+const service = new UserService(new UserValidator(), new UserRepository());
+try {
+  service.register("A", "bad");
+} catch (e) { console.log("Error:", e.message); }
+
+const user = service.register("Alice", "alice@mail.com");
+console.log("Registered:", user.name, user.email);
+` }} />

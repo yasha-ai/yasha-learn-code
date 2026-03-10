@@ -1,0 +1,484 @@
+---
+title: "30. Signals (Angular 17+)"
+sidebar:
+  order: 32
+---
+import { Playground } from '@components/Playground'
+
+## 📡 Signals в Angular 17
+
+Signals — это новая реактивная примитива Angular, которая заменяет Zone.js как механизм отслеживания изменений. Мелкозернистая реактивность, предсказуемость, производительность.
+
+---
+
+### 🎯 signal() — создание сигнала
+
+```typescript
+import { Component, signal } from '@angular/core';
+
+@Component({
+  selector: 'app-counter',
+  standalone: true,
+  template: `
+    <p>Счётчик: {{ count() }}</p>
+    <button (click)="increment()">+</button>
+    <button (click)="decrement()">−</button>
+    <button (click)="reset()">Сброс</button>
+  `
+})
+export class CounterComponent {
+  count = signal(0);  // Начальное значение 0
+
+  increment() {
+    // set() — установить новое значение
+    this.count.set(this.count() + 1);
+  }
+
+  decrement() {
+    // update() — функция трансформации предыдущего значения
+    this.count.update(v => v - 1);
+  }
+
+  reset() {
+    this.count.set(0);
+  }
+}
+```
+
+Чтение сигнала — вызов как функция `count()`. Это регистрирует **зависимость**.
+
+---
+
+### 🧮 computed() — производные сигналы
+
+`computed()` создаёт сигнал, значение которого **автоматически пересчитывается**:
+
+```typescript
+import { Component, signal, computed } from '@angular/core';
+
+@Component({
+  selector: 'app-cart',
+  standalone: true,
+  template: `
+    <p>Товаров: {{ itemCount() }}</p>
+    <p>Сумма: {{ totalPrice() | currency:'RUB' }}</p>
+    <p>Скидка: {{ discount() | percent }}</p>
+    <p>Итого: {{ finalPrice() | currency:'RUB' }}</p>
+  `
+})
+export class CartComponent {
+  items = signal<CartItem[]>([
+    { name: 'Книга', price: 500, qty: 2 },
+    { name: 'Ручка', price: 50, qty: 5 },
+  ]);
+
+  // computed автоматически перечитывает items() при изменении
+  itemCount = computed(() =>
+    this.items().reduce((sum, item) => sum + item.qty, 0)
+  );
+
+  totalPrice = computed(() =>
+    this.items().reduce((sum, item) => sum + item.price * item.qty, 0)
+  );
+
+  discount = computed(() =>
+    this.totalPrice() > 1000 ? 0.1 : 0
+  );
+
+  finalPrice = computed(() =>
+    this.totalPrice() * (1 - this.discount())
+  );
+
+  addItem(item: CartItem) {
+    this.items.update(prev => [...prev, item]);
+    // Все computed автоматически обновятся!
+  }
+}
+```
+
+---
+
+### 🔮 effect() — побочные эффекты
+
+`effect()` запускает функцию когда **любой читаемый сигнал** изменяется:
+
+```typescript
+import { Component, signal, effect, inject } from '@angular/core';
+import { LocalStorageService } from './local-storage.service';
+
+@Component({ ... })
+export class ThemeComponent {
+  theme = signal<'light' | 'dark'>('dark');
+  fontSize = signal(16);
+
+  constructor() {
+    // effect — синхронизация с localStorage
+    effect(() => {
+      // Читаем оба сигнала — оба становятся зависимостями
+      const currentTheme = this.theme();
+      const currentFontSize = this.fontSize();
+
+      document.body.classList.toggle('dark-theme', currentTheme === 'dark');
+      document.documentElement.style.fontSize = `${currentFontSize}px`;
+
+      localStorage.setItem('theme', currentTheme);
+      localStorage.setItem('fontSize', String(currentFontSize));
+    });
+  }
+}
+```
+
+> ⚠️ `effect()` запускается **асинхронно** (в следующем microtask). Не используй для синхронной логики.
+
+---
+
+### 📥 input() signal — Signal-based @Input (Angular 17.1+)
+
+```typescript
+import { Component, input, computed } from '@angular/core';
+
+@Component({
+  selector: 'app-user-card',
+  standalone: true,
+  template: `
+    <div>
+      <h3>{{ fullName() }}</h3>
+      <span>{{ role() }}</span>
+    </div>
+  `
+})
+export class UserCardComponent {
+  // input() — это signal!
+  firstName = input.required<string>();  // обязательный
+  lastName = input.required<string>();
+  role = input<string>('user');          // опциональный с дефолтом
+
+  // computed на основе input signals
+  fullName = computed(() => `${this.firstName()} ${this.lastName()}`);
+}
+```
+
+```html
+<!-- Использование — как обычный @Input -->
+<app-user-card firstName="Яша" lastName="Смирнов" role="admin" />
+```
+
+---
+
+### 📤 output() — Signal-based @Output (Angular 17.1+)
+
+```typescript
+import { Component, output } from '@angular/core';
+
+@Component({
+  selector: 'app-counter',
+  template: `
+    <button (click)="increment()">+</button>
+    <span>{{ count }}</span>
+  `
+})
+export class CounterComponent {
+  count = 0;
+
+  // output() — замена EventEmitter
+  countChanged = output<number>();
+  doubled = output<number>();
+
+  increment() {
+    this.count++;
+    this.countChanged.emit(this.count);
+    if (this.count % 2 === 0) {
+      this.doubled.emit(this.count);
+    }
+  }
+}
+```
+
+---
+
+### 🔄 toSignal() — Observable → Signal
+
+Конвертируем Observable в Signal для использования в шаблоне без `async` pipe:
+
+```typescript
+import { Component, inject } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
+import { UserService } from './user.service';
+
+@Component({
+  selector: 'app-users',
+  standalone: true,
+  template: `
+    <!-- Не нужен async pipe! -->
+    <div *ngFor="let user of users()">{{ user.name }}</div>
+    <div *ngIf="currentUser()">{{ currentUser()?.name }}</div>
+  `
+})
+export class UsersComponent {
+  private userService = inject(UserService);
+
+  // Observable → Signal (автоматически отписывается при destroy)
+  users = toSignal(this.userService.getUsers(), {
+    initialValue: []  // начальное значение до первого emit
+  });
+
+  currentUser = toSignal(this.userService.currentUser$);
+}
+```
+
+---
+
+### 🌊 toObservable() — Signal → Observable
+
+```typescript
+import { Component, signal } from '@angular/core';
+import { toObservable } from '@angular/core/rxjs-interop';
+import { debounceTime, switchMap } from 'rxjs/operators';
+
+@Component({ ... })
+export class SearchComponent {
+  searchQuery = signal('');
+
+  // Signal → Observable для RxJS операторов
+  results$ = toObservable(this.searchQuery).pipe(
+    debounceTime(300),
+    switchMap(query => this.searchService.search(query))
+  );
+}
+```
+
+---
+
+### ⚡ Зачем Signals заменяют Zone.js
+
+```
+Без Signals (Zone.js):
+  Любое async событие → CD для ВСЕГО дерева компонентов
+  
+С Signals:
+  signal.set() → Angular знает ТОЧНО какой шаблон читал этот сигнал
+              → Обновляется ТОЛЬКО нужный компонент
+```
+
+Это позволяет Angular **без Zone.js** (`zoneless`):
+
+```typescript
+// main.ts — полностью без Zone.js
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideExperimentalZonelessChangeDetection()  // Angular 18
+  ]
+})
+```
+
+---
+
+### 📊 Сравнение: Signals vs RxJS
+
+| Задача | Signals | RxJS |
+|--------|---------|------|
+| Состояние компонента | ✅ Идеально | Избыточно |
+| HTTP запросы | `toSignal(http$)` | ✅ Нативно |
+| Трансформации данных | `computed()` | `.pipe()` |
+| Периодические данные | Через RxJS | ✅ interval, timer |
+| Синхронизация с DOM | ✅ Автоматически | Через async pipe |
+| Отладка | ✅ Просто | Сложнее |
+
+---
+
+```mdx-playground
+export default function SignalsPlayground() {
+  const [count, setCount] = React.useState(0);
+  const [multiplier, setMultiplier] = React.useState(2);
+  const [effects, setEffects] = React.useState([]);
+  const [history, setHistory] = React.useState([0]);
+
+  // Simulated computed signals
+  const doubled = count * multiplier;
+  const isEven = count % 2 === 0;
+  const isPositive = count > 0;
+  const summary = `count=${count}, doubled=${doubled}, even=${isEven}`;
+
+  const addEffect = (msg) => {
+    setEffects(prev => [{ msg, id: Date.now() }, ...prev].slice(0, 5));
+  };
+
+  const increment = () => {
+    const newVal = count + 1;
+    setCount(newVal);
+    setHistory(h => [...h, newVal].slice(-8));
+    addEffect(`effect(): count изменился → ${newVal}`);
+    if (newVal % multiplier === 0) addEffect(`effect(): doubled threshold → ${doubled + multiplier * 2}`);
+  };
+
+  const decrement = () => {
+    const newVal = count - 1;
+    setCount(newVal);
+    setHistory(h => [...h, newVal].slice(-8));
+    addEffect(`effect(): count изменился → ${newVal}`);
+  };
+
+  const reset = () => {
+    setCount(0);
+    setHistory([0]);
+    addEffect('effect(): count.set(0) — сброс');
+  };
+
+  const changeMultiplier = (m) => {
+    setMultiplier(m);
+    addEffect(`effect(): multiplier изменился → ${m}, doubled пересчитан`);
+  };
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: 480, padding: 24, borderRadius: 12, fontFamily: 'system-ui', color: '#e2e8f0' }}>
+      <div style={{ color: '#dd0031', fontWeight: 700, fontSize: 16, marginBottom: 20 }}>
+        📡 Angular Signals: signal(), computed(), effect()
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+        <div>
+          {/* Signals */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155', marginBottom: 16 }}>
+            <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 12 }}>🔵 signal()</div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+              <button onClick={decrement} style={{ background: '#334155', color: '#e2e8f0', border: 'none', width: 36, height: 36, borderRadius: 8, cursor: 'pointer', fontSize: 18 }}>−</button>
+              <div style={{ textAlign: 'center', flex: 1 }}>
+                <div style={{ fontSize: 42, fontWeight: 700, color: '#dd0031', fontFamily: 'monospace' }}>{count}</div>
+                <div style={{ fontSize: 11, color: '#475569' }}>count.set() / count.update()</div>
+              </div>
+              <button onClick={increment} style={{ background: '#dd0031', color: 'white', border: 'none', width: 36, height: 36, borderRadius: 8, cursor: 'pointer', fontSize: 18 }}>+</button>
+            </div>
+
+            <button onClick={reset} style={{ width: '100%', background: 'transparent', color: '#64748b', border: '1px solid #334155', padding: '6px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+              count.set(0)
+            </button>
+          </div>
+
+          {/* Computed */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #7c3aed', marginBottom: 16 }}>
+            <div style={{ color: '#a78bfa', fontSize: 12, marginBottom: 12 }}>🟣 computed()</div>
+
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>multiplier =</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[2, 3, 5, 10].map(m => (
+                  <button key={m} onClick={() => changeMultiplier(m)} style={{ background: multiplier === m ? '#7c3aed' : '#334155', color: 'white', border: 'none', padding: '4px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+                    ×{m}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {[
+              { name: 'doubled', formula: `count() × ${multiplier}`, value: doubled, color: '#a78bfa' },
+              { name: 'isEven', formula: 'count() % 2 === 0', value: String(isEven), color: isEven ? '#22c55e' : '#f87171' },
+              { name: 'isPositive', formula: 'count() > 0', value: String(isPositive), color: isPositive ? '#22c55e' : '#f87171' },
+            ].map(({ name, formula, value, color }) => (
+              <div key={name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, padding: '6px 10px', background: '#0f172a', borderRadius: 6 }}>
+                <div>
+                  <span style={{ fontSize: 12, color, fontFamily: 'monospace' }}>{name}()</span>
+                  <div style={{ fontSize: 10, color: '#475569' }}>= {formula}</div>
+                </div>
+                <span style={{ fontSize: 16, fontWeight: 700, color }}>{String(value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          {/* Effect log */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #f59e0b', marginBottom: 16 }}>
+            <div style={{ color: '#f59e0b', fontSize: 12, marginBottom: 12 }}>🟡 effect() — автозапуск при изменениях</div>
+            {effects.length === 0 && <div style={{ color: '#475569', fontSize: 12 }}>Измени сигналы...</div>}
+            {effects.map((e, i) => (
+              <div key={e.id} style={{ fontSize: 12, color: i === 0 ? '#f59e0b' : '#475569', marginBottom: 6, transition: 'color 0.5s' }}>
+                → {e.msg}
+              </div>
+            ))}
+          </div>
+
+          {/* History */}
+          <div style={{ background: '#1e293b', borderRadius: 10, padding: 16, border: '1px solid #334155' }}>
+            <div style={{ color: '#7dd3fc', fontSize: 12, marginBottom: 12 }}>📊 История count</div>
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 80 }}>
+              {history.map((v, i) => {
+                const maxAbs = Math.max(...history.map(Math.abs), 1);
+                const height = Math.abs(v) / maxAbs * 60 + 4;
+                return (
+                  <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                    <div style={{ width: '100%', height, background: i === history.length - 1 ? '#dd0031' : '#334155', borderRadius: 3, transition: 'all 0.3s', marginTop: 'auto' }} />
+                    <div style={{ fontSize: 9, color: i === history.length - 1 ? '#dd0031' : '#475569' }}>{v}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: 12, fontSize: 11, color: '#64748b', background: '#0f172a', borderRadius: 6, padding: 8, fontFamily: 'monospace' }}>
+              <div style={{ color: '#64748b' }}>// Текущее состояние:</div>
+              <div><span style={{ color: '#7dd3fc' }}>count</span>() = <span style={{ color: '#a3e635' }}>{count}</span></div>
+              <div><span style={{ color: '#a78bfa' }}>doubled</span>() = <span style={{ color: '#a3e635' }}>{doubled}</span></div>
+              <div><span style={{ color: '#a78bfa' }}>isEven</span>() = <span style={{ color: isEven ? '#22c55e' : '#f87171' }}>{String(isEven)}</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.js": `// Демонстрация концепции Signals (эквивалент Angular)
+// Angular: signal(), computed(), effect() — мелкозернистая реактивность
+// React: useState + useMemo — аналогичный паттерн
+
+import { useState, useMemo } from "react";
+
+export default function App() {
+  // signal() — создание сигнала
+  const [firstName, setFirstName] = useState("Angular");
+  const [lastName, setLastName] = useState("Developer");
+  const [count, setCount] = useState(0);
+
+  // computed() — вычисляемый сигнал
+  const fullName = useMemo(() => firstName + " " + lastName, [firstName, lastName]);
+  const doubled = useMemo(() => count * 2, [count]);
+
+  return (
+    <div style={{ fontFamily: "system-ui", padding: 16 }}>
+      <h3>Angular Signals</h3>
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ marginBottom: 6 }}>
+          <label style={{ fontSize: 12 }}>signal firstName: </label>
+          <input value={firstName} onChange={e => setFirstName(e.target.value)}
+            style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc" }} />
+        </div>
+        <div>
+          <label style={{ fontSize: 12 }}>signal lastName: </label>
+          <input value={lastName} onChange={e => setLastName(e.target.value)}
+            style={{ padding: "4px 8px", borderRadius: 4, border: "1px solid #ccc" }} />
+        </div>
+      </div>
+      <div style={{ background: "#f5f5f5", borderRadius: 6, padding: 10, marginBottom: 10, fontSize: 13 }}>
+        <strong>computed:</strong> fullName() = "{fullName}"
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <button onClick={() => setCount(c => c + 1)} style={{ padding: "6px 12px" }}>
+          count.update(c =&gt; c + 1)
+        </button>
+        <span>count() = {count}</span>
+      </div>
+      <div style={{ background: "#f5f5f5", borderRadius: 6, padding: 10, fontSize: 13 }}>
+        <strong>computed:</strong> doubled() = {doubled}
+      </div>
+      <p style={{ fontSize: 11, color: "#888", marginTop: 10 }}>
+        signal() = useState, computed() = useMemo, set/update = setState
+      </p>
+    </div>
+  );
+}
+` }} />

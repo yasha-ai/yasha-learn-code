@@ -1,0 +1,317 @@
+---
+title: "18. Тестирование"
+sidebar:
+  order: 18
+---
+import { Playground } from '@components/Playground'
+
+
+Тестирование в Remix охватывает unit-тесты (Vitest), интеграционные тесты маршрутов и E2E тесты (Playwright/Cypress).
+
+## Настройка Vitest
+
+```bash
+npm install -D vitest @testing-library/react @testing-library/jest-dom happy-dom
+```
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+import react from "@vitejs/plugin-react";
+import tsconfigPaths from "vite-tsconfig-paths";
+
+export default defineConfig({
+  plugins: [react(), tsconfigPaths()],
+  test: {
+    globals: true,
+    environment: "happy-dom",
+    setupFiles: ["./tests/setup.ts"],
+  },
+});
+
+// tests/setup.ts
+import "@testing-library/jest-dom/vitest";
+```
+
+## Unit тесты утилит
+
+```typescript
+// app/utils/format.test.ts
+import { describe, it, expect } from "vitest";
+import { formatPrice, slugify } from "./format";
+
+describe("formatPrice", () => {
+  it("форматирует цену в рубли", () => {
+    expect(formatPrice(1500)).toBe("1 500 ₽");
+    expect(formatPrice(99.5)).toBe("99,50 ₽");
+  });
+});
+
+describe("slugify", () => {
+  it("создаёт slug из строки", () => {
+    expect(slugify("Hello World")).toBe("hello-world");
+    expect(slugify("React & Remix")).toBe("react-remix");
+  });
+});
+```
+
+## Тестирование loader
+
+```typescript
+// app/routes/users.$id.test.ts
+import { createRequest } from "@remix-run/testing";
+import { loader } from "./users.$id";
+import { db } from "~/db.server";
+
+// Мокируем БД
+vi.mock("~/db.server", () => ({
+  db: {
+    user: {
+      findUnique: vi.fn(),
+    },
+  },
+}));
+
+describe("loader /users/:id", () => {
+  it("возвращает пользователя", async () => {
+    const mockUser = { id: "1", name: "Алексей", email: "alex@example.com" };
+    vi.mocked(db.user.findUnique).mockResolvedValue(mockUser);
+
+    const response = await loader({
+      request: new Request("http://app.com/users/1"),
+      params: { id: "1" },
+      context: {},
+    });
+
+    const data = await response.json();
+    expect(data.user).toEqual(mockUser);
+  });
+
+  it("бросает 404 если пользователь не найден", async () => {
+    vi.mocked(db.user.findUnique).mockResolvedValue(null);
+
+    await expect(
+      loader({ request: new Request("http://app.com/users/999"), params: { id: "999" }, context: {} })
+    ).rejects.toThrow();
+  });
+});
+```
+
+## Тестирование action
+
+```typescript
+// app/routes/login.test.ts
+import { action } from "./login";
+
+describe("login action", () => {
+  it("перенаправляет после успешного входа", async () => {
+    const formData = new FormData();
+    formData.set("email", "user@example.com");
+    formData.set("password", "correct-password");
+
+    const response = await action({
+      request: new Request("http://app.com/login", {
+        method: "POST",
+        body: formData,
+      }),
+      params: {},
+      context: {},
+    });
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("/dashboard");
+  });
+});
+```
+
+## MSW для мокирования API
+
+```bash
+npm install -D msw
+```
+
+```typescript
+// tests/mocks/handlers.ts
+import { http, HttpResponse } from "msw";
+
+export const handlers = [
+  http.get("/api/users", () => {
+    return HttpResponse.json([
+      { id: 1, name: "Алексей" },
+      { id: 2, name: "Мария" },
+    ]);
+  }),
+];
+```
+
+## E2E тесты с Playwright
+
+```typescript
+// tests/e2e/auth.test.ts
+import { test, expect } from "@playwright/test";
+
+test("пользователь может войти в систему", async ({ page }) => {
+  await page.goto("/login");
+
+  await page.getByLabel("Email").fill("user@example.com");
+  await page.getByLabel("Пароль").fill("password123");
+  await page.getByRole("button", { name: "Войти" }).click();
+
+  await expect(page).toHaveURL("/dashboard");
+  await expect(page.getByText("Добро пожаловать")).toBeVisible();
+});
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+const WARN = "#f59e0b";
+
+type TestStatus = "idle" | "running" | "passed" | "failed";
+
+type TestCase = {
+  name: string;
+  file: string;
+  type: "unit" | "integration" | "e2e";
+  status: TestStatus;
+  duration?: number;
+};
+
+const initialTests: TestCase[] = [
+  { name: "formatPrice форматирует цену", file: "utils/format.test.ts", type: "unit", status: "idle" },
+  { name: "slugify создаёт slug", file: "utils/format.test.ts", type: "unit", status: "idle" },
+  { name: "loader возвращает пользователя", file: "routes/users.$id.test.ts", type: "integration", status: "idle" },
+  { name: "loader бросает 404", file: "routes/users.$id.test.ts", type: "integration", status: "idle" },
+  { name: "action создаёт пользователя", file: "routes/register.test.ts", type: "integration", status: "idle" },
+  { name: "пользователь может войти", file: "e2e/auth.test.ts", type: "e2e", status: "idle" },
+  { name: "защищённые маршруты редиректят", file: "e2e/auth.test.ts", type: "e2e", status: "idle" },
+];
+
+const typeColors: Record<string, string> = {
+  unit: SUCCESS,
+  integration: ACCENT,
+  e2e: "#8b5cf6",
+};
+
+export default function App() {
+  const [tests, setTests] = useState<TestCase[]>(initialTests);
+  const [running, setRunning] = useState(false);
+  const [filter, setFilter] = useState<"all" | "unit" | "integration" | "e2e">("all");
+
+  const runTests = () => {
+    setRunning(true);
+    const newTests = initialTests.map(t => ({ ...t, status: "running" as TestStatus }));
+    setTests(newTests);
+
+    // Simulate running tests one by one
+    newTests.forEach((_, i) => {
+      setTimeout(() => {
+        setTests(prev => prev.map((t, j) => {
+          if (j === i) {
+            const shouldFail = i === 3; // Make one test fail for demo
+            return {
+              ...t,
+              status: shouldFail ? "failed" : "passed",
+              duration: Math.floor(Math.random() * 150) + 10,
+            };
+          }
+          return t;
+        }));
+        if (i === newTests.length - 1) setRunning(false);
+      }, (i + 1) * 300);
+    });
+  };
+
+  const reset = () => {
+    setTests(initialTests.map(t => ({ ...t, status: "idle", duration: undefined })));
+  };
+
+  const filtered = filter === "all" ? tests : tests.filter(t => t.type === filter);
+  const passed = tests.filter(t => t.status === "passed").length;
+  const failed = tests.filter(t => t.status === "failed").length;
+  const total = tests.length;
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>🧪 Тестирование Remix</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "20px" }}>Симулятор Vitest + Playwright</p>
+
+      <div style={{ display: "flex", gap: "12px", marginBottom: "20px", alignItems: "center" }}>
+        <button onClick={running ? undefined : runTests} disabled={running} style={{
+          padding: "10px 20px", background: running ? "#334155" : ACCENT,
+          color: "#fff", border: "none", borderRadius: "8px",
+          cursor: running ? "not-allowed" : "pointer", fontWeight: 700, fontSize: "13px",
+        }}>
+          {running ? "⏳ Тесты запущены..." : "▶ npm run test"}
+        </button>
+        <button onClick={reset} style={{
+          padding: "10px 16px", background: "transparent", color: MUTED,
+          border: "1px solid #334155", borderRadius: "8px", cursor: "pointer", fontSize: "13px",
+        }}>
+          Сбросить
+        </button>
+        {passed > 0 && (
+          <span style={{ color: SUCCESS, fontSize: "13px" }}>✅ {passed}/{total} passed</span>
+        )}
+        {failed > 0 && (
+          <span style={{ color: ERROR, fontSize: "13px" }}>❌ {failed} failed</span>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+        {(["all", "unit", "integration", "e2e"] as const).map(f => (
+          <button key={f} onClick={() => setFilter(f)} style={{
+            padding: "6px 12px", borderRadius: "6px",
+            border: \`1px solid \${filter === f ? typeColors[f] || ACCENT : "#334155"}\`,
+            background: filter === f ? (typeColors[f] || ACCENT) + "22" : "transparent",
+            color: filter === f ? (typeColors[f] || ACCENT) : MUTED,
+            cursor: "pointer", fontSize: "12px",
+          }}>
+            {f}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ maxWidth: "700px", display: "flex", flexDirection: "column", gap: "6px" }}>
+        {filtered.map((test, i) => (
+          <div key={i} style={{
+            background: CARD,
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "grid",
+            gridTemplateColumns: "24px 1fr auto auto",
+            alignItems: "center",
+            gap: "10px",
+            borderLeft: \`3px solid \${test.status === "passed" ? SUCCESS : test.status === "failed" ? ERROR : test.status === "running" ? ACCENT : "#334155"}\`,
+          }}>
+            <span style={{ fontSize: "14px" }}>
+              {test.status === "idle" ? "○" : test.status === "running" ? "⏳" : test.status === "passed" ? "✅" : "❌"}
+            </span>
+            <div>
+              <div style={{ fontSize: "13px", color: test.status === "failed" ? ERROR : TEXT }}>{test.name}</div>
+              <div style={{ fontSize: "11px", color: MUTED, fontFamily: "monospace" }}>{test.file}</div>
+            </div>
+            <span style={{
+              fontSize: "10px", padding: "2px 8px", borderRadius: "4px",
+              background: typeColors[test.type] + "22",
+              color: typeColors[test.type],
+            }}>
+              {test.type}
+            </span>
+            <span style={{ fontSize: "11px", color: MUTED, minWidth: "50px", textAlign: "right" }}>
+              {test.duration ? \`\${test.duration}ms\` : ""}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,329 @@
+---
+title: "3. WebSocket в браузере"
+sidebar:
+  order: 3
+---
+
+import { Playground } from "@components/Playground"
+
+Браузер предоставляет нативный `WebSocket` API — никаких библиотек не нужно.
+
+## Основы браузерного WebSocket
+
+```javascript
+// Создаём соединение
+const ws = new WebSocket('wss://example.com/ws');
+// Протоколы: ws:// (незащищённый), wss:// (через TLS, всегда в продакшене)
+
+// Состояния соединения
+console.log(ws.readyState);
+// 0 = CONNECTING  — устанавливается
+// 1 = OPEN        — открыто, можно отправлять
+// 2 = CLOSING     — закрывается
+// 3 = CLOSED      — закрыто
+
+// Четыре события
+ws.onopen = (event) => {
+  console.log('Соединение установлено');
+  ws.send('Привет, сервер!');
+};
+
+ws.onmessage = (event) => {
+  console.log('Получено:', event.data);
+  // event.data — строка, Blob или ArrayBuffer
+};
+
+ws.onerror = (event) => {
+  console.error('Ошибка WebSocket');
+  // Деталей ошибки нет из соображений безопасности
+};
+
+ws.onclose = (event) => {
+  console.log(`Закрыто: код=${event.code}, причина=${event.reason}`);
+  console.log('Чисто?', event.wasClean);
+};
+```
+
+## Отправка данных
+
+```javascript
+// Текст (строка)
+ws.send('Hello, world!');
+
+// JSON
+ws.send(JSON.stringify({ type: 'message', text: 'Привет!' }));
+
+// Бинарные данные — ArrayBuffer
+const buffer = new ArrayBuffer(8);
+const view = new DataView(buffer);
+view.setFloat64(0, 3.14159);
+ws.send(buffer);
+
+// Blob
+const blob = new Blob(['Hello'], { type: 'text/plain' });
+ws.send(blob);
+```
+
+## Получение бинарных данных
+
+```javascript
+// По умолчанию binaryType = 'blob'
+ws.binaryType = 'arraybuffer'; // Или 'blob'
+
+ws.onmessage = (event) => {
+  if (event.data instanceof ArrayBuffer) {
+    const view = new DataView(event.data);
+    console.log('Float64:', view.getFloat64(0));
+  } else if (event.data instanceof Blob) {
+    event.data.text().then(text => console.log('Blob text:', text));
+  } else {
+    console.log('Строка:', event.data);
+  }
+};
+```
+
+## Проверка перед отправкой
+
+```javascript
+function safeSend(ws, data) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(typeof data === 'string' ? data : JSON.stringify(data));
+  } else {
+    console.warn('Соединение не открыто:', ws.readyState);
+  }
+}
+
+// bufferedAmount — сколько байт в очереди на отправку
+console.log('В очереди:', ws.bufferedAmount, 'байт');
+```
+
+## Автопереподключение
+
+Браузерный WebSocket не переподключается автоматически — нужно реализовать самому:
+
+```javascript
+class ReconnectingWebSocket {
+  constructor(url, options = {}) {
+    this.url = url;
+    this.reconnectDelay = options.reconnectDelay || 1000;
+    this.maxDelay = options.maxDelay || 30000;
+    this.maxRetries = options.maxRetries || Infinity;
+    this.retries = 0;
+    this.ws = null;
+    
+    this.onopen = null;
+    this.onmessage = null;
+    this.onclose = null;
+    this.onerror = null;
+    
+    this._connect();
+  }
+
+  _connect() {
+    this.ws = new WebSocket(this.url);
+    
+    this.ws.onopen = (e) => {
+      console.log('Подключено');
+      this.retries = 0;
+      this.reconnectDelay = 1000; // сбрасываем задержку
+      if (this.onopen) this.onopen(e);
+    };
+
+    this.ws.onmessage = (e) => {
+      if (this.onmessage) this.onmessage(e);
+    };
+
+    this.ws.onerror = (e) => {
+      if (this.onerror) this.onerror(e);
+    };
+
+    this.ws.onclose = (e) => {
+      if (this.onclose) this.onclose(e);
+      
+      if (this.retries < this.maxRetries && !e.wasClean) {
+        console.log(`Переподключение через ${this.reconnectDelay}мс...`);
+        setTimeout(() => this._connect(), this.reconnectDelay);
+        
+        // Экспоненциальная задержка
+        this.reconnectDelay = Math.min(
+          this.reconnectDelay * 2,
+          this.maxDelay
+        );
+        this.retries++;
+      }
+    };
+  }
+
+  send(data) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(typeof data === 'object' ? JSON.stringify(data) : data);
+    }
+  }
+
+  close() {
+    this.maxRetries = 0; // Запрещаем переподключение
+    this.ws?.close(1000, 'Закрыто пользователем');
+  }
+}
+
+// Использование
+const ws = new ReconnectingWebSocket('wss://example.com/ws', {
+  reconnectDelay: 1000,
+  maxDelay: 30000,
+  maxRetries: 10,
+});
+
+ws.onopen = () => console.log('Открыто!');
+ws.onmessage = (e) => console.log('Данные:', e.data);
+ws.send({ type: 'subscribe', channel: 'updates' });
+```
+
+## Использование в React
+
+```jsx
+import { useEffect, useRef, useState, useCallback } from 'react';
+
+function useWebSocket(url) {
+  const ws = useRef(null);
+  const [status, setStatus] = useState('disconnected');
+  const [messages, setMessages] = useState([]);
+
+  useEffect(() => {
+    ws.current = new WebSocket(url);
+
+    ws.current.onopen = () => setStatus('connected');
+    ws.current.onclose = () => setStatus('disconnected');
+    ws.current.onerror = () => setStatus('error');
+    ws.current.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      setMessages((prev) => [...prev, data]);
+    };
+
+    return () => {
+      ws.current?.close(1000, 'Компонент размонтирован');
+    };
+  }, [url]);
+
+  const send = useCallback((data) => {
+    if (ws.current?.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify(data));
+    }
+  }, []);
+
+  return { status, messages, send };
+}
+
+// Компонент
+function Chat() {
+  const { status, messages, send } = useWebSocket('wss://example.com/chat');
+  const [input, setInput] = useState('');
+
+  const handleSend = () => {
+    if (input.trim()) {
+      send({ type: 'message', text: input });
+      setInput('');
+    }
+  };
+
+  return (
+    <div>
+      <div>Статус: {status}</div>
+      <div>
+        {messages.map((msg, i) => (
+          <div key={i}>{msg.text}</div>
+        ))}
+      </div>
+      <input value={input} onChange={(e) => setInput(e.target.value)} />
+      <button onClick={handleSend}>Отправить</button>
+    </div>
+  );
+}
+```
+
+## Отладка в DevTools
+
+В Chrome DevTools → Network → фильтр WS → можно видеть все фреймы:
+
+```
+↑ Отправлено клиентом (зелёный)
+↓ Получено от сервера (белый)
+```
+
+## Задания
+
+1. Реализуй `ReconnectingWebSocket` с экспоненциальной задержкой
+2. Добавь в хук `useWebSocket` поддержку переподключения
+3. Как отправить файл через WebSocket? Напиши пример
+4. Что будет, если вызвать `ws.send()` пока `readyState === CONNECTING`?
+
+## Итог
+
+Browser WebSocket API прост: создай соединение, слушай 4 события, отправляй данные через `send()`. Для продакшена нужно реализовать автопереподключение. В следующем уроке — Socket.io, который делает это за нас.
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState, useRef, useEffect } from "react";
+
+export default function App() {
+  const [log, setLog] = useState([]);
+  const [input, setInput] = useState("Hello WebSocket!");
+  const [connected, setConnected] = useState(false);
+  const wsRef = useRef(null);
+
+  const addLog = (msg, color = "#94a3b8") => {
+    setLog(prev => [...prev.slice(-8), { msg, color, time: new Date().toLocaleTimeString() }]);
+  };
+
+  const connect = () => {
+    const ws = new WebSocket("wss://echo.websocket.org");
+    wsRef.current = ws;
+    addLog("Подключение...", "#f59e0b");
+
+    ws.onopen = () => { setConnected(true); addLog("✓ Соединение открыто", "#10b981"); };
+    ws.onmessage = (e) => addLog("← Получено: " + e.data, "#3b82f6");
+    ws.onclose = () => { setConnected(false); addLog("✕ Соединение закрыто", "#ef4444"); };
+    ws.onerror = () => addLog("Ошибка соединения", "#ef4444");
+  };
+
+  const send = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(input);
+      addLog("→ Отправлено: " + input, "#a78bfa");
+    }
+  };
+
+  const disconnect = () => wsRef.current?.close();
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>WebSocket API в браузере</h3>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        {!connected ? (
+          <button onClick={connect} style={{ padding: "6px 14px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Подключиться</button>
+        ) : (
+          <button onClick={disconnect} style={{ padding: "6px 14px", background: "#ef4444", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Отключиться</button>
+        )}
+      </div>
+      {connected && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <input value={input} onChange={e => setInput(e.target.value)}
+            style={{ flex: 1, padding: "6px 10px", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4 }} />
+          <button onClick={send} style={{ padding: "6px 14px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Отправить</button>
+        </div>
+      )}
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {log.map((l, i) => (
+          <div key={i} style={{ color: l.color, fontSize: 12 }}>
+            <span style={{ color: "#475569" }}>{l.time}</span> {l.msg}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

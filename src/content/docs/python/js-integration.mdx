@@ -1,0 +1,461 @@
+---
+title: "20. Интеграция с JS фронтендом"
+sidebar:
+  order: 19
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/intro.png)
+
+## Архитектура Full-Stack
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    FRONTEND (JS)                         │
+│           React / Next.js / Vue / Svelte                │
+│    fetch / axios / React Query / SWR / Tanstack Query   │
+└────────────────────┬────────────────────────────────────┘
+                     │ HTTP / WebSocket
+┌────────────────────▼────────────────────────────────────┐
+│                    BACKEND (Python)                      │
+│              FastAPI / Django REST                       │
+│           JWT Auth / CORS / Rate Limiting               │
+└────────────────────┬────────────────────────────────────┘
+                     │ SQL / Redis
+┌────────────────────▼────────────────────────────────────┐
+│                   DATABASE                              │
+│           PostgreSQL / MongoDB / Redis                  │
+└─────────────────────────────────────────────────────────┘
+```
+
+## CORS настройка FastAPI
+
+```python
+# main.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+# Настройка CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",   # React dev
+        "http://localhost:5173",   # Vite dev
+        "https://myapp.com",       # продакшн
+    ],
+    allow_credentials=True,        # для cookies/auth
+    allow_methods=["*"],           # GET, POST, PUT, DELETE, ...
+    allow_headers=["*"],           # Authorization, Content-Type, ...
+)
+```
+
+## API Design для фронтенда
+
+### Стандартный формат ответов
+
+```python
+# schemas/base.py
+from pydantic import BaseModel
+from typing import TypeVar, Generic
+
+T = TypeVar("T")
+
+class SuccessResponse(BaseModel, Generic[T]):
+    success: bool = True
+    data: T
+
+class ErrorResponse(BaseModel):
+    success: bool = False
+    error: str
+    details: dict | None = None
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    items: list[T]
+    total: int
+    page: int
+    pages: int
+    size: int
+
+# Использование
+@app.get("/posts", response_model=PaginatedResponse[PostResponse])
+async def get_posts(page: int = 1, size: int = 10, db = Depends(get_db)):
+    posts, total = await get_posts_db(db, page, size)
+    return PaginatedResponse(
+        items=posts,
+        total=total,
+        page=page,
+        pages=(total + size - 1) // size,
+        size=size
+    )
+```
+
+### Версионирование API
+
+```python
+from fastapi import FastAPI, APIRouter
+
+app = FastAPI()
+
+v1 = APIRouter(prefix="/api/v1")
+v2 = APIRouter(prefix="/api/v2")
+
+@v1.get("/users")
+async def get_users_v1():
+    return [{"id": 1, "name": "Яша"}]  # старый формат
+
+@v2.get("/users")
+async def get_users_v2():
+    return {"items": [{"id": 1, "username": "yasha", "display_name": "Яша"}]}
+
+app.include_router(v1)
+app.include_router(v2)
+```
+
+## Интеграция с Next.js
+
+### Клиент API на TypeScript
+
+```typescript
+// lib/api.ts
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+interface ApiOptions extends RequestInit {
+  token?: string
+}
+
+async function api<T>(endpoint: string, options: ApiOptions = {}): Promise<T> {
+  const { token, ...init } = options
+  
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+    ...(token && { Authorization: `Bearer ${token}` }),
+    ...init.headers,
+  }
+  
+  const response = await fetch(`${API_URL}${endpoint}`, {
+    ...init,
+    headers,
+  })
+  
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.detail || 'API Error')
+  }
+  
+  return response.json()
+}
+
+// Использование
+export const postsApi = {
+  getAll: (page = 1, size = 10) => 
+    api<PaginatedResponse<Post>>(`/posts?page=${page}&size=${size}`),
+  
+  getById: (id: number) => 
+    api<Post>(`/posts/${id}`),
+  
+  create: (data: PostCreate, token: string) =>
+    api<Post>('/posts', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      token,
+    }),
+  
+  update: (id: number, data: PostUpdate, token: string) =>
+    api<Post>(`/posts/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+      token,
+    }),
+}
+```
+
+### React Query + FastAPI
+
+```typescript
+// hooks/usePosts.ts
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { postsApi } from '@/lib/api'
+import { useAuth } from '@/hooks/useAuth'
+
+export function usePosts(page = 1) {
+  return useQuery({
+    queryKey: ['posts', page],
+    queryFn: () => postsApi.getAll(page),
+    staleTime: 60_000,  // кэш 1 минута
+  })
+}
+
+export function useCreatePost() {
+  const { token } = useAuth()
+  const queryClient = useQueryClient()
+  
+  return useMutation({
+    mutationFn: (data: PostCreate) => postsApi.create(data, token!),
+    onSuccess: () => {
+      // Инвалидируем кэш — React Query перезапросит
+      queryClient.invalidateQueries({ queryKey: ['posts'] })
+    },
+  })
+}
+
+// Компонент
+function PostsList() {
+  const { data, isLoading, error } = usePosts()
+  const createPost = useCreatePost()
+  
+  if (isLoading) return <Spinner />
+  if (error) return <Error message={error.message} />
+  
+  return (
+    <>
+      {data?.items.map(post => <PostCard key={post.id} post={post} />)}
+      <Pagination total={data?.pages} />
+    </>
+  )
+}
+```
+
+## WebSockets — реалтайм
+
+```python
+# FastAPI WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import dict
+
+app = FastAPI()
+
+class ConnectionManager:
+    def __init__(self):
+        self.connections: dict[str, list[WebSocket]] = {}
+    
+    async def connect(self, room: str, websocket: WebSocket):
+        await websocket.accept()
+        self.connections.setdefault(room, []).append(websocket)
+    
+    def disconnect(self, room: str, websocket: WebSocket):
+        self.connections[room].remove(websocket)
+    
+    async def broadcast(self, room: str, message: dict):
+        for ws in self.connections.get(room, []):
+            await ws.send_json(message)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/{room}")
+async def websocket_endpoint(websocket: WebSocket, room: str):
+    await manager.connect(room, websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            # Транслируем всем в комнате
+            await manager.broadcast(room, {
+                "type": "message",
+                "data": data,
+            })
+    except WebSocketDisconnect:
+        manager.disconnect(room, websocket)
+        await manager.broadcast(room, {"type": "user_left"})
+```
+
+```typescript
+// React WebSocket хук
+import { useEffect, useRef, useState, useCallback } from 'react'
+
+function useWebSocket(roomId: string) {
+  const [messages, setMessages] = useState<Message[]>([])
+  const [isConnected, setIsConnected] = useState(false)
+  const ws = useRef<WebSocket | null>(null)
+  
+  useEffect(() => {
+    ws.current = new WebSocket(`ws://localhost:8000/ws/${roomId}`)
+    
+    ws.current.onopen = () => setIsConnected(true)
+    ws.current.onclose = () => setIsConnected(false)
+    ws.current.onmessage = (event) => {
+      const msg = JSON.parse(event.data)
+      setMessages(prev => [...prev, msg])
+    }
+    
+    return () => ws.current?.close()
+  }, [roomId])
+  
+  const send = useCallback((data: unknown) => {
+    ws.current?.send(JSON.stringify(data))
+  }, [])
+  
+  return { messages, isConnected, send }
+}
+```
+
+## Загрузка файлов
+
+```python
+# FastAPI: загрузка файлов
+from fastapi import File, UploadFile
+import aiofiles
+import uuid
+
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    # Проверка типа
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(400, "Недопустимый тип файла")
+    
+    # Ограничение размера (5MB)
+    max_size = 5 * 1024 * 1024
+    content = await file.read()
+    if len(content) > max_size:
+        raise HTTPException(400, "Файл слишком большой (макс. 5MB)")
+    
+    # Сохраняем
+    ext = Path(file.filename).suffix
+    filename = f"{uuid.uuid4()}{ext}"
+    filepath = UPLOAD_DIR / filename
+    
+    async with aiofiles.open(filepath, "wb") as f:
+        await f.write(content)
+    
+    return {"url": f"/uploads/{filename}", "filename": filename}
+
+# Статические файлы
+from fastapi.staticfiles import StaticFiles
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+```
+
+```typescript
+// React: загрузка файла
+async function uploadImage(file: File): Promise<string> {
+  const formData = new FormData()
+  formData.append('file', file)
+  
+  const response = await fetch('/upload', {
+    method: 'POST',
+    body: formData,  // НЕ добавляй Content-Type — браузер сделает сам!
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+  
+  const data = await response.json()
+  return data.url
+}
+```
+
+## Деплой: Python + Next.js
+
+```yaml
+# docker-compose.yml
+version: "3.9"
+
+services:
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://user:pass@db/myapp
+      SECRET_KEY: ${SECRET_KEY}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+
+  frontend:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:8000
+    ports:
+      - "3000:3000"
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: myapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+```
+
+```dockerfile
+# backend/Dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+## Задание — финальный проект
+
+Создай полноценный Full-Stack ToDo сервис:
+
+**Backend (FastAPI):**
+- JWT аутентификация (register/login/refresh)
+- CRUD для задач с пагинацией и фильтрами
+- WebSocket для реалтайм уведомлений
+- Загрузка файлов-вложений к задаче
+- PostgreSQL + SQLAlchemy
+
+**Frontend (Next.js):**
+- Страница входа/регистрации
+- Kanban доска (todo/in_progress/done)
+- Drag & drop для перемещения задач
+- Реалтайм обновления через WebSocket
+- Загрузка файлов
+
+**Деплой:**
+- Docker Compose
+- Nginx как reverse proxy
+- SSL через Certbot
+
+Поздравляем! Ты прошёл весь курс Python для Full-Stack. 🎉
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.js": `// Интеграция Python и JavaScript
+
+// 1. REST API: Python backend <-> JS frontend
+async function fetchFromPythonAPI() {
+  const mockResponse = {
+    users: [{ id: 1, name: "Алиса" }, { id: 2, name: "Борис" }],
+    status: "ok"
+  };
+  console.log("API ответ:", mockResponse);
+  return mockResponse;
+}
+
+// 2. JSON — общий формат данных
+const data = { name: "Алиса", scores: [95, 87, 92] };
+const jsonStr = JSON.stringify(data);
+console.log("\\nJSON:", jsonStr);
+console.log("Parsed:", JSON.parse(jsonStr));
+
+// 3. Способы интеграции
+console.log("\\n--- Способы интеграции ---");
+console.log("1. REST API (FastAPI/Django -> fetch)");
+console.log("2. WebSocket (реалтайм)");
+console.log("3. Server-Sent Events");
+console.log("4. gRPC (производительность)");
+
+// 4. Общие структуры данных
+const pythonDict = { key: "value" };
+const pythonList = [1, 2, 3];
+const pythonTuple = Object.freeze([1, 2]);
+console.log("\\ndict -> object:", pythonDict);
+console.log("list -> array:", pythonList);
+console.log("tuple -> frozen array:", pythonTuple);
+
+fetchFromPythonAPI();
+`
+  }}
+/>

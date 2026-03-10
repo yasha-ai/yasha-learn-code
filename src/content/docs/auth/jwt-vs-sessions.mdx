@@ -1,0 +1,299 @@
+---
+title: "5. JWT vs Sessions"
+sidebar:
+  order: 4
+---
+import { Playground } from '@components/Playground'
+
+## Сравнение концепций
+
+| Характеристика | Sessions | JWT |
+|----------------|----------|-----|
+| Хранение состояния | Сервер (БД/Redis) | Клиент (токен) |
+| Масштабирование | Нужен shared storage | Лёгкое |
+| Отзыв | Мгновенный | Сложный |
+| Нагрузка на БД | Есть при каждом запросе | Нет (stateless) |
+| Размер | Маленький cookie (32 байта) | Больше (300-800 байт) |
+| Безопасность | Проще управлять | Нужна осторожность |
+
+## Когда использовать Sessions
+
+### Традиционные веб-приложения
+
+- Сервер рендерит HTML (SSR)
+- Пользователи работают в браузере
+- Нет мобильных клиентов
+
+```javascript
+// express-session — простота и надёжность
+app.use(session({
+  store: new RedisStore({ client }),
+  secret: process.env.SESSION_SECRET,
+  cookie: { httpOnly: true, secure: true },
+}));
+
+app.post('/login', async (req, res) => {
+  const user = await authenticate(req.body);
+  req.session.userId = user.id;
+  res.redirect('/dashboard');
+});
+```
+
+### Когда нужен мгновенный отзыв
+
+```javascript
+// Принудительный logout всех сессий пользователя
+async function logoutAllSessions(userId) {
+  // Удаляем все сессии пользователя из Redis
+  const keys = await redis.keys(`sess:*`);
+  for (const key of keys) {
+    const session = await redis.get(key);
+    const parsed = JSON.parse(session);
+    if (parsed.userId === userId) {
+      await redis.del(key);
+    }
+  }
+}
+```
+
+### Когда хранишь много данных о сессии
+
+Сессия хранится на сервере — можно хранить много данных без увеличения нагрузки на сеть.
+
+## Когда использовать JWT
+
+### API для мобильных приложений
+
+Мобильные приложения не используют куки нативно. JWT удобнее.
+
+```javascript
+// React Native / Flutter
+const response = await fetch('/api/login', {
+  method: 'POST',
+  body: JSON.stringify({ email, password }),
+});
+const { accessToken } = await response.json();
+
+// Сохраняем в secure storage (не localStorage!)
+await SecureStore.setItemAsync('token', accessToken);
+
+// Используем в запросах
+const apiResponse = await fetch('/api/user', {
+  headers: { 'Authorization': `Bearer ${accessToken}` },
+});
+```
+
+### Микросервисная архитектура
+
+JWT можно верифицировать без обращения к центральному серверу:
+
+```
+                    Auth Service
+                       │
+           ┌───────────┼───────────┐
+           ▼           ▼           ▼
+    User Service  Order Service  Pay Service
+    
+Каждый сервис верифицирует JWT своим публичным ключом.
+Не нужно ходить в Auth Service при каждом запросе!
+```
+
+### Temporary access links
+
+JWT идеальны для одноразовых ссылок:
+
+```javascript
+function createPasswordResetToken(userId) {
+  return jwt.sign(
+    { sub: userId, purpose: 'password-reset' },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h', jti: crypto.randomUUID() }
+  );
+}
+
+// Ссылка: /reset-password?token=eyJ...
+app.post('/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body;
+  
+  const payload = jwt.verify(token, process.env.JWT_SECRET);
+  
+  if (payload.purpose !== 'password-reset') {
+    return res.status(400).json({ error: 'Invalid token purpose' });
+  }
+  
+  await changePassword(payload.sub, newPassword);
+  res.json({ success: true });
+});
+```
+
+## Гибридный подход (рекомендуется)
+
+**Refresh token в httpOnly cookie (как сессия) + Access JWT в памяти**
+
+Это лучшее из двух миров:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                      Клиент                              │
+│                                                          │
+│  Memory: accessToken (15 min)                           │
+│  httpOnly Cookie: refreshToken (30 days)                │
+└──────────────────────────────────┬──────────────────────┘
+                                   │
+                    ┌──────────────┼──────────────────┐
+                    ▼                                  ▼
+            Access token                      Refresh token
+         (15 мин, stateless)            (30 дней, хранится в БД)
+         верифицируется быстро          можно отозвать мгновенно
+```
+
+```javascript
+// Клиент: хранение в памяти (не localStorage!)
+let accessToken = null;
+
+async function getAccessToken() {
+  if (accessToken && !isExpired(accessToken)) {
+    return accessToken;
+  }
+  
+  // Запрашиваем новый через refresh token (из cookie)
+  const response = await fetch('/api/refresh', {
+    method: 'POST',
+    credentials: 'include', // отправляет cookie
+  });
+  
+  const data = await response.json();
+  accessToken = data.accessToken;
+  return accessToken;
+}
+
+// Axios interceptor для авто-обновления токена
+axios.interceptors.response.use(
+  response => response,
+  async error => {
+    if (error.response?.status === 401) {
+      const token = await getAccessToken();
+      error.config.headers['Authorization'] = `Bearer ${token}`;
+      return axios.request(error.config);
+    }
+    return Promise.reject(error);
+  }
+);
+```
+
+## Next.js: рекомендуемый подход
+
+В Next.js используй **NextAuth.js** с сессиями через JWT:
+
+```javascript
+// Гибрид: JWT внутри, session cookie снаружи
+export const authOptions = {
+  providers: [/* ... */],
+  session: {
+    strategy: 'jwt', // JWT хранится в зашифрованном cookie
+    maxAge: 30 * 24 * 60 * 60, // 30 дней
+  },
+  callbacks: {
+    jwt({ token, user }) {
+      if (user) {
+        token.role = user.role;
+      }
+      return token;
+    },
+    session({ session, token }) {
+      session.user.role = token.role;
+      return session;
+    },
+  },
+};
+```
+
+## Таблица решений
+
+```
+Твой сценарий                     Рекомендация
+────────────────────────────────────────────────
+Традиционный SSR сайт             Sessions (Redis)
+SPA + один backend                JWT в cookie
+Мобильное приложение              JWT (access + refresh)
+Микросервисы                      JWT (RS256)
+Third-party OAuth                 NextAuth.js / Passport
+Временные ссылки                  Short-lived JWT
+Высокая безопасность              Sessions + 2FA
+```
+
+## Итог
+
+**Сессии** надёжнее и проще в управлении. Выбирай для традиционных веб-приложений.
+
+**JWT** гибче и масштабируется лучше. Выбирай для API, мобильных приложений и микросервисов.
+
+**Гибрид** (refresh cookie + access JWT в памяти) — лучший баланс для большинства SPA.
+
+## Попробуй: JWT vs Sessions — выбери подход
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    '/App.js': `import { useState } from 'react';
+
+const scenarios = [
+  { name: 'SSR веб-сайт', best: 'sessions', reason: 'Простое управление, мгновенный отзыв' },
+  { name: 'SPA + один backend', best: 'hybrid', reason: 'JWT в cookie, лучший баланс' },
+  { name: 'Мобильное приложение', best: 'jwt', reason: 'Нет нативных куки, удобный Bearer' },
+  { name: 'Микросервисы', best: 'jwt', reason: 'RS256, верификация без Auth сервера' },
+  { name: 'Временные ссылки', best: 'jwt', reason: 'Self-contained, short-lived token' },
+  { name: 'Высокая безопасность', best: 'sessions', reason: 'Мгновенный отзыв + 2FA' },
+];
+
+const colors = { sessions: '#3b82f6', jwt: '#22c55e', hybrid: '#a855f7' };
+const labels = { sessions: 'Sessions', jwt: 'JWT', hybrid: 'Гибрид' };
+
+export default function App() {
+  const [selected, setSelected] = useState(null);
+  const [score, setScore] = useState({ correct: 0, total: 0 });
+  const [answers, setAnswers] = useState({});
+
+  const handleAnswer = (i, answer) => {
+    if (answers[i] !== undefined) return;
+    const correct = answer === scenarios[i].best;
+    setAnswers({ ...answers, [i]: answer });
+    setScore({ correct: score.correct + (correct ? 1 : 0), total: score.total + 1 });
+  };
+
+  return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff' }}>
+      <h2>Выбери лучший подход</h2>
+      <p style={{ color: '#94a3b8' }}>Для каждого сценария выбери оптимальный метод аутентификации</p>
+      {score.total > 0 && (
+        <div style={{ background: '#1e293b', padding: 8, borderRadius: 6, marginBottom: 12, textAlign: 'center' }}>
+          Результат: {score.correct}/{score.total}
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {scenarios.map((s, i) => (
+          <div key={i} style={{ background: '#0f0f23', padding: 12, borderRadius: 8, border: '1px solid #ffffff1a' }}>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>{s.name}</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {Object.keys(labels).map(opt => (
+                <button key={opt} onClick={() => handleAnswer(i, opt)} style={{
+                  padding: '6px 14px', borderRadius: 6, border: 'none', cursor: answers[i] !== undefined ? 'default' : 'pointer',
+                  background: answers[i] === opt ? (opt === s.best ? '#22c55e33' : '#ef444433') : (answers[i] !== undefined && opt === s.best ? '#22c55e33' : '#1e293b'),
+                  color: answers[i] === opt ? (opt === s.best ? '#22c55e' : '#ef4444') : (answers[i] !== undefined && opt === s.best ? '#22c55e' : '#94a3b8'),
+                  border: '1px solid ' + (answers[i] !== undefined && opt === s.best ? '#22c55e' : '#ffffff1a'),
+                  fontSize: 13,
+                }}>{labels[opt]}</button>
+              ))}
+            </div>
+            {answers[i] !== undefined && (
+              <p style={{ margin: '6px 0 0', fontSize: 12, color: '#94a3b8' }}>{s.reason}</p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

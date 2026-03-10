@@ -1,0 +1,391 @@
+---
+title: "10. Обработка ошибок"
+sidebar:
+  order: 11
+---
+import { Playground } from '@components/Playground'
+
+
+## 11. Обработка ошибок в RxJS 🚨
+
+Привет! Яша снова здесь. Сегодня разбираем одну из самых важных тем — **что делать, когда что-то пошло не так**. В RxJS ошибки — это первоклассные граждане потока, и у нас есть целый арсенал инструментов для работы с ними.
+
+### Как ошибки распространяются в потоке
+
+Когда в Observable возникает ошибка, поток **завершается**. Ошибка «падает вниз» по цепочке операторов до первого обработчика.
+
+```typescript
+import { throwError, of } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+// Ошибка в операторе завершает поток
+of(1, 2, 3).pipe(
+  map(n => {
+    if (n === 2) throw new Error('Число 2 — плохое!');
+    return n;
+  })
+).subscribe({
+  next: n => console.log('next:', n),      // 1
+  error: e => console.log('error:', e.message), // Число 2 — плохое!
+  complete: () => console.log('done'),     // НЕ вызовется
+});
+```
+
+> 💡 **Важно:** ошибка, брошенная **внутри оператора**, обрабатывается цепочкой. Ошибка, брошенная **вне** — например, синхронно в subscribe — падает в глобальный обработчик и НЕ перехватывается `catchError`.
+
+---
+
+### throwError — создать поток-ошибку
+
+`throwError` создаёт Observable, который немедленно бросает ошибку и завершается.
+
+```typescript
+import { throwError } from 'rxjs';
+
+// Фабрика ошибки (рекомендуемый способ в RxJS 7+)
+const error$ = throwError(() => new Error('Что-то сломалось'));
+
+error$.subscribe({
+  next: v => console.log(v),       // не вызовется
+  error: e => console.log(e.message), // Что-то сломалось
+});
+```
+
+---
+
+### EMPTY — поток, который молча завершается
+
+`EMPTY` — Observable, который сразу завершается без значений и без ошибок. Удобен как «заглушка» при обработке ошибок.
+
+```typescript
+import { EMPTY, of } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
+
+// Если id нет — не делаем ничего
+const fetchUser = (id: string | null) =>
+  id ? of({ name: 'Яша', id }) : EMPTY;
+
+fetchUser(null).subscribe({
+  next: u => console.log(u),
+  complete: () => console.log('завершено без значений'),
+});
+```
+
+---
+
+### catchError — перехват и восстановление
+
+`catchError` перехватывает ошибку и позволяет **вернуть другой Observable** — продолжить поток или завершить его.
+
+```typescript
+import { of, throwError } from 'rxjs';
+import { catchError, map } from 'rxjs/operators';
+
+const api$ = throwError(() => new Error('500 Internal Server Error'));
+
+api$.pipe(
+  catchError(err => {
+    console.log('Поймали ошибку:', err.message);
+    return of({ data: null, error: err.message }); // возвращаем fallback
+  })
+).subscribe(console.log);
+// { data: null, error: '500 Internal Server Error' }
+```
+
+`catchError` получает два аргумента: `(error, caught$)`. Второй — **исходный Observable**, что позволяет переподписаться:
+
+```typescript
+import { of, throwError, timer } from 'rxjs';
+import { catchError, switchMap } from 'rxjs/operators';
+
+// Переподписка с задержкой — ручной retry
+let attempt = 0;
+const flaky$ = new Observable(obs => {
+  attempt++;
+  if (attempt < 3) obs.error(new Error(`Попытка ${attempt} неудачна`));
+  else { obs.next('Успех!'); obs.complete(); }
+});
+
+flaky$.pipe(
+  catchError((err, caught$) => {
+    console.log(err.message);
+    return timer(1000).pipe(switchMap(() => caught$));
+  })
+).subscribe(console.log); // Через 2 секунды: Успех!
+```
+
+---
+
+### retry — автоматические повторные попытки
+
+`retry(n)` автоматически переподписывается на источник при ошибке, до `n` раз.
+
+```typescript
+import { throwError, of } from 'rxjs';
+import { retry, map } from 'rxjs/operators';
+
+let calls = 0;
+const flakyApi$ = new Observable<string>(obs => {
+  calls++;
+  console.log(`Запрос #${calls}`);
+  if (calls < 3) obs.error(new Error('Сеть упала'));
+  else { obs.next('Данные получены ✅'); obs.complete(); }
+});
+
+flakyApi$.pipe(
+  retry(3) // попробуем ещё 3 раза при ошибке
+).subscribe({
+  next: v => console.log(v),
+  error: e => console.log('Всё, сдаёмся:', e.message),
+});
+// Запрос #1, Запрос #2, Запрос #3 → Данные получены ✅
+```
+
+В RxJS 7+ `retry` принимает конфиг-объект:
+
+```typescript
+import { retry } from 'rxjs/operators';
+
+flakyApi$.pipe(
+  retry({
+    count: 3,
+    delay: 1000,          // ждать 1 секунду между попытками
+    resetOnSuccess: true, // сбросить счётчик после успеха
+  })
+).subscribe(console.log);
+```
+
+---
+
+### retryWhen — умные повторные попытки (RxJS 6)
+
+`retryWhen` даёт полный контроль: принимает Observable ошибок и позволяет задать любую логику задержки.
+
+```typescript
+import { retryWhen, delay, take, tap } from 'rxjs/operators';
+import { throwError, timer } from 'rxjs';
+
+flakyApi$.pipe(
+  retryWhen(errors$ =>
+    errors$.pipe(
+      tap((err, i) => console.log(`Ошибка ${i + 1}: ${err.message}`)),
+      delay(2000), // экспоненциальная задержка вручную
+      take(3),     // максимум 3 повтора
+    )
+  )
+).subscribe(console.log);
+```
+
+> ⚠️ `retryWhen` устарел в RxJS 7. Используйте `retry({ delay: ... })` или `retry({ delay: (err, count) => timer(count * 1000) })`.
+
+---
+
+### onErrorResumeNextWith — игнорировать ошибки и продолжать
+
+`onErrorResumeNextWith` (ранее `onErrorResumeNext`) переключается на следующий Observable при ошибке **без передачи ошибки подписчику**.
+
+```typescript
+import { onErrorResumeNextWith } from 'rxjs/operators';
+import { throwError, of } from 'rxjs';
+
+throwError(() => new Error('Провал!')).pipe(
+  onErrorResumeNextWith(of('резервный источник'), of('и ещё один'))
+).subscribe(console.log);
+// резервный источник
+// и ещё один
+```
+
+---
+
+### Сравнительная таблица операторов ошибок
+
+| Оператор | Что делает при ошибке | Передаёт ошибку? |
+|---|---|---|
+| `catchError` | Переключается на другой Observable | Нет (если вернуть Observable) |
+| `retry(n)` | Переподписывается N раз | Да (если все попытки исчерпаны) |
+| `retryWhen` | Переподписывается по условию | Да (если источник завершился) |
+| `onErrorResumeNextWith` | Переходит к следующему Observable | Нет |
+| `EMPTY` | Тихое завершение | Нет |
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef, useCallback } from 'react';
+import { Subject, of, throwError, timer } from 'rxjs';
+import { switchMap, retry, catchError, tap, scan } from 'rxjs/operators';
+
+// Симулируем нестабильное API: 30% шанс упасть
+function flakyApi(id: number) {
+  return new Promise<string>((resolve, reject) => {
+    setTimeout(() => {
+      if (Math.random() < 0.3) {
+        reject(new Error(\`Запрос #\${id}: сетевая ошибка\`));
+      } else {
+        resolve(\`✅ Данные от запроса #\${id}\`);
+      }
+    }, 500);
+  });
+}
+
+interface LogEntry {
+  id: number;
+  type: 'attempt' | 'success' | 'error' | 'fatal';
+  message: string;
+}
+
+export default function App() {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [running, setRunning] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const triggerRef = useRef(new Subject<void>());
+  const logIdRef = useRef(0);
+  const requestIdRef = useRef(0);
+
+  const addLog = useCallback((type: LogEntry['type'], message: string) => {
+    setLogs(prev => [...prev.slice(-19), {
+      id: logIdRef.current++,
+      type,
+      message,
+    }]);
+  }, []);
+
+  useEffect(() => {
+    const trigger$ = triggerRef.current;
+
+    const sub = trigger$.pipe(
+      switchMap(() => {
+        requestIdRef.current++;
+        const reqId = requestIdRef.current;
+        setRetryCount(0);
+
+        // Оборачиваем Promise в Observable с retry(3)
+        const { from } = require('rxjs');
+        let attempt = 0;
+
+        return from(flakyApi(reqId)).pipe(
+          tap({
+            subscribe: () => {
+              attempt++;
+              addLog('attempt', \`🔄 Попытка \${attempt} (запрос #\${reqId})\`);
+            }
+          }),
+          retry({
+            count: 3,
+            delay: (err, retryIndex) => {
+              setRetryCount(retryIndex);
+              addLog('error', \`⚠️ \${err.message} → жду \${retryIndex * 500}мс\`);
+              return timer(retryIndex * 500);
+            },
+          }),
+          catchError(err => {
+            addLog('fatal', \`💥 Все 3 попытки провалились: \${err.message}\`);
+            return of(null);
+          }),
+        );
+      }),
+    ).subscribe(result => {
+      if (result !== null) {
+        addLog('success', result as string);
+      }
+      setRunning(false);
+    });
+
+    return () => sub.unsubscribe();
+  }, [addLog]);
+
+  const handleRequest = () => {
+    if (running) return;
+    setRunning(true);
+    triggerRef.current.next();
+  };
+
+  const colors: Record<LogEntry['type'], string> = {
+    attempt: '#60a5fa',
+    success: '#4ade80',
+    error:   '#fbbf24',
+    fatal:   '#f87171',
+  };
+
+  return (
+    <div style={{
+      background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace',
+      minHeight: '100vh', padding: '24px',
+    }}>
+      <h2 style={{ color: '#818cf8', margin: '0 0 8px' }}>
+        🚨 Обработка ошибок RxJS
+      </h2>
+      <p style={{ color: '#94a3b8', margin: '0 0 20px', fontSize: '13px' }}>
+        API падает с вероятностью 30%. retry(3) с задержкой спасает ситуацию.
+      </p>
+
+      <div style={{ display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '20px' }}>
+        <button
+          onClick={handleRequest}
+          disabled={running}
+          style={{
+            background: running ? '#334155' : '#6366f1',
+            color: 'white', border: 'none', padding: '10px 20px',
+            borderRadius: '8px', cursor: running ? 'not-allowed' : 'pointer',
+            fontSize: '14px', fontWeight: 'bold',
+          }}
+        >
+          {running ? '⏳ Загрузка...' : '📡 Сделать запрос'}
+        </button>
+        <button
+          onClick={() => setLogs([])}
+          style={{
+            background: 'transparent', color: '#64748b', border: '1px solid #334155',
+            padding: '10px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px',
+          }}
+        >
+          Очистить
+        </button>
+        {running && (
+          <span style={{ color: '#fbbf24', fontSize: '13px' }}>
+            🔁 Попытка повтора: {retryCount}/3
+          </span>
+        )}
+      </div>
+
+      <div style={{
+        background: '#1e293b', borderRadius: '12px', padding: '16px',
+        minHeight: '300px', maxHeight: '420px', overflowY: 'auto',
+      }}>
+        {logs.length === 0 && (
+          <p style={{ color: '#475569', textAlign: 'center', marginTop: '60px' }}>
+            Нажми «Сделать запрос» — логи появятся здесь 👆
+          </p>
+        )}
+        {logs.map(log => (
+          <div key={log.id} style={{
+            padding: '6px 10px', marginBottom: '4px', borderRadius: '6px',
+            background: '#0f172a', borderLeft: \`3px solid \${colors[log.type]}\`,
+            fontSize: '12px', color: colors[log.type],
+            animation: 'fadeIn 0.2s ease',
+          }}>
+            {log.message}
+          </div>
+        ))}
+      </div>
+
+      <div style={{
+        marginTop: '16px', padding: '12px', background: '#1e293b',
+        borderRadius: '8px', fontSize: '12px', color: '#64748b',
+      }}>
+        <strong style={{ color: '#94a3b8' }}>Паттерн:</strong>{' '}
+        <code style={{ color: '#a78bfa' }}>
+          from(flakyApi()).pipe(retry(&#123; count: 3, delay: ... &#125;), catchError(...))
+        </code>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

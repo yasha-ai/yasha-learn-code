@@ -1,0 +1,473 @@
+---
+title: "19. useSyncExternalStore"
+sidebar:
+  order: 19
+---
+import { Playground } from '@components/Playground'
+
+
+## TypeScript: Синхронизация Внешних Источников с `useSyncExternalStore`
+
+Привет, кодер! Яша снова на связи. Сегодня мы погрузимся в одну из самых мощных, но часто недооцененных возможностей React для работы с внешними источниками данных – хук `useSyncExternalStore`. Если ты когда-то ломал голову, как правильно подружить глобальный стор, браузерные API или, скажем, WebSockets с состоянием React, избегая "разрывов" (tearing) и лишних ре-рендеров, то этот урок для тебя.
+
+### 🤔 Что такое "Внешний Источник" и Зачем Его Синхронизировать?
+
+Представь React-компонент как актера на сцене. У него есть свой реквизит (состояние), и он точно знает, когда и что менять. Но иногда актеру нужно взаимодействовать с тем, что происходит "за кулисами" – например, с глобальным освещением, звуковым пультом или даже с другими спектаклями, идущими в соседнем зале. Эти "закулисье" и есть внешние источники.
+
+**Внешний источник** – это любой источник данных, который не управляется напрямую React. Это может быть:
+*   **Глобальный стейт-менеджер** (Redux, [Zustand](/react/zustand-basics/), Vuex-подобные хранилища).
+*   **Браузерные API** (`localStorage`, `sessionStorage`, `navigator.onLine`, `window.matchMedia`, `IntersectionObserver`).
+*   **Сокеты** (WebSockets, Server-Sent Events).
+*   **Сторонние библиотеки** с собственным управлением состоянием.
+
+Проблема в том, что React рендерит твой UI в несколько этапов, и между этими этапами внешние данные могут измениться. Если ты просто читаешь их в `useEffect` или `useState`, есть риск, что разные части твоего дерева компонентов увидят разные версии внешнего состояния в рамках одного цикла рендера. Это называется **"разрыв" (tearing)** – когда UI отображает несогласованное состояние.
+
+`useSyncExternalStore` создан для того, чтобы решить эту проблему элегантно и эффективно. Он гарантирует, что все компоненты, которые подписываются на внешний стор, всегда получают одну и ту же, актуальную версию состояния, даже при конкурентных рендерах React.
+
+### 🛠️ Как Работает `useSyncExternalStore`?
+
+Этот хук принимает три аргумента: `subscribe`, `getSnapshot` и `getServerSnapshot`.
+
+```typescript
+function useSyncExternalStore<Snapshot>(
+  subscribe: (onStoreChange: () => void) => () => void,
+  getSnapshot: () => Snapshot,
+  getServerSnapshot?: () => Snapshot
+): Snapshot;
+```
+
+Давай разберем каждый из них:
+
+1.  **`subscribe`**:
+    *   Это функция, которая принимает колбэк `onStoreChange`.
+    *   Этот колбэк должен быть вызван каждый раз, когда внешний стор изменяется.
+    *   `subscribe` должна **вернуть функцию отписки** (cleanup function), которая убирает подписку на изменения стора. Это как кнопка "отписаться" от рассылки – очень важно, чтобы React мог её нажать, когда компонент размонтируется или подписка меняется.
+
+2.  **`getSnapshot`**:
+    *   Это функция без аргументов, которая **возвращает текущее значение** внешнего стора.
+    *   **ОЧЕНЬ ВАЖНО**: `getSnapshot` должна возвращать **иммутабельное значение**. Если она будет возвращать новый объект/массив каждый раз, React будет думать, что стор изменился, и вызывать бесконечные ре-рендеры! Используй примитивы или стабильные ссылки на объекты.
+    *   React использует результат этой функции для сравнения и определения, нужно ли перерендерить компонент.
+
+3.  **`getServerSnapshot` (опционально)**:
+    *   Эта функция также без аргументов и возвращает значение.
+    *   Она используется только при **серверном рендеринге (SSR)**.
+    *   Её задача – предоставить начальное значение стора на сервере, чтобы избежать "гидратационного разрыва" (hydration mismatch), когда клиентский React-код видит другое состояние, чем то, что было отрендерено сервером.
+    *   Если ты не используешь SSR, или внешний стор доступен только в браузере (например, `localStorage`), можешь передать `undefined` или функцию, которая возвращает дефолтное значение.
+
+### 🚀 Пример 1: Простой Глобальный Счётчик
+
+Давай создадим простейший глобальный стор-счётчик и подключим его к React с помощью `useSyncExternalStore`.
+
+```typescript
+// store/counterStore.ts
+type Subscriber = () => void;
+
+let currentCount = 0;
+const subscribers = new Set<Subscriber>();
+
+// Функция, которая оповещает всех подписчиков об изменении
+function emitChange() {
+  subscribers.forEach((subscriber) => subscriber());
+}
+
+export const counterStore = {
+  // Получаем текущее значение счётчика
+  getCount(): number {
+    return currentCount;
+  },
+
+  // Увеличиваем счётчик и оповещаем подписчиков
+  increment(): void {
+    currentCount++;
+    emitChange();
+  },
+
+  // Уменьшаем счётчик и оповещаем подписчиков
+  decrement(): void {
+    currentCount--;
+    emitChange();
+  },
+
+  // Подписываемся на изменения. Возвращаем функцию отписки.
+  subscribe(callback: Subscriber): () => void {
+    subscribers.add(callback);
+    return () => subscribers.delete(callback); // Важно: возвращаем функцию для отписки
+  },
+};
+```
+
+Теперь, создадим React-хук, использующий `useSyncExternalStore`:
+
+```typescript
+// hooks/useCounter.ts
+import { useSyncExternalStore } from 'react';
+import { counterStore } from '../store/counterStore';
+
+export function useCounter() {
+  const count = useSyncExternalStore(
+    counterStore.subscribe,  // Функция подписки
+    counterStore.getCount,   // Функция получения текущего состояния
+    () => 0                  // Функция для SSR: начальное значение 0
+  );
+
+  const increment = counterStore.increment;
+  const decrement = counterStore.decrement;
+
+  return { count, increment, decrement };
+}
+```
+
+И используем его в компоненте:
+
+```typescript
+// components/CounterComponent.tsx
+import React from 'react';
+import { useCounter } from '../hooks/useCounter';
+
+export function CounterComponent() {
+  const { count, increment, decrement } = useCounter();
+
+  return (
+    <div style={{ padding: '15px', border: '1px solid #ccc', borderRadius: '8px' }}>
+      <h3>Счётчик из Внешнего Стора</h3>
+      <p>Текущее значение: <strong>{count}</strong></p>
+      <button onClick={increment} style={{ marginRight: '10px' }}>Увеличить</button>
+      <button onClick={decrement}>Уменьшить</button>
+    </div>
+  );
+}
+```
+
+### 🌍 Пример 2: Синхронизация с `localStorage`
+
+`localStorage` – отличный кандидат для `useSyncExternalStore`, так как его изменения (даже из других вкладок) можно отслеживать через событие `storage`.
+
+```typescript
+// store/localStorageStore.ts
+type LocalStorageKey = 'my-settings' | 'user-theme'; // Определим ключи, чтобы избежать опечаток
+
+interface UserSettings {
+  theme: 'dark' | 'light';
+  notificationsEnabled: boolean;
+}
+
+const defaultSettings: UserSettings = {
+  theme: 'light',
+  notificationsEnabled: true,
+};
+
+// Функция для чтения настроек из localStorage
+function readSettingsFromLocalStorage(): UserSettings {
+  if (typeof window === 'undefined') {
+    return defaultSettings; // На сервере localStorage недоступен
+  }
+  try {
+    const item = window.localStorage.getItem('my-settings');
+    return item ? JSON.parse(item) : defaultSettings;
+  } catch (error) {
+    console.error("Error reading from localStorage:", error);
+    return defaultSettings;
+  }
+}
+
+// Функция для записи настроек в localStorage
+function writeSettingsToLocalStorage(settings: UserSettings): void {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem('my-settings', JSON.stringify(settings));
+  }
+}
+
+// Создаем "сторовую" обёртку
+export const localStorageStore = {
+  getSnapshot(): UserSettings {
+    return readSettingsFromLocalStorage();
+  },
+
+  // Подписываемся на событие storage, которое срабатывает при изменении localStorage из других вкладок
+  subscribe(callback: () => void): () => void {
+    if (typeof window === 'undefined') {
+      return () => {}; // На сервере нет событий storage
+    }
+    window.addEventListener('storage', callback);
+    return () => window.removeEventListener('storage', callback);
+  },
+
+  // Функция для обновления настроек
+  setSettings(newSettings: Partial<UserSettings>): void {
+    const currentSettings = this.getSnapshot();
+    const updatedSettings = { ...currentSettings, ...newSettings };
+    writeSettingsToLocalStorage(updatedSettings);
+    // Принудительно вызываем оповещение, так как setItem не вызывает 'storage' для текущей вкладки
+    // Если бы мы хотели, чтобы это событие срабатывало и для текущей вкладки,
+    // пришлось бы эмитить его вручную или использовать более сложный паттерн.
+    // Для useSyncExternalStore достаточно, что getSnapshot обновится при следующем рендере.
+    // Но для других компонентов, которые могут использовать этот стор напрямую,
+    // лучше было бы добавить emitChange(). Для простоты пока опустим.
+  },
+
+  // Значение для SSR: всегда возвращаем дефолтные настройки
+  getServerSnapshot(): UserSettings {
+    return defaultSettings;
+  },
+};
+```
+
+И хук, использующий это:
+
+```typescript
+// hooks/useUserSettings.ts
+import { useSyncExternalStore } from 'react';
+import { localStorageStore } from '../store/localStorageStore';
+import { UserSettings } from '../store/localStorageStore'; // Импортируем тип
+
+export function useUserSettings() {
+  const settings = useSyncExternalStore(
+    localStorageStore.subscribe,
+    localStorageStore.getSnapshot,
+    localStorageStore.getServerSnapshot
+  );
+
+  // Добавляем функцию для обновления настроек
+  const updateSettings = (newSettings: Partial<UserSettings>) => {
+    localStorageStore.setSettings(newSettings);
+  };
+
+  return { settings, updateSettings };
+}
+```
+
+Компонент:
+
+```typescript
+// components/UserSettingsComponent.tsx
+import React from 'react';
+import { useUserSettings } from '../hooks/useUserSettings';
+
+export function UserSettingsComponent() {
+  const { settings, updateSettings } = useUserSettings();
+
+  const toggleTheme = () => {
+    updateSettings({ theme: settings.theme === 'light' ? 'dark' : 'light' });
+  };
+
+  const toggleNotifications = () => {
+    updateSettings({ notificationsEnabled: !settings.notificationsEnabled });
+  };
+
+  // Дополнительно: чтобы увидеть изменение темы сразу, можно менять body class
+  React.useEffect(() => {
+    document.body.className = settings.theme;
+  }, [settings.theme]);
+
+  return (
+    <div style={{ padding: '15px', border: '1px solid #ccc', borderRadius: '8px', marginTop: '20px' }}>
+      <h3>Настройки Пользователя (LocalStorage)</h3>
+      <p>Тема: <strong>{settings.theme}</strong></p>
+      <p>Уведомления: <strong>{settings.notificationsEnabled ? 'Включены' : 'Выключены'}</strong></p>
+      <button onClick={toggleTheme} style={{ marginRight: '10px' }}>
+        Сменить тему на {settings.theme === 'light' ? 'тёмную' : 'светлую'}
+      </button>
+      <button onClick={toggleNotifications}>
+        {settings.notificationsEnabled ? 'Выключить' : 'Включить'} уведомления
+      </button>
+    </div>
+  );
+}
+```
+
+### 🐛 Типичные Ошибки и Решения
+
+1.  **`getSnapshot` возвращает новый объект каждый раз:**
+    ```typescript
+    // ❌ Плохо: getSnapshot возвращает новый объект каждый раз
+    const myStore = {
+      _value: { count: 0 },
+      getSnapshot() {
+        return { ...this._value }; // Каждый раз новый объект! React будет видеть изменения.
+      },
+      // ...
+    };
+
+    // ✅ Хорошо: Возвращаем примитив или стабильную ссылку
+    const myStore = {
+      _value: 0,
+      getSnapshot() {
+        return this._value; // Примитив всегда стабилен
+      },
+      // ...
+    };
+
+    // Если нужно вернуть объект, убедитесь, что он изменяется иммутабельно
+    // и getSnapshot возвращает ссылку только на новый объект после изменения.
+    // Например, если _value меняется так: this._value = { count: 1 }
+    // Тогда getSnapshot: return this._value; будет работать корректно.
+    ```
+    **Решение**: Всегда возвращай примитивы (`string`, `number`, `boolean`) или стабильные ссылки на объекты/массивы. Если состояние стора – объект, и он изменяется, `getSnapshot` должна возвращать **ссылку на новый объект**, а не каждый раз создавать его копию.
+
+2.  **Забыта функция отписки в `subscribe`:**
+    ```typescript
+    // ❌ Плохо: Нет функции отписки
+    const myStore = {
+      // ...
+      subscribe(callback: () => void) {
+        // Где-то здесь добавили callback в список слушателей, но не вернули функцию для его удаления
+        // subscribers.add(callback);
+      },
+    };
+
+    // ✅ Хорошо: Всегда возвращаем функцию для удаления подписки
+    const myStore = {
+      // ...
+      subscribe(callback: () => void): () => void {
+        subscribers.add(callback);
+        return () => subscribers.delete(callback); // Вот она!
+      },
+    };
+    ```
+    **Решение**: Без функции отписки будут утечки памяти и нежелательное поведение, когда компонент уже неактивен, но продолжает слушать изменения.
+
+### 🎯 Практика
+
+Время для самостоятельной работы, мой юный падаван!
+
+1.  **Погода из Глобального Стора:**
+    Создай простой глобальный стор `weatherStore`, который хранит текущую температуру и город. Реализуй методы `setTemperature(temp: number)` и `setCity(city: string)`. Затем создай React-хук `useWeather` на базе `useSyncExternalStore` и компонент `WeatherDisplayComponent`, который отображает эту информацию и кнопки для её изменения.
+
+2.  **Статус Онлайн/Офлайн:**
+    Используй `useSyncExternalStore` для создания хука `useNetworkStatus`, который отслеживает, находится ли пользователь онлайн или офлайн. Используй браузерные события `window.addEventListener('online', ...)` и `window.addEventListener('offline', ...)` для подписки. `getSnapshot` должен возвращать `navigator.onLine`. Подумай, что вернет `getServerSnapshot`.
+
+3.  **Вычисляемое Состояние из Нескольких Источников:**
+    Представь, что у тебя есть `userProfileStore` (хранит имя и фамилию) и `userSettingsStore` (хранит предпочитаемый язык). Используй `useSyncExternalStore` для создания **одного** хука `useUserDisplayInfo`, который возвращает строку "Привет, [Имя Фамилия]! Ваш язык: [Язык]". Подсказка: ты можешь создать функцию `combineStores` или просто внутри `getSnapshot` считывать данные из обоих сторов. Это продвинутое задание, требующее умения синхронизировать несколько внешних источников.
+
+### 💡 Совет
+
+`useSyncExternalStore` – это низкоуровневый, но очень мощный примитив. Обычно ты не будешь использовать его напрямую в каждом компоненте. Вместо этого, ты создашь на его основе свои кастомные, более высокоуровневые хуки (как `useCounter` или `useUserSettings`), которые уже будут предоставлять удобный API для твоих компонентов. Это разделение ответственности делает код чище и проще в поддержке. Думай о нем как о фундаменте, на котором ты строишь свои архитектурные решения для работы с внешним состоянием.
+
+---
+
+## 🔗 Полезные ссылки
+- [Zustand: Простое управление стейтом](/react/zustand-basics/)
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useSyncExternalStore } from 'react';
+
+// Фабрика внешних хранилищ — живёт вне React
+function createStore<T>(initial: T) {
+  let state = initial;
+  const listeners = new Set<() => void>();
+  return {
+    // Возвращает текущее состояние — должен быть стабильным (без new obj каждый раз)
+    getSnapshot: () => state,
+    // Подписка — возвращает функцию отписки
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    // Обновление состояния + уведомление подписчиков
+    set: (updater: (prev: T) => T) => {
+      state = updater(state);
+      listeners.forEach(l => l());
+    },
+  };
+}
+
+// Глобальные сторы — живут снаружи React, не сбрасываются при рендере
+const counterStore = createStore({ count: 0, step: 1 });
+const themeStore = createStore<'dark' | 'light'>('dark');
+const cartStore = createStore<string[]>([]);
+
+// Хуки-обёртки над useSyncExternalStore
+function useCounter() {
+  return useSyncExternalStore(counterStore.subscribe, counterStore.getSnapshot);
+}
+function useTheme() {
+  return useSyncExternalStore(themeStore.subscribe, themeStore.getSnapshot);
+}
+function useCart() {
+  return useSyncExternalStore(cartStore.subscribe, cartStore.getSnapshot);
+}
+
+export default function App() {
+  const { count, step } = useCounter();
+  const theme = useTheme();
+  const cart = useCart();
+
+  const addToCart = () => {
+    const items = ['Яблоко', 'Банан', 'Манго', 'Киви', 'Груша'];
+    cartStore.set(prev => [...prev, items[Math.floor(Math.random() * items.length)]]);
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#0f172a', padding: 24, fontFamily: 'sans-serif' }}>
+      <h2 style={{ color: '#38bdf8', marginTop: 0, marginBottom: 4 }}>useSyncExternalStore</h2>
+      <p style={{ color: '#94a3b8', fontSize: 14, marginBottom: 20 }}>
+        Синхронизирует React-компоненты с внешними хранилищами. Без useState, без тиринга.
+      </p>
+
+      {/* counterStore */}
+      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 12 }}>
+        <p style={{ color: '#64748b', fontSize: 12, margin: '0 0 12px' }}>counterStore</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+          <button
+            onClick={() => counterStore.set(s => ({ ...s, count: s.count - s.step }))}
+            style={{ background: '#0f172a', color: '#e2e8f0', border: '1px solid #334155', borderRadius: 8, padding: '8px 18px', cursor: 'pointer', fontSize: 20 }}
+          >−</button>
+          <span style={{ color: '#e2e8f0', fontSize: 36, fontWeight: 'bold', minWidth: 64, textAlign: 'center' }}>{count}</span>
+          <button
+            onClick={() => counterStore.set(s => ({ ...s, count: s.count + s.step }))}
+            style={{ background: '#0f172a', color: '#e2e8f0', border: '1px solid #334155', borderRadius: 8, padding: '8px 18px', cursor: 'pointer', fontSize: 20 }}
+          >+</button>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ color: '#94a3b8', fontSize: 13 }}>Шаг:</span>
+          {[1, 5, 10].map(s => (
+            <button
+              key={s}
+              onClick={() => counterStore.set(st => ({ ...st, step: s }))}
+              style={{ background: step === s ? '#0ea5e9' : '#0f172a', color: '#fff', border: '1px solid #334155', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
+            >{s}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* themeStore */}
+      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 12 }}>
+        <p style={{ color: '#64748b', fontSize: 12, margin: '0 0 10px' }}>themeStore</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ width: 36, height: 36, borderRadius: '50%', background: theme === 'dark' ? '#0f172a' : '#f1f5f9', border: '2px solid #334155', flexShrink: 0 }} />
+          <span style={{ color: '#e2e8f0', flex: 1 }}>{'Тема: ' + theme}</span>
+          <button
+            onClick={() => themeStore.set(t => t === 'dark' ? 'light' : 'dark')}
+            style={{ background: '#0ea5e9', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}
+          >Переключить</button>
+        </div>
+      </div>
+
+      {/* cartStore */}
+      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16 }}>
+        <p style={{ color: '#64748b', fontSize: 12, margin: '0 0 10px' }}>cartStore</p>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+          <button
+            onClick={addToCart}
+            style={{ background: '#10b981', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}
+          >Добавить в корзину</button>
+          <button
+            onClick={() => cartStore.set(() => [])}
+            style={{ background: '#0f172a', color: '#94a3b8', border: '1px solid #334155', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}
+          >Очистить</button>
+        </div>
+        <div style={{ color: '#e2e8f0', fontSize: 13 }}>
+          {cart.length === 0
+            ? 'Корзина пуста'
+            : cart.map((item, i) => (
+                <span key={i} style={{ display: 'inline-block', background: '#0f172a', borderRadius: 6, padding: '2px 8px', margin: '2px', fontSize: 12 }}>{item}</span>
+              ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

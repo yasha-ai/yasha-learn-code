@@ -1,0 +1,351 @@
+---
+title: "6. OAuth 2.0"
+sidebar:
+  order: 5
+---
+import { Playground } from '@components/Playground'
+
+## Что такое OAuth 2.0?
+
+**OAuth 2.0** — протокол авторизации, позволяющий приложениям получать ограниченный доступ к аккаунтам пользователей на других сервисах (Google, GitHub, Facebook) без передачи логина/пароля.
+
+**Зачем это нужно?**
+- Пользователь не вводит пароль в твоё приложение
+- Твоё приложение получает только нужные права (scope)
+- Пользователь может отозвать доступ в любой момент
+
+## Ключевые участники
+
+```
+Пользователь (Resource Owner)
+     │ хочет войти через Google
+     ▼
+Твоё приложение (Client)
+     │ перенаправляет на Google
+     ▼
+Google (Authorization Server)
+     │ выдаёт Authorization Code
+     ▼
+Твоё приложение (Client)
+     │ обменивает Code на Access Token
+     ▼
+Google API (Resource Server)
+     │ возвращает данные пользователя
+     ▼
+Твоё приложение
+```
+
+## Authorization Code Flow (рекомендуется)
+
+Самый безопасный flow для веб-приложений:
+
+### Шаг 1: Перенаправление на Authorization Server
+
+```javascript
+// Генерируем state для защиты от CSRF
+const state = crypto.randomBytes(16).toString('hex');
+// Сохраняем state в сессии для проверки
+req.session.oauthState = state;
+
+const params = new URLSearchParams({
+  response_type: 'code',
+  client_id: process.env.GOOGLE_CLIENT_ID,
+  redirect_uri: 'https://myapp.com/auth/google/callback',
+  scope: 'openid email profile',
+  state,
+  // PKCE (для public clients)
+  code_challenge: codeChallenge,
+  code_challenge_method: 'S256',
+});
+
+res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+```
+
+### Шаг 2: Callback — получаем Authorization Code
+
+```javascript
+app.get('/auth/google/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  
+  // Проверяем state (защита от CSRF)
+  if (state !== req.session.oauthState) {
+    return res.status(400).json({ error: 'Invalid state' });
+  }
+  
+  if (error) {
+    return res.redirect(`/login?error=${error}`);
+  }
+  
+  // Обмениваем code на токены
+  const tokens = await exchangeCodeForTokens(code);
+  
+  // Получаем данные пользователя
+  const userInfo = await getUserInfo(tokens.access_token);
+  
+  // Логиним пользователя в нашей системе
+  const user = await findOrCreateUser(userInfo);
+  req.session.userId = user.id;
+  
+  res.redirect('/dashboard');
+});
+```
+
+### Шаг 3: Обмен Code на токены
+
+```javascript
+async function exchangeCodeForTokens(code) {
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: 'https://myapp.com/auth/google/callback',
+      grant_type: 'authorization_code',
+      // PKCE
+      code_verifier: codeVerifier,
+    }),
+  });
+  
+  if (!response.ok) {
+    throw new Error('Token exchange failed');
+  }
+  
+  return response.json();
+  // { access_token, refresh_token, id_token, expires_in, token_type }
+}
+```
+
+## PKCE (Proof Key for Code Exchange)
+
+PKCE — расширение для публичных клиентов (SPA, мобильные), где нельзя безопасно хранить client_secret.
+
+```javascript
+import { createHash, randomBytes } from 'crypto';
+
+function generatePKCE() {
+  // code_verifier — случайная строка 43-128 символов
+  const verifier = randomBytes(32).toString('base64url');
+  
+  // code_challenge = BASE64URL(SHA256(verifier))
+  const challenge = createHash('sha256')
+    .update(verifier)
+    .digest('base64url');
+  
+  return { verifier, challenge };
+}
+
+// При начале OAuth flow
+const { verifier, challenge } = generatePKCE();
+req.session.codeVerifier = verifier; // сохраняем для callback
+
+// В URL добавляем challenge
+params.append('code_challenge', challenge);
+params.append('code_challenge_method', 'S256');
+
+// В callback передаём verifier
+body.append('code_verifier', req.session.codeVerifier);
+```
+
+## Другие OAuth Flows
+
+### Client Credentials (серверные приложения)
+
+Для машина-машина коммуникации, без участия пользователя:
+
+```javascript
+async function getServiceToken() {
+  const response = await fetch('https://api.example.com/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: process.env.CLIENT_ID,
+      client_secret: process.env.CLIENT_SECRET,
+      scope: 'read:users write:reports',
+    }),
+  });
+  
+  return response.json();
+}
+```
+
+### Device Authorization Flow (TV, консоли)
+
+Для устройств без браузера:
+
+```javascript
+// Шаг 1: получаем device code
+const { device_code, user_code, verification_uri } = await fetch(
+  'https://accounts.google.com/o/oauth2/device/code',
+  { method: 'POST', body: { client_id, scope } }
+).then(r => r.json());
+
+// Показываем пользователю:
+console.log(`Перейди на ${verification_uri} и введи код: ${user_code}`);
+
+// Шаг 2: опрашиваем сервер пока пользователь не авторизует
+while (true) {
+  const tokens = await fetch('/token', {
+    body: { grant_type: 'device_code', device_code, client_id }
+  });
+  
+  if (tokens.access_token) break;
+  if (tokens.error === 'authorization_pending') {
+    await sleep(5000); // ждём
+  }
+}
+```
+
+## Scopes
+
+Scopes ограничивают доступ к данным:
+
+```
+Google OAuth scopes:
+- openid            — базовая аутентификация
+- email             — email адрес
+- profile           — имя, фото
+- https://www.googleapis.com/auth/gmail.readonly — чтение почты
+- https://www.googleapis.com/auth/drive.file    — файлы Drive
+
+GitHub OAuth scopes:
+- user              — данные пользователя
+- user:email        — email
+- repo              — публичные репозитории
+- repo:status       — статусы коммитов
+```
+
+**Принцип минимальных прав**: запрашивай только нужные scopes!
+
+## Хранение OAuth токенов
+
+```javascript
+// В БД (для refresh token)
+await db.oauthTokens.upsert({
+  where: { userId_provider: { userId: user.id, provider: 'google' } },
+  update: {
+    accessToken: encrypt(tokens.access_token),
+    refreshToken: encrypt(tokens.refresh_token),
+    expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
+  },
+  create: {
+    userId: user.id,
+    provider: 'google',
+    accessToken: encrypt(tokens.access_token),
+    refreshToken: encrypt(tokens.refresh_token),
+    expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
+  },
+});
+```
+
+## Обновление access token
+
+```javascript
+async function getValidGoogleToken(userId) {
+  const stored = await db.oauthTokens.findUnique({
+    where: { userId_provider: { userId, provider: 'google' } }
+  });
+  
+  // Проверяем, не истёк ли токен
+  if (stored.expiresAt > new Date(Date.now() + 60000)) {
+    return decrypt(stored.accessToken);
+  }
+  
+  // Обновляем через refresh token
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: decrypt(stored.refreshToken),
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+    }),
+  });
+  
+  const tokens = await response.json();
+  
+  await db.oauthTokens.update({
+    where: { userId_provider: { userId, provider: 'google' } },
+    data: {
+      accessToken: encrypt(tokens.access_token),
+      expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
+    }
+  });
+  
+  return tokens.access_token;
+}
+```
+
+## Практические задания
+
+1. Настрой OAuth приложение в Google Console
+2. Реализуй Authorization Code Flow для GitHub OAuth
+3. Добавь PKCE для SPA приложения
+4. Реализуй автоматическое обновление access token
+
+## Дополнительные ресурсы
+
+- [OAuth 2.0 RFC 6749](https://tools.ietf.org/html/rfc6749)
+- [OAuth 2.0 Security Best Practices](https://oauth.net/2/oauth-best-practice/)
+- [Google OAuth Playground](https://developers.google.com/oauthplayground/)
+
+## Попробуй: OAuth 2.0 Flow визуализация
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    '/App.js': `import { useState } from 'react';
+
+const steps = [
+  { actor: 'User', action: 'Нажимает "Войти через Google"', arrow: '→', target: 'Client', color: '#3b82f6' },
+  { actor: 'Client', action: 'Redirect на Authorization Server', arrow: '→', target: 'Google', color: '#a855f7' },
+  { actor: 'Google', action: 'Показывает форму согласия', arrow: '→', target: 'User', color: '#f59e0b' },
+  { actor: 'User', action: 'Разрешает доступ (scope)', arrow: '→', target: 'Google', color: '#22c55e' },
+  { actor: 'Google', action: 'Redirect с Authorization Code', arrow: '→', target: 'Client', color: '#ef4444' },
+  { actor: 'Client', action: 'Обменивает Code на Access Token', arrow: '→', target: 'Google', color: '#06b6d4' },
+  { actor: 'Client', action: 'Запрос данных с Access Token', arrow: '→', target: 'Google API', color: '#ec4899' },
+  { actor: 'Google API', action: 'Возвращает данные пользователя', arrow: '→', target: 'Client', color: '#22c55e' },
+];
+
+export default function App() {
+  const [step, setStep] = useState(-1);
+
+  return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff' }}>
+      <h2 style={{ textAlign: 'center' }}>OAuth 2.0: Authorization Code Flow</h2>
+      <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginBottom: 20 }}>
+        <button onClick={() => setStep(s => Math.max(-1, s - 1))}
+          style={{ padding: '6px 16px', borderRadius: 6, border: 'none', background: '#1e293b', color: '#fff', cursor: 'pointer' }}>
+          ← Назад
+        </button>
+        <button onClick={() => setStep(s => Math.min(steps.length - 1, s + 1))}
+          style={{ padding: '6px 16px', borderRadius: 6, border: 'none', background: '#3b82f6', color: '#fff', cursor: 'pointer' }}>
+          Далее →
+        </button>
+      </div>
+      <div style={{ maxWidth: 500, margin: '0 auto' }}>
+        {steps.map((s, i) => (
+          <div key={i} style={{
+            padding: '10px 14px', marginBottom: 6, borderRadius: 8,
+            background: i <= step ? s.color + '22' : '#ffffff08',
+            border: '1px solid ' + (i <= step ? s.color : '#ffffff0d'),
+            opacity: i <= step ? 1 : 0.4, transition: 'all 0.3s',
+          }}>
+            <span style={{ color: s.color, fontWeight: 600, fontSize: 13 }}>
+              {i + 1}. {s.actor} {s.arrow} {s.target}
+            </span>
+            <div style={{ color: '#cbd5e1', fontSize: 13, marginTop: 2 }}>{s.action}</div>
+          </div>
+        ))}
+      </div>
+      <p style={{ textAlign: 'center', color: '#64748b', fontSize: 13, marginTop: 12 }}>
+        Шаг {step + 1} из {steps.length} — {step < 0 ? 'нажми "Далее" для начала' : steps[step].action}
+      </p>
+    </div>
+  );
+}
+`
+  }}
+/>

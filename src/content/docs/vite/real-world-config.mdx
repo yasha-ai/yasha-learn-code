@@ -1,0 +1,593 @@
+---
+title: "17. Реальная конфигурация"
+sidebar:
+  order: 17
+---
+import { Playground } from '@components/Playground'
+
+
+В реальных проектах конфигурация Vite включает десятки настроек: прокси, алиасы, PWA, оптимизации, environment-specific конфиги. Эта глава — финальный урок курса с полным production-ready шаблоном.
+
+## Полный production конфиг
+
+```typescript
+// vite.config.ts
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import { resolve } from 'path'
+import { visualizer } from 'rollup-plugin-visualizer'
+import { VitePWA } from 'vite-plugin-pwa'
+import compression from 'vite-plugin-compression'
+
+export default defineConfig(({ command, mode }) => {
+  // Загружаем env переменные для использования в конфиге
+  const env = loadEnv(mode, process.cwd(), '')
+  const isProduction = mode === 'production'
+  const isDevelopment = mode === 'development'
+
+  return {
+    // Базовый URL (для GitHub Pages: '/my-repo/')
+    base: env.VITE_BASE_URL || '/',
+
+    plugins: [
+      // React с Fast Refresh
+      react({
+        babel: {
+          plugins: isProduction ? ['babel-plugin-styled-components'] : [],
+        },
+      }),
+
+      // PWA (Service Worker + Offline Support)
+      VitePWA({
+        registerType: 'autoUpdate',
+        workbox: {
+          globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        },
+        manifest: {
+          name: env.VITE_APP_TITLE || 'My App',
+          short_name: 'App',
+          theme_color: '#646cff',
+        },
+      }),
+
+      // Bundle analysis (только при анализе)
+      mode === 'analyze' && visualizer({
+        open: true,
+        gzipSize: true,
+        brotliSize: true,
+        filename: 'stats.html',
+      }),
+
+      // Gzip compression (только в production)
+      isProduction && compression({ algorithm: 'gzip' }),
+      isProduction && compression({ algorithm: 'brotliCompress', ext: '.br' }),
+    ].filter(Boolean),
+
+    // Алиасы
+    resolve: {
+      alias: {
+        '@': resolve(__dirname, './src'),
+        '@components': resolve(__dirname, './src/components'),
+        '@hooks': resolve(__dirname, './src/hooks'),
+        '@utils': resolve(__dirname, './src/utils'),
+        '@pages': resolve(__dirname, './src/pages'),
+        '@assets': resolve(__dirname, './src/assets'),
+        '@store': resolve(__dirname, './src/store'),
+        '@types': resolve(__dirname, './src/types'),
+      },
+    },
+
+    // Dev сервер
+    server: {
+      port: Number(env.PORT) || 3000,
+      host: true,
+      open: isDevelopment,
+      proxy: {
+        '/api': {
+          target: env.VITE_API_TARGET || 'http://localhost:8080',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api/, ''),
+        },
+        '/ws': {
+          target: env.VITE_WS_TARGET || 'ws://localhost:8080',
+          ws: true,
+        },
+      },
+      hmr: {
+        overlay: true,
+      },
+    },
+
+    // Preview сервер
+    preview: {
+      port: 8080,
+      strictPort: true,
+    },
+
+    // Production build
+    build: {
+      outDir: 'dist',
+      sourcemap: !isProduction,
+      minify: isProduction ? 'terser' : 'esbuild',
+      target: ['es2020', 'chrome87', 'firefox78', 'safari13'],
+      chunkSizeWarningLimit: 500,
+      terserOptions: isProduction ? {
+        compress: {
+          drop_console: true,
+          drop_debugger: true,
+        },
+      } : undefined,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+            'vendor-query': ['@tanstack/react-query'],
+            'vendor-utils': ['lodash-es', 'date-fns'],
+          },
+        },
+      },
+    },
+
+    // CSS конфиг
+    css: {
+      preprocessorOptions: {
+        scss: {
+          additionalData: `@use "@/styles/variables" as *;`,
+        },
+      },
+    },
+
+    // Глобальные определения
+    define: {
+      __APP_VERSION__: JSON.stringify(process.env.npm_package_version),
+      __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+    },
+
+    // Оптимизация зависимостей
+    optimizeDeps: {
+      include: ['react', 'react-dom', 'react-router-dom'],
+      exclude: ['@vite/client', '@vite/env'],
+    },
+  }
+})
+```
+
+## Структура переменных окружения
+
+```bash
+# .env
+VITE_APP_TITLE=My Production App
+VITE_BASE_URL=/
+
+# .env.development
+VITE_API_TARGET=http://localhost:8080
+VITE_WS_TARGET=ws://localhost:8080
+PORT=3000
+
+# .env.production
+VITE_API_TARGET=https://api.myapp.com
+VITE_WS_TARGET=wss://ws.myapp.com
+VITE_BASE_URL=/
+
+# .env.staging
+VITE_API_TARGET=https://staging-api.myapp.com
+VITE_WS_TARGET=wss://staging-ws.myapp.com
+```
+
+## Дополнительные скрипты
+
+```json
+{
+  "scripts": {
+    "dev": "vite",
+    "dev:staging": "vite --mode staging",
+    "build": "tsc --noEmit && vite build",
+    "build:staging": "vite build --mode staging",
+    "build:analyze": "vite build --mode analyze",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage",
+    "type-check": "tsc --noEmit"
+  }
+}
+```
+
+Ниже — полный production dashboard: статистика сборки, граф модулей, конфигурация по окружениям:
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef } from 'react';
+
+const BG = '#0f172a';
+const VITE_COLOR = '#646cff';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#38bdf8';
+const GREEN = '#4ade80';
+const RED = '#f87171';
+const AMBER = '#f59e0b';
+const PURPLE = '#a78bfa';
+
+type Tab = 'overview' | 'chunks' | 'modules' | 'env' | 'config';
+type Env = 'development' | 'production' | 'staging';
+
+interface Chunk {
+  name: string;
+  size: number;
+  gzip: number;
+  type: 'entry' | 'vendor' | 'chunk' | 'css';
+  modules: number;
+}
+
+interface Module {
+  path: string;
+  size: number;
+  imports: string[];
+  kind: 'page' | 'component' | 'hook' | 'util' | 'store';
+}
+
+const chunks: Chunk[] = [
+  { name: 'index.js', size: 68, gzip: 22, type: 'entry', modules: 12 },
+  { name: 'vendor-react.js', size: 154, gzip: 48, type: 'vendor', modules: 3 },
+  { name: 'vendor-query.js', size: 42, gzip: 13, type: 'vendor', modules: 1 },
+  { name: 'vendor-utils.js', size: 24, gzip: 8, type: 'vendor', modules: 2 },
+  { name: 'Dashboard.js', size: 48, gzip: 15, type: 'chunk', modules: 8 },
+  { name: 'Settings.js', size: 22, gzip: 7, type: 'chunk', modules: 5 },
+  { name: 'AdminPanel.js', size: 35, gzip: 11, type: 'chunk', modules: 6 },
+  { name: 'index.css', size: 24, gzip: 6, type: 'css', modules: 0 },
+];
+
+const modules: Module[] = [
+  { path: 'src/pages/HomePage.tsx', size: 8, imports: ['Button', 'Card', 'useAuth'], kind: 'page' },
+  { path: 'src/pages/DashboardPage.tsx', size: 12, imports: ['Chart', 'Table', 'useQuery'], kind: 'page' },
+  { path: 'src/components/Button.tsx', size: 2, imports: [], kind: 'component' },
+  { path: 'src/components/Card.tsx', size: 3, imports: ['Button'], kind: 'component' },
+  { path: 'src/components/Table.tsx', size: 6, imports: ['useQuery'], kind: 'component' },
+  { path: 'src/hooks/useAuth.ts', size: 4, imports: ['authStore'], kind: 'hook' },
+  { path: 'src/hooks/useQuery.ts', size: 3, imports: [], kind: 'hook' },
+  { path: 'src/store/authStore.ts', size: 5, imports: [], kind: 'store' },
+  { path: 'src/utils/format.ts', size: 2, imports: [], kind: 'util' },
+  { path: 'src/utils/api.ts', size: 4, imports: ['useAuth'], kind: 'util' },
+];
+
+const envConfigs: Record<Env, Record<string, string>> = {
+  development: {
+    'VITE_API_TARGET': 'http://localhost:8080',
+    'VITE_WS_TARGET': 'ws://localhost:8080',
+    'VITE_APP_TITLE': 'My App [DEV]',
+    'PORT': '3000',
+    'VITE_DEBUG': 'true',
+  },
+  production: {
+    'VITE_API_TARGET': 'https://api.myapp.com',
+    'VITE_WS_TARGET': 'wss://ws.myapp.com',
+    'VITE_APP_TITLE': 'My App',
+    'VITE_BASE_URL': '/',
+    'VITE_DEBUG': 'false',
+  },
+  staging: {
+    'VITE_API_TARGET': 'https://staging-api.myapp.com',
+    'VITE_WS_TARGET': 'wss://staging-ws.myapp.com',
+    'VITE_APP_TITLE': 'My App [STAGING]',
+    'VITE_BASE_URL': '/staging/',
+    'VITE_DEBUG': 'true',
+  },
+};
+
+const kindColors: Record<string, string> = {
+  page: VITE_COLOR, component: ACCENT, hook: GREEN, util: AMBER, store: PURPLE,
+};
+
+function CircleProgress({ value, max, color, label }: { value: number; max: number; color: string; label: string }) {
+  const r = 32;
+  const circ = 2 * Math.PI * r;
+  const pct = Math.min(value / max, 1);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+      <svg width={80} height={80} viewBox="0 0 80 80">
+        <circle cx={40} cy={40} r={r} fill="none" stroke="#334155" strokeWidth={6} />
+        <circle
+          cx={40} cy={40} r={r} fill="none" stroke={color} strokeWidth={6}
+          strokeDasharray={circ}
+          strokeDashoffset={circ * (1 - pct)}
+          strokeLinecap="round"
+          transform="rotate(-90 40 40)"
+        />
+        <text x={40} y={44} textAnchor="middle" fill={color} fontSize={14} fontWeight={700} fontFamily="monospace">
+          {value}KB
+        </text>
+      </svg>
+      <div style={{ fontSize: 11, color: '#64748b' }}>{label}</div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [tab, setTab] = useState<Tab>('overview');
+  const [env, setEnv] = useState<Env>('production');
+  const [selectedModule, setSelectedModule] = useState<Module | null>(null);
+  const [building, setBuilding] = useState(false);
+  const [buildProgress, setBuildProgress] = useState(0);
+  const [buildDone, setBuildDone] = useState(false);
+
+  const totalSize = chunks.reduce((s, c) => s + c.size, 0);
+  const totalGzip = chunks.reduce((s, c) => s + c.gzip, 0);
+
+  const simulateBuild = () => {
+    setBuilding(true);
+    setBuildProgress(0);
+    setBuildDone(false);
+    let p = 0;
+    const interval = setInterval(() => {
+      p += Math.random() * 15;
+      setBuildProgress(Math.min(p, 100));
+      if (p >= 100) {
+        clearInterval(interval);
+        setBuilding(false);
+        setBuildDone(true);
+      }
+    }, 120);
+  };
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: 'overview', label: '📊 Overview' },
+    { id: 'chunks', label: '📦 Chunks' },
+    { id: 'modules', label: '🔗 Modules' },
+    { id: 'env', label: '🔑 Env' },
+    { id: 'config', label: '⚙️ Config' },
+  ];
+
+  const configText = \`import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import { resolve } from 'path'
+import { VitePWA } from 'vite-plugin-pwa'
+import compression from 'vite-plugin-compression'
+
+export default defineConfig(({ command, mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const isProd = mode === 'production'
+
+  return {
+    base: env.VITE_BASE_URL || '/',
+    plugins: [
+      react(),
+      VitePWA({ registerType: 'autoUpdate' }),
+      isProd && compression({ algorithm: 'gzip' }),
+    ].filter(Boolean),
+    resolve: {
+      alias: { '@': resolve(__dirname, './src') },
+    },
+    server: {
+      port: 3000,
+      proxy: {
+        '/api': {
+          target: env.VITE_API_TARGET,
+          changeOrigin: true,
+          rewrite: (p) => p.replace(/^\\/api/, ''),
+        },
+      },
+    },
+    build: {
+      sourcemap: !isProd,
+      minify: isProd ? 'terser' : 'esbuild',
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-react': ['react', 'react-dom'],
+          },
+        },
+      },
+    },
+  }
+})\`;
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px 14px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 740, margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+          <div>
+            <h1 style={{
+              margin: 0, fontSize: 20, fontWeight: 800,
+              background: \`linear-gradient(90deg, \${VITE_COLOR}, \${ACCENT})\`,
+              WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+            }}>⚡ Vite Build Dashboard</h1>
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 3 }}>Production-ready configuration</div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {(['development', 'production', 'staging'] as Env[]).map(e => (
+              <button key={e} onClick={() => setEnv(e)} style={{
+                padding: '4px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 700,
+                background: env === e ? (e === 'production' ? GREEN : e === 'staging' ? AMBER : ACCENT) : CARD,
+                color: env === e ? BG : '#64748b',
+              }}>{e.slice(0, 4)}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Build bar */}
+        {(building || buildDone) && (
+          <div style={{ background: CARD, borderRadius: 10, padding: '10px 14px', marginBottom: 14, border: '1px solid #334155' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 6 }}>
+              <span style={{ color: building ? AMBER : GREEN }}>
+                {building ? '⏳ Сборка...' : '✅ Сборка завершена!'}
+              </span>
+              <span style={{ color: '#64748b', fontFamily: 'monospace' }}>{Math.round(buildProgress)}%</span>
+            </div>
+            <div style={{ height: 6, background: '#334155', borderRadius: 3 }}>
+              <div style={{ height: '100%', width: \`\${buildProgress}%\`, background: building ? AMBER : GREEN, borderRadius: 3, transition: 'width 0.1s' }} />
+            </div>
+            {buildDone && (
+              <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, color: '#64748b' }}>
+                <span>📦 {totalSize}KB minified</span>
+                <span>🗜️ {totalGzip}KB gzip</span>
+                <span>⏱ ~2.3s</span>
+                <span>📄 {chunks.length} chunks</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 4, marginBottom: 18, background: CARD, padding: 4, borderRadius: 10, overflowX: 'auto' }}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              flex: 1, padding: '7px 4px', borderRadius: 7, border: 'none', cursor: 'pointer', whiteSpace: 'nowrap',
+              background: tab === t.id ? VITE_COLOR : 'transparent',
+              color: tab === t.id ? '#fff' : '#94a3b8', fontSize: 11, fontWeight: tab === t.id ? 700 : 400,
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {/* Overview */}
+        {tab === 'overview' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-around', background: CARD, borderRadius: 14, padding: '20px 10px', marginBottom: 16, border: '1px solid #334155' }}>
+              <CircleProgress value={totalSize} max={1000} color={VITE_COLOR} label="Minified" />
+              <CircleProgress value={totalGzip} max={500} color={GREEN} label="Gzip" />
+              <CircleProgress value={modules.length} max={50} color={ACCENT} label="Modules" />
+              <CircleProgress value={chunks.length} max={20} color={PURPLE} label="Chunks" />
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+              {[
+                { label: '⚡ Dev Startup', value: '~60ms', color: VITE_COLOR, note: 'Native ESM' },
+                { label: '🔥 HMR Update', value: '<10ms', color: GREEN, note: 'Per module' },
+                { label: '🏗️ Build Time', value: '~2.3s', color: AMBER, note: 'TypeScript + Rollup' },
+                { label: '🎯 Bundle Target', value: 'ES2020', color: ACCENT, note: 'Chrome 87+' },
+              ].map(stat => (
+                <div key={stat.label} style={{ background: CARD, borderRadius: 12, padding: '14px 16px', border: '1px solid #334155' }}>
+                  <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>{stat.label}</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: stat.color }}>{stat.value}</div>
+                  <div style={{ fontSize: 11, color: '#475569' }}>{stat.note}</div>
+                </div>
+              ))}
+            </div>
+
+            <button onClick={simulateBuild} disabled={building} style={{
+              width: '100%', padding: '12px 0', borderRadius: 12, border: 'none',
+              cursor: building ? 'not-allowed' : 'pointer',
+              background: building ? '#334155' : VITE_COLOR,
+              color: '#fff', fontWeight: 700, fontSize: 14,
+            }}>
+              {building ? '⏳ Building...' : '🚀 Simulate vite build'}
+            </button>
+          </div>
+        )}
+
+        {/* Chunks */}
+        {tab === 'chunks' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {chunks.sort((a, b) => b.size - a.size).map((chunk, i) => {
+              const typeColor = { entry: VITE_COLOR, vendor: AMBER, chunk: GREEN, css: ACCENT }[chunk.type];
+              return (
+                <div key={i} style={{ background: CARD, borderRadius: 10, padding: '10px 14px', border: \`1px solid \${typeColor}30\` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <code style={{ fontFamily: 'monospace', fontSize: 12, color: typeColor, fontWeight: 700 }}>
+                        dist/assets/{chunk.name}
+                      </code>
+                      <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 4, background: \`\${typeColor}20\`, color: typeColor }}>
+                        {chunk.type}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
+                      <span>{chunk.size}KB</span>
+                      <span style={{ color: GREEN }}>{chunk.gzip}KB gz</span>
+                    </div>
+                  </div>
+                  <div style={{ height: 5, background: '#334155', borderRadius: 3 }}>
+                    <div style={{ height: '100%', width: \`\${(chunk.size / 154) * 100}%\`, background: typeColor, borderRadius: 3 }} />
+                  </div>
+                  {chunk.modules > 0 && (
+                    <div style={{ fontSize: 10, color: '#475569', marginTop: 4 }}>{chunk.modules} модулей</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Modules */}
+        {tab === 'modules' && (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+              {modules.map(mod => (
+                <div key={mod.path} onClick={() => setSelectedModule(selectedModule?.path === mod.path ? null : mod)} style={{
+                  background: CARD, borderRadius: 10, padding: '10px 12px',
+                  border: \`1px solid \${selectedModule?.path === mod.path ? kindColors[mod.kind] : '#334155'}\`,
+                  cursor: 'pointer', transition: 'all 0.2s',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <code style={{ fontSize: 10, color: kindColors[mod.kind], fontFamily: 'monospace', lineHeight: 1.4 }}>
+                      {mod.path.split('/').slice(-2).join('/')}
+                    </code>
+                    <span style={{ fontSize: 10, color: '#64748b', flexShrink: 0, marginLeft: 6 }}>{mod.size}KB</span>
+                  </div>
+                  <span style={{ fontSize: 9, color: kindColors[mod.kind], background: \`\${kindColors[mod.kind]}15\`, padding: '1px 5px', borderRadius: 3, marginTop: 4, display: 'inline-block' }}>
+                    {mod.kind}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {selectedModule && (
+              <div style={{ background: CARD, borderRadius: 12, padding: 14, border: \`1px solid \${kindColors[selectedModule.kind]}40\` }}>
+                <div style={{ fontWeight: 700, color: kindColors[selectedModule.kind], marginBottom: 8, fontSize: 13 }}>
+                  {selectedModule.path}
+                </div>
+                <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>
+                  Импортирует: {selectedModule.imports.length > 0 ? selectedModule.imports.join(', ') : 'нет зависимостей'}
+                </div>
+                <div style={{ display: 'flex', gap: 12, fontSize: 12 }}>
+                  <span style={{ color: '#94a3b8' }}>Размер: <span style={{ color: ACCENT }}>{selectedModule.size}KB</span></span>
+                  <span style={{ color: '#94a3b8' }}>Тип: <span style={{ color: kindColors[selectedModule.kind] }}>{selectedModule.kind}</span></span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Env */}
+        {tab === 'env' && (
+          <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+              {(['development', 'production', 'staging'] as Env[]).map(e => (
+                <button key={e} onClick={() => setEnv(e)} style={{
+                  flex: 1, padding: '8px 0', borderRadius: 10, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                  background: env === e ? (e === 'production' ? GREEN : e === 'staging' ? AMBER : ACCENT) : CARD,
+                  color: env === e ? BG : '#94a3b8', transition: 'all 0.2s',
+                }}>{e}</button>
+              ))}
+            </div>
+            <div style={{ background: CARD, borderRadius: 12, overflow: 'hidden', border: '1px solid #334155' }}>
+              <div style={{ padding: '8px 14px', borderBottom: '1px solid #334155', fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
+                .env.{env}
+              </div>
+              {Object.entries(envConfigs[env]).map(([key, value]) => (
+                <div key={key} style={{ display: 'flex', padding: '9px 14px', borderBottom: '1px solid #1a1a2e', gap: 12, alignItems: 'center' }}>
+                  <code style={{ fontFamily: 'monospace', fontSize: 12, color: ACCENT, flex: 1 }}>{key}</code>
+                  <code style={{ fontFamily: 'monospace', fontSize: 12, color: GREEN, flex: 1, textAlign: 'right' }}>={value}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Config */}
+        {tab === 'config' && (
+          <div style={{ background: CARD, borderRadius: 14, overflow: 'hidden', border: '1px solid #334155' }}>
+            <div style={{ padding: '8px 14px', borderBottom: '1px solid #334155', background: '#1a2744', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: 5 }}>
+                {['#ef4444','#f59e0b','#22c55e'].map(c => <div key={c} style={{ width: 9, height: 9, borderRadius: '50%', background: c }} />)}
+              </div>
+              <span style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>vite.config.ts (production-ready)</span>
+              <span style={{ fontSize: 10, color: GREEN }}>⚡ Vite 5</span>
+            </div>
+            <pre style={{ margin: 0, padding: 16, fontSize: 11, color: TEXT, fontFamily: 'monospace', lineHeight: 1.65, overflowX: 'auto', maxHeight: 500, overflowY: 'auto' }}>
+              <code>{configText}</code>
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}` }} />

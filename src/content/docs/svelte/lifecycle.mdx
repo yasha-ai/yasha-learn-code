@@ -1,0 +1,1250 @@
+---
+title: "8. Lifecycle хуки"
+sidebar:
+  order: 8
+---
+import { Playground } from '@components/Playground'
+
+
+## Lifecycle в Svelte: onMount, onDestroy и друзья 🔄
+
+Каждый компонент живёт своей жизнью: рождается, обновляется и умирает. Svelte даёт нам хуки, чтобы "подцепиться" к каждому из этих моментов. Если ты знаком с React — сравни с `useEffect`, и многое станет на своё место! 😎
+
+---
+
+## Обзор: все хуки в одном взгляде 👀
+
+Svelte предоставляет **четыре lifecycle-хука** плюс специальную функцию `tick()`:
+
+```
+  Компонент создаётся
+         │
+   onMount() ✅  ← DOM готов! Самый частый хук
+         │
+  ┌──────┴──────┐
+  │  Данные     │
+  │  изменились │
+  └──────┬──────┘
+         │
+  beforeUpdate() → обновление DOM → afterUpdate()
+         │
+  Компонент уничтожается
+         │
+  onDestroy() 🧹  ← чистим ресурсы
+```
+
+Все хуки импортируются из `'svelte'`:
+
+```svelte
+<script>
+  import { onMount, onDestroy, beforeUpdate, afterUpdate, tick } from 'svelte';
+</script>
+```
+
+> 💡 В Svelte 5 все эти хуки заменяются на `$effect()` — об этом в конце урока!
+
+---
+
+## onMount — главный хук 🚀
+
+`onMount(callback)` запускается **после того, как компонент вставлен в DOM**. Это аналог `useEffect(fn, [])` в React — выполняется **один раз** после первого рендера.
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  let users = [];
+  let loading = true;
+
+  onMount(async () => {
+    // ✅ DOM уже готов — можно работать с элементами
+    // ✅ Запрашиваем данные
+    const res = await fetch('https://jsonplaceholder.typicode.com/users');
+    users = await res.json();
+    loading = false;
+  });
+</script>
+
+{#if loading}
+  <p>Загрузка...</p>
+{:else}
+  <ul>
+    {#each users as user}
+      <li>{user.name}</li>
+    {/each}
+  </ul>
+{/if}
+```
+
+### Идеально подходит для:
+
+| Задача | Пример |
+|--------|--------|
+| Загрузка данных | `fetch('/api/data')` |
+| Инициализация библиотек | `new Chart(canvas, {...})` |
+| Запуск таймеров | `setInterval(fn, 1000)` |
+| Подписка на события | `window.addEventListener(...)` |
+| Работа с DOM-элементами | `element.focus()` |
+
+---
+
+## onMount + cleanup = магия 🪄
+
+Самая крутая фишка: **можно вернуть функцию очистки прямо из onMount**! Svelte вызовет её при уничтожении компонента — как `useEffect(() => { return cleanup }, [])` в React:
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  let seconds = 0;
+
+  onMount(() => {
+    // Запускаем таймер при монтировании
+    const interval = setInterval(() => {
+      seconds += 1;
+    }, 1000);
+
+    // Возвращаем функцию очистки — она вызовется при onDestroy!
+    return () => {
+      clearInterval(interval);
+      console.log('Таймер остановлен ✅');
+    };
+  });
+</script>
+
+<p>Компонент живёт уже: {seconds} сек.</p>
+```
+
+> 💡 Если вернуть cleanup из `onMount` — отдельный `onDestroy` не нужен! Но оба варианта работают.
+
+---
+
+## onMount и SSR ⚠️
+
+Очень важный момент: **onMount НЕ запускается на сервере**! Это сделано специально — хук предназначен только для браузерного кода.
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  let mapInstance = null;
+
+  onMount(() => {
+    // Безопасно! Этот код никогда не запустится на сервере.
+    // Библиотека Leaflet работает только в браузере (нужен window/document)
+    import('leaflet').then(L => {
+      mapInstance = L.map('map').setView([55.75, 37.61], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstance);
+    });
+
+    return () => mapInstance?.remove();
+  });
+</script>
+
+<div id="map" style="height: 400px;" />
+```
+
+**Что запускается при SSR, а что нет:**
+
+```
+При SSR (сервер):         В браузере:
+─────────────────         ────────────────
+✅ <script> тело          ✅ <script> тело
+✅ Реактивные $:          ✅ Реактивные $:
+❌ onMount                ✅ onMount
+✅ onDestroy              ✅ onDestroy
+❌ beforeUpdate           ✅ beforeUpdate
+❌ afterUpdate            ✅ afterUpdate
+```
+
+---
+
+## onDestroy — убираем за собой 🧹
+
+`onDestroy(callback)` вызывается **перед уничтожением компонента**. Используй его для очистки ресурсов, которые иначе останутся "висеть" в памяти:
+
+```svelte
+<script>
+  import { onMount, onDestroy } from 'svelte';
+
+  let position = { x: 0, y: 0 };
+
+  function handleMouseMove(event) {
+    position = { x: event.clientX, y: event.clientY };
+  }
+
+  onMount(() => {
+    window.addEventListener('mousemove', handleMouseMove);
+  });
+
+  // Убираем слушатель, когда компонент удалён из DOM
+  onDestroy(() => {
+    window.removeEventListener('mousemove', handleMouseMove);
+    console.log('Компонент уничтожен, слушатель удалён 🧹');
+  });
+</script>
+
+<p>Мышь: x={position.x}, y={position.y}</p>
+```
+
+### Типичные паттерны cleanup:
+
+```svelte
+<script>
+  import { onMount, onDestroy } from 'svelte';
+
+  // Паттерн 1: таймер
+  let timer;
+  onMount(() => { timer = setInterval(tick, 1000); });
+  onDestroy(() => clearInterval(timer));
+
+  // Паттерн 2: WebSocket
+  let ws;
+  onMount(() => { ws = new WebSocket('wss://example.com'); });
+  onDestroy(() => ws?.close());
+
+  // Паттерн 3: ResizeObserver
+  let observer;
+  let el;
+  onMount(() => {
+    observer = new ResizeObserver(entries => {
+      console.log('Размер изменился:', entries[0].contentRect);
+    });
+    observer.observe(el);
+  });
+  onDestroy(() => observer?.disconnect());
+</script>
+```
+
+---
+
+## beforeUpdate — перед обновлением DOM 🔮
+
+`beforeUpdate(callback)` вызывается **прямо перед тем, как Svelte обновит DOM** в ответ на изменение состояния. Важно: **он вызывается и перед первым рендером** (до onMount)!
+
+```svelte
+<script>
+  import { beforeUpdate } from 'svelte';
+
+  let messages = [];
+  let div;
+  let autoscroll = false;
+
+  beforeUpdate(() => {
+    // Сохраняем, нужно ли прокручивать ПЕРЕД обновлением
+    // (потом в afterUpdate — прокручиваем)
+    if (div) {
+      const scrollableDistance = div.scrollHeight - div.offsetHeight;
+      autoscroll = div.scrollTop > scrollableDistance - 20;
+    }
+  });
+</script>
+```
+
+> ⚠️ Не изменяй реактивные данные в `beforeUpdate` — получишь бесконечный цикл!
+
+---
+
+## afterUpdate — после обновления DOM ✅
+
+`afterUpdate(callback)` вызывается **после каждого обновления DOM**. Классический паттерн — автоскролл в чате:
+
+```svelte
+<script>
+  import { beforeUpdate, afterUpdate } from 'svelte';
+
+  let messages = ['Привет!', 'Как дела?'];
+  let div;
+  let autoscroll = false;
+
+  beforeUpdate(() => {
+    if (div) {
+      const scrollableDistance = div.scrollHeight - div.offsetHeight;
+      autoscroll = div.scrollTop > scrollableDistance - 20;
+    }
+  });
+
+  afterUpdate(() => {
+    // Прокручиваем вниз только если пользователь уже был внизу
+    if (autoscroll) {
+      div.scrollTo(0, div.scrollHeight);
+    }
+  });
+
+  function sendMessage() {
+    messages = [...messages, `Сообщение ${messages.length + 1}`];
+  }
+</script>
+
+<div bind:this={div} style="height: 200px; overflow-y: auto;">
+  {#each messages as message}
+    <p>{message}</p>
+  {/each}
+</div>
+
+<button on:click={sendMessage}>Отправить</button>
+```
+
+---
+
+## tick() — ждём обновления DOM ⏱️
+
+`tick()` — это не lifecycle-хук, а **утилита**, которая возвращает Promise. Он резолвится **после того, как все ожидающие изменения состояния применены к DOM**. Аналог `flushSync` в React или `nextTick` во Vue:
+
+```svelte
+<script>
+  import { tick } from 'svelte';
+
+  let text = 'Привет!';
+  let input;
+
+  async function handleClick() {
+    text = 'Обновлённый текст';
+
+    // DOM ещё НЕ обновлён здесь!
+    // input.selectionStart — было бы неправильное значение
+
+    await tick(); // Ждём, пока Svelte обновит DOM
+
+    // Теперь DOM актуален
+    input.selectionStart = 0;
+    input.selectionEnd = input.value.length;
+    input.focus();
+  }
+</script>
+
+<input bind:this={input} bind:value={text} />
+<button on:click={handleClick}>Обновить и выделить</button>
+```
+
+### Ещё один пример tick() — автоформатирование:
+
+```svelte
+<script>
+  import { tick } from 'svelte';
+
+  let code = '';
+  let textarea;
+
+  async function handleInput() {
+    const before = textarea.selectionStart;
+
+    // Форматируем текст
+    code = code.toUpperCase();
+
+    await tick();
+
+    // Восстанавливаем позицию курсора после изменения
+    textarea.selectionStart = before;
+    textarea.selectionEnd = before;
+  }
+</script>
+
+<textarea
+  bind:this={textarea}
+  bind:value={code}
+  on:input={handleInput}
+/>
+```
+
+---
+
+## Полный порядок событий 📋
+
+Посмотрим, в каком порядке всё срабатывает:
+
+```
+  Компонент создаётся:
+  1. beforeUpdate()     ← первый вызов, DOM ещё нет!
+  2. [рендер DOM]
+  3. onMount()          ← DOM готов
+
+  Состояние изменяется:
+  4. beforeUpdate()
+  5. [обновление DOM]
+  6. afterUpdate()
+
+  Компонент уничтожается:
+  7. onDestroy()        ← (или cleanup из onMount)
+```
+
+---
+
+## Сравнение с React useEffect 🔄
+
+Если ты приходишь из React — вот таблица соответствий:
+
+| Svelte | React | Когда |
+|--------|-------|-------|
+| `onMount(fn)` | `useEffect(fn, [])` | Один раз после монтирования |
+| `onDestroy(fn)` | `useEffect(() => fn, [])` | При размонтировании |
+| `beforeUpdate(fn)` | `useEffect` с deps | Перед обновлением DOM |
+| `afterUpdate(fn)` | `useEffect` с deps | После обновления DOM |
+| `tick()` | `flushSync()` или `setTimeout(fn, 0)` | Ждём обновления DOM |
+
+```svelte
+<!-- Svelte: onMount с cleanup -->
+<script>
+  import { onMount } from 'svelte';
+
+  onMount(() => {
+    const id = setInterval(() => console.log('tick'), 1000);
+    return () => clearInterval(id); // cleanup!
+  });
+</script>
+```
+
+```jsx
+// React: аналог
+useEffect(() => {
+  const id = setInterval(() => console.log('tick'), 1000);
+  return () => clearInterval(id); // cleanup!
+}, []);
+```
+
+---
+
+## Практические паттерны 🛠️
+
+### Паттерн 1: Fetch с AbortController
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  let data = null;
+  let error = null;
+
+  onMount(() => {
+    const controller = new AbortController();
+
+    fetch('/api/data', { signal: controller.signal })
+      .then(res => res.json())
+      .then(json => { data = json; })
+      .catch(err => {
+        if (err.name !== 'AbortError') error = err.message;
+      });
+
+    // Отменяем запрос при уничтожении компонента!
+    return () => controller.abort();
+  });
+</script>
+
+{#if error}<p style="color: red">{error}</p>{/if}
+{#if data}<pre>{JSON.stringify(data, null, 2)}</pre>{/if}
+```
+
+### Паттерн 2: ResizeObserver
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  let width = 0;
+  let height = 0;
+  let box;
+
+  onMount(() => {
+    const ro = new ResizeObserver(([entry]) => {
+      ({ width, height } = entry.contentRect);
+    });
+
+    ro.observe(box);
+    return () => ro.disconnect();
+  });
+</script>
+
+<div bind:this={box} style="resize: both; overflow: auto; padding: 1rem; border: 1px solid #ccc;">
+  Я {Math.round(width)}×{Math.round(height)} пикселей!
+</div>
+```
+
+### Паттерн 3: IntersectionObserver
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  let visible = false;
+  let el;
+
+  onMount(() => {
+    const io = new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+    }, { threshold: 0.5 });
+
+    io.observe(el);
+    return () => io.disconnect();
+  });
+</script>
+
+<div style="height: 200vh; display: flex; align-items: center;">
+  <div
+    bind:this={el}
+    style="padding: 2rem; background: {visible ? '#4ade80' : '#f87171'}; transition: background 0.3s;"
+  >
+    Я {visible ? 'видим' : 'не видим'}!
+  </div>
+</div>
+```
+
+### Паттерн 4: Подписка на Store в onMount
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+  import { userStore } from './stores';
+
+  let user = null;
+
+  onMount(() => {
+    // Ручная подписка (обычно используют $userStore)
+    const unsubscribe = userStore.subscribe(value => {
+      user = value;
+    });
+
+    return unsubscribe; // Отписываемся при уничтожении!
+  });
+</script>
+```
+
+### Паттерн 5: Event Listener с cleanup
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  let keys = [];
+
+  onMount(() => {
+    const handler = (e) => {
+      keys = [...keys.slice(-9), e.key];
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  });
+</script>
+
+<p>Последние нажатия: {keys.join(' → ')}</p>
+```
+
+---
+
+## Lifecycle внутри компонентов-обёрток 📦
+
+Хуки работают для компонента, в котором вызваны. Можно создавать переиспользуемую логику:
+
+```svelte
+<!-- useTimer.js — переиспользуемая логика (Svelte 4) -->
+<script context="module">
+  import { onMount, onDestroy } from 'svelte';
+  import { writable } from 'svelte/store';
+
+  export function createTimer() {
+    const seconds = writable(0);
+    let interval;
+
+    onMount(() => {
+      interval = setInterval(() => seconds.update(n => n + 1), 1000);
+      return () => clearInterval(interval);
+    });
+
+    return seconds;
+  }
+</script>
+```
+
+---
+
+## Svelte 5: $effect() заменяет всё 🆕
+
+В Svelte 5 появились **runes** — новая система реактивности. Все lifecycle-хуки заменяются на `$effect()`:
+
+```svelte
+<!-- Svelte 5 -->
+<script>
+  let count = $state(0);
+
+  $effect(() => {
+    // Запускается после монтирования и при каждом изменении зависимостей
+    const interval = setInterval(() => count++, 1000);
+
+    // Возвращаем cleanup — работает как onMount + onDestroy
+    return () => clearInterval(interval);
+  });
+
+  // $effect.pre — аналог beforeUpdate
+  $effect.pre(() => {
+    console.log('Перед обновлением DOM, count =', count);
+  });
+</script>
+
+<p>Count: {count}</p>
+```
+
+**Сравнение Svelte 4 vs Svelte 5:**
+
+```
+Svelte 4              Svelte 5
+─────────────         ──────────────────────
+onMount(fn)     →     $effect(fn) [с cleanup]
+onDestroy(fn)   →     $effect(() => fn) [return fn]
+beforeUpdate    →     $effect.pre(fn)
+afterUpdate     →     $effect(fn) [без cleanup]
+tick()          →     tick() [не изменился!]
+```
+
+---
+
+## Важные правила и ловушки ⚠️
+
+### Правило 1: Хуки вызываются только в `<script>`
+
+```svelte
+<!-- ✅ Правильно -->
+<script>
+  import { onMount } from 'svelte';
+  onMount(() => console.log('OK'));
+</script>
+
+<!-- ❌ Неправильно — нельзя вызывать в функциях/условиях -->
+<script>
+  function setup() {
+    onMount(() => {}); // Не работает!
+  }
+</script>
+```
+
+### Правило 2: async onMount — осторожно!
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  onMount(async () => {
+    const data = await fetch('/api').then(r => r.json());
+    // ...
+
+    // ⚠️ НЕЛЬЗЯ вернуть cleanup из async функции!
+    // async функция возвращает Promise, а не функцию
+  });
+
+  // ✅ Правильный паттерн с cleanup:
+  onMount(() => {
+    let cancelled = false;
+
+    fetch('/api').then(r => r.json()).then(data => {
+      if (!cancelled) { /* обновляем состояние */ }
+    });
+
+    return () => { cancelled = true; };
+  });
+</script>
+```
+
+### Правило 3: Порядок имеет значение
+
+```svelte
+<script>
+  import { beforeUpdate, afterUpdate, onMount } from 'svelte';
+
+  // ⚠️ beforeUpdate вызывается ПЕРЕД первым рендером тоже!
+  beforeUpdate(() => {
+    // При первом вызове DOM ещё не существует!
+    // Проверяй, что элемент существует перед работой с ним
+  });
+</script>
+```
+
+---
+
+## Итоги урока 🎯
+
+| Хук | Когда | Зачем |
+|-----|-------|-------|
+| `onMount(fn)` | После монтирования | API, библиотеки, таймеры |
+| `onMount(() => cleanup)` | Mount + Destroy | Таймеры с очисткой |
+| `onDestroy(fn)` | Перед уничтожением | Отписки, закрытие соединений |
+| `beforeUpdate(fn)` | Перед обновлением DOM | Сохранить позицию скролла |
+| `afterUpdate(fn)` | После обновления DOM | Автоскролл в чате |
+| `tick()` | По требованию | Дождаться обновления DOM |
+
+---
+
+## Интерактивный Playground 🎮
+
+Монтируй и размонтируй компонент, запускай таймер, следи за часами — и наблюдай, когда именно срабатывает каждый lifecycle-хук!
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, useCallback } from 'react';
+
+const BG = '#0f172a';
+const ACCENT = '#ff3e00';
+const YELLOW = '#ffba00';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const DIM = '#475569';
+
+type LifecycleHook =
+  | 'onMount'
+  | 'onDestroy'
+  | 'beforeUpdate'
+  | 'afterUpdate'
+  | 'tick';
+
+interface LogEntry {
+  id: number;
+  hook: LifecycleHook;
+  time: string;
+  msg: string;
+}
+
+const hookColors: Record<LifecycleHook, string> = {
+  onMount: '#4ade80',
+  onDestroy: '#f87171',
+  beforeUpdate: YELLOW,
+  afterUpdate: '#60a5fa',
+  tick: '#a78bfa',
+};
+
+const hookDesc: Record<LifecycleHook, string> = {
+  onMount: 'DOM готов, запускаем ресурсы',
+  onDestroy: 'Компонент удалён, чистим ресурсы',
+  beforeUpdate: 'Состояние изменится, DOM ещё старый',
+  afterUpdate: 'DOM обновлён, синхронизация завершена',
+  tick: 'Promise резолвится — DOM актуален',
+};
+
+let logIdCounter = 0;
+
+function getTime() {
+  return new Date().toLocaleTimeString('ru', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function SvelteComponent({
+  onLog,
+}: {
+  onLog: (hook: LifecycleHook, msg: string) => void;
+}) {
+  const [count, setCount] = useState(0);
+  const [clockTime, setClockTime] = useState(getTime());
+  const prevCount = useRef(count);
+  const mountTime = useRef(getTime());
+
+  // onMount — runs once after mounting
+  useEffect(() => {
+    onLog('onMount', \`DOM готов! Компонент смонтирован в \${mountTime.current}\`);
+
+    // Clock — demonstrates onMount + cleanup pattern
+    const clockId = setInterval(() => {
+      setClockTime(getTime());
+    }, 1000);
+
+    // Return cleanup = onDestroy equivalent
+    return () => {
+      clearInterval(clockId);
+      onLog('onDestroy', 'Интервал часов очищен, компонент удалён');
+    };
+  }, []);
+
+  // beforeUpdate + afterUpdate simulation
+  useEffect(() => {
+    if (prevCount.current !== count) {
+      onLog(
+        'beforeUpdate',
+        \`count: \${prevCount.current} → \${count} (DOM ещё не обновлён)\`
+      );
+      const t = setTimeout(() => {
+        onLog('afterUpdate', \`DOM синхронизирован, count = \${count}\`);
+      }, 16);
+      prevCount.current = count;
+      return () => clearTimeout(t);
+    }
+  }, [count]);
+
+  const handleTick = () => {
+    onLog('tick', 'await tick() — ждём следующего обновления DOM');
+    setTimeout(() => {
+      onLog('tick', 'Promise resolved — DOM актуален ✅');
+    }, 50);
+  };
+
+  const btnBase: React.CSSProperties = {
+    border: 'none',
+    borderRadius: '6px',
+    padding: '0.4rem 0.9rem',
+    cursor: 'pointer',
+    fontWeight: 700,
+    fontSize: '0.82rem',
+    fontFamily: 'monospace',
+  };
+
+  return (
+    <div
+      style={{
+        background: CARD,
+        border: \`2px solid \${ACCENT}\`,
+        borderRadius: '10px',
+        padding: '1rem',
+        marginBottom: '0.75rem',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: '0.75rem',
+        }}
+      >
+        <span
+          style={{ color: ACCENT, fontWeight: 700, fontSize: '0.85rem' }}
+        >
+          {"<SvelteComponent />"}
+        </span>
+        <span
+          style={{
+            background: '#14532d',
+            color: '#4ade80',
+            padding: '0.2rem 0.6rem',
+            borderRadius: '9999px',
+            fontSize: '0.7rem',
+            fontWeight: 700,
+          }}
+        >
+          MOUNTED ✅
+        </span>
+      </div>
+
+      {/* Clock — onMount + cleanup */}
+      <div
+        style={{
+          background: '#0f172a',
+          borderRadius: '8px',
+          padding: '0.75rem',
+          marginBottom: '0.75rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+        }}
+      >
+        <span style={{ fontSize: '1.4rem' }}>🕐</span>
+        <div>
+          <div
+            style={{ color: MUTED, fontSize: '0.68rem', marginBottom: '0.15rem' }}
+          >
+            onMount: setInterval каждую секунду
+          </div>
+          <div
+            style={{ color: hookColors.onMount, fontWeight: 700, fontSize: '1.1rem' }}
+          >
+            {clockTime}
+          </div>
+        </div>
+      </div>
+
+      {/* Counter — beforeUpdate/afterUpdate */}
+      <div
+        style={{
+          background: '#0f172a',
+          borderRadius: '8px',
+          padding: '0.75rem',
+          marginBottom: '0.75rem',
+        }}
+      >
+        <div
+          style={{ color: MUTED, fontSize: '0.68rem', marginBottom: '0.5rem' }}
+        >
+          beforeUpdate / afterUpdate при изменении count
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <button
+            onClick={() => setCount((c) => c - 1)}
+            style={{ ...btnBase, background: BORDER, color: TEXT, width: '32px' }}
+          >
+            −
+          </button>
+          <span
+            style={{
+              color: YELLOW,
+              fontWeight: 700,
+              fontSize: '1.5rem',
+              minWidth: '2.5rem',
+              textAlign: 'center',
+            }}
+          >
+            {count}
+          </span>
+          <button
+            onClick={() => setCount((c) => c + 1)}
+            style={{ ...btnBase, background: BORDER, color: TEXT, width: '32px' }}
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      {/* tick() */}
+      <button
+        onClick={handleTick}
+        style={{ ...btnBase, background: '#312e81', color: '#a78bfa', width: '100%' }}
+      >
+        await tick() — вызвать вручную
+      </button>
+    </div>
+  );
+}
+
+function HookBadge({ hook }: { hook: LifecycleHook }) {
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        background: hookColors[hook] + '22',
+        color: hookColors[hook],
+        border: \`1px solid \${hookColors[hook]}55\`,
+        borderRadius: '4px',
+        padding: '0.1rem 0.4rem',
+        fontSize: '0.72rem',
+        fontWeight: 700,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {hook}
+    </span>
+  );
+}
+
+export default function App() {
+  const [mounted, setMounted] = useState(true);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  const addLog = useCallback((hook: LifecycleHook, msg: string) => {
+    setLogs((prev) => [
+      { id: logIdCounter++, hook, time: getTime(), msg },
+      ...prev.slice(0, 24),
+    ]);
+  }, []);
+
+  const lifecycleOrder: { hook: LifecycleHook; phase: string }[] = [
+    { hook: 'onMount', phase: 'mount' },
+    { hook: 'beforeUpdate', phase: 'update' },
+    { hook: 'afterUpdate', phase: 'update' },
+    { hook: 'tick', phase: 'util' },
+    { hook: 'onDestroy', phase: 'destroy' },
+  ];
+
+  const phaseColors: Record<string, string> = {
+    mount: hookColors.onMount,
+    update: YELLOW,
+    util: '#a78bfa',
+    destroy: hookColors.onDestroy,
+  };
+
+  return (
+    <div
+      style={{
+        background: BG,
+        minHeight: '100vh',
+        padding: '1.25rem',
+        fontFamily: 'monospace',
+        color: TEXT,
+        boxSizing: 'border-box',
+      }}
+    >
+      {/* Header */}
+      <div style={{ marginBottom: '1.25rem' }}>
+        <h2
+          style={{
+            color: ACCENT,
+            fontSize: '1.15rem',
+            fontWeight: 700,
+            margin: '0 0 0.25rem',
+          }}
+        >
+          🔄 Svelte Lifecycle Visualizer
+        </h2>
+        <p style={{ color: MUTED, fontSize: '0.78rem', margin: 0 }}>
+          Монтируй и размонтируй компонент — следи за хуками в реальном времени!
+        </p>
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: '1rem',
+        }}
+      >
+        {/* Left column */}
+        <div>
+          {/* Mount/Unmount controls */}
+          <div
+            style={{
+              background: CARD,
+              border: \`1px solid \${BORDER}\`,
+              borderRadius: '8px',
+              padding: '1rem',
+              marginBottom: '0.75rem',
+            }}
+          >
+            <div
+              style={{
+                color: MUTED,
+                fontSize: '0.68rem',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                marginBottom: '0.75rem',
+              }}
+            >
+              Управление компонентом
+            </div>
+            <div
+              style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}
+            >
+              <button
+                onClick={() => { if (!mounted) setMounted(true); }}
+                disabled={mounted}
+                style={{
+                  flex: 1,
+                  padding: '0.5rem',
+                  borderRadius: '6px',
+                  border: 'none',
+                  cursor: mounted ? 'not-allowed' : 'pointer',
+                  background: mounted ? BORDER : '#14532d',
+                  color: mounted ? DIM : '#4ade80',
+                  fontWeight: 700,
+                  fontSize: '0.82rem',
+                  fontFamily: 'monospace',
+                  transition: 'all 0.2s',
+                }}
+              >
+                ✨ Монтировать
+              </button>
+              <button
+                onClick={() => { if (mounted) setMounted(false); }}
+                disabled={!mounted}
+                style={{
+                  flex: 1,
+                  padding: '0.5rem',
+                  borderRadius: '6px',
+                  border: 'none',
+                  cursor: !mounted ? 'not-allowed' : 'pointer',
+                  background: !mounted ? BORDER : '#7f1d1d',
+                  color: !mounted ? DIM : '#f87171',
+                  fontWeight: 700,
+                  fontSize: '0.82rem',
+                  fontFamily: 'monospace',
+                  transition: 'all 0.2s',
+                }}
+              >
+                💥 Размонтировать
+              </button>
+            </div>
+            <div style={{ fontSize: '0.75rem' }}>
+              Статус:{' '}
+              <span
+                style={{
+                  color: mounted ? '#4ade80' : '#f87171',
+                  fontWeight: 700,
+                }}
+              >
+                {mounted ? 'MOUNTED ✅' : 'UNMOUNTED ❌'}
+              </span>
+            </div>
+          </div>
+
+          {/* Component */}
+          {mounted ? (
+            <SvelteComponent onLog={addLog} />
+          ) : (
+            <div
+              style={{
+                background: CARD,
+                border: \`1px dashed \${BORDER}\`,
+                borderRadius: '10px',
+                padding: '2.5rem',
+                textAlign: 'center',
+                color: DIM,
+                marginBottom: '0.75rem',
+                fontSize: '0.82rem',
+              }}
+            >
+              <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>💤</div>
+              Компонент размонтирован
+              <br />
+              <span style={{ color: '#374151', fontSize: '0.7rem' }}>
+                onDestroy вызван
+              </span>
+            </div>
+          )}
+
+          {/* Lifecycle order reference */}
+          <div
+            style={{
+              background: CARD,
+              border: \`1px solid \${BORDER}\`,
+              borderRadius: '8px',
+              padding: '0.85rem',
+            }}
+          >
+            <div
+              style={{
+                color: MUTED,
+                fontSize: '0.68rem',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                marginBottom: '0.65rem',
+              }}
+            >
+              Порядок lifecycle
+            </div>
+            {lifecycleOrder.map(({ hook, phase }, i) => (
+              <div
+                key={hook}
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '0.5rem',
+                  marginBottom: '0.45rem',
+                }}
+              >
+                <span
+                  style={{ color: '#334155', fontSize: '0.68rem', minWidth: '14px', paddingTop: '0.15rem' }}
+                >
+                  {i + 1}.
+                </span>
+                <div>
+                  <span
+                    style={{
+                      color: hookColors[hook],
+                      fontWeight: 700,
+                      fontSize: '0.78rem',
+                    }}
+                  >
+                    {hook}()
+                  </span>
+                  <div style={{ color: '#475569', fontSize: '0.66rem' }}>
+                    {hookDesc[hook]}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Right column — logs */}
+        <div
+          style={{
+            background: '#080e1a',
+            border: \`1px solid \${BORDER}\`,
+            borderRadius: '8px',
+            padding: '0.85rem',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '0.75rem',
+            }}
+          >
+            <div
+              style={{
+                color: MUTED,
+                fontSize: '0.68rem',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              📋 Lifecycle Log
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <span
+                style={{
+                  background: ACCENT + '22',
+                  color: ACCENT,
+                  borderRadius: '9999px',
+                  padding: '0.1rem 0.5rem',
+                  fontSize: '0.68rem',
+                  fontWeight: 700,
+                }}
+              >
+                {logs.length}
+              </span>
+              <button
+                onClick={() => setLogs([])}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: DIM,
+                  cursor: 'pointer',
+                  fontSize: '0.7rem',
+                  fontFamily: 'monospace',
+                }}
+              >
+                очистить
+              </button>
+            </div>
+          </div>
+
+          <div style={{ overflowY: 'auto', flex: 1, maxHeight: '460px' }}>
+            {logs.length === 0 ? (
+              <div style={{ color: '#1e293b', fontSize: '0.78rem' }}>
+                {'// Монтируй/размонтируй компонент...'}
+              </div>
+            ) : (
+              logs.map((entry, i) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    marginBottom: '0.55rem',
+                    padding: '0.4rem 0.5rem',
+                    background: i === 0 ? hookColors[entry.hook] + '11' : 'transparent',
+                    borderRadius: '4px',
+                    borderLeft: i === 0 ? \`2px solid \${hookColors[entry.hook]}\` : '2px solid transparent',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.4rem',
+                      marginBottom: '0.2rem',
+                    }}
+                  >
+                    <span style={{ color: '#334155', fontSize: '0.65rem' }}>
+                      {entry.time}
+                    </span>
+                    <HookBadge hook={entry.hook} />
+                  </div>
+                  <div
+                    style={{
+                      color: i === 0 ? TEXT : DIM,
+                      fontSize: '0.72rem',
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {entry.msg}
+                  </div>
+                </div>
+              ))
+            )}
+            <div ref={logsEndRef} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

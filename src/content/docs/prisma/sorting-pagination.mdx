@@ -1,0 +1,231 @@
+---
+title: "10. Сортировка и пагинация"
+sidebar:
+  order: 10
+---
+import { Playground } from '@components/Playground'
+
+
+Для работы с большими наборами данных в Prisma используются операторы `orderBy`, `skip`, `take` и курсорная пагинация. Правильная пагинация критически важна для производительности приложения.
+
+## Сортировка с orderBy
+
+```typescript
+// Сортировка по одному полю
+const users = await prisma.user.findMany({
+  orderBy: { createdAt: 'desc' },
+})
+
+// Сортировка по нескольким полям
+const users = await prisma.user.findMany({
+  orderBy: [
+    { lastName: 'asc' },
+    { firstName: 'asc' },
+  ],
+})
+```
+
+## Пагинация смещением (offset-based)
+
+Классический подход с `skip` и `take`:
+
+```typescript
+const pageSize = 10
+const page = 2
+
+const users = await prisma.user.findMany({
+  skip: (page - 1) * pageSize,  // пропустить N записей
+  take: pageSize,                // взять N записей
+  orderBy: { id: 'asc' },
+})
+
+// Получить общее количество для UI
+const total = await prisma.user.count()
+```
+
+## Курсорная пагинация (cursor-based)
+
+Эффективнее для больших наборов данных и бесконечной прокрутки:
+
+```typescript
+// Первая страница
+const firstPage = await prisma.user.findMany({
+  take: 10,
+  orderBy: { id: 'asc' },
+})
+
+// Следующая страница (после последнего элемента)
+const lastId = firstPage[firstPage.length - 1].id
+const nextPage = await prisma.user.findMany({
+  take: 10,
+  skip: 1,
+  cursor: { id: lastId },
+  orderBy: { id: 'asc' },
+})
+```
+
+## Сравнение подходов
+
+| Критерий | Offset | Cursor |
+|---------|--------|--------|
+| Простота реализации | ✅ Просто | ⚠️ Сложнее |
+| Перфоманс на больших данных | ❌ Медленнее | ✅ Быстрее |
+| Стабильность при изменении данных | ❌ Нестабильная | ✅ Стабильная |
+| Произвольный переход на страницу | ✅ Да | ❌ Нет |
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const allUsers = Array.from({ length: 47 }, (_, i) => ({
+  id: i + 1,
+  name: ['Иван', 'Анна', 'Пётр', 'Мария', 'Дмитрий', 'Елена', 'Алексей', 'Ольга', 'Николай', 'Татьяна'][i % 10] + ' ' + ['Петров', 'Смирнова', 'Иванов', 'Козлова', 'Новиков'][i % 5],
+  email: 'user' + (i + 1) + '@example.com',
+  role: ['USER', 'ADMIN', 'MODERATOR'][i % 3],
+  createdAt: new Date(2024, 0, i + 1).toLocaleDateString('ru-RU'),
+  age: 18 + (i % 45),
+}))
+
+function getCode(page, pageSize, sortField, sortDir) {
+  return 'const users = await prisma.user.findMany({\n' +
+    '  skip: ' + ((page - 1) * pageSize) + ',\n' +
+    '  take: ' + pageSize + ',\n' +
+    '  orderBy: { ' + sortField + ': "' + sortDir + '" },\n' +
+    '})\n\n' +
+    'const total = await prisma.user.count()\n' +
+    '// total: ' + allUsers.length + ', pages: ' + Math.ceil(allUsers.length / pageSize)
+}
+
+export default function App() {
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(5)
+  const [sortField, setSortField] = useState('id')
+  const [sortDir, setSortDir] = useState('asc')
+
+  const sorted = [...allUsers].sort((a, b) => {
+    const av = a[sortField], bv = b[sortField]
+    if (typeof av === 'number') return sortDir === 'asc' ? av - bv : bv - av
+    return sortDir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av))
+  })
+
+  const totalPages = Math.ceil(sorted.length / pageSize)
+  const items = sorted.slice((page - 1) * pageSize, page * pageSize)
+
+  const roleColor = { USER: '#334155', ADMIN: '#5a67d8', MODERATOR: '#38a169' }
+  const roleTextColor = { USER: '#94a3b8', ADMIN: '#a5b4fc', MODERATOR: '#86efac' }
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '28px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 920, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 22px 0' }}>
+          Симулятор пагинации и сортировки
+        </h2>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+          <div style={{ background: CARD, borderRadius: 14, padding: 18, border: '1px solid #334155' }}>
+            <h4 style={{ color: TEXT, margin: '0 0 14px 0', fontSize: 14, fontWeight: 700 }}>⚙️ Параметры</h4>
+
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ color: '#94a3b8', fontSize: 12, display: 'block', marginBottom: 4 }}>Записей на страницу</label>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[5, 10, 20].map(s => (
+                  <button key={s} onClick={() => { setPageSize(s); setPage(1) }}
+                    style={{ flex: 1, background: pageSize === s ? PRISMA : '#0a0f1e', color: pageSize === s ? '#fff' : '#94a3b8', border: '1px solid ' + (pageSize === s ? PRISMA : '#334155'), borderRadius: 6, padding: '6px 0', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ color: '#94a3b8', fontSize: 12, display: 'block', marginBottom: 4 }}>Сортировка по полю</label>
+              <select
+                value={sortField}
+                onChange={e => { setSortField(e.target.value); setPage(1) }}
+                style={{ width: '100%', background: '#0a0f1e', color: TEXT, border: '1px solid #334155', borderRadius: 6, padding: '7px 10px', fontSize: 13 }}
+              >
+                {['id', 'name', 'email', 'age', 'role'].map(f => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label style={{ color: '#94a3b8', fontSize: 12, display: 'block', marginBottom: 4 }}>Направление</label>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {['asc', 'desc'].map(d => (
+                  <button key={d} onClick={() => setSortDir(d)}
+                    style={{ flex: 1, background: sortDir === d ? PRISMA : '#0a0f1e', color: sortDir === d ? '#fff' : '#94a3b8', border: '1px solid ' + (sortDir === d ? PRISMA : '#334155'), borderRadius: 6, padding: '6px 0', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                    {d === 'asc' ? '↑ ASC' : '↓ DESC'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ background: '#0a0f1e', borderRadius: 14, padding: 18, border: '1px solid #1e3a5f' }}>
+            <div style={{ color: '#475569', fontSize: 11, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Prisma запрос</div>
+            <pre style={{ margin: 0, color: TEXT, fontSize: 12, lineHeight: 1.7, fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+              {getCode(page, pageSize, sortField, sortDir)}
+            </pre>
+          </div>
+        </div>
+
+        <div style={{ background: CARD, borderRadius: 14, padding: 16, border: '1px solid #334155' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h4 style={{ color: TEXT, margin: 0, fontSize: 14, fontWeight: 700 }}>
+              📋 Результаты ({allUsers.length} всего)
+            </h4>
+            <span style={{ color: '#94a3b8', fontSize: 12 }}>
+              Страница {page} из {totalPages}
+            </span>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            {items.map(user => (
+              <div key={user.id} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '9px 12px', background: '#0a0f1e', borderRadius: 8, marginBottom: 4 }}>
+                <span style={{ color: '#475569', fontSize: 12, width: 28, textAlign: 'right', flexShrink: 0, fontFamily: 'monospace' }}>#{user.id}</span>
+                <span style={{ color: TEXT, fontSize: 13, flex: 2, fontWeight: 500 }}>{user.name}</span>
+                <span style={{ color: '#64748b', fontSize: 12, flex: 2 }}>{user.email}</span>
+                <span style={{ color: '#94a3b8', fontSize: 12, width: 32 }}>{user.age}</span>
+                <span style={{ background: roleColor[user.role], color: roleTextColor[user.role], fontSize: 11, padding: '2px 8px', borderRadius: 6, fontWeight: 600, flexShrink: 0 }}>
+                  {user.role}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', gap: 4, justifyContent: 'center', flexWrap: 'wrap' }}>
+            <button onClick={() => setPage(1)} disabled={page === 1}
+              style={{ background: CARD, color: page === 1 ? '#334155' : '#94a3b8', border: '1px solid #334155', borderRadius: 6, padding: '5px 10px', cursor: page === 1 ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+              «
+            </button>
+            <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
+              style={{ background: CARD, color: page === 1 ? '#334155' : '#94a3b8', border: '1px solid #334155', borderRadius: 6, padding: '5px 10px', cursor: page === 1 ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+              ‹
+            </button>
+            {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
+              const p = Math.max(1, Math.min(page - 2, totalPages - 4)) + i
+              return (
+                <button key={p} onClick={() => setPage(p)}
+                  style={{ background: page === p ? PRISMA : CARD, color: page === p ? '#fff' : '#94a3b8', border: '1px solid ' + (page === p ? PRISMA : '#334155'), borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12, fontWeight: page === p ? 700 : 400, minWidth: 32 }}>
+                  {p}
+                </button>
+              )
+            })}
+            <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}
+              style={{ background: CARD, color: page === totalPages ? '#334155' : '#94a3b8', border: '1px solid #334155', borderRadius: 6, padding: '5px 10px', cursor: page === totalPages ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+              ›
+            </button>
+            <button onClick={() => setPage(totalPages)} disabled={page === totalPages}
+              style={{ background: CARD, color: page === totalPages ? '#334155' : '#94a3b8', border: '1px solid #334155', borderRadius: 6, padding: '5px 10px', cursor: page === totalPages ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+              »
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

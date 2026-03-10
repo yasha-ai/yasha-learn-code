@@ -1,0 +1,384 @@
+---
+title: "20. WebSockets (ws)"
+sidebar:
+  order: 20
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-websockets.png)
+
+**WebSockets** — протокол двусторонней связи между клиентом и сервером в реальном времени. В отличие от HTTP, соединение постоянное.
+
+## HTTP vs WebSocket
+
+```
+HTTP (request-response):
+Клиент → Запрос → Сервер
+Клиент ← Ответ  ← Сервер
+(соединение закрывается)
+
+WebSocket (двусторонний):
+Клиент ←→ Соединение ←→ Сервер
+(постоянное, обе стороны могут отправлять в любой момент)
+```
+
+Когда использовать:
+- Чаты и мессенджеры
+- Игры реального времени
+- Биржевые котировки, трекинг
+- Уведомления в реальном времени
+- Совместное редактирование
+
+## Установка
+
+```bash
+npm install ws
+```
+
+## Базовый WebSocket сервер
+
+```javascript
+const { WebSocketServer } = require('ws');
+const http = require('http');
+const express = require('express');
+
+const app = express();
+const server = http.createServer(app);
+
+// WebSocket сервер привязан к HTTP серверу
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws, req) => {
+  const ip = req.socket.remoteAddress;
+  console.log(`Новое подключение: ${ip}`);
+
+  // Отправить сообщение клиенту
+  ws.send(JSON.stringify({ type: 'welcome', message: 'Подключено!' }));
+
+  // Получить сообщение от клиента
+  ws.on('message', (data) => {
+    try {
+      const message = JSON.parse(data.toString());
+      console.log('Получено:', message);
+
+      // Ответить этому клиенту
+      ws.send(JSON.stringify({ type: 'echo', data: message }));
+    } catch (err) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
+    }
+  });
+
+  // Клиент отключился
+  ws.on('close', (code, reason) => {
+    console.log(`Отключён: ${code} ${reason}`);
+  });
+
+  // Ошибка соединения
+  ws.on('error', (err) => {
+    console.error('WS ошибка:', err.message);
+  });
+});
+
+server.listen(3000, () => {
+  console.log('HTTP + WS сервер на порту 3000');
+});
+```
+
+## Broadcast — отправка всем
+
+```javascript
+// Отправить сообщение всем подключённым клиентам
+function broadcast(data, excludeWs = null) {
+  const message = JSON.stringify(data);
+  wss.clients.forEach((client) => {
+    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+wss.on('connection', (ws) => {
+  // Уведомить остальных о новом подключении
+  broadcast({ type: 'user_joined', count: wss.clients.size }, ws);
+
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString());
+
+    if (msg.type === 'chat') {
+      // Отправить всем (включая отправителя)
+      broadcast({
+        type: 'chat',
+        user: msg.user,
+        text: msg.text,
+        timestamp: Date.now(),
+      });
+    }
+  });
+
+  ws.on('close', () => {
+    broadcast({ type: 'user_left', count: wss.clients.size });
+  });
+});
+```
+
+## Комнаты (rooms)
+
+```javascript
+// Простая реализация комнат
+const rooms = new Map(); // roomId → Set<ws>
+
+function joinRoom(ws, roomId) {
+  if (!rooms.has(roomId)) rooms.set(roomId, new Set());
+  rooms.get(roomId).add(ws);
+  ws.roomId = roomId;
+}
+
+function leaveRoom(ws) {
+  const room = rooms.get(ws.roomId);
+  if (room) {
+    room.delete(ws);
+    if (room.size === 0) rooms.delete(ws.roomId);
+  }
+}
+
+function broadcastToRoom(roomId, data, excludeWs = null) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  const message = JSON.stringify(data);
+  room.forEach((client) => {
+    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+wss.on('connection', (ws) => {
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+
+    switch (msg.type) {
+      case 'join':
+        leaveRoom(ws);
+        joinRoom(ws, msg.roomId);
+        broadcastToRoom(msg.roomId, {
+          type: 'system',
+          text: `${msg.username} присоединился`,
+        });
+        break;
+
+      case 'chat':
+        broadcastToRoom(ws.roomId, {
+          type: 'chat',
+          user: msg.user,
+          text: msg.text,
+          timestamp: Date.now(),
+        });
+        break;
+
+      case 'leave':
+        broadcastToRoom(ws.roomId, {
+          type: 'system',
+          text: `${msg.username} вышел`,
+        }, ws);
+        leaveRoom(ws);
+        break;
+    }
+  });
+
+  ws.on('close', () => leaveRoom(ws));
+});
+```
+
+## Аутентификация WebSocket
+
+```javascript
+const jwt = require('jsonwebtoken');
+const url = require('url');
+
+const wss = new WebSocketServer({
+  server,
+  // Проверяем токен до установки соединения
+  verifyClient: (info, callback) => {
+    const params = new URL(info.req.url, 'http://localhost').searchParams;
+    const token = params.get('token');
+
+    if (!token) {
+      callback(false, 401, 'Токен не предоставлен');
+      return;
+    }
+
+    try {
+      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      info.req.user = payload;  // сохраняем данные юзера
+      callback(true);
+    } catch {
+      callback(false, 401, 'Неверный токен');
+    }
+  },
+});
+
+wss.on('connection', (ws, req) => {
+  console.log(`Пользователь ${req.user.userId} подключился`);
+  ws.userId = req.user.userId;
+});
+
+// Клиент подключается так:
+// new WebSocket('ws://localhost:3000?token=eyJhbGci...');
+```
+
+## Heartbeat — проверка живых соединений
+
+```javascript
+// Ping-pong для обнаружения отвалившихся клиентов
+function heartbeat() {
+  this.isAlive = true;
+}
+
+wss.on('connection', (ws) => {
+  ws.isAlive = true;
+  ws.on('pong', heartbeat);  // клиент ответил на ping
+});
+
+// Каждые 30 сек проверяем
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      console.log('Клиент не отвечает — отключаем');
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();  // отправляем ping
+  });
+}, 30000);
+
+wss.on('close', () => clearInterval(interval));
+```
+
+## Клиент (браузер)
+
+```javascript
+// Подключение с автоматическим переподключением
+class WebSocketClient {
+  constructor(url) {
+    this.url = url;
+    this.handlers = new Map();
+    this.connect();
+  }
+
+  connect() {
+    this.ws = new WebSocket(this.url);
+
+    this.ws.onopen = () => {
+      console.log('WebSocket подключён');
+    };
+
+    this.ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      const handler = this.handlers.get(data.type);
+      if (handler) handler(data);
+    };
+
+    this.ws.onclose = () => {
+      console.log('Переподключение через 3 сек...');
+      setTimeout(() => this.connect(), 3000);
+    };
+
+    this.ws.onerror = (err) => {
+      console.error('WS ошибка:', err);
+    };
+  }
+
+  on(type, handler) {
+    this.handlers.set(type, handler);
+  }
+
+  send(type, data = {}) {
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type, ...data }));
+    }
+  }
+}
+
+// Использование
+const client = new WebSocketClient('ws://localhost:3000?token=...');
+client.on('chat', (msg) => console.log(`${msg.user}: ${msg.text}`));
+client.send('chat', { user: 'Яша', text: 'Привет!' });
+```
+
+## Практика
+
+1. Создай базовый WebSocket сервер с echo (ответ тем же сообщением)
+2. Реализуй broadcast — отправка всем подключённым клиентам
+3. Добавь комнаты: join, leave, chat внутри комнаты
+4. Подключи JWT аутентификацию через query параметр token
+5. Реализуй heartbeat ping/pong для обнаружения отвалившихся соединений
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState, useRef } from "react";
+
+export default function App() {
+  const [log, setLog] = useState([]);
+  const [connected, setConnected] = useState(false);
+  const [input, setInput] = useState("Hello WS!");
+  const wsRef = useRef(null);
+
+  const add = (msg, color = "#e2e8f0") => setLog(prev => [...prev.slice(-8), { msg, color, t: new Date().toLocaleTimeString() }]);
+
+  const connect = () => {
+    try {
+      const ws = new WebSocket("wss://echo.websocket.org");
+      wsRef.current = ws;
+      add("Подключение к wss://echo.websocket.org...", "#f59e0b");
+      ws.onopen = () => { setConnected(true); add("✓ Соединение установлено", "#10b981"); };
+      ws.onmessage = (e) => add("← " + e.data, "#3b82f6");
+      ws.onclose = () => { setConnected(false); add("Соединение закрыто", "#94a3b8"); };
+      ws.onerror = () => add("Ошибка подключения", "#ef4444");
+    } catch (e) {
+      add("Ошибка: " + e.message, "#ef4444");
+    }
+  };
+
+  const send = () => {
+    if (wsRef.current?.readyState === 1) {
+      wsRef.current.send(input);
+      add("→ " + input, "#a78bfa");
+    }
+  };
+
+  const close = () => wsRef.current?.close();
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>WebSocket клиент</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {!connected ? (
+          <button onClick={connect} style={{ padding: "5px 12px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>Connect</button>
+        ) : (
+          <button onClick={close} style={{ padding: "5px 12px", background: "#ef4444", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>Disconnect</button>
+        )}
+      </div>
+      {connected && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()}
+            style={{ flex: 1, padding: "5px 8px", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, fontSize: 12 }} />
+          <button onClick={send} style={{ padding: "5px 12px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>Send</button>
+        </div>
+      )}
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {log.map((l, i) => (
+          <div key={i} style={{ fontSize: 12 }}>
+            <span style={{ color: "#475569" }}>{l.t}</span> <span style={{ color: l.color }}>{l.msg}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

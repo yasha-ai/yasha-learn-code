@@ -1,0 +1,483 @@
+---
+title: "17. Реальный проект: API"
+sidebar:
+  order: 17
+---
+import { Playground } from '@components/Playground'
+
+
+В этом финальном уроке мы рассмотрим построение полноценного production-ready API на tRPC. Мы создадим API с несколькими роутерами: аутентификация, пользователи, посты и комментарии — всё с правильной архитектурой, валидацией и обработкой ошибок.
+
+## Архитектура проекта
+
+Хорошо организованный tRPC-проект имеет чёткую структуру: `server/routers/` содержит отдельные роутеры для каждой сущности, `server/trpc.ts` — инициализацию tRPC и типы процедур, `server/context.ts` — создание контекста запроса.
+
+## Разделение по доменам
+
+Разбивайте API на домены: `auth` (аутентификация), `user` (пользователи), `post` (посты), `comment` (комментарии). Каждый роутер инкапсулирует логику своего домена и экспортирует только необходимые типы.
+
+## Защищённые процедуры
+
+Создайте `protectedProcedure` и `adminProcedure` один раз и используйте их в роутерах. Это гарантирует единообразную проверку аутентификации без дублирования кода.
+
+## Вложенные ресурсы
+
+Для вложенных ресурсов (комментарии к посту) используйте понятные имена процедур: `comment.getByPost`, `comment.create`. Это сохраняет API плоским и предотвращает глубокую вложенность.
+
+## Обработка ошибок
+
+В каждой процедуре явно обрабатывайте ошибки: проверяйте существование ресурса и выбрасывайте `NOT_FOUND`, проверяйте права доступа и выбрасывайте `FORBIDDEN`, оборачивайте операции с БД в try-catch.
+
+## Лучшие практики
+
+Используйте Zod для всех входных данных; возвращайте минимально необходимый набор полей; документируйте процедуры через TypeScript JSDoc-комментарии; пишите тесты для каждой процедуры с mock-контекстом.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+const PURPLE = '#a855f7';
+
+interface ProcedureSpec {
+  path: string;
+  type: 'query' | 'mutation';
+  auth: 'public' | 'user' | 'admin';
+  description: string;
+  inputFields: { name: string; type: string; required: boolean; placeholder: string }[];
+  mockResponse: unknown;
+}
+
+const procedures: ProcedureSpec[] = [
+  {
+    path: 'auth.login',
+    type: 'mutation',
+    auth: 'public',
+    description: 'Вход в систему. Возвращает JWT-токен и данные пользователя.',
+    inputFields: [
+      { name: 'email', type: 'string', required: true, placeholder: 'user@example.com' },
+      { name: 'password', type: 'string', required: true, placeholder: 'password' },
+    ],
+    mockResponse: { token: 'eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiIxIn0.abc', user: { id: '1', name: 'Alice', email: 'user@example.com', role: 'user' } },
+  },
+  {
+    path: 'auth.register',
+    type: 'mutation',
+    auth: 'public',
+    description: 'Регистрация нового пользователя. Возвращает созданного пользователя.',
+    inputFields: [
+      { name: 'name', type: 'string', required: true, placeholder: 'Alice Johnson' },
+      { name: 'email', type: 'string', required: true, placeholder: 'alice@example.com' },
+      { name: 'password', type: 'string', required: true, placeholder: 'securepassword' },
+    ],
+    mockResponse: { id: '4', name: 'Alice Johnson', email: 'alice@example.com', role: 'user', createdAt: '2024-12-01' },
+  },
+  {
+    path: 'auth.me',
+    type: 'query',
+    auth: 'user',
+    description: 'Получить текущего авторизованного пользователя из сессии.',
+    inputFields: [],
+    mockResponse: { id: '1', name: 'Alice', email: 'alice@example.com', role: 'user', createdAt: '2024-01-15' },
+  },
+  {
+    path: 'users.getAll',
+    type: 'query',
+    auth: 'admin',
+    description: 'Список всех пользователей. Доступен только администраторам.',
+    inputFields: [
+      { name: 'limit', type: 'number', required: false, placeholder: '10' },
+      { name: 'offset', type: 'number', required: false, placeholder: '0' },
+    ],
+    mockResponse: [
+      { id: '1', name: 'Alice', email: 'alice@example.com', role: 'admin' },
+      { id: '2', name: 'Bob', email: 'bob@example.com', role: 'user' },
+      { id: '3', name: 'Carol', email: 'carol@example.com', role: 'moderator' },
+    ],
+  },
+  {
+    path: 'users.getById',
+    type: 'query',
+    auth: 'user',
+    description: 'Получить пользователя по ID. Обычные пользователи могут видеть только себя.',
+    inputFields: [
+      { name: 'id', type: 'string', required: true, placeholder: 'usr_123' },
+    ],
+    mockResponse: { id: 'usr_123', name: 'Bob Smith', email: 'bob@example.com', role: 'user', createdAt: '2024-02-20', postsCount: 5 },
+  },
+  {
+    path: 'users.update',
+    type: 'mutation',
+    auth: 'user',
+    description: 'Обновить профиль пользователя. Можно обновить только свой профиль.',
+    inputFields: [
+      { name: 'name', type: 'string', required: false, placeholder: 'Новое имя' },
+      { name: 'email', type: 'string', required: false, placeholder: 'new@email.com' },
+    ],
+    mockResponse: { id: '1', name: 'Новое имя', email: 'new@email.com', role: 'user', updatedAt: '2024-12-01' },
+  },
+  {
+    path: 'posts.getAll',
+    type: 'query',
+    auth: 'public',
+    description: 'Список опубликованных постов. Поддерживает пагинацию и фильтрацию.',
+    inputFields: [
+      { name: 'authorId', type: 'string', required: false, placeholder: 'usr_123 (опционально)' },
+      { name: 'limit', type: 'number', required: false, placeholder: '20' },
+    ],
+    mockResponse: [
+      { id: '1', title: 'Введение в tRPC', authorName: 'Alice', publishedAt: '2024-11-01', likesCount: 42 },
+      { id: '2', title: 'Advanced tRPC Patterns', authorName: 'Bob', publishedAt: '2024-11-15', likesCount: 28 },
+      { id: '3', title: 'tRPC + Next.js Best Practices', authorName: 'Carol', publishedAt: '2024-12-01', likesCount: 65 },
+    ],
+  },
+  {
+    path: 'posts.getById',
+    type: 'query',
+    auth: 'public',
+    description: 'Получить пост по ID с полным содержимым.',
+    inputFields: [
+      { name: 'id', type: 'string', required: true, placeholder: 'post_123' },
+    ],
+    mockResponse: { id: 'post_123', title: 'Введение в tRPC', content: 'tRPC — это удивительная библиотека...', authorId: '1', authorName: 'Alice', publishedAt: '2024-11-01', likesCount: 42 },
+  },
+  {
+    path: 'posts.create',
+    type: 'mutation',
+    auth: 'user',
+    description: 'Создать новый пост. Создаётся в состоянии черновика.',
+    inputFields: [
+      { name: 'title', type: 'string', required: true, placeholder: 'Заголовок поста' },
+      { name: 'content', type: 'string', required: true, placeholder: 'Содержимое поста...' },
+    ],
+    mockResponse: { id: 'post_new', title: 'Заголовок поста', content: 'Содержимое...', authorId: '1', published: false, createdAt: '2024-12-01' },
+  },
+  {
+    path: 'posts.update',
+    type: 'mutation',
+    auth: 'user',
+    description: 'Обновить пост. Только автор или администратор может редактировать.',
+    inputFields: [
+      { name: 'id', type: 'string', required: true, placeholder: 'post_123' },
+      { name: 'title', type: 'string', required: false, placeholder: 'Новый заголовок' },
+      { name: 'content', type: 'string', required: false, placeholder: 'Новое содержимое' },
+    ],
+    mockResponse: { id: 'post_123', title: 'Новый заголовок', updatedAt: '2024-12-01', published: true },
+  },
+  {
+    path: 'posts.delete',
+    type: 'mutation',
+    auth: 'user',
+    description: 'Удалить пост. Только автор или администратор может удалить.',
+    inputFields: [
+      { name: 'id', type: 'string', required: true, placeholder: 'post_123' },
+    ],
+    mockResponse: { success: true, deletedId: 'post_123' },
+  },
+  {
+    path: 'comments.getByPost',
+    type: 'query',
+    auth: 'public',
+    description: 'Получить комментарии к посту.',
+    inputFields: [
+      { name: 'postId', type: 'string', required: true, placeholder: 'post_123' },
+    ],
+    mockResponse: [
+      { id: 'c1', text: 'Отличная статья!', authorName: 'Bob', createdAt: '2024-11-02' },
+      { id: 'c2', text: 'Очень полезно, спасибо!', authorName: 'Carol', createdAt: '2024-11-03' },
+    ],
+  },
+  {
+    path: 'comments.create',
+    type: 'mutation',
+    auth: 'user',
+    description: 'Добавить комментарий к посту.',
+    inputFields: [
+      { name: 'postId', type: 'string', required: true, placeholder: 'post_123' },
+      { name: 'text', type: 'string', required: true, placeholder: 'Ваш комментарий...' },
+    ],
+    mockResponse: { id: 'c_new', postId: 'post_123', text: 'Ваш комментарий...', authorId: '1', authorName: 'Alice', createdAt: '2024-12-01' },
+  },
+];
+
+const authColors: Record<string, string> = {
+  public: GREEN,
+  user: TRPC,
+  admin: RED,
+};
+
+const authIcons: Record<string, string> = {
+  public: '🌐',
+  user: '🔐',
+  admin: '👑',
+};
+
+const routerGroups: { name: string; color: string; icon: string; paths: string[] }[] = [
+  { name: 'auth', color: PURPLE, icon: '🔑', paths: ['auth.login', 'auth.register', 'auth.me'] },
+  { name: 'users', color: TRPC, icon: '👤', paths: ['users.getAll', 'users.getById', 'users.update'] },
+  { name: 'posts', color: YELLOW, icon: '📝', paths: ['posts.getAll', 'posts.getById', 'posts.create', 'posts.update', 'posts.delete'] },
+  { name: 'comments', color: GREEN, icon: '💬', paths: ['comments.getByPost', 'comments.create'] },
+];
+
+export default function App() {
+  const [selectedProc, setSelectedProc] = useState<ProcedureSpec>(procedures[0]);
+  const [inputValues, setInputValues] = useState<Record<string, string>>({});
+  const [response, setResponse] = useState<{ data: unknown; error: string | null; loading: boolean }>({ data: null, error: null, loading: false });
+  const [expandedGroup, setExpandedGroup] = useState<string | null>('auth');
+
+  const selectProcedure = (proc: ProcedureSpec) => {
+    setSelectedProc(proc);
+    setInputValues({});
+    setResponse({ data: null, error: null, loading: false });
+  };
+
+  const executeRequest = () => {
+    const missingRequired = selectedProc.inputFields.filter(f => f.required && !inputValues[f.name]);
+    if (missingRequired.length > 0) {
+      setResponse({ data: null, error: 'Обязательные поля не заполнены: ' + missingRequired.map(f => f.name).join(', '), loading: false });
+      return;
+    }
+    setResponse({ data: null, error: null, loading: true });
+    setTimeout(() => {
+      setResponse({ data: selectedProc.mockResponse, error: null, loading: false });
+    }, 600 + Math.random() * 400);
+  };
+
+  const getGroupColor = (path: string) => {
+    const group = routerGroups.find(g => g.paths.includes(path));
+    return group ? group.color : TEXT;
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '16px', fontFamily: 'monospace', color: TEXT, display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', margin: 0, fontSize: '20px' }}>
+        tRPC API Explorer — Полный Реальный API
+      </h2>
+
+      <div style={{ display: 'flex', gap: '10px', flex: '1', flexWrap: 'wrap', minHeight: '500px' }}>
+
+        {/* Left Panel - Procedure List */}
+        <div style={{ width: '200px', flex: '0 0 200px', background: CARD, border: '1px solid #334155', borderRadius: '10px', overflow: 'hidden' }}>
+          <div style={{ background: '#0a0f1a', padding: '10px 12px', borderBottom: '1px solid #334155', color: TRPC, fontWeight: 'bold', fontSize: '11px' }}>
+            📦 API Процедуры ({procedures.length})
+          </div>
+          <div style={{ overflowY: 'auto', maxHeight: '500px' }}>
+            {routerGroups.map(group => (
+              <div key={group.name}>
+                <div
+                  onClick={() => setExpandedGroup(expandedGroup === group.name ? null : group.name)}
+                  style={{
+                    padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid #1e293b',
+                    background: expandedGroup === group.name ? group.color + '22' : 'transparent',
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  }}
+                >
+                  <span style={{ color: group.color, fontWeight: 'bold', fontSize: '11px' }}>
+                    {group.icon} {group.name}
+                  </span>
+                  <span style={{ color: TEXT, opacity: 0.4, fontSize: '10px' }}>
+                    {expandedGroup === group.name ? '▼' : '▶'}
+                  </span>
+                </div>
+                {expandedGroup === group.name && procedures
+                  .filter(p => group.paths.includes(p.path))
+                  .map(proc => (
+                    <div key={proc.path}
+                      onClick={() => selectProcedure(proc)}
+                      style={{
+                        padding: '6px 12px 6px 20px', cursor: 'pointer', borderBottom: '1px solid #0f172a',
+                        background: selectedProc.path === proc.path ? group.color + '22' : 'transparent',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ color: selectedProc.path === proc.path ? group.color : TEXT, fontSize: '10px' }}>
+                          {proc.path.split('.')[1]}
+                        </span>
+                        <div style={{ display: 'flex', gap: '3px', alignItems: 'center' }}>
+                          <span style={{
+                            background: proc.type === 'query' ? 'rgba(57,140,203,0.2)' : 'rgba(234,179,8,0.2)',
+                            color: proc.type === 'query' ? TRPC : YELLOW,
+                            fontSize: '8px', padding: '1px 3px', borderRadius: '2px',
+                          }}>
+                            {proc.type === 'query' ? 'Q' : 'M'}
+                          </span>
+                          <span style={{ fontSize: '8px' }}>{authIcons[proc.auth]}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                }
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Middle Panel - Request Builder */}
+        <div style={{ flex: '1', minWidth: '220px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ background: CARD, border: '1px solid ' + getGroupColor(selectedProc.path), borderRadius: '10px', padding: '14px', transition: 'border-color 0.2s' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
+              <div>
+                <div style={{ color: getGroupColor(selectedProc.path), fontWeight: 'bold', fontSize: '14px' }}>
+                  {selectedProc.path}
+                </div>
+                <div style={{ display: 'flex', gap: '5px', marginTop: '4px' }}>
+                  <span style={{
+                    background: selectedProc.type === 'query' ? 'rgba(57,140,203,0.2)' : 'rgba(234,179,8,0.2)',
+                    color: selectedProc.type === 'query' ? TRPC : YELLOW,
+                    fontSize: '10px', padding: '1px 6px', borderRadius: '3px',
+                  }}>
+                    {selectedProc.type.toUpperCase()}
+                  </span>
+                  <span style={{
+                    background: authColors[selectedProc.auth] + '22',
+                    color: authColors[selectedProc.auth],
+                    fontSize: '10px', padding: '1px 6px', borderRadius: '3px',
+                  }}>
+                    {authIcons[selectedProc.auth]} {selectedProc.auth}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <p style={{ color: TEXT, opacity: 0.7, fontSize: '11px', margin: '0 0 12px 0', lineHeight: '1.4' }}>
+              {selectedProc.description}
+            </p>
+
+            {selectedProc.inputFields.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '12px' }}>
+                <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '11px', marginBottom: '2px' }}>📥 Input (z.object)</div>
+                {selectedProc.inputFields.map(field => (
+                  <div key={field.name}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
+                      <label style={{ color: TRPC, fontSize: '10px' }}>
+                        {field.name}
+                        {field.required && <span style={{ color: RED }}> *</span>}
+                        <span style={{ color: TEXT, opacity: 0.4 }}> ({field.type})</span>
+                      </label>
+                    </div>
+                    <input
+                      value={inputValues[field.name] || ''}
+                      onChange={e => setInputValues(prev => ({ ...prev, [field.name]: e.target.value }))}
+                      placeholder={field.placeholder}
+                      style={{
+                        width: '100%', background: BG, border: '1px solid ' + (inputValues[field.name] ? TRPC + '55' : '#334155'),
+                        borderRadius: '5px', padding: '5px 8px', color: TEXT, fontSize: '11px', boxSizing: 'border-box',
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ color: TEXT, opacity: 0.5, fontSize: '11px', marginBottom: '12px' }}>
+                Нет входных параметров
+              </div>
+            )}
+
+            <button
+              onClick={executeRequest}
+              disabled={response.loading}
+              style={{
+                width: '100%', background: response.loading ? '#334155' : getGroupColor(selectedProc.path),
+                color: '#fff', border: 'none', borderRadius: '7px', padding: '9px',
+                cursor: response.loading ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 'bold',
+              }}
+            >
+              {response.loading ? '⏳ Выполнение...' : (selectedProc.type === 'query' ? '▶ Выполнить Query' : '▶ Выполнить Mutation')}
+            </button>
+          </div>
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '8px', padding: '10px' }}>
+            <div style={{ color: TEXT, opacity: 0.6, fontSize: '10px', marginBottom: '6px' }}>Код использования на клиенте:</div>
+            <pre style={{ margin: 0, fontSize: '9px', color: TEXT, lineHeight: '1.5', whiteSpace: 'pre-wrap' }}>
+              {selectedProc.type === 'query'
+                ? 'const { data } = trpc.' + selectedProc.path + '.useQuery(' +
+                  (selectedProc.inputFields.length > 0 ? '{\n  ' + selectedProc.inputFields.map(f => f.name + ': "..."').join(',\n  ') + '\n}' : '') +
+                  ');'
+                : 'const mut = trpc.' + selectedProc.path + '.useMutation();\nmut.mutate({\n  ' +
+                  selectedProc.inputFields.map(f => f.name + ': "..."').join(',\n  ') + '\n});'
+              }
+            </pre>
+          </div>
+        </div>
+
+        {/* Right Panel - Response Viewer */}
+        <div style={{ flex: '1', minWidth: '220px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px', flex: '1' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '12px' }}>📤 Ответ сервера</div>
+              {response.data && !response.loading && (
+                <span style={{ background: 'rgba(34,197,94,0.2)', color: GREEN, fontSize: '10px', padding: '2px 6px', borderRadius: '4px' }}>
+                  200 OK
+                </span>
+              )}
+              {response.error && (
+                <span style={{ background: 'rgba(239,68,68,0.2)', color: RED, fontSize: '10px', padding: '2px 6px', borderRadius: '4px' }}>
+                  400 Error
+                </span>
+              )}
+            </div>
+
+            {response.loading && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px', flexDirection: 'column', gap: '10px' }}>
+                <div style={{ color: TRPC, fontSize: '24px' }}>⏳</div>
+                <div style={{ color: TEXT, opacity: 0.6, fontSize: '12px' }}>Запрос отправлен...</div>
+              </div>
+            )}
+
+            {!response.loading && !response.data && !response.error && (
+              <div style={{ color: TEXT, opacity: 0.4, textAlign: 'center', padding: '40px', fontSize: '12px' }}>
+                Выберите процедуру и нажмите "Выполнить"
+              </div>
+            )}
+
+            {response.error && (
+              <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid ' + RED, borderRadius: '6px', padding: '12px' }}>
+                <div style={{ color: RED, fontWeight: 'bold', fontSize: '11px', marginBottom: '6px' }}>❌ Ошибка валидации</div>
+                <div style={{ color: RED, fontSize: '11px' }}>{response.error}</div>
+                <pre style={{ margin: '8px 0 0', fontSize: '10px', color: TEXT, opacity: 0.8, whiteSpace: 'pre-wrap' }}>
+                  {'{\n  "code": "BAD_REQUEST",\n  "message": "' + response.error + '"\n}'}
+                </pre>
+              </div>
+            )}
+
+            {response.data && !response.loading && (
+              <div>
+                <div style={{ color: GREEN, fontWeight: 'bold', fontSize: '11px', marginBottom: '8px' }}>✅ Успешный ответ</div>
+                <pre style={{
+                  margin: 0, background: BG, borderRadius: '6px', padding: '12px',
+                  fontSize: '10px', color: GREEN, lineHeight: '1.6',
+                  overflowX: 'auto', whiteSpace: 'pre-wrap', maxHeight: '300px', overflowY: 'auto',
+                }}>
+                  {JSON.stringify(response.data, null, 2)}
+                </pre>
+              </div>
+            )}
+          </div>
+
+          <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '8px', padding: '10px' }}>
+            <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '11px', marginBottom: '8px' }}>📊 API Статистика</div>
+            <div style={{ display: 'flex', justifyContent: 'space-around', flexWrap: 'wrap', gap: '6px' }}>
+              {routerGroups.map(group => (
+                <div key={group.name} style={{ textAlign: 'center' }}>
+                  <div style={{ color: group.color, fontSize: '14px' }}>{group.icon}</div>
+                  <div style={{ color: TEXT, opacity: 0.6, fontSize: '9px' }}>{group.name}</div>
+                  <div style={{ color: group.color, fontSize: '11px', fontWeight: 'bold' }}>{group.paths.length}</div>
+                </div>
+              ))}
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ color: TRPC, fontSize: '14px' }}>∑</div>
+                <div style={{ color: TEXT, opacity: 0.6, fontSize: '9px' }}>total</div>
+                <div style={{ color: TRPC, fontSize: '11px', fontWeight: 'bold' }}>{procedures.length}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

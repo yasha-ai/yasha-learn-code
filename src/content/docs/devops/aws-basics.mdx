@@ -1,0 +1,361 @@
+---
+title: "10. AWS: EC2 и S3"
+sidebar:
+  order: 10
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/devops-aws.png)
+
+**AWS** — крупнейший облачный провайдер. EC2 — виртуальные серверы, S3 — хранилище файлов. Базовые сервисы для любого бекенда.
+
+## Основные сервисы AWS для разработчика
+
+```
+EC2     — виртуальные серверы (VPS)
+S3      — хранение файлов (объектное хранилище)
+RDS     — managed БД (PostgreSQL, MySQL)
+Lambda  — serverless функции
+ECS/EKS — контейнеры
+CloudFront — CDN
+Route53 — DNS
+IAM     — управление доступом
+```
+
+## EC2: виртуальный сервер
+
+### Запуск EC2 инстанса
+
+```bash
+# AWS CLI
+aws ec2 run-instances \
+  --image-id ami-0c55b159cbfafe1f0 \   # Ubuntu 22.04
+  --instance-type t3.micro \
+  --key-name my-keypair \
+  --security-group-ids sg-xxxxxxxx \
+  --subnet-id subnet-xxxxxxxx \
+  --count 1 \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=myapp}]'
+```
+
+### Подключение по SSH
+
+```bash
+# Скачать key pair (.pem файл) при создании
+chmod 400 my-keypair.pem
+
+# Подключение
+ssh -i my-keypair.pem ubuntu@ec2-xx-xx-xx-xx.compute-1.amazonaws.com
+
+# Или через Instance Connect (в браузере)
+# EC2 Console → выбрать instance → Connect → EC2 Instance Connect
+```
+
+### Настройка сервера (Ubuntu 22.04)
+
+```bash
+# Обновление системы
+sudo apt update && sudo apt upgrade -y
+
+# Установка Node.js (через nvm)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+source ~/.bashrc
+nvm install 20
+nvm use 20
+
+# Установка PM2
+npm install -g pm2
+
+# Установка Nginx
+sudo apt install nginx -y
+sudo systemctl enable nginx
+sudo systemctl start nginx
+
+# Firewall
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'
+sudo ufw enable
+```
+
+### Security Groups — firewall EC2
+
+```bash
+# Создание группы безопасности
+aws ec2 create-security-group \
+  --group-name myapp-sg \
+  --description "MyApp Security Group"
+
+# Разрешить SSH (22)
+aws ec2 authorize-security-group-ingress \
+  --group-id sg-xxxxxxxx \
+  --protocol tcp \
+  --port 22 \
+  --cidr 0.0.0.0/0    # лучше только твой IP: $(curl -s ifconfig.me)/32
+
+# Разрешить HTTP (80) и HTTPS (443)
+aws ec2 authorize-security-group-ingress \
+  --group-id sg-xxxxxxxx \
+  --protocol tcp \
+  --port 80 \
+  --cidr 0.0.0.0/0
+
+aws ec2 authorize-security-group-ingress \
+  --group-id sg-xxxxxxxx \
+  --protocol tcp \
+  --port 443 \
+  --cidr 0.0.0.0/0
+```
+
+### Elastic IP — статический IP
+
+```bash
+# Выделить Elastic IP
+aws ec2 allocate-address --domain vpc
+
+# Привязать к инстансу
+aws ec2 associate-address \
+  --instance-id i-xxxxxxxxxxxxxxxxx \
+  --allocation-id eipalloc-xxxxxxxxxxxxxxxxx
+```
+
+## S3: хранилище файлов
+
+### Базовые операции
+
+```bash
+# Создание bucket
+aws s3 mb s3://my-bucket-name --region eu-west-1
+
+# Загрузка файлов
+aws s3 cp file.jpg s3://my-bucket-name/
+aws s3 cp ./dist/ s3://my-bucket-name/static/ --recursive
+
+# Скачивание
+aws s3 cp s3://my-bucket-name/file.jpg ./file.jpg
+aws s3 sync s3://my-bucket-name/backup/ ./backup/
+
+# Список файлов
+aws s3 ls s3://my-bucket-name/
+
+# Удаление
+aws s3 rm s3://my-bucket-name/file.jpg
+aws s3 rm s3://my-bucket-name/ --recursive
+```
+
+### S3 в Node.js приложении
+
+```bash
+npm install @aws-sdk/client-s3 @aws-sdk/s3-request-presigner
+```
+
+```typescript
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+const s3 = new S3Client({
+  region: process.env.AWS_REGION || 'eu-west-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  },
+});
+
+// Загрузка файла
+async function uploadFile(key: string, body: Buffer, contentType: string) {
+  await s3.send(new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET!,
+    Key: key,
+    Body: body,
+    ContentType: contentType,
+  }));
+  
+  return `https://${process.env.S3_BUCKET}.s3.amazonaws.com/${key}`;
+}
+
+// Presigned URL для прямой загрузки с клиента
+async function getPresignedUploadUrl(key: string, contentType: string) {
+  const command = new PutObjectCommand({
+    Bucket: process.env.S3_BUCKET!,
+    Key: key,
+    ContentType: contentType,
+  });
+  
+  return getSignedUrl(s3, command, { expiresIn: 3600 });  // 1 час
+}
+
+// Presigned URL для чтения приватного файла
+async function getPresignedDownloadUrl(key: string) {
+  const command = new GetObjectCommand({
+    Bucket: process.env.S3_BUCKET!,
+    Key: key,
+  });
+  
+  return getSignedUrl(s3, command, { expiresIn: 300 });  // 5 минут
+}
+
+// Удаление
+async function deleteFile(key: string) {
+  await s3.send(new DeleteObjectCommand({
+    Bucket: process.env.S3_BUCKET!,
+    Key: key,
+  }));
+}
+```
+
+### S3 для статического сайта
+
+```bash
+# 1. Включить static website hosting
+aws s3 website s3://my-static-site/ \
+  --index-document index.html \
+  --error-document 404.html
+
+# 2. Сделать bucket публичным (bucket policy)
+aws s3api put-bucket-policy \
+  --bucket my-static-site \
+  --policy '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "PublicReadGetObject",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::my-static-site/*"
+    }]
+  }'
+
+# 3. Деплой сайта
+npm run build
+aws s3 sync ./dist s3://my-static-site/ --delete
+
+# URL: http://my-static-site.s3-website-eu-west-1.amazonaws.com
+```
+
+## IAM: управление доступом
+
+```bash
+# Создать пользователя для CI/CD
+aws iam create-user --user-name github-actions-deploy
+
+# Создать ключи доступа
+aws iam create-access-key --user-name github-actions-deploy
+# Сохрани AccessKeyId и SecretAccessKey → в GitHub Secrets
+
+# Минимальные права для S3 деплоя
+aws iam put-user-policy \
+  --user-name github-actions-deploy \
+  --policy-name s3-deploy \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::my-bucket",
+        "arn:aws:s3:::my-bucket/*"
+      ]
+    }]
+  }'
+```
+
+## GitHub Actions + S3 деплой
+
+```yaml
+# .github/workflows/deploy-s3.yml
+name: Deploy to S3
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm ci && npm run build
+
+      - name: Deploy to S3
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - run: aws s3 sync ./dist s3://${{ secrets.S3_BUCKET }} --delete
+```
+
+## Ключевые моменты
+
+- EC2 — виртуальный сервер, полный контроль
+- Security Groups — firewall для EC2, разрешай только нужные порты
+- Elastic IP — статический IP для EC2
+- S3 — объектное хранилище, идеально для файлов и статики
+- Presigned URLs — безопасная загрузка/скачивание без прямого доступа к AWS
+- IAM — минимальные права (principle of least privilege)
+- AWS SDK v3 — модульный, тряски дерева, рекомендуется
+
+## Интерактивный пример
+
+Основные сервисы AWS и их связи:
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": {
+      code: `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0f172a; color: #e2e8f0; padding: 20px; }
+h3 { color: #818cf8; margin-bottom: 12px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.svc { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px; cursor: pointer; transition: all .2s; text-align: center; }
+.svc:hover { border-color: #f59e0b; transform: translateY(-2px); }
+.svc.active { border-color: #f59e0b; background: #1c1917; }
+.svc .icon { font-size: 24px; margin-bottom: 6px; }
+.svc .name { font-size: 12px; font-weight: 700; color: #f59e0b; }
+.svc .type { font-size: 10px; color: #64748b; }
+.info { margin-top: 14px; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px 16px; font-size: 12px; color: #94a3b8; min-height: 60px; }
+</style>
+</head>
+<body>
+<h3>AWS Core Services</h3>
+<div class="grid" id="grid"></div>
+<div class="info" id="info">Выбери сервис, чтобы узнать подробнее</div>
+<script>
+const svcs = [
+  { icon: "🖥️", name: "EC2", type: "Compute", info: "Виртуальные серверы. Выбираешь тип инстанса (t2.micro — бесплатный), ОС, и получаешь полноценный сервер." },
+  { icon: "📦", name: "S3", type: "Storage", info: "Объектное хранилище. Хранит файлы (изображения, бэкапы, статику). До 5TB на объект." },
+  { icon: "🗄️", name: "RDS", type: "Database", info: "Управляемые БД: PostgreSQL, MySQL, MariaDB. AWS сам делает бэкапы и обновления." },
+  { icon: "🌐", name: "CloudFront", type: "CDN", info: "CDN — раздаёт контент с ближайшего к пользователю сервера. Ускоряет загрузку." },
+  { icon: "🔗", name: "Route 53", type: "DNS", info: "DNS-сервис. Привязывает домен к EC2/S3/CloudFront. Поддерживает health checks." },
+  { icon: "⚡", name: "Lambda", type: "Serverless", info: "Запускает код без сервера. Платишь только за время выполнения. Идеально для API." },
+];
+const grid = document.getElementById("grid");
+const info = document.getElementById("info");
+svcs.forEach(s => {
+  const div = document.createElement("div");
+  div.className = "svc";
+  div.innerHTML = "<div class=\\"icon\\">" + s.icon + "</div><div class=\\"name\\">" + s.name + "</div><div class=\\"type\\">" + s.type + "</div>";
+  div.onclick = () => {
+    grid.querySelectorAll(".svc").forEach(el => el.classList.remove("active"));
+    div.classList.add("active");
+    info.innerHTML = "<strong style=\\"color:#f59e0b\\">" + s.name + "</strong> (" + s.type + ")<br><br>" + s.info;
+  };
+  grid.appendChild(div);
+});
+<\/script>
+</body>
+</html>`,
+      active: true,
+    },
+  }}
+/>

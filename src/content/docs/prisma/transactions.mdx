@@ -1,0 +1,235 @@
+---
+title: "11. Транзакции"
+sidebar:
+  order: 11
+---
+import { Playground } from '@components/Playground'
+
+
+Транзакции гарантируют атомарность операций: либо все изменения применяются успешно, либо ни одно из них не применяется. Это критически важно для сохранения согласованности данных.
+
+## Sequential transactions (пакетные транзакции)
+
+Самый простой способ: передать массив Prisma-операций в `$transaction`. Они выполнятся в одной транзакции:
+
+```typescript
+const [user, post] = await prisma.$transaction([
+  prisma.user.create({ data: { email: 'ivan@example.com' } }),
+  prisma.post.create({ data: { title: 'Первый пост', authorId: 1 } }),
+])
+```
+
+## Interactive transactions (интерактивные транзакции)
+
+Более гибкий подход с коллбэком. Позволяет принимать решения на основе промежуточных результатов:
+
+```typescript
+const result = await prisma.$transaction(async (tx) => {
+  // Проверить баланс
+  const account = await tx.account.findUnique({
+    where: { id: fromAccountId },
+  })
+
+  if (account.balance < amount) {
+    throw new Error('Недостаточно средств')
+  }
+
+  // Снять средства
+  await tx.account.update({
+    where: { id: fromAccountId },
+    data: { balance: { decrement: amount } },
+  })
+
+  // Зачислить средства
+  await tx.account.update({
+    where: { id: toAccountId },
+    data: { balance: { increment: amount } },
+  })
+
+  return { success: true }
+})
+```
+
+## Timeout и настройки транзакции
+
+```typescript
+await prisma.$transaction(async (tx) => {
+  // ...операции...
+}, {
+  maxWait: 5000,  // максимальное ожидание начала транзакции (мс)
+  timeout: 10000, // максимальное время выполнения (мс)
+})
+```
+
+## Вложенные операции
+
+Prisma также поддерживает вложенные записи без явных транзакций — они автоматически оборачиваются в транзакцию:
+
+```typescript
+await prisma.user.create({
+  data: {
+    email: 'ivan@example.com',
+    posts: { create: [{ title: 'Пост 1' }, { title: 'Пост 2' }] },
+    profile: { create: { bio: 'Разработчик' } },
+  },
+})
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const initialAccounts = [
+  { id: 1, owner: 'Иван Петров', balance: 50000, color: '#3182ce' },
+  { id: 2, owner: 'Анна Смирнова', balance: 30000, color: '#38a169' },
+]
+
+const transactionSteps = [
+  { id: 'start', label: 'Начало транзакции', icon: '🚀', desc: 'prisma.$transaction(async (tx) => ...)', color: '#94a3b8' },
+  { id: 'check', label: 'Проверка баланса', icon: '🔍', desc: 'const account = await tx.account.findUnique(...)', color: '#3182ce' },
+  { id: 'debit', label: 'Списание средств', icon: '➖', desc: 'await tx.account.update({ data: { balance: { decrement: amount } } })', color: '#e53e3e' },
+  { id: 'credit', label: 'Зачисление средств', icon: '➕', desc: 'await tx.account.update({ data: { balance: { increment: amount } } })', color: '#38a169' },
+  { id: 'commit', label: 'Фиксация (COMMIT)', icon: '✅', desc: '// Все операции успешны — транзакция зафиксирована', color: '#38a169' },
+]
+
+export default function App() {
+  const [accounts, setAccounts] = useState(initialAccounts)
+  const [amount, setAmount] = useState(10000)
+  const [fromId, setFromId] = useState(1)
+  const [toId, setToId] = useState(2)
+  const [step, setStep] = useState(-1)
+  const [status, setStatus] = useState('idle')
+  const [log, setLog] = useState([])
+  const [simulateError, setSimulateError] = useState(false)
+
+  const reset = () => {
+    setAccounts(initialAccounts)
+    setStep(-1)
+    setStatus('idle')
+    setLog([])
+  }
+
+  const runTransaction = async () => {
+    if (status === 'running') return
+    setStatus('running')
+    setLog([])
+
+    const from = accounts.find(a => a.id === fromId)
+    const to = accounts.find(a => a.id === toId)
+
+    const addLog = (msg, color) => setLog(l => [...l, { msg, color, time: new Date().toLocaleTimeString('ru-RU') }])
+
+    for (let i = 0; i < transactionSteps.length; i++) {
+      await new Promise(r => setTimeout(r, 700))
+      setStep(i)
+
+      if (i === 1) {
+        addLog('Баланс счёта ' + from.owner + ': ' + from.balance.toLocaleString() + ' ₽', '#7dd3fc')
+        if (simulateError || from.balance < amount) {
+          addLog('❌ Ошибка: Недостаточно средств!', '#fc8181')
+          setStatus('error')
+          return
+        }
+        addLog('✓ Баланса достаточно', '#86efac')
+      }
+      if (i === 2) {
+        addLog('Списано ' + amount.toLocaleString() + ' ₽ со счёта ' + from.owner, '#fca5a5')
+        setAccounts(prev => prev.map(a => a.id === fromId ? { ...a, balance: a.balance - amount } : a))
+      }
+      if (i === 3) {
+        addLog('Зачислено ' + amount.toLocaleString() + ' ₽ на счёт ' + to.owner, '#86efac')
+        setAccounts(prev => prev.map(a => a.id === toId ? { ...a, balance: a.balance + amount } : a))
+      }
+      if (i === 4) {
+        addLog('✅ Транзакция успешно зафиксирована', '#86efac')
+        setStatus('success')
+      }
+    }
+  }
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '28px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 880, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 4px 0' }}>
+          Симулятор транзакции
+        </h2>
+        <p style={{ color: '#94a3b8', margin: '0 0 22px 0', fontSize: 13 }}>
+          Перевод средств между счетами с использованием Prisma $transaction
+        </p>
+
+        <div style={{ display: 'flex', gap: 14, marginBottom: 18 }}>
+          {accounts.map(acc => (
+            <div key={acc.id} style={{ flex: 1, background: CARD, borderRadius: 14, padding: 18, border: '2px solid ' + acc.color + '50' }}>
+              <div style={{ color: acc.color, fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{acc.owner}</div>
+              <div style={{ color: TEXT, fontSize: 26, fontWeight: 800 }}>
+                {acc.balance.toLocaleString()} <span style={{ fontSize: 16 }}>₽</span>
+              </div>
+              <div style={{ color: '#475569', fontSize: 11, marginTop: 2 }}>Счёт #{acc.id}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 18 }}>
+          <div style={{ background: CARD, borderRadius: 14, padding: 18, border: '1px solid #334155' }}>
+            <h4 style={{ color: TEXT, margin: '0 0 14px 0', fontSize: 14, fontWeight: 700 }}>⚙️ Параметры перевода</h4>
+
+            <div style={{ marginBottom: 10 }}>
+              <label style={{ color: '#94a3b8', fontSize: 12, display: 'block', marginBottom: 4 }}>Сумма (₽)</label>
+              <input type="number" value={amount} onChange={e => setAmount(Number(e.target.value))} min={1}
+                style={{ width: '100%', background: '#0a0f1e', color: TEXT, border: '1px solid #334155', borderRadius: 8, padding: '8px 12px', fontSize: 14, boxSizing: 'border-box' }} />
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14 }}>
+              <input type="checkbox" id="simulateError" checked={simulateError} onChange={e => setSimulateError(e.target.checked)} />
+              <label htmlFor="simulateError" style={{ color: '#fc8181', fontSize: 13, cursor: 'pointer' }}>
+                Симулировать ошибку (откат)
+              </label>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={runTransaction} disabled={status === 'running'}
+                style={{ flex: 1, background: status === 'running' ? '#334155' : PRISMA, color: '#fff', border: 'none', borderRadius: 10, padding: '10px', cursor: status === 'running' ? 'wait' : 'pointer', fontSize: 13, fontWeight: 700 }}>
+                {status === 'running' ? '⏳ Выполнение...' : '▶ Выполнить'}
+              </button>
+              <button onClick={reset}
+                style={{ background: CARD, color: '#94a3b8', border: '1px solid #334155', borderRadius: 10, padding: '10px 14px', cursor: 'pointer', fontSize: 13 }}>
+                ↺ Сброс
+              </button>
+            </div>
+          </div>
+
+          <div style={{ background: CARD, borderRadius: 14, padding: 18, border: '1px solid #334155' }}>
+            <h4 style={{ color: TEXT, margin: '0 0 12px 0', fontSize: 14, fontWeight: 700 }}>📋 Шаги транзакции</h4>
+            {transactionSteps.map((s, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 8, opacity: step >= i ? 1 : 0.35, transition: 'opacity 0.3s' }}>
+                <div style={{ width: 22, height: 22, borderRadius: '50%', background: step > i ? '#22543d' : step === i ? s.color : '#334155', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, flexShrink: 0, border: step === i ? '2px solid ' + s.color : '2px solid transparent', transition: 'all 0.3s' }}>
+                  {step > i ? '✓' : s.icon}
+                </div>
+                <div>
+                  <div style={{ color: step >= i ? s.color : '#475569', fontSize: 12, fontWeight: 600 }}>{s.label}</div>
+                  <div style={{ color: '#475569', fontSize: 10, fontFamily: 'monospace' }}>{s.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {log.length > 0 && (
+          <div style={{ background: '#0a0f1e', borderRadius: 14, padding: 16, border: '1px solid ' + (status === 'error' ? '#e53e3e' : status === 'success' ? '#38a169' : '#1e3a5f') }}>
+            <h4 style={{ color: TEXT, margin: '0 0 10px 0', fontSize: 13, fontWeight: 700 }}>🗒️ Лог транзакции</h4>
+            {log.map((l, i) => (
+              <div key={i} style={{ display: 'flex', gap: 10, marginBottom: 4 }}>
+                <span style={{ color: '#475569', fontSize: 11, flexShrink: 0 }}>{l.time}</span>
+                <span style={{ color: l.color, fontSize: 12 }}>{l.msg}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+` }} />

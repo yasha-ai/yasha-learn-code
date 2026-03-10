@@ -1,0 +1,330 @@
+---
+title: "21. Server-Sent Events"
+sidebar:
+  order: 21
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-sse.png)
+
+**SSE** (Server-Sent Events) — однонаправленный поток данных от сервера к клиенту через HTTP. Проще WebSocket, идеально для уведомлений и live-обновлений.
+
+## SSE vs WebSocket vs Polling
+
+```
+Polling:        Клиент → Сервер (каждые N сек)     ❌ нагрузка
+Long Polling:   Клиент → Сервер (ждёт ответ)       ⚠️ сложнее
+SSE:            Сервер → Клиент (один поток)         ✅ простой
+WebSocket:      Сервер ↔ Клиент (двусторонний)      ✅ мощный
+
+Когда SSE лучше WebSocket:
+- Нужен только поток от сервера (уведомления, ленты)
+- Хочешь автоматическое переподключение (встроено в браузер)
+- Работает через обычный HTTP (прокси, CDN дружественно)
+- Не нужна двусторонняя связь
+```
+
+## Базовый SSE сервер
+
+```javascript
+const express = require('express');
+const app = express();
+
+app.get('/events', (req, res) => {
+  // Устанавливаем заголовки SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // для Nginx
+  res.flushHeaders();
+
+  // Отправляем данные каждую секунду
+  let counter = 0;
+  const interval = setInterval(() => {
+    counter++;
+    res.write(`data: ${JSON.stringify({ count: counter, time: new Date().toISOString() })}\n\n`);
+  }, 1000);
+
+  // Клиент отключился
+  req.on('close', () => {
+    clearInterval(interval);
+    console.log('SSE клиент отключился');
+  });
+});
+
+app.listen(3000);
+```
+
+## Формат SSE сообщений
+
+```javascript
+// Формат протокола SSE:
+// data: текст\n\n              — простое сообщение
+// event: тип\ndata: текст\n\n  — именованное событие
+// id: 123\ndata: текст\n\n     — с идентификатором (для переподключения)
+// retry: 5000\n\n              — задержка переподключения (мс)
+// : комментарий\n\n            — комментарий (keepalive)
+
+function sendSSE(res, data, event = null, id = null) {
+  if (id) res.write(`id: ${id}\n`);
+  if (event) res.write(`event: ${event}\n`);
+  
+  // data может быть многострочным
+  const lines = JSON.stringify(data).split('\n');
+  lines.forEach(line => res.write(`data: ${line}\n`));
+  res.write('\n');  // пустая строка = конец сообщения
+}
+
+// Использование
+app.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Задержка переподключения
+  res.write('retry: 5000\n\n');
+
+  let id = 0;
+
+  // Разные типы событий
+  sendSSE(res, { message: 'Подключено!' }, 'connected', ++id);
+
+  const interval = setInterval(() => {
+    sendSSE(res, { time: Date.now() }, 'tick', ++id);
+  }, 1000);
+
+  // Keepalive (каждые 15 сек, чтобы прокси не закрывали)
+  const keepalive = setInterval(() => {
+    res.write(': keepalive\n\n');
+  }, 15000);
+
+  req.on('close', () => {
+    clearInterval(interval);
+    clearInterval(keepalive);
+  });
+});
+```
+
+## SSE Hub — управление подписчиками
+
+```javascript
+// Менеджер SSE подключений
+class SSEHub {
+  constructor() {
+    this.clients = new Map(); // userId → Set<res>
+  }
+
+  addClient(userId, res) {
+    if (!this.clients.has(userId)) {
+      this.clients.set(userId, new Set());
+    }
+    this.clients.get(userId).add(res);
+
+    // Настраиваем SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.write('retry: 5000\n\n');
+
+    // Удаляем при отключении
+    res.on('close', () => {
+      this.clients.get(userId)?.delete(res);
+      if (this.clients.get(userId)?.size === 0) {
+        this.clients.delete(userId);
+      }
+    });
+  }
+
+  // Отправить конкретному пользователю
+  sendToUser(userId, event, data) {
+    const clients = this.clients.get(userId);
+    if (!clients) return;
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    clients.forEach(res => res.write(message));
+  }
+
+  // Отправить всем
+  broadcast(event, data) {
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    this.clients.forEach(clients => {
+      clients.forEach(res => res.write(message));
+    });
+  }
+
+  // Количество подключений
+  get size() {
+    let count = 0;
+    this.clients.forEach(c => count += c.size);
+    return count;
+  }
+}
+
+// Глобальный hub
+const sseHub = new SSEHub();
+
+// Подключение к SSE
+app.get('/events', authenticate, (req, res) => {
+  sseHub.addClient(req.user.userId, res);
+  console.log(`SSE подключений: ${sseHub.size}`);
+});
+
+// Из любого места — отправить уведомление
+app.post('/orders', authenticate, async (req, res) => {
+  const order = await db.order.create({ data: req.body });
+
+  // Отправить SSE уведомление создателю
+  sseHub.sendToUser(req.user.userId, 'order_created', {
+    orderId: order.id,
+    message: `Заказ #${order.id} создан!`,
+  });
+
+  // Уведомить всех админов
+  sseHub.broadcast('new_order', { orderId: order.id });
+
+  res.status(201).json({ data: order });
+});
+```
+
+## Клиент (браузер)
+
+```javascript
+// EventSource — встроенный API браузера
+const eventSource = new EventSource('/events');
+
+// Общий обработчик (для data без event)
+eventSource.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log('Сообщение:', data);
+};
+
+// Именованные события
+eventSource.addEventListener('notification', (event) => {
+  const data = JSON.parse(event.data);
+  showNotification(data.title, data.body);
+});
+
+eventSource.addEventListener('order_update', (event) => {
+  const data = JSON.parse(event.data);
+  updateOrderUI(data);
+});
+
+// Ошибка / переподключение
+eventSource.onerror = (event) => {
+  if (eventSource.readyState === EventSource.CONNECTING) {
+    console.log('Переподключение...');
+  } else {
+    console.error('SSE ошибка');
+    eventSource.close();
+  }
+};
+
+// Закрыть соединение
+eventSource.close();
+
+// С аутентификацией — EventSource не поддерживает заголовки!
+// Решение: передать токен через query
+const es = new EventSource(`/events?token=${token}`);
+
+// Или использовать fetch + ReadableStream
+async function connectSSE(url, token) {
+  const response = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    const text = decoder.decode(value);
+    // Парсим SSE формат вручную
+    const lines = text.split('\n');
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = JSON.parse(line.slice(6));
+        handleEvent(data);
+      }
+    }
+  }
+}
+```
+
+## Практика
+
+1. Создай SSE эндпоинт, который отправляет серверное время каждую секунду
+2. Реализуй SSEHub для управления подписчиками
+3. Добавь именованные события: `notification`, `update`, `system`
+4. Подключи аутентификацию (через query token)
+5. Создай страницу с EventSource, которая показывает live-уведомления
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState, useRef, useEffect } from "react";
+
+export default function App() {
+  const [events, setEvents] = useState([]);
+  const [listening, setListening] = useState(false);
+  const ref = useRef(null);
+
+  const start = () => {
+    setListening(true);
+    setEvents([{ type: "open", data: "SSE поток открыт", id: 0 }]);
+    let id = 0;
+    ref.current = setInterval(() => {
+      id++;
+      const types = ["update", "notification", "heartbeat"];
+      const type = types[id % 3];
+      const data = type === "update"
+        ? \`{"temp": \${(20 + Math.random()*10).toFixed(1)}, "humidity": \${(40 + Math.random()*30).toFixed(0)}}\`
+        : type === "notification"
+        ? \`{"text": "Событие #\${id}"}\`
+        : ": ping";
+      setEvents(prev => [...prev.slice(-7), { type, data, id }]);
+    }, 1500);
+  };
+
+  const stop = () => {
+    clearInterval(ref.current);
+    setListening(false);
+    setEvents(prev => [...prev, { type: "close", data: "Поток закрыт", id: -1 }]);
+  };
+
+  useEffect(() => () => clearInterval(ref.current), []);
+
+  const col = { update: "#10b981", notification: "#3b82f6", heartbeat: "#475569", open: "#f59e0b", close: "#ef4444" };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Server-Sent Events (Node.js)</h3>
+      <pre style={{ background: "#1e293b", padding: 10, borderRadius: 6, fontSize: 11, color: "#94a3b8", marginBottom: 12 }}>
+{listening ? \`// Клиент: new EventSource('/api/stream')
+// Сервер: res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+// Сервер: res.write('data: ...')\` : \`// Нажмите "Подключиться" для старта SSE потока\`}
+      </pre>
+      <button onClick={listening ? stop : start}
+        style={{ padding: "6px 14px", background: listening ? "#ef4444" : "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", marginBottom: 12, fontSize: 12 }}>
+        {listening ? "Отключиться" : "Подключиться"}
+      </button>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {events.map((e, i) => (
+          <div key={i} style={{ fontSize: 12, marginBottom: 2 }}>
+            <span style={{ color: col[e.type] || "#94a3b8" }}>event: {e.type}</span>{" "}
+            <span style={{ color: "#e2e8f0" }}>{e.data}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

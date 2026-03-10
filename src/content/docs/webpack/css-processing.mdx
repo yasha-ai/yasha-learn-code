@@ -1,0 +1,359 @@
+---
+title: "9. Обработка CSS"
+sidebar:
+  order: 9
+---
+import { Playground } from '@components/Playground'
+
+
+Обработка CSS в Webpack — это целая экосистема инструментов. Правильная настройка CSS pipeline критически важна для производительности, изоляции стилей и удобства разработки. Рассмотрим все уровни: от базового импорта CSS до CSS Modules и PostCSS.
+
+## Базовая цепочка: style-loader + css-loader
+
+```bash
+npm install --save-dev css-loader style-loader
+```
+
+```js
+// webpack.config.js
+module: {
+  rules: [{
+    test: /\\.css$/,
+    use: ['style-loader', 'css-loader'],
+    // Порядок справа налево:
+    // 1. css-loader — разрешает @import, url(), создаёт JS модуль
+    // 2. style-loader — инжектирует CSS в <style> тег
+  }]
+}
+```
+
+```js
+// В коде:
+import './App.css'; // CSS инжектируется в DOM при импорте
+```
+
+**Когда использовать style-loader**: только в development. В production используйте MiniCssExtractPlugin.
+
+## MiniCssExtractPlugin — CSS в отдельные файлы
+
+```bash
+npm install --save-dev mini-css-extract-plugin
+```
+
+```js
+const MiniCssExtractPlugin = require('mini-css-extract-plugin');
+const isDev = process.env.NODE_ENV === 'development';
+
+module.exports = {
+  module: {
+    rules: [{
+      test: /\\.css$/,
+      use: [
+        isDev ? 'style-loader' : MiniCssExtractPlugin.loader,
+        'css-loader',
+      ],
+    }],
+  },
+  plugins: [
+    !isDev && new MiniCssExtractPlugin({
+      filename: '[name].[contenthash:8].css',
+    }),
+  ].filter(Boolean),
+};
+```
+
+## CSS Modules — изоляция стилей
+
+CSS Modules автоматически генерируют уникальные имена классов, предотвращая коллизии:
+
+```js
+{
+  test: /\\.module\\.css$/,
+  use: [
+    'style-loader',
+    {
+      loader: 'css-loader',
+      options: {
+        modules: {
+          localIdentName: '[name]__[local]--[hash:base64:5]',
+        },
+      },
+    },
+  ],
+}
+```
+
+```jsx
+// Button.module.css
+.button { background: blue; }
+.primary { color: white; }
+
+// Button.tsx
+import styles from './Button.module.css';
+// styles.button → 'Button__button--abc12'
+// styles.primary → 'Button__primary--def34'
+
+function Button() {
+  return <button className={styles.button}>Click</button>;
+  // В HTML: <button class="Button__button--abc12">Click</button>
+}
+```
+
+## SASS/SCSS
+
+```bash
+npm install --save-dev sass-loader sass
+```
+
+```js
+{
+  test: /\\.s[ac]ss$/i,
+  use: [
+    isDev ? 'style-loader' : MiniCssExtractPlugin.loader,
+    {
+      loader: 'css-loader',
+      options: { importLoaders: 2 }, // Количество лоадеров после css-loader
+    },
+    'sass-loader',
+  ],
+}
+```
+
+## PostCSS — трансформация CSS
+
+PostCSS — это инструмент для трансформации CSS с помощью плагинов (Autoprefixer, CSS Nesting, etc.):
+
+```bash
+npm install --save-dev postcss-loader postcss autoprefixer postcss-preset-env
+```
+
+```js
+{
+  test: /\\.css$/,
+  use: [
+    'style-loader',
+    { loader: 'css-loader', options: { importLoaders: 1 } },
+    {
+      loader: 'postcss-loader',
+      options: {
+        postcssOptions: {
+          plugins: [
+            'autoprefixer',                // Вендорные префиксы
+            ['postcss-preset-env', {       // Современный CSS → совместимый
+              stage: 3,
+              features: {
+                'nesting-rules': true,
+              },
+            }],
+          ],
+        },
+      },
+    },
+  ],
+}
+```
+
+Или через `postcss.config.js`:
+```js
+// postcss.config.js
+module.exports = {
+  plugins: [
+    require('autoprefixer'),
+    require('postcss-preset-env')({ stage: 3 }),
+  ],
+};
+```
+
+## Полный production конфиг CSS
+
+```js
+const isDev = process.env.NODE_ENV === 'development';
+
+const getCssLoaders = (cssModules = false) => [
+  isDev ? 'style-loader' : MiniCssExtractPlugin.loader,
+  {
+    loader: 'css-loader',
+    options: {
+      modules: cssModules ? { localIdentName: '[name]__[local]--[hash:base64:5]' } : false,
+      importLoaders: 2,
+      sourceMap: isDev,
+    },
+  },
+  { loader: 'postcss-loader', options: { postcssOptions: { plugins: ['autoprefixer'] } } },
+  'sass-loader',
+];
+
+module: {
+  rules: [
+    { test: /\\.module\\.(css|scss)$/, use: getCssLoaders(true) },
+    { test: /(?<!module)\\.(css|scss)$/, use: getCssLoaders(false) },
+  ],
+}
+```
+
+Ниже — интерактивный визуализатор CSS pipeline. Выберите конфигурацию и посмотрите как CSS проходит через каждый инструмент.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const PURPLE = '#a78bfa';
+
+interface PipelineStep {
+  name: string;
+  color: string;
+  input: string;
+  output: string;
+  description: string;
+}
+
+type Config = 'basic' | 'modules' | 'sass' | 'postcss' | 'full';
+
+const CONFIGS: Record<Config, { label: string; desc: string; steps: PipelineStep[] }> = {
+  basic: {
+    label: 'Basic CSS',
+    desc: 'Простой импорт CSS через style-loader',
+    steps: [
+      { name: 'css-loader', color: PURPLE, description: 'Разрешает @import и url(), создаёт JS модуль', input: '.app { color: blue; }\\n.button { background: red; }', output: 'exports.push([module.id, ".app { color: blue; }\\n.button { background: red; }", ""])' },
+      { name: 'style-loader', color: WEBPACK_COLOR, description: 'Инжектирует CSS в <style> тег', input: 'CSS модуль (JS)', output: '// Runtime JS:\\nconst style = document.createElement("style");\\nstyle.innerHTML = ".app { color: blue; }\\n.button { background: red; }";\\ndocument.head.appendChild(style);' },
+    ],
+  },
+  modules: {
+    label: 'CSS Modules',
+    desc: 'Изоляция классов через уникальные имена',
+    steps: [
+      { name: 'css-loader (modules)', color: PURPLE, description: 'Генерирует уникальные имена классов', input: '.button { background: #8dd6f9; }\\n.primary { color: white; font-weight: bold; }', output: 'exports.locals = {\\n  "button": "Button__button--a1b2c",\\n  "primary": "Button__primary--d3e4f"\\n}\\n// CSS с переименованными классами:\\n.Button__button--a1b2c { background: #8dd6f9; }\\n.Button__primary--d3e4f { color: white; font-weight: bold; }' },
+      { name: 'style-loader', color: WEBPACK_COLOR, description: 'Инжектирует CSS с уникальными именами', input: 'CSS модуль (JS) + locals map', output: '// В браузере:\\n<style>\\n.Button__button--a1b2c { background: #8dd6f9; }\\n.Button__primary--d3e4f { color: white; }\\n</style>\\n// В коде: styles.button === "Button__button--a1b2c"' },
+    ],
+  },
+  sass: {
+    label: 'SASS/SCSS',
+    desc: 'Компиляция SCSS переменных и вложенности',
+    steps: [
+      { name: 'sass-loader', color: '#f472b6', description: 'Компилирует SCSS/SASS в CSS', input: '$primary: #8dd6f9;\\n$bg: #0f172a;\\n\\n.container {\\n  background: $bg;\\n  .button {\\n    color: $primary;\\n    &:hover { opacity: 0.8; }\\n  }\\n}', output: '.container {\\n  background: #0f172a;\\n}\\n.container .button {\\n  color: #8dd6f9;\\n}\\n.container .button:hover {\\n  opacity: 0.8;\\n}' },
+      { name: 'css-loader', color: PURPLE, description: 'Обработка CSS, создание JS модуля', input: '.container { background: #0f172a; }\\n.container .button { color: #8dd6f9; }', output: 'exports.push([module.id, "...CSS...", ""])' },
+      { name: 'style-loader', color: WEBPACK_COLOR, description: 'Инжекция в DOM', input: 'CSS модуль', output: '<style>.container { background: #0f172a; }...</style>' },
+    ],
+  },
+  postcss: {
+    label: 'PostCSS',
+    desc: 'Автопрефиксер и современный CSS синтаксис',
+    steps: [
+      { name: 'css-loader', color: PURPLE, description: 'Базовая обработка CSS', input: '.grid { display: grid; gap: 16px; }\\n.flex { display: flex; user-select: none; }', output: '.grid { display: grid; gap: 16px; }\\n.flex { display: flex; user-select: none; }' },
+      { name: 'postcss-loader (autoprefixer)', color: SUCCESS, description: 'Добавляет вендорные префиксы', input: '.grid { display: grid; gap: 16px; }\\n.flex { display: flex; user-select: none; }', output: '.grid { display: -ms-grid; display: grid; gap: 16px; }\\n.flex { display: -webkit-flex; display: flex;\\n  -webkit-user-select: none;\\n  -moz-user-select: none;\\n  user-select: none; }' },
+      { name: 'style-loader', color: WEBPACK_COLOR, description: 'Инжекция в DOM', input: 'CSS с префиксами', output: '<style>.grid { display: -ms-grid; display: grid; }</style>' },
+    ],
+  },
+  full: {
+    label: 'Production Full',
+    desc: 'SCSS + PostCSS + MiniCssExtractPlugin',
+    steps: [
+      { name: 'sass-loader', color: '#f472b6', description: 'SCSS → CSS', input: '$color: #8dd6f9;\\n.app { background: darken($color, 50%); }', output: '.app { background: #0a2744; }' },
+      { name: 'postcss-loader', color: SUCCESS, description: 'PostCSS трансформации', input: '.app { background: #0a2744; }', output: '.app { background: #0a2744; }' },
+      { name: 'css-loader', color: PURPLE, description: 'CSS → JS модуль', input: '.app { background: #0a2744; }', output: 'exports.push(...)' },
+      { name: 'MiniCssExtractPlugin.loader', color: ACCENT, description: 'CSS → отдельный файл вместо <style>', input: 'CSS модуль', output: '📄 dist/main.a1b2c3d4.css (отдельный файл)\\n→ <link href="/main.a1b2c3d4.css" rel="stylesheet">' },
+    ],
+  },
+};
+
+export default function App() {
+  const [config, setConfig] = useState<Config>('basic');
+  const [activeStep, setActiveStep] = useState<number>(0);
+
+  const data = CONFIGS[config];
+  const step = data.steps[activeStep] || data.steps[0];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>🎨 CSS Pipeline Visualizer</div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Выберите конфигурацию CSS и исследуйте каждый шаг обработки</div>
+        </div>
+
+        {/* Config selector */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {(Object.entries(CONFIGS) as [Config, typeof CONFIGS[Config]][]).map(([key, val]) => (
+            <div
+              key={key}
+              onClick={() => { setConfig(key); setActiveStep(0); }}
+              style={{ padding: '8px 16px', borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s', background: config === key ? WEBPACK_COLOR : CARD, color: config === key ? BG : TEXT, fontWeight: config === key ? 700 : 400, fontSize: 12, border: \`2px solid \${config === key ? WEBPACK_COLOR : 'transparent'}\` }}
+            >{val.label}</div>
+          ))}
+        </div>
+
+        {/* Description */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 16, marginBottom: 20 }}>
+          <div style={{ fontSize: 13, color: ACCENT, marginBottom: 12 }}>💡 {data.desc}</div>
+
+          {/* Pipeline steps */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+            <div style={{ background: '#0a0f1e', borderRadius: 6, padding: '6px 12px', fontSize: 11, color: MUTED }}>input.{config === 'sass' || config === 'full' ? 'scss' : 'css'}</div>
+            {data.steps.map((s, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ color: MUTED }}>→</span>
+                <div
+                  onClick={() => setActiveStep(i)}
+                  style={{ background: activeStep === i ? '#0f2744' : '#0a0f1e', border: \`2px solid \${activeStep === i ? s.color : '#334155'}\`, borderRadius: 6, padding: '6px 12px', cursor: 'pointer', transition: 'all 0.2s' }}
+                >
+                  <div style={{ fontSize: 11, color: activeStep === i ? s.color : TEXT, fontWeight: activeStep === i ? 700 : 400 }}>{s.name}</div>
+                </div>
+              </div>
+            ))}
+            <span style={{ color: MUTED }}>→</span>
+            <div style={{ background: '#0a0f1e', borderRadius: 6, padding: '6px 12px', fontSize: 11, color: SUCCESS }}>
+              {config === 'full' ? 'dist/styles.css' : 'bundle.js'}
+            </div>
+          </div>
+        </div>
+
+        {/* Step detail */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: step.color }} />
+            <div style={{ fontSize: 15, color: step.color, fontWeight: 700 }}>{step.name}</div>
+          </div>
+          <div style={{ fontSize: 12, color: MUTED, marginBottom: 16 }}>{step.description}</div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 6, textTransform: 'uppercase' }}>ВХОД</div>
+              <pre style={{ margin: 0, background: '#0a0f1e', borderRadius: 8, padding: '12px', fontSize: 11, lineHeight: 1.5, color: TEXT, overflow: 'auto', minHeight: 120 }}>
+                {step.input}
+              </pre>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 6, textTransform: 'uppercase' }}>ВЫХОД</div>
+              <pre style={{ margin: 0, background: '#0a0f1e', borderRadius: 8, padding: '12px', fontSize: 11, lineHeight: 1.5, color: SUCCESS, overflow: 'auto', minHeight: 120 }}>
+                {step.output}
+              </pre>
+            </div>
+          </div>
+        </div>
+
+        {/* Navigation */}
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <button
+            onClick={() => setActiveStep(Math.max(0, activeStep - 1))}
+            disabled={activeStep === 0}
+            style={{ padding: '8px 20px', background: activeStep === 0 ? '#334155' : CARD, color: activeStep === 0 ? MUTED : TEXT, border: \`1px solid #334155\`, borderRadius: 6, cursor: activeStep === 0 ? 'default' : 'pointer', fontSize: 12, fontFamily: 'monospace' }}
+          >← Предыдущий шаг</button>
+          <div style={{ color: MUTED, fontSize: 12, alignSelf: 'center' }}>
+            Шаг {activeStep + 1} из {data.steps.length}
+          </div>
+          <button
+            onClick={() => setActiveStep(Math.min(data.steps.length - 1, activeStep + 1))}
+            disabled={activeStep === data.steps.length - 1}
+            style={{ padding: '8px 20px', background: activeStep === data.steps.length - 1 ? '#334155' : WEBPACK_COLOR, color: activeStep === data.steps.length - 1 ? MUTED : BG, border: 'none', borderRadius: 6, cursor: activeStep === data.steps.length - 1 ? 'default' : 'pointer', fontSize: 12, fontFamily: 'monospace', fontWeight: 700 }}
+          >Следующий шаг →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

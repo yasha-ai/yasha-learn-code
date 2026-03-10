@@ -1,0 +1,537 @@
+---
+title: "26. Performance Profiling"
+sidebar:
+  order: 26
+---
+import { Playground } from '@components/Playground'
+
+
+## TypeScript: [Оптимизация](/react/optimization-patterns/) Производительности (Performance Profiling)
+
+Привет, коллеги-разработчики! Добро пожаловать в мир, где ваш код работает *быстро*, а не просто *работает*. Сегодня мы поговорим о Performance Profiling — искусстве и науке поиска узких мест в вашем TypeScript-приложении. Представьте, что вы детектив, а ваше приложение — это сложный механизм. Ваша задача — найти ту шестерёнку, которая крутится слишком медленно, и понять, почему.
+
+Зачем это нужно? Медленный код раздражает пользователей, увеличивает затраты на серверы и делает ваше приложение менее конкурентоспособным. А в сложных TypeScript-проектах, где много бизнес-логики и обработки данных, производительность часто становится критическим фактором. Мы научимся не просто угадывать, что тормозит, а *измерять* и *доказывать*.
+
+### Что такое Performance Profiling?
+
+Performance Profiling — это процесс анализа производительности программного обеспечения для выявления его узких мест (bottlenecks). Мы будем измерять, сколько времени занимает выполнение определённых функций, сколько ресурсов процессора или памяти они потребляют.
+
+В мире TypeScript и JavaScript мы чаще всего сталкиваемся с двумя типами узких мест:
+
+1.  **CPU-bound операции:** Вычисления, которые сильно нагружают процессор (например, сложные алгоритмы, обработка больших объемов данных).
+2.  **I/O-bound операции:** Операции, ожидающие ввода/вывода (например, сетевые запросы, чтение/запись файлов, взаимодействие с базой данных).
+
+Сегодня мы сфокусируемся в основном на CPU-bound операциях, так как они находятся под прямым контролем вашего кода.
+
+### 🛠️ Инструменты и Подходы
+
+TypeScript компилируется в JavaScript, поэтому для профилирования мы используем стандартные инструменты JS-среды: браузерные DevTools, встроенные модули Node.js и, конечно, наши собственные решения.
+
+#### Быстрая Оценка с `console.time()`
+
+Самый простой и быстрый способ измерить время выполнения блока кода — это `console.time()` и `console.timeEnd()`.
+
+```typescript
+console.time('heavyCalculation'); // Начинаем отсчет времени с меткой 'heavyCalculation'
+
+// Имитируем тяжелые вычисления
+let result = 0;
+for (let i = 0; i < 1_000_000; i++) {
+    result += Math.sqrt(i) * Math.sin(i);
+}
+
+console.log(`Результат: ${result}`);
+console.timeEnd('heavyCalculation'); // Завершаем отсчет и выводим время
+```
+
+Этот метод хорош для быстрой проверки гипотез, но он не очень точен и не дает глубоких деталей (например, потребление CPU).
+
+#### Точное Измерение с Node.js `perf_hooks`
+
+Для серверных приложений на Node.js (а значит, и на TypeScript) у нас есть мощный модуль `perf_hooks`. Он предоставляет API, аналогичное `Performance` API в браузерах, с высокой точностью измерений.
+
+```typescript
+import { performance, PerformanceObserver } from 'perf_hooks';
+
+// Создаем наблюдатель за метками производительности
+const obs = new PerformanceObserver((items) => {
+    items.getEntries().forEach((entry) => {
+        console.log(`[${entry.name}] - Длительность: ${entry.duration.toFixed(2)} мс`);
+    });
+    // obs.disconnect(); // Можно отключить наблюдателя после получения данных
+});
+obs.observe({ entryTypes: ['measure'], buffered: true });
+
+function calculateComplexFibonacci(n: number): number {
+    performance.mark('startFibonacci'); // Ставим стартовую метку
+
+    if (n <= 1) return n;
+    let a = 0, b = 1;
+    for (let i = 2; i <= n; i++) {
+        const next = a + b;
+        a = b;
+        b = next;
+    }
+
+    performance.mark('endFibonacci'); // Ставим конечную метку
+    performance.measure('Фибоначчи', 'startFibonacci', 'endFibonacci'); // Измеряем интервал между метками
+
+    return b;
+}
+
+console.log('Вычисляем Фибоначчи...');
+calculateComplexFibonacci(45); // Достаточно большое число для заметной задержки
+calculateComplexFibonacci(40);
+```
+`performance.mark()` создает именованные временные точки, а `performance.measure()` вычисляет разницу между ними. `PerformanceObserver` позволяет асинхронно собирать эти данные, что удобно для мониторинга в больших приложениях.
+
+#### Браузерные DevTools
+
+Если вы разрабатываете клиентский TypeScript, то инструменты разработчика в Chrome, Firefox или Edge — ваши лучшие друзья. Вкладка "Performance" позволяет записывать активность страницы, показывая диаграмму Ганта с вызовами функций, потреблением CPU и даже памятью.
+
+Мы не можем напрямую показать UI DevTools в MDX, но важно знать, что ваш TypeScript-код, скомпилированный в JS, будет виден там. Вы сможете увидеть, какие функции отнимают больше всего времени, когда происходит перерисовка DOM, и где ваш код тратит время впустую.
+
+### 🧠 Продвинутые Техники и Паттерны
+
+Для более структурированного и автоматизированного профилирования в TypeScript, особенно для методов классов, декораторы подходят идеально.
+
+#### Декоратор для профилирования методов
+
+Давайте создадим универсальный декоратор, который будет измерять время выполнения любого метода, к которому он применён.
+
+```typescript
+import { performance } from 'perf_hooks'; // Используем perf_hooks для Node.js
+
+/**
+ * Декоратор @profile
+ * Измеряет время выполнения метода и логирует его в консоль.
+ * @param target Целевой объект (прототип класса)
+ * @param propertyKey Имя метода
+ * @param descriptor Дескриптор свойства метода
+ */
+function profile(target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+    const originalMethod = descriptor.value; // Сохраняем оригинальный метод
+
+    descriptor.value = function (...args: any[]) {
+        const start = performance.now(); // Начало измерения
+        try {
+            const result = originalMethod.apply(this, args); // Выполняем оригинальный метод
+            return result;
+        } finally {
+            const end = performance.now(); // Конец измерения
+            console.log(`[${target.constructor.name}.${propertyKey}] - Длительность: ${(end - start).toFixed(2)} мс`);
+        }
+    };
+
+    return descriptor;
+}
+
+class DataProcessor {
+    private cache = new Map<number, number>();
+
+    /**
+     * Тяжелый метод, имитирующий вычисление факториала.
+     * @profile
+     */
+    @profile
+    calculateFactorial(n: number): number {
+        if (n < 0) throw new Error("Факториал определен только для неотрицательных чисел.");
+        if (n === 0) return 1;
+
+        if (this.cache.has(n)) {
+            // console.log(`[${n}] - Взято из кэша`);
+            return this.cache.get(n)!;
+        }
+
+        let result = 1;
+        for (let i = 1; i <= n; i++) {
+            result *= i;
+        }
+        this.cache.set(n, result);
+        return result;
+    }
+
+    // Еще один метод, который мы можем профилировать или нет
+    @profile
+    processArray(arr: number[]): number[] {
+        // Имитация сложной обработки массива
+        return arr.map(x => x * x).sort((a, b) => b - a);
+    }
+}
+
+const processor = new DataProcessor();
+
+processor.calculateFactorial(10);
+processor.calculateFactorial(5); // Возможно, будет быстрее, если в кеше (но тут нет, т.к. кэш внутри метода)
+processor.calculateFactorial(12);
+
+processor.processArray(Array.from({ length: 10000 }, (_, i) => i));
+processor.processArray(Array.from({ length: 500 }, (_, i) => i));
+```
+
+Этот декоратор значительно упрощает добавление профилирования, особенно для сложных классов с множеством методов. Вы просто помечаете нужные методы, и система сама логирует время.
+
+#### Мемоизация как результат профилирования
+
+Часто профилирование показывает, что одна и та же функция вызывается многократно с одинаковыми аргументами, и при этом она выполняет дорогие вычисления. В таких случаях на помощь приходит **мемоизация** — кеширование результатов выполнения функции, основанное на её аргументах.
+
+Давайте модифицируем наш факториал из предыдущего примера, чтобы он *действительно* использовал кэш.
+
+```typescript
+import { performance } from 'perf_hooks';
+
+// Декоратор профилирования (как выше)
+function profile(target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+    const originalMethod = descriptor.value;
+    descriptor.value = function (...args: any[]) {
+        const start = performance.now();
+        try {
+            const result = originalMethod.apply(this, args);
+            return result;
+        } finally {
+            const end = performance.now();
+            console.log(`[${target.constructor.name}.${propertyKey}] - Длительность: ${(end - start).toFixed(2)} мс`);
+        }
+    };
+    return descriptor;
+}
+
+// Декоратор мемоизации
+function memoize(target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+    const originalMethod = descriptor.value;
+    const cache = new Map<string, any>(); // Кэш для результатов
+
+    descriptor.value = function (...args: any[]) {
+        const cacheKey = JSON.stringify(args); // Генерируем ключ из аргументов
+
+        if (cache.has(cacheKey)) {
+            // console.log(`[${propertyKey}] - Результат для ${cacheKey} взят из кэша.`);
+            return cache.get(cacheKey);
+        }
+
+        const result = originalMethod.apply(this, args); // Выполняем оригинальный метод
+        cache.set(cacheKey, result); // Сохраняем результат в кэше
+        return result;
+    };
+
+    return descriptor;
+}
+
+
+class MemoizedCalculator {
+    @profile
+    @memoize // Сначала мемоизация, потом профилирование
+    calculateExpensivePower(base: number, exponent: number): number {
+        // Имитация очень дорогого вычисления, например, возведение в большую степень
+        // В реальном мире тут может быть сложный алгоритм или внешний запрос
+        console.log(`Вычисляем ${base} в степени ${exponent}...`);
+        let result = 1;
+        for (let i = 0; i < exponent; i++) {
+            result *= base;
+            // Имитация задержки
+            for (let j = 0; j < 100000; j++) Math.sin(j);
+        }
+        return result;
+    }
+}
+
+const calculator = new MemoizedCalculator();
+
+console.log('Первый вызов:');
+calculator.calculateExpensivePower(2, 15);
+
+console.log('\nВторой вызов (те же аргументы, из кэша):');
+calculator.calculateExpensivePower(2, 15);
+
+console.log('\nТретий вызов (другие аргументы):');
+calculator.calculateExpensivePower(3, 10);
+
+console.log('\nЧетвертый вызов (те же аргументы, из кэша):');
+calculator.calculateExpensivePower(3, 10);
+```
+Обратите внимание на порядок декораторов: `@memoize` применяется первым, чтобы профилирование измеряло время с учетом кэширования. Если бы `@profile` был первым, он бы измерял только время до попадания в `memoize`, а не полное время вычислений (или взятия из кэша).
+
+### 🚫 Типичные Ошибки и Ловушки
+
+1.  **Профилирование в режиме разработки:** JIT-компиляторы JavaScript (V8 в Node.js/Chrome) выполняют много оптимизаций "на лету", которые могут не проявляться в dev-режиме. Всегда профилируйте Production-сборки (или максимально приближенные к ним).
+2.  **Микро-оптимизации без профилирования:** "Преждевременная оптимизация — корень всех зол" (Дональд Кнут). Не пытайтесь оптимизировать каждый цикл или маленькую функцию, пока не увидите, что именно они являются узким местом.
+3.  **Игнорирование I/O:** Профилирование CPU покажет, что функция "ожидает" данных из сети или диска. Это не значит, что код плох, это значит, что узкое место вне вашего кода. В таких случаях нужно оптимизировать сетевые запросы, кешировать данные или использовать асинхронные паттерны.
+4.  **Накладные расходы профилирования:** Сам код профилирования добавляет некоторое время выполнения. Учитывайте это при анализе очень коротких операций.
+
+### 🎯 Практика
+
+Ваша задача — применить полученные знания для выявления и устранения узких мест.
+
+#### Задание 1: Профилирование сложного преобразования данных
+
+У вас есть функция, которая должна преобразовывать большой массив объектов. Найдите наиболее медленную часть.
+
+```typescript
+type UserData = {
+    id: number;
+    name: string;
+    email: string;
+    isActive: boolean;
+    registrationDate: Date;
+    tags: string[];
+};
+
+function generateLargeUserData(count: number): UserData[] {
+    const data: UserData[] = [];
+    for (let i = 0; i < count; i++) {
+        data.push({
+            id: i,
+            name: `User ${i}`,
+            email: `user${i}@example.com`,
+            isActive: i % 2 === 0,
+            registrationDate: new Date(Date.now() - Math.random() * 1000 * 3600 * 24 * 365 * 5),
+            tags: Array.from({ length: Math.floor(Math.random() * 5) + 1 }, (_, tagIdx) => `tag-${tagIdx}-${i % 10}`)
+        });
+    }
+    return data;
+}
+
+/**
+ * Ваша задача: Профилировать эту функцию и определить, какая из внутренних операций (map, filter, sort)
+ * занимает больше всего времени. Используйте console.time() или perf_hooks.
+ */
+function processUserData(users: UserData[]): { id: number; username: string; activeTags: number }[] {
+    // ??? ДОБАВЬТЕ СЮДА ПРОФИЛИРОВАНИЕ ???
+    const processed = users
+        .filter(user => user.isActive && user.registrationDate.getFullYear() > 2020)
+        .map(user => ({
+            id: user.id,
+            username: user.name.toUpperCase(),
+            activeTags: user.tags.filter(tag => tag.startsWith('tag-0')).length
+        }))
+        .sort((a, b) => a.activeTags - b.activeTags);
+    // ??? И СЮДА ???
+    return processed;
+}
+
+const largeDataSet = generateLargeUserData(50_000);
+processUserData(largeDataSet);
+```
+
+#### Задание 2: Применение `@profile` к классу с бизнес-логикой
+
+Создайте класс `ReportGenerator` с несколькими методами для подготовки отчетов. Примените `@profile` декоратор к тем методам, которые, по вашему мнению, могут быть наиболее ресурсоемкими.
+
+```typescript
+// Импортируйте или определите декоратор @profile здесь
+// ... (ваш декоратор profile из урока) ...
+
+class ReportGenerator {
+    private data: { category: string; value: number }[];
+
+    constructor(size: number) {
+        this.data = Array.from({ length: size }, (_, i) => ({
+            category: `Category ${i % 10}`,
+            value: Math.random() * 1000
+        }));
+    }
+
+    // ??? Примените @profile к этому методу ???
+    generateSummaryReport(): Map<string, number> {
+        const summary = new Map<string, number>();
+        for (const item of this.data) {
+            summary.set(item.category, (summary.get(item.category) || 0) + item.value);
+        }
+        return summary;
+    }
+
+    // ??? Примените @profile к этому методу ???
+    findTopCategories(limit: number): string[] {
+        const summary = this.generateSummaryReport(); // Эта функция вызывается внутри
+        return Array.from(summary.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, limit)
+            .map(entry => entry[0]);
+    }
+
+    // Этот метод не профилировать, чтобы сравнить
+    getDataSourceSize(): number {
+        return this.data.length;
+    }
+}
+
+const reportGen = new ReportGenerator(100_000);
+reportGen.generateSummaryReport();
+reportGen.findTopCategories(5);
+reportGen.getDataSourceSize();
+```
+
+#### Задание 3: Мемоизация для оптимизации рекурсивной функции
+
+Дана рекурсивная функция вычисления числа Фибоначчи (крайне неэффективная).
+1.  Измерьте её производительность для `n = 40`.
+2.  Примените декоратор `@memoize` (из урока) к этой функции.
+3.  Снова измерьте производительность для `n = 40` (повторный вызов) и сравните результаты.
+
+```typescript
+// Импортируйте или определите декораторы @profile и @memoize здесь
+// ... (ваш декоратор profile из урока) ...
+// ... (ваш декоратор memoize из урока) ...
+
+class FibonacciCalculator {
+    @profile // Профилируем, чтобы увидеть разницу
+    // ??? Примените @memoize к этому методу ???
+    calculateRecursiveFibonacci(n: number): number {
+        if (n <= 1) {
+            return n;
+        }
+        return this.calculateRecursiveFibonacci(n - 1) + this.calculateRecursiveFibonacci(n - 2);
+    }
+}
+
+const fibCalculator = new FibonacciCalculator();
+
+console.log('--- Без мемоизации (или первый вызов) ---');
+fibCalculator.calculateRecursiveFibonacci(40);
+
+console.log('\n--- С мемоизацией (или повторный вызов) ---');
+fibCalculator.calculateRecursiveFibonacci(40); // Вызов с тем же аргументом
+fibCalculator.calculateRecursiveFibonacci(10); // Новый аргумент
+fibCalculator.calculateRecursiveFibonacci(40); // Снова тот же аргумент
+```
+
+### 💡 Совет
+
+Всегда помните золотое правило оптимизации: **"Измеряй, прежде чем оптимизировать."** Без точных данных о производительности вы рискуете потратить часы на оптимизацию участка кода, который и так работает быстро, проигнорировав реальное узкое место. Инструменты профилирования — это ваши глаза, которые показывают, куда направить усилия. Используйте их!
+
+---
+
+## 🔗 Полезные ссылки
+- [Паттерны оптимизации](/react/optimization-patterns/)
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useState, useRef, memo, useCallback } from 'react';
+
+type CompName = 'Header' | 'Sidebar' | 'Content' | 'Footer' | 'UserMenu';
+
+const ALL: CompName[] = ['Header', 'Sidebar', 'Content', 'Footer', 'UserMenu'];
+
+const COLORS: Record<CompName, string> = {
+  Header: '#38bdf8',
+  Sidebar: '#a78bfa',
+  Content: '#34d399',
+  Footer: '#fb923c',
+  UserMenu: '#f472b6',
+};
+
+function useRenderCount() {
+  const ref = useRef(0);
+  ref.current += 1;
+  return ref.current;
+}
+
+const ComponentRow = memo(function ComponentRow({
+  name,
+  active,
+}: {
+  name: CompName;
+  active: boolean;
+}) {
+  const renders = useRenderCount();
+  const color = COLORS[name];
+  const badgeBg = renders > 5 ? '#7f1d1d' : renders > 2 ? '#78350f' : '#14532d';
+  const badgeColor = renders > 5 ? '#fca5a5' : renders > 2 ? '#fde68a' : '#86efac';
+  return (
+    <div
+      style={{
+        background: active ? '#1e293b' : '#0f172a',
+        border: '1px solid ' + (active ? color : '#1e293b'),
+        borderRadius: 8,
+        padding: '12px 16px',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        transition: 'border-color 0.4s, background 0.4s',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: '50%',
+            background: active ? color : '#334155',
+            transition: 'background 0.4s',
+          }}
+        />
+        <span style={{ color: '#e2e8f0', fontSize: 14 }}>{name}</span>
+      </div>
+      <span
+        style={{
+          background: badgeBg,
+          color: badgeColor,
+          borderRadius: 12,
+          padding: '2px 10px',
+          fontSize: 12,
+          fontWeight: 700,
+          minWidth: 80,
+          textAlign: 'center',
+        }}
+      >
+        {renders} {renders === 1 ? 'render' : 'renders'}
+      </span>
+    </div>
+  );
+});
+
+const SCENARIOS: { label: string; affected: CompName[] }[] = [
+  { label: 'Route change', affected: ['Header', 'Sidebar', 'Content', 'Footer'] },
+  { label: 'User login', affected: ['Header', 'UserMenu'] },
+  { label: 'New post', affected: ['Content'] },
+  { label: 'Window resize', affected: ['Header', 'Sidebar', 'Footer'] },
+  { label: 'Force all', affected: [...ALL] },
+];
+
+export default function App() {
+  const [active, setActive] = useState<Set<CompName>>(new Set());
+
+  const trigger = useCallback((names: CompName[]) => {
+    setActive(new Set(names));
+    setTimeout(() => setActive(new Set()), 700);
+  }, []);
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: 24, fontFamily: 'monospace', color: 'white' }}>
+      <h2 style={{ color: '#38bdf8', margin: '0 0 4px' }}>React Render Profiler</h2>
+      <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 16px' }}>
+        Simulate interactions and see which components re-render
+      </p>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+        {SCENARIOS.map(s => (
+          <button
+            key={s.label}
+            onClick={() => trigger(s.affected)}
+            style={{
+              background: s.label === 'Force all' ? '#7c2d12' : '#1e293b',
+              color: s.label === 'Force all' ? '#fed7aa' : '#94a3b8',
+              border: '1px solid ' + (s.label === 'Force all' ? '#9a3412' : '#334155'),
+              borderRadius: 6,
+              padding: '7px 14px',
+              cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {ALL.map(name => (
+          <ComponentRow key={name} name={name} active={active.has(name)} />
+        ))}
+      </div>
+      <div style={{ marginTop: 16, background: '#1e293b', borderRadius: 8, padding: 12, fontSize: 12, color: '#64748b' }}>
+        Highlighted components re-rendered. Renders accumulate — green is few, yellow is moderate, red is many.
+      </div>
+    </div>
+  );
+}
+` }} />

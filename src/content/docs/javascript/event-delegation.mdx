@@ -1,0 +1,339 @@
+---
+title: "92. Делегирование событий"
+sidebar:
+  order: 94
+---
+import { Playground } from '@components/Playground'
+
+
+Делегирование событий (Event Delegation) — техника, при которой один обработчик устанавливается на **родительский элемент** вместо обработчиков на каждый дочерний. Работает благодаря механизму **всплытия событий** (bubbling).
+
+## Всплытие событий (Event Bubbling)
+
+Когда событие происходит на элементе, оно «всплывает» вверх по DOM-дереву:
+
+```
+span → li → ul → div → body → html → document → window
+```
+
+```javascript
+document.querySelector('ul').addEventListener('click', (e) => {
+  // e.target — элемент на котором произошёл клик
+  // e.currentTarget — элемент на котором висит обработчик (ul)
+  console.log('target:', e.target.tagName)
+  console.log('currentTarget:', e.currentTarget.tagName)
+})
+
+// Клик на li → сработает обработчик ul!
+// Клик на span внутри li → тоже сработает!
+```
+
+## Проблема без делегирования
+
+```javascript
+// ❌ Плохо: обработчик на каждый элемент
+const items = document.querySelectorAll('.item')
+items.forEach(item => {
+  item.addEventListener('click', handleClick) // N обработчиков!
+})
+
+// Проблемы:
+// 1. Много обработчиков = больше памяти
+// 2. Новые элементы нужно обрабатывать вручную
+// 3. Сложная очистка
+
+// ✅ Хорошо: один обработчик на родителе
+document.querySelector('.list').addEventListener('click', handleClick)
+// Работает и для существующих, и для будущих элементов!
+```
+
+## Базовый паттерн делегирования
+
+```javascript
+const list = document.querySelector('#todo-list')
+
+list.addEventListener('click', function(event) {
+  // Ищем нужный элемент через closest()
+  const item = event.target.closest('.todo-item')
+  if (!item) return // клик был не на todo-item
+
+  const deleteBtn = event.target.closest('.delete-btn')
+  const checkbox = event.target.closest('input[type="checkbox"]')
+  
+  if (deleteBtn) {
+    item.remove()
+  } else if (checkbox) {
+    item.classList.toggle('completed', checkbox.checked)
+  }
+})
+```
+
+## event.target.closest() — главный инструмент
+
+`closest(selector)` ищет ближайшего предка (включая сам элемент), соответствующего селектору:
+
+```javascript
+document.addEventListener('click', (e) => {
+  // Обработка кнопок по data-атрибуту
+  const button = e.target.closest('[data-action]')
+  if (!button) return
+
+  const action = button.dataset.action
+  const id = button.dataset.id
+
+  switch (action) {
+    case 'edit':   editItem(id); break
+    case 'delete': deleteItem(id); break
+    case 'toggle': toggleItem(id); break
+  }
+})
+
+// HTML:
+// <button data-action="delete" data-id="42">Удалить</button>
+// <button data-action="edit" data-id="42">Изменить</button>
+```
+
+## Паттерн: data-атрибуты как команды
+
+```javascript
+// Мощный паттерн: обработчик команд через data-action
+const handlers = {
+  'load-more': (btn) => {
+    const page = parseInt(btn.dataset.page) + 1
+    loadPage(page)
+  },
+  'filter': (btn) => {
+    setFilter(btn.dataset.filter)
+  },
+  'sort': (btn) => {
+    setSort(btn.dataset.field, btn.dataset.direction)
+  },
+  'modal-open': (btn) => {
+    openModal(btn.dataset.modal)
+  },
+}
+
+document.addEventListener('click', (e) => {
+  const actionEl = e.target.closest('[data-action]')
+  if (!actionEl) return
+
+  const handler = handlers[actionEl.dataset.action]
+  if (handler) handler(actionEl)
+})
+```
+
+## Делегирование с динамическим контентом
+
+```javascript
+// Список с CRUD — делегирование идеально для динамики
+class TodoList {
+  #container
+  #todos = []
+  #nextId = 1
+
+  constructor(container) {
+    this.#container = container
+    this.#setupDelegation()
+  }
+
+  #setupDelegation() {
+    this.#container.addEventListener('click', (e) => {
+      const id = parseInt(e.target.closest('[data-id]')?.dataset.id)
+      if (!id) return
+
+      if (e.target.closest('.delete-btn')) this.delete(id)
+      if (e.target.closest('.toggle-btn')) this.toggle(id)
+    })
+  }
+
+  add(text) {
+    const todo = { id: this.#nextId++, text, done: false }
+    this.#todos.push(todo)
+    this.#render()
+    return this
+  }
+
+  delete(id) {
+    this.#todos = this.#todos.filter(t => t.id !== id)
+    this.#render()
+  }
+
+  toggle(id) {
+    const todo = this.#todos.find(t => t.id === id)
+    if (todo) { todo.done = !todo.done; this.#render() }
+  }
+
+  #render() {
+    this.#container.innerHTML = this.#todos.map(t => `
+      <li data-id="${t.id}" style="${t.done ? 'opacity:.5;text-decoration:line-through' : ''}">
+        <button class="toggle-btn">✓</button>
+        ${t.text}
+        <button class="delete-btn">✕</button>
+      </li>
+    `).join('')
+  }
+}
+
+const list = new TodoList(document.querySelector('#todos'))
+list.add('Изучить делегирование').add('Практика').add('Написать код')
+// Один обработчик обслуживает все элементы, включая добавленные!
+```
+
+## stopPropagation vs preventDefault
+
+```javascript
+el.addEventListener('click', (e) => {
+  e.stopPropagation()  // ✋ Останавливает всплытие (ломает делегирование!)
+  e.preventDefault()   // 🚫 Отменяет действие браузера (ссылка, форма)
+  e.stopImmediatePropagation() // ✋✋ Также блокирует другие обработчики на элементе
+})
+
+// Правило: не злоупотребляйте stopPropagation — это ломает делегирование!
+// Вместо этого проверяйте e.target в родительском обработчике
+```
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 20px; margin: 0; }
+    h2 { color: #89b4fa; margin-top: 20px; }
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; margin: 4px; font-size: 14px; }
+    button:hover { background: #74c7ec; }
+    .box { background: #313244; border-radius: 8px; padding: 16px; margin: 10px 0; }
+    .output { background: #181825; border-radius: 6px; padding: 12px; font-family: monospace; font-size: 13px; min-height: 40px; color: #a6e3a1; white-space: pre-wrap; }
+    #taskList { list-style: none; padding: 0; margin: 10px 0; }
+    .task-item { background: #45475a; border-radius: 6px; padding: 10px 14px; margin: 6px 0; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background 0.15s; }
+    .task-item:hover { background: #585b70; }
+    .task-item.done { background: #1e3a2f; text-decoration: line-through; color: #6c7086; }
+    .task-item .del { background: #f38ba8; color: #1e1e2e; border: none; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .task-item .del:hover { background: #eba0ac; }
+    input[type=text] { background: #313244; color: #cdd6f4; border: 1px solid #45475a; padding: 7px 10px; border-radius: 4px; font-size: 14px; width: 200px; margin-right: 6px; }
+    .counter { background: #89b4fa; color: #1e1e2e; border-radius: 12px; padding: 2px 8px; font-size: 12px; font-weight: bold; }
+    #delegationBadge { background: #a6e3a1; color: #1e1e2e; border-radius: 4px; padding: 3px 8px; font-size: 12px; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <h2>Список задач — один обработчик для всех элементов</h2>
+  <div class="box">
+    <p style="color:#bac2de;font-size:13px;margin:0 0 10px">
+      Один <code style="background:#181825;padding:2px 5px;border-radius:3px">addEventListener</code>
+      на <code style="background:#181825;padding:2px 5px;border-radius:3px">#taskList</code>
+      обрабатывает клики по всем дочерним элементам
+      <span id="delegationBadge">делегирование ✓</span>
+    </p>
+    <div style="display:flex;align-items:center;margin-bottom:10px">
+      <input type="text" id="newTask" placeholder="Новая задача..." />
+      <button onclick="addTask()">Добавить</button>
+      <span class="counter" id="taskCount" style="margin-left:8px">0</span>
+    </div>
+    <ul id="taskList"></ul>
+    <div class="output" id="eventLog">Кликните по задаче...</div>
+  </div>
+
+  <h2>Сравнение: прямые обработчики vs делегирование</h2>
+  <div class="box">
+    <button onclick="showDirect()">Прямые обработчики (плохо)</button>
+    <button onclick="showDelegation()">Делегирование (хорошо)</button>
+    <div class="output" id="compareOut">Нажмите кнопку для сравнения</div>
+  </div>
+
+  <script>
+    const tasks = ['Изучить делегирование', 'Написать тесты', 'Сделать code review'];
+    let clickCount = 0;
+
+    // ОДИН обработчик на родителе — это и есть делегирование
+    document.getElementById('taskList').addEventListener('click', function(e) {
+      clickCount++;
+      const item = e.target.closest('.task-item');
+      if (!item) return;
+
+      if (e.target.classList.contains('del')) {
+        // Удаление
+        const taskText = item.querySelector('.task-text').textContent;
+        item.remove();
+        updateCount();
+        log('❌ Удалено: "' + taskText + '"  |  e.target: .del кнопка  |  делегирован на #taskList');
+      } else {
+        // Переключение done
+        item.classList.toggle('done');
+        const taskText = item.querySelector('.task-text').textContent;
+        const isDone = item.classList.contains('done');
+        log((isDone ? '✅' : '🔄') + ' "' + taskText + '"  |  e.target: .task-item  |  клик #' + clickCount);
+      }
+    });
+
+    function log(msg) {
+      document.getElementById('eventLog').textContent = msg;
+    }
+
+    window.addTask = function() {
+      const input = document.getElementById('newTask');
+      const text = input.value.trim() || 'Задача ' + (tasks.length + 1);
+      tasks.push(text);
+      renderTask(text);
+      input.value = '';
+      updateCount();
+      log('➕ Добавлено: "' + text + '" — обработчик уже назначен (делегирование)!');
+    }
+
+    function renderTask(text) {
+      const li = document.createElement('li');
+      li.className = 'task-item';
+      li.innerHTML = '<span class="task-text">' + text + '</span><button class="del">✕</button>';
+      document.getElementById('taskList').appendChild(li);
+    }
+
+    function updateCount() {
+      document.getElementById('taskCount').textContent = document.querySelectorAll('.task-item').length;
+    }
+
+    // Инициализация
+    tasks.forEach(renderTask);
+    updateCount();
+
+    window.showDirect = function() {
+      const n = 1000;
+      document.getElementById('compareOut').textContent = [
+        '// ❌ Прямые обработчики (N элементов = N обработчиков)',
+        'items.forEach(item => {',
+        '  item.addEventListener("click", handler);  // × ' + n,
+        '});',
+        '',
+        'Проблемы:',
+        '  • ' + n + ' обработчиков = ' + n + ' объектов в памяти',
+        '  • Новые элементы нужно подключать вручную',
+        '  • Утечки памяти при удалении без removeEventListener',
+        '  • Сложнее управлять / отключать',
+      ].join('\\n');
+    }
+
+    window.showDelegation = function() {
+      document.getElementById('compareOut').textContent = [
+        '// ✅ Делегирование (1 обработчик для всех)',
+        'list.addEventListener("click", (e) => {',
+        '  const item = e.target.closest(".task-item");',
+        '  if (!item) return;',
+        '  // обработать клик',
+        '});',
+        '',
+        'Преимущества:',
+        '  • 1 обработчик вместо N',
+        '  • Автоматически работает для новых элементов',
+        '  • Меньше памяти, нет утечек',
+        '  • e.target — точный элемент, e.currentTarget — делегат',
+        '',
+        'Текущий список: ' + document.querySelectorAll(".task-item").length + ' элементов, 1 listener',
+      ].join('\\n');
+    }
+  </script>
+</body>
+</html>`,
+  }}
+/>

@@ -1,0 +1,748 @@
+---
+title: "9. Server Middleware"
+sidebar:
+  order: 9
+---
+import { Playground } from '@components/Playground'
+
+
+## 🛡️ Server Middleware в Nuxt 3
+
+Server Middleware в Nuxt 3 выполняется **перед каждым запросом** к серверу. Это идеальное место для логирования, CORS, аутентификации, rate limiting и любой сквозной серверной логики.
+
+---
+
+### Что такое Server Middleware? 🔮
+
+```
+HTTP запрос
+    ↓
+[Server Middleware 1] — logger.ts
+    ↓
+[Server Middleware 2] — cors.ts
+    ↓
+[Server Middleware 3] — auth.ts
+    ↓
+Обработчик маршрута (api/users.get.ts)
+    ↓
+HTTP ответ
+```
+
+Server Middleware — это функция `defineEventHandler`, которая:
+1. Получает объект события `H3Event`
+2. Может модифицировать запрос/ответ
+3. Может прервать цепочку (выбросить ошибку)
+4. Может ничего не возвращать (передать дальше)
+
+---
+
+### Создание первого Middleware 📝
+
+```typescript
+// server/middleware/logger.ts
+export default defineEventHandler((event) => {
+  const start = Date.now()
+  const method = getMethod(event)
+  const url = getRequestURL(event)
+
+  // Логируем после завершения запроса
+  event.node.res.on('finish', () => {
+    const duration = Date.now() - start
+    const status = event.node.res.statusCode
+
+    console.log(
+      \`[\${new Date().toISOString()}] \${method} \${url.pathname} → \${status} (\${duration}ms)\`
+    )
+  })
+
+  // Не возвращаем ничего — передаём дальше
+})
+```
+
+---
+
+### Порядок выполнения Middleware 🔢
+
+Middleware выполняются **в алфавитном порядке** имён файлов:
+
+```
+server/middleware/
+├── 01.logger.ts      ← Выполняется первым
+├── 02.cors.ts        ← Вторым
+├── 03.auth.ts        ← Третьим
+└── 04.rate-limit.ts  ← Последним
+```
+
+---
+
+### CORS Middleware 🌐
+
+```typescript
+// server/middleware/02.cors.ts
+export default defineEventHandler((event) => {
+  const allowedOrigins = [
+    'https://myapp.com',
+    'https://admin.myapp.com',
+    process.env.NODE_ENV === 'development' ? 'http://localhost:3000' : ''
+  ].filter(Boolean)
+
+  const origin = getHeader(event, 'origin')
+
+  // Проверяем origin
+  if (origin && allowedOrigins.includes(origin)) {
+    setHeader(event, 'Access-Control-Allow-Origin', origin)
+  }
+
+  setHeader(event, 'Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
+  setHeader(event, 'Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+  setHeader(event, 'Access-Control-Allow-Credentials', 'true')
+  setHeader(event, 'Access-Control-Max-Age', '86400') // 24 часа preflight кэш
+
+  // Обрабатываем OPTIONS preflight запросы
+  if (getMethod(event) === 'OPTIONS') {
+    setResponseStatus(event, 204)
+    return '' // Завершаем запрос
+  }
+})
+```
+
+---
+
+### Auth Middleware 🔐
+
+```typescript
+// server/middleware/03.auth.ts
+export default defineEventHandler(async (event) => {
+  // Маршруты, не требующие аутентификации
+  const publicPaths = [
+    '/api/auth/login',
+    '/api/auth/register',
+    '/api/auth/refresh',
+    '/api/public',
+  ]
+
+  const path = getRequestURL(event).pathname
+
+  // Пропускаем публичные маршруты
+  if (publicPaths.some(p => path.startsWith(p))) return
+
+  // Проверяем только API маршруты
+  if (!path.startsWith('/api/')) return
+
+  // Ищем токен в заголовке или cookie
+  const authHeader = getHeader(event, 'authorization')
+  const token = authHeader?.startsWith('Bearer ')
+    ? authHeader.slice(7)
+    : getCookie(event, 'auth-token')
+
+  if (!token) {
+    throw createError({
+      statusCode: 401,
+      statusMessage: 'Токен не предоставлен',
+    })
+  }
+
+  try {
+    // Верифицируем JWT
+    const payload = verifyJWT(token)
+    // Добавляем пользователя в контекст
+    event.context.user = payload
+  } catch {
+    throw createError({
+      statusCode: 401,
+      statusMessage: 'Недействительный токен',
+    })
+  }
+})
+```
+
+---
+
+### Rate Limiting Middleware ⚡
+
+```typescript
+// server/middleware/04.rate-limit.ts
+// Простое in-memory хранилище (используй Redis в продакшне)
+const requestCounts = new Map<string, { count: number; resetAt: number }>()
+
+const RATE_LIMIT = 100  // запросов
+const WINDOW_MS = 60 * 1000  // за минуту
+
+export default defineEventHandler((event) => {
+  const ip = event.node.req.socket.remoteAddress || 'unknown'
+  const now = Date.now()
+
+  let record = requestCounts.get(ip)
+
+  if (!record || now > record.resetAt) {
+    record = { count: 0, resetAt: now + WINDOW_MS }
+    requestCounts.set(ip, record)
+  }
+
+  record.count++
+
+  // Добавляем заголовки
+  setHeader(event, 'X-RateLimit-Limit', String(RATE_LIMIT))
+  setHeader(event, 'X-RateLimit-Remaining', String(Math.max(0, RATE_LIMIT - record.count)))
+  setHeader(event, 'X-RateLimit-Reset', String(record.resetAt))
+
+  if (record.count > RATE_LIMIT) {
+    throw createError({
+      statusCode: 429,
+      statusMessage: 'Too Many Requests',
+      data: {
+        retryAfter: Math.ceil((record.resetAt - now) / 1000)
+      }
+    })
+  }
+})
+```
+
+---
+
+### Request Modification Middleware 🔧
+
+```typescript
+// server/middleware/01.request-id.ts
+import { randomUUID } from 'crypto'
+
+export default defineEventHandler((event) => {
+  // Генерируем уникальный ID запроса
+  const requestId = getHeader(event, 'x-request-id') || randomUUID()
+
+  // Сохраняем в контексте
+  event.context.requestId = requestId
+
+  // Добавляем в ответ
+  setHeader(event, 'X-Request-ID', requestId)
+})
+```
+
+```typescript
+// server/middleware/02.body-parser.ts
+export default defineEventHandler(async (event) => {
+  // Только для запросов с телом
+  const method = getMethod(event)
+  if (!['POST', 'PUT', 'PATCH'].includes(method)) return
+
+  const contentType = getHeader(event, 'content-type') || ''
+
+  // Валидируем Content-Type
+  if (contentType.includes('application/json')) {
+    try {
+      event.context.parsedBody = await readBody(event)
+    } catch {
+      throw createError({
+        statusCode: 400,
+        statusMessage: 'Неверный формат JSON',
+      })
+    }
+  }
+})
+```
+
+---
+
+### Сессии с H3 💾
+
+```typescript
+// server/middleware/05.session.ts
+export default defineEventHandler(async (event) => {
+  // Используем nuxt-auth-utils или свою реализацию
+  const sessionId = getCookie(event, 'session_id')
+
+  if (sessionId) {
+    // Загружаем сессию из хранилища
+    const session = await storage.getItem(\`sessions:\${sessionId}\`)
+    if (session) {
+      event.context.session = session
+    }
+  }
+})
+```
+
+```typescript
+// server/api/session-demo.ts
+export default defineEventHandler(async (event) => {
+  const session = event.context.session || {}
+
+  if (!session.visits) {
+    session.visits = 0
+  }
+  session.visits++
+  session.lastVisit = new Date().toISOString()
+
+  // Сохраняем обновлённую сессию
+  let sessionId = getCookie(event, 'session_id')
+  if (!sessionId) {
+    sessionId = crypto.randomUUID()
+    setCookie(event, 'session_id', sessionId, {
+      httpOnly: true,
+      maxAge: 60 * 60 * 24 * 7
+    })
+  }
+
+  await storage.setItem(\`sessions:\${sessionId}\`, session)
+
+  return { visits: session.visits, lastVisit: session.lastVisit }
+})
+```
+
+---
+
+### Middleware для конкретных маршрутов 🎯
+
+```typescript
+// server/api/admin/[...].ts — middleware только для /api/admin/**
+export default defineEventHandler(async (event) => {
+  const user = event.context.user
+
+  if (!user) {
+    throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
+  }
+
+  if (user.role !== 'admin') {
+    throw createError({ statusCode: 403, statusMessage: 'Forbidden' })
+  }
+
+  // Передаём в следующий обработчик
+})
+```
+
+---
+
+### Глобальный обработчик ошибок 🚨
+
+```typescript
+// server/plugins/error-handler.ts
+export default defineNitroPlugin((nitroApp) => {
+  nitroApp.hooks.hook('error', (error, { event }) => {
+    // Логируем все серверные ошибки
+    console.error('Server Error:', {
+      url: event?.path,
+      statusCode: error.statusCode,
+      message: error.message,
+      stack: error.stack,
+    })
+
+    // Оповещаем Sentry или другой сервис
+    // sentry.captureException(error)
+  })
+})
+```
+
+---
+
+### Security Headers Middleware 🔒
+
+```typescript
+// server/middleware/security.ts
+export default defineEventHandler((event) => {
+  // Защита от XSS
+  setHeader(event, 'X-Content-Type-Options', 'nosniff')
+  setHeader(event, 'X-Frame-Options', 'SAMEORIGIN')
+  setHeader(event, 'X-XSS-Protection', '1; mode=block')
+
+  // HSTS (только HTTPS)
+  if (event.node.req.connection?.encrypted) {
+    setHeader(event, 'Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  }
+
+  // Content Security Policy
+  setHeader(event, 'Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https:",
+    "font-src 'self'",
+    "connect-src 'self'",
+  ].join('; '))
+
+  // Referrer Policy
+  setHeader(event, 'Referrer-Policy', 'strict-origin-when-cross-origin')
+
+  // Permissions Policy
+  setHeader(event, 'Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+})
+```
+
+---
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState } from "react";
+
+const middlewares = [
+  {
+    id: "logger",
+    file: "01.logger.ts",
+    name: "Logger",
+    color: "#00dc82",
+    icon: "📝",
+    desc: "Логирование всех запросов",
+    alwaysRuns: true,
+    headers: ["X-Request-ID"],
+  },
+  {
+    id: "cors",
+    file: "02.cors.ts",
+    name: "CORS",
+    color: "#00b4d8",
+    icon: "🌐",
+    desc: "Cross-Origin Resource Sharing",
+    alwaysRuns: true,
+    headers: ["Access-Control-Allow-Origin", "Access-Control-Allow-Methods"],
+  },
+  {
+    id: "security",
+    file: "03.security.ts",
+    name: "Security Headers",
+    color: "#7c3aed",
+    icon: "🔒",
+    desc: "X-Frame-Options, CSP и другие",
+    alwaysRuns: true,
+    headers: ["X-Content-Type-Options", "X-Frame-Options", "Content-Security-Policy"],
+  },
+  {
+    id: "ratelimit",
+    file: "04.rate-limit.ts",
+    name: "Rate Limit",
+    color: "#f59e0b",
+    icon: "⚡",
+    desc: "Ограничение 100 запросов/минуту",
+    alwaysRuns: true,
+    headers: ["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+  },
+  {
+    id: "auth",
+    file: "05.auth.ts",
+    name: "Auth",
+    color: "#ec4899",
+    icon: "🔐",
+    desc: "Проверка JWT токена для /api/*",
+    alwaysRuns: false,
+    headers: [],
+  },
+];
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function simulateRequest(path, isAuthenticated, rateLimitExceeded) {
+  const steps = [];
+  let blocked = false;
+  let blockedAt = null;
+
+  for (const mw of middlewares) {
+    await delay(150);
+    steps.push({ id: mw.id, name: mw.name, status: "running" });
+
+    if (mw.id === "ratelimit" && rateLimitExceeded) {
+      steps[steps.length - 1].status = "blocked";
+      steps[steps.length - 1].statusCode = 429;
+      blocked = true;
+      blockedAt = mw.name;
+      break;
+    }
+
+    if (mw.id === "auth" && path.startsWith("/api/") && !isAuthenticated) {
+      const publicPaths = ["/api/auth/login", "/api/public"];
+      if (!publicPaths.some(p => path.startsWith(p))) {
+        steps[steps.length - 1].status = "blocked";
+        steps[steps.length - 1].statusCode = 401;
+        blocked = true;
+        blockedAt = mw.name;
+        break;
+      }
+    }
+
+    steps[steps.length - 1].status = "passed";
+  }
+
+  if (!blocked) {
+    steps.push({ id: "handler", name: "Route Handler", status: "success", statusCode: 200 });
+  }
+
+  return { steps, blocked, blockedAt };
+}
+
+export default function App() {
+  const [path, setPath] = useState("/api/users");
+  const [isAuth, setIsAuth] = useState(false);
+  const [rateLimit, setRateLimit] = useState(false);
+  const [steps, setSteps] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [selectedMw, setSelectedMw] = useState(middlewares[0]);
+
+  const runRequest = async () => {
+    setRunning(true);
+    setSteps([]);
+    const result = await simulateRequest(path, isAuth, rateLimit);
+    setSteps(result.steps);
+    setRunning(false);
+  };
+
+  const statusColors = {
+    running: "#f59e0b",
+    passed: "#00dc82",
+    blocked: "#ef4444",
+    success: "#00dc82",
+  };
+
+  return (
+    <div style={{
+      background: "#0f172a",
+      minHeight: "100vh",
+      padding: "20px",
+      fontFamily: "'Segoe UI', sans-serif",
+      color: "#e2e8f0",
+    }}>
+      <div style={{ textAlign: "center", marginBottom: "20px" }}>
+        <h1 style={{ color: "#00dc82", margin: 0, fontSize: "22px" }}>🛡️ Server Middleware — визуализация</h1>
+        <p style={{ color: "#64748b", fontSize: "12px", margin: "4px 0 0" }}>
+          Смотри как запрос проходит через middleware
+        </p>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+        {/* Left: Controls + Middleware list */}
+        <div>
+          {/* Request config */}
+          <div style={{ background: "#1a1a2e", borderRadius: "10px", padding: "14px", marginBottom: "10px" }}>
+            <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "10px" }}>Настройка запроса</div>
+
+            <div style={{ marginBottom: "8px" }}>
+              <label style={{ color: "#94a3b8", fontSize: "11px", display: "block", marginBottom: "4px" }}>URL</label>
+              <input
+                value={path}
+                onChange={e => setPath(e.target.value)}
+                style={{
+                  width: "100%", background: "#0f172a", border: "1px solid #ffffff22",
+                  borderRadius: "6px", padding: "6px 10px", color: "#e2e8f0",
+                  fontSize: "12px", boxSizing: "border-box",
+                }}
+              />
+            </div>
+
+            <div style={{ display: "flex", gap: "16px", marginBottom: "12px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "12px" }}>
+                <input type="checkbox" checked={isAuth} onChange={e => setIsAuth(e.target.checked)} style={{ accentColor: "#00dc82" }} />
+                <span style={{ color: "#94a3b8" }}>🔐 JWT токен</span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "12px" }}>
+                <input type="checkbox" checked={rateLimit} onChange={e => setRateLimit(e.target.checked)} style={{ accentColor: "#f59e0b" }} />
+                <span style={{ color: "#94a3b8" }}>⚡ Превысить лимит</span>
+              </label>
+            </div>
+
+            <button onClick={runRequest} disabled={running} style={{
+              width: "100%",
+              background: running ? "#ffffff11" : "#00dc8222",
+              color: running ? "#64748b" : "#00dc82",
+              border: "1px solid #00dc8233",
+              borderRadius: "8px",
+              padding: "8px",
+              cursor: running ? "not-allowed" : "pointer",
+              fontWeight: 700,
+              fontSize: "13px",
+            }}>
+              {running ? "⏳ Выполняется..." : "🚀 Отправить запрос"}
+            </button>
+          </div>
+
+          {/* Middleware list */}
+          <div style={{ background: "#1a1a2e", borderRadius: "10px", padding: "14px" }}>
+            <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "10px" }}>
+              Middleware pipeline (кликни для деталей)
+            </div>
+            {middlewares.map((mw, idx) => {
+              const step = steps.find(s => s.id === mw.id);
+              return (
+                <div key={mw.id}>
+                  <div
+                    onClick={() => setSelectedMw(mw)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "10px",
+                      padding: "8px 10px",
+                      borderRadius: "8px",
+                      cursor: "pointer",
+                      background: selectedMw.id === mw.id ? "#0f172a" : "transparent",
+                      border: \`1px solid \${selectedMw.id === mw.id ? mw.color + "44" : "transparent"}\`,
+                      marginBottom: "4px",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    <div style={{
+                      width: "24px", height: "24px",
+                      borderRadius: "50%",
+                      background: step ? statusColors[step.status] + "22" : "#ffffff11",
+                      border: \`2px solid \${step ? statusColors[step.status] : "#ffffff22"}\`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: "11px", color: step ? statusColors[step.status] : "#475569",
+                      fontWeight: 700,
+                      transition: "all 0.3s",
+                    }}>
+                      {step
+                        ? step.status === "passed" ? "✓"
+                        : step.status === "blocked" ? "✗"
+                        : step.status === "running" ? "⟳"
+                        : "✓"
+                        : idx + 1}
+                    </div>
+                    <span style={{ fontSize: "12px" }}>{mw.icon}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{
+                        color: step ? statusColors[step.status] : "#94a3b8",
+                        fontSize: "12px", fontWeight: 600,
+                      }}>{mw.name}</div>
+                      <div style={{ color: "#475569", fontSize: "10px", fontFamily: "monospace" }}>
+                        server/middleware/{mw.file}
+                      </div>
+                    </div>
+                    {step?.statusCode && (
+                      <span style={{
+                        color: step.statusCode >= 400 ? "#ef4444" : "#00dc82",
+                        fontSize: "11px", fontWeight: 700,
+                      }}>{step.statusCode}</span>
+                    )}
+                  </div>
+                  {idx < middlewares.length - 1 && (
+                    <div style={{
+                      width: "2px",
+                      height: "6px",
+                      background: "#ffffff11",
+                      marginLeft: "20px",
+                      marginBottom: "4px",
+                    }} />
+                  )}
+                </div>
+              );
+            })}
+            {steps.find(s => s.id === "handler") && (
+              <>
+                <div style={{ width: "2px", height: "6px", background: "#00dc8244", marginLeft: "20px" }} />
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "10px",
+                  padding: "8px 10px", borderRadius: "8px",
+                  background: "#00dc8211", border: "1px solid #00dc8244",
+                }}>
+                  <div style={{
+                    width: "24px", height: "24px", borderRadius: "50%",
+                    background: "#00dc8222", border: "2px solid #00dc82",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    color: "#00dc82", fontSize: "11px", fontWeight: 700,
+                  }}>✓</div>
+                  <span style={{ fontSize: "12px" }}>🎯</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: "#00dc82", fontSize: "12px", fontWeight: 700 }}>Route Handler</div>
+                    <div style={{ color: "#475569", fontSize: "10px" }}>{path}</div>
+                  </div>
+                  <span style={{ color: "#00dc82", fontSize: "11px", fontWeight: 700 }}>200 OK</span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Right: Middleware details */}
+        <div>
+          <div style={{
+            background: "#1a1a2e",
+            border: \`1px solid \${selectedMw.color}33\`,
+            borderRadius: "10px",
+            padding: "16px",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+              <span style={{ fontSize: "24px" }}>{selectedMw.icon}</span>
+              <div>
+                <div style={{ color: selectedMw.color, fontWeight: 700, fontSize: "16px" }}>
+                  {selectedMw.name}
+                </div>
+                <code style={{ color: "#64748b", fontSize: "11px" }}>
+                  server/middleware/{selectedMw.file}
+                </code>
+              </div>
+            </div>
+
+            <div style={{ color: "#94a3b8", fontSize: "13px", marginBottom: "14px" }}>
+              {selectedMw.desc}
+            </div>
+
+            <div style={{ marginBottom: "12px" }}>
+              <div style={{ color: "#64748b", fontSize: "11px", marginBottom: "6px" }}>
+                Добавляемые заголовки:
+              </div>
+              {selectedMw.headers.length > 0 ? selectedMw.headers.map(h => (
+                <div key={h} style={{
+                  background: "#0f172a",
+                  borderRadius: "5px",
+                  padding: "5px 10px",
+                  fontFamily: "monospace",
+                  fontSize: "11px",
+                  color: selectedMw.color,
+                  marginBottom: "4px",
+                }}>
+                  {h}: ...
+                </div>
+              )) : (
+                <div style={{ color: "#475569", fontSize: "12px" }}>Нет дополнительных заголовков</div>
+              )}
+            </div>
+
+            <div style={{
+              background: "#0f172a",
+              borderRadius: "8px",
+              padding: "12px",
+              borderLeft: \`3px solid \${selectedMw.color}\`,
+            }}>
+              <div style={{ color: "#64748b", fontSize: "11px", marginBottom: "8px" }}>
+                Поведение:
+              </div>
+              <div style={{ color: "#94a3b8", fontSize: "12px", lineHeight: "1.7" }}>
+                {selectedMw.id === "logger" && "Логирует каждый запрос: метод, URL, статус, время выполнения. Не блокирует запросы."}
+                {selectedMw.id === "cors" && "Добавляет CORS заголовки. При OPTIONS запросе отвечает 204 и завершает цепочку."}
+                {selectedMw.id === "security" && "Добавляет security заголовки: CSP, X-Frame-Options, HSTS и другие."}
+                {selectedMw.id === "ratelimit" && "Считает запросы по IP. При превышении лимита возвращает 429 Too Many Requests."}
+                {selectedMw.id === "auth" && "Проверяет JWT для /api/* маршрутов. Публичные маршруты пропускаются. При ошибке — 401."}
+              </div>
+            </div>
+          </div>
+
+          {steps.length > 0 && (
+            <div style={{
+              background: "#1a1a2e",
+              borderRadius: "10px",
+              padding: "14px",
+              marginTop: "10px",
+            }}>
+              <div style={{ color: "#64748b", fontSize: "12px", marginBottom: "10px" }}>
+                Результат последнего запроса
+              </div>
+              {steps.map(step => (
+                <div key={step.id} style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  padding: "5px 8px",
+                  borderRadius: "4px",
+                  background: "#0f172a",
+                  marginBottom: "4px",
+                  fontSize: "12px",
+                }}>
+                  <span style={{ color: "#94a3b8" }}>{step.name}</span>
+                  <span style={{ color: statusColors[step.status], fontWeight: 700 }}>
+                    {step.status === "passed" ? "✓ PASS" : step.status === "blocked" ? \`✗ \${step.statusCode}\` : step.status === "success" ? \`✓ \${step.statusCode}\` : "..."}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

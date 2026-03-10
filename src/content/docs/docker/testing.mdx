@@ -1,0 +1,332 @@
+---
+title: "24. Тестирование с Docker"
+sidebar:
+  order: 24
+---
+import { Playground } from '@components/Playground'
+
+
+Тестирование контейнеризованных приложений включает несколько уровней: unit-тесты внутри контейнеров, интеграционные тесты с реальными зависимостями (базой данных, Redis) и end-to-end тесты всего стека.
+
+## Запуск тестов в Docker
+
+```bash
+# Запустить тесты в контейнере
+docker run --rm myapp npm test
+
+# С переменными окружения
+docker run --rm \
+  -e NODE_ENV=test \
+  -e DATABASE_URL=postgresql://localhost/testdb \
+  myapp npm test
+
+# Запустить конкретный файл тестов
+docker run --rm myapp npx jest src/user.test.js
+
+# С coverage
+docker run --rm \
+  -v $(pwd)/coverage:/app/coverage \
+  myapp npm run test:coverage
+```
+
+## Multi-stage тесты в Dockerfile
+
+```dockerfile
+# Dockerfile с этапом тестирования
+
+FROM node:20-alpine AS base
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+FROM base AS test
+COPY . .
+RUN npm test  # запустить тесты при сборке
+              # сборка упадёт если тесты не пройдут
+
+FROM base AS production
+RUN npm ci --only=production
+COPY --from=test /app/dist ./dist  # только из успешного test-этапа
+CMD ["node", "dist/server.js"]
+```
+
+```bash
+# Запустить только до test-этапа
+docker build --target test -t myapp:test .
+
+# Сборка упадёт, если тесты не пройдут!
+docker build -t myapp:prod .
+```
+
+## Docker Compose для тестового окружения
+
+```yaml
+# docker-compose.test.yml
+version: '3.8'
+services:
+  tests:
+    build:
+      context: .
+      target: test
+    environment:
+      - NODE_ENV=test
+      - DATABASE_URL=postgresql://testuser:testpass@postgres-test/testdb
+      - REDIS_URL=redis://redis-test:6379
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    command: npm run test:ci
+
+  postgres-test:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    tmpfs:
+      - /var/lib/postgresql/data  # данные в RAM, быстрее
+
+  redis-test:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+```
+
+```bash
+# Запустить тесты
+docker compose -f docker-compose.test.yml up \
+  --abort-on-container-exit \
+  --exit-code-from tests
+
+# Очистить после тестов
+docker compose -f docker-compose.test.yml down -v
+```
+
+## Testcontainers
+
+Testcontainers — библиотека, позволяющая запускать реальные Docker-контейнеры из кода тестов:
+
+```javascript
+// Jest + Testcontainers для Node.js
+const { PostgreSqlContainer } = require('@testcontainers/postgresql');
+const { GenericContainer } = require('testcontainers');
+
+describe('User Service', () => {
+  let pgContainer;
+  let redisContainer;
+
+  beforeAll(async () => {
+    // Запустить реальный PostgreSQL в Docker
+    pgContainer = await new PostgreSqlContainer('postgres:15-alpine')
+      .withDatabase('testdb')
+      .withUsername('testuser')
+      .withPassword('testpass')
+      .start();
+
+    // Запустить Redis
+    redisContainer = await new GenericContainer('redis:7-alpine')
+      .withExposedPorts(6379)
+      .start();
+  });
+
+  afterAll(async () => {
+    await pgContainer.stop();
+    await redisContainer.stop();
+  });
+
+  test('should create user', async () => {
+    const db = await connectToDatabase(pgContainer.getConnectionUri());
+    const user = await createUser(db, { name: 'Alice' });
+    expect(user.id).toBeDefined();
+  });
+});
+```
+
+## Параллельные тесты в CI
+
+```yaml
+# .github/workflows/test.yml
+jobs:
+  test:
+    strategy:
+      matrix:
+        node: [18, 20]
+        postgres: [14, 15]
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target test -t myapp:test .
+      - run: docker run --rm myapp:test npm test
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `export default function App() {
+  const [testSuites, setTestSuites] = React.useState([
+    { name: 'unit',         label: 'Unit Tests',          icon: '🧪', services: [],                          duration: 8,  tests: 124 },
+    { name: 'integration',  label: 'Integration Tests',   icon: '🔗', services: ['postgres', 'redis'],       duration: 25, tests: 48  },
+    { name: 'e2e',          label: 'E2E Tests',           icon: '🌐', services: ['postgres', 'redis', 'api'], duration: 45, tests: 20  },
+  ]);
+  const [running, setRunning] = React.useState(false);
+  const [results, setResults] = React.useState({});
+  const [services, setServices] = React.useState({
+    postgres: 'stopped', redis: 'stopped', api: 'stopped',
+  });
+  const [selected, setSelected] = React.useState('integration');
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  const svcColors = { postgres: '#336791', redis: '#ef4444', api: docker };
+  const svcIcons  = { postgres: '🐘', redis: '🔴', api: '⚙️' };
+  const statusColors = { stopped: muted, starting: amber, healthy: green, running: green, failed: red };
+
+  const sel = testSuites.find(s => s.name === selected);
+
+  const runTests = () => {
+    if (running) return;
+    setRunning(true);
+    setResults({});
+    const svcs = sel.services;
+
+    // Start services
+    svcs.forEach((svc, i) => {
+      setTimeout(() => setServices(s => ({ ...s, [svc]: 'starting' })), i * 500);
+      setTimeout(() => setServices(s => ({ ...s, [svc]: 'healthy' })), i * 500 + 1500);
+    });
+
+    const startDelay = svcs.length * 500 + 2000;
+
+    setTimeout(() => {
+      setResults(r => ({ ...r, [selected]: { status: 'running', passed: 0, failed: 0, total: sel.tests } }));
+      let passed = 0;
+      const tick = setInterval(() => {
+        passed += Math.floor(Math.random() * 5) + 1;
+        if (passed >= sel.tests) {
+          passed = sel.tests;
+          clearInterval(tick);
+          setResults(r => ({ ...r, [selected]: { status: 'done', passed, failed: 0, total: sel.tests } }));
+          setServices(s => {
+            const next = { ...s };
+            svcs.forEach(svc => { next[svc] = 'stopped'; });
+            return next;
+          });
+          setRunning(false);
+        } else {
+          setResults(r => ({ ...r, [selected]: { status: 'running', passed, failed: 0, total: sel.tests } }));
+        }
+      }, 200);
+    }, startDelay);
+  };
+
+  const compose = \`# docker-compose.test.yml
+services:
+  tests:
+    build: { target: test }
+    environment:
+      - NODE_ENV=test
+\${sel.services.map(s => \`      - \${s.toUpperCase()}_URL=...\`).join('\\n')}\${sel.services.length > 0 ? \`\\n    depends_on:\` : ''}
+\${sel.services.map(s => \`      \${s}:\\n        condition: service_healthy\`).join('\\n')}
+\${sel.services.map(s => \`  \${s}:\\n    image: \${s === 'postgres' ? 'postgres:15-alpine' : s === 'redis' ? 'redis:7-alpine' : 'node:20-alpine'}\\n    healthcheck: { test: ... }\`).join('\\n')}\`;
+
+  const res = results[selected];
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        🧪 Docker Test Environment
+      </h2>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 20 }}>
+        {testSuites.map(s => (
+          <button key={s.name} onClick={() => { setSelected(s.name); setResults({}); setServices(sv => ({ postgres: 'stopped', redis: 'stopped', api: 'stopped' })); }} style={{
+            padding: '8px 16px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            background: selected === s.name ? docker : card, color: selected === s.name ? '#fff' : muted,
+          }}>{s.icon} {s.label}</button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 16, maxWidth: 720, margin: '0 auto', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 14, border: '1px solid #ffffff10' }}>
+            <div style={{ color: docker, fontWeight: 700, fontSize: 14, marginBottom: 12 }}>
+              {sel.icon} {sel.label}
+            </div>
+            <div style={{ color: muted, fontSize: 12, marginBottom: 4 }}>Тестов: {sel.tests}</div>
+            <div style={{ color: muted, fontSize: 12, marginBottom: 10 }}>Время: ~{sel.duration}с</div>
+
+            {sel.services.length > 0 && (
+              <div>
+                <div style={{ color: muted, fontSize: 12, marginBottom: 8 }}>Требуемые сервисы:</div>
+                {sel.services.map(svc => (
+                  <div key={svc} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                    <span style={{ fontSize: 18 }}>{svcIcons[svc]}</span>
+                    <span style={{ flex: 1, fontSize: 13 }}>{svc}</span>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: statusColors[services[svc]] }} />
+                    <span style={{ color: statusColors[services[svc]], fontSize: 11 }}>{services[svc]}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {sel.services.length === 0 && (
+              <div style={{ color: muted, fontSize: 12 }}>Без внешних зависимостей — только контейнер с кодом</div>
+            )}
+          </div>
+
+          <button onClick={runTests} disabled={running} style={{
+            width: '100%', background: running ? muted : green, border: 'none', borderRadius: 10,
+            padding: '12px', color: '#fff', cursor: running ? 'default' : 'pointer', fontSize: 14, fontWeight: 700,
+          }}>{running ? '⚙️ Тесты запущены...' : \`▶ docker compose -f test.yml up\`}</button>
+
+          {res && (
+            <div style={{ marginTop: 12, background: res.status === 'done' ? green + '15' : amber + '15', borderRadius: 10, padding: 14, border: \`1px solid \${res.status === 'done' ? green : amber}44\` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ color: res.status === 'done' ? green : amber, fontWeight: 700 }}>
+                  {res.status === 'done' ? '✅ PASSED' : '⏳ RUNNING'}
+                </span>
+                <span style={{ color: text, fontSize: 13 }}>{res.passed}/{res.total}</span>
+              </div>
+              <div style={{ background: '#ffffff11', borderRadius: 4, height: 8, overflow: 'hidden' }}>
+                <div style={{ background: green, height: '100%', width: \`\${res.passed / res.total * 100}%\`, transition: 'width 0.2s' }} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ width: 280, flexShrink: 0 }}>
+          <div style={{ color: muted, fontSize: 12, marginBottom: 8 }}>docker-compose.test.yml</div>
+          <pre style={{
+            background: '#0d1117', borderRadius: 10, padding: 12, fontSize: 10, color: '#94a3b8',
+            fontFamily: 'monospace', lineHeight: 1.6, border: '1px solid #ffffff10',
+            whiteSpace: 'pre-wrap', maxHeight: 360, overflowY: 'auto',
+          }}>{compose}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

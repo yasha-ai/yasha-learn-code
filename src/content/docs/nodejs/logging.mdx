@@ -1,0 +1,299 @@
+---
+title: "24. Логирование (pino, winston)"
+sidebar:
+  order: 24
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-logging.png)
+
+**Логирование** — глаза и уши твоего сервера. Без логов в production ты слепой.
+
+## console.log — почему недостаточно
+
+```javascript
+// ❌ console.log в production
+console.log('Пользователь зарегистрировался');      // нет даты, нет уровня
+console.log('Error:', error);                        // нет контекста
+console.log(`User ${id} logged in`);                // нет структуры
+
+// ✅ Правильное логирование
+logger.info({ userId: 42, action: 'register' }, 'Пользователь зарегистрирован');
+logger.error({ err, userId: 42 }, 'Ошибка при обновлении профиля');
+```
+
+## Pino — быстрый JSON логгер
+
+```bash
+npm install pino pino-pretty
+```
+
+```javascript
+const pino = require('pino');
+
+// Создание логгера
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  
+  // Красивый вывод в dev, JSON в production
+  transport: process.env.NODE_ENV !== 'production'
+    ? { target: 'pino-pretty', options: { colorize: true } }
+    : undefined,
+});
+
+// Уровни логирования
+logger.trace('Очень подробно');   // 10
+logger.debug('Для отладки');      // 20
+logger.info('Информация');        // 30 (по умолчанию)
+logger.warn('Предупреждение');    // 40
+logger.error('Ошибка');           // 50
+logger.fatal('Критичная ошибка'); // 60
+
+// Структурированные логи (ключевое преимущество)
+logger.info({ userId: 42, email: 'yasha@mail.com' }, 'Регистрация');
+// {"level":30,"time":1705000000,"userId":42,"email":"yasha@mail.com","msg":"Регистрация"}
+
+// Логирование ошибок
+try {
+  await riskyOperation();
+} catch (err) {
+  logger.error({ err }, 'Ошибка операции');
+  // Pino автоматически сериализует Error (message, stack, type)
+}
+```
+
+## Pino + Express
+
+```javascript
+const pinoHttp = require('pino-http');
+
+// Middleware для автоматического логирования запросов
+app.use(pinoHttp({
+  logger,
+  
+  // Кастомные поля
+  customProps: (req) => ({
+    userId: req.user?.id,
+  }),
+  
+  // Уровень по статус-коду
+  customLogLevel: (req, res, err) => {
+    if (res.statusCode >= 500 || err) return 'error';
+    if (res.statusCode >= 400) return 'warn';
+    return 'info';
+  },
+  
+  // Что логировать
+  serializers: {
+    req: (req) => ({
+      method: req.method,
+      url: req.url,
+      // НЕ логируем заголовки (могут содержать токены!)
+    }),
+    res: (res) => ({
+      statusCode: res.statusCode,
+    }),
+  },
+}));
+
+// Использование в роутах
+app.get('/users', (req, res) => {
+  req.log.info('Запрос списка пользователей');
+  // req.log — child логгер с request ID
+  res.json({ data: [] });
+});
+```
+
+## Winston — гибкий логгер
+
+```bash
+npm install winston
+```
+
+```javascript
+const winston = require('winston');
+const { combine, timestamp, json, printf, colorize } = winston.format;
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  
+  // JSON формат для production
+  format: combine(
+    timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+    json()
+  ),
+  
+  // Транспорты — куда писать логи
+  transports: [
+    // Файл для ошибок
+    new winston.transports.File({
+      filename: 'logs/error.log',
+      level: 'error',
+      maxsize: 10 * 1024 * 1024,  // 10 МБ
+      maxFiles: 5,                  // ротация — 5 файлов
+    }),
+    
+    // Файл для всех логов
+    new winston.transports.File({
+      filename: 'logs/combined.log',
+      maxsize: 10 * 1024 * 1024,
+      maxFiles: 10,
+    }),
+  ],
+});
+
+// Красивый вывод в dev
+if (process.env.NODE_ENV !== 'production') {
+  logger.add(new winston.transports.Console({
+    format: combine(
+      colorize(),
+      timestamp({ format: 'HH:mm:ss' }),
+      printf(({ timestamp, level, message, ...meta }) => {
+        const metaStr = Object.keys(meta).length ? JSON.stringify(meta) : '';
+        return `${timestamp} ${level}: ${message} ${metaStr}`;
+      })
+    ),
+  }));
+}
+
+// Использование
+logger.info('Сервер запущен', { port: 3000 });
+logger.error('Ошибка БД', { error: err.message, query: 'SELECT ...' });
+```
+
+## Что и когда логировать
+
+```javascript
+// ✅ ЛОГИРУЙ
+logger.info({ userId, action: 'login' }, 'Вход пользователя');
+logger.info({ orderId, total }, 'Заказ создан');
+logger.warn({ userId, attempts: 5 }, 'Много неудачных попыток входа');
+logger.error({ err, userId, requestId }, 'Ошибка обработки запроса');
+
+// ❌ НЕ ЛОГИРУЙ
+logger.info({ password: '123' });         // НИКОГДА пароли!
+logger.info({ token: 'eyJhb...' });       // НИКОГДА токены!
+logger.info({ creditCard: '4111...' });   // НИКОГДА данные карт!
+logger.debug('Here 1');                    // бесполезно
+logger.info(`User: ${JSON.stringify(userObj)}`); // лучше: logger.info({ user })
+```
+
+## Request ID — отслеживание запроса
+
+```javascript
+const { v4: uuid } = require('uuid');
+
+// Middleware добавляет уникальный ID каждому запросу
+app.use((req, res, next) => {
+  req.requestId = req.headers['x-request-id'] || uuid();
+  res.setHeader('X-Request-ID', req.requestId);
+  
+  // Child логгер с requestId
+  req.log = logger.child({ requestId: req.requestId });
+  next();
+});
+
+// Теперь в любом месте обработки можно отследить запрос
+app.get('/users', async (req, res) => {
+  req.log.info('Получение пользователей');
+  const users = await db.users.findMany();
+  req.log.info({ count: users.length }, 'Пользователи получены');
+  res.json({ data: users });
+});
+
+// В логах:
+// {"requestId":"abc-123","msg":"Получение пользователей"}
+// {"requestId":"abc-123","count":42,"msg":"Пользователи получены"}
+```
+
+## Pino vs Winston
+
+```
+Pino                         Winston
+──────────────────────────   ──────────────────────────
+~5x быстрее                 Медленнее
+JSON по умолчанию            Гибкие форматы
+Минимальный API              Богатый API
+pino-pretty для dev          Встроенное форматирование
+pino-http для Express        express-winston
+Меньше зависимостей          Больше фич (ротация, и т.д.)
+
+Рекомендация:
+API / Микросервисы → Pino (скорость!)
+Традиционные приложения → Winston (гибкость)
+```
+
+## Практика
+
+1. Настрой pino логгер с pino-pretty в dev и JSON в production
+2. Подключи pino-http для автоматического логирования запросов
+3. Добавь Request ID middleware для отслеживания запросов
+4. Настрой winston с ротацией файлов и разными уровнями
+5. Создай helper `sanitizeLog(obj)`, который маскирует чувствительные поля
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+const levels = { trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60 };
+const levelColor = { trace: "#94a3b8", debug: "#94a3b8", info: "#10b981", warn: "#f59e0b", error: "#ef4444", fatal: "#dc2626" };
+
+export default function App() {
+  const [logs, setLogs] = useState([]);
+  const [minLevel, setMinLevel] = useState("info");
+  const [lib, setLib] = useState("pino");
+
+  const log = (level, msg, data = {}) => {
+    if (levels[level] < levels[minLevel]) return;
+    const entry = lib === "pino"
+      ? JSON.stringify({ level: levels[level], time: Date.now(), msg, ...data })
+      : \`\${new Date().toISOString()} [\${level.toUpperCase()}]: \${msg} \${Object.keys(data).length ? JSON.stringify(data) : ""}\`;
+    setLogs(prev => [...prev.slice(-7), { level, text: entry }]);
+  };
+
+  const simulate = () => {
+    setLogs([]);
+    setTimeout(() => log("info", "Server started", { port: 3000 }), 100);
+    setTimeout(() => log("debug", "DB connection pool created", { size: 10 }), 300);
+    setTimeout(() => log("info", "GET /api/users", { status: 200, ms: 12 }), 500);
+    setTimeout(() => log("warn", "Slow query", { ms: 2500, query: "SELECT..." }), 700);
+    setTimeout(() => log("error", "Connection refused", { host: "redis:6379" }), 900);
+    setTimeout(() => log("info", "POST /api/login", { status: 200, ms: 45 }), 1100);
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Логирование</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        {["pino", "winston"].map(l => (
+          <button key={l} onClick={() => setLib(l)}
+            style={{ padding: "3px 10px", background: lib === l ? "#3b82f6" : "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+        <span style={{ color: "#94a3b8", fontSize: 11, lineHeight: "24px" }}>Level:</span>
+        {Object.keys(levels).map(l => (
+          <button key={l} onClick={() => setMinLevel(l)}
+            style={{ padding: "2px 8px", background: minLevel === l ? levelColor[l] : "#1e293b", color: minLevel === l ? "#000" : levelColor[l], border: "none", borderRadius: 3, cursor: "pointer", fontSize: 10 }}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <button onClick={simulate} style={{ padding: "6px 14px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", marginBottom: 12, fontSize: 12 }}>
+        Simulate server
+      </button>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 80 }}>
+        {logs.map((l, i) => <div key={i} style={{ fontSize: 11, color: levelColor[l.level], wordBreak: "break-all" }}>{l.text}</div>)}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

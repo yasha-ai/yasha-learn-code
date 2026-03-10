@@ -1,0 +1,293 @@
+---
+title: "13. Request и Response объекты"
+sidebar:
+  order: 13
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-reqres.png)
+
+`req` и `res` — два главных объекта в каждом роуте Express. Полный разбор всех свойств и методов.
+
+## Request (req) — полный разбор
+
+```javascript
+app.use((req, res, next) => {
+  // === ТЕЛО ЗАПРОСА ===
+  req.body          // { name: 'Яша' } — парсится middleware express.json()
+  
+  // === URL ПАРАМЕТРЫ ===
+  req.params        // { id: '42', slug: 'hello-world' }
+  req.params.id     // '42' (всегда строка!)
+  
+  // === QUERY СТРОКА ===
+  req.query         // { page: '1', limit: '10', tags: ['js', 'node'] }
+  req.query.page    // '1' (тоже строка!)
+  
+  // === ЗАГОЛОВКИ ===
+  req.headers                          // объект всех заголовков
+  req.headers['content-type']          // 'application/json'
+  req.headers['authorization']         // 'Bearer token...'
+  req.get('Authorization')             // то же, удобнее
+  req.header('Authorization')          // синоним get()
+  
+  // === МЕТОД И URL ===
+  req.method        // 'GET', 'POST', 'PUT', 'DELETE'
+  req.url           // '/api/users?page=1'
+  req.originalUrl   // '/api/users?page=1' (после монтирования роутера)
+  req.path          // '/api/users' (без query)
+  req.baseUrl       // '/api' (префикс роутера)
+  req.hostname      // 'localhost' или 'example.com'
+  req.protocol      // 'http' или 'https'
+  req.secure        // true если https
+  req.ip            // '127.0.0.1'
+  req.ips           // ['127.0.0.1'] (при X-Forwarded-For)
+  
+  // === COOKIES ===
+  // require cookie-parser middleware
+  req.cookies       // { token: 'abc', lang: 'ru' }
+  req.signedCookies // подписанные куки
+  
+  // === ПОЛЕЗНЫЕ ПРОВЕРКИ ===
+  req.is('application/json')  // true/false — проверка Content-Type
+  req.accepts('json')         // 'json' или false
+  req.fresh   // true если ответ не изменился (кэш)
+  req.stale   // !req.fresh
+  req.xhr     // true если Ajax запрос (X-Requested-With: XMLHttpRequest)
+  
+  next();
+});
+```
+
+## Response (res) — полный разбор
+
+```javascript
+app.get('/response-demo', (req, res) => {
+  // === ОТПРАВКА ДАННЫХ ===
+  res.json({ data: 'value' });               // JSON ответ
+  res.send('text');                           // текст/HTML
+  res.send(Buffer.from('binary'));            // бинарные данные
+  res.sendStatus(204);                        // только статус, без тела
+  res.end();                                  // завершить без данных
+  
+  // === СТАТУС-КОД ===
+  res.status(404).json({ error: 'Not found' });
+  res.status(201).json({ id: 1 });
+  
+  // === ЗАГОЛОВКИ ===
+  res.set('Content-Type', 'application/pdf');
+  res.set({ 'X-A': '1', 'X-B': '2' });
+  res.setHeader('X-Custom', 'value');  // синоним set()
+  res.get('Content-Type');             // получить заголовок
+  res.removeHeader('X-Powered-By');    // удалить заголовок
+  res.append('Link', '<https://example.com>; rel="preconnect"');
+  
+  // === ПЕРЕНАПРАВЛЕНИЯ ===
+  res.redirect('/new-url');
+  res.redirect(301, '/permanent');
+  res.redirect('back');                // на предыдущую страницу
+  
+  // === ФАЙЛЫ ===
+  res.sendFile('/absolute/path/file.pdf');
+  res.sendFile('report.pdf', { root: __dirname });
+  res.download('/path/to/file.xlsx', 'Отчёт 2024.xlsx');
+  
+  // === COOKIES ===
+  res.cookie('token', 'value', {
+    httpOnly: true,           // недоступен из JS
+    secure: true,             // только HTTPS
+    sameSite: 'strict',       // защита CSRF
+    maxAge: 7 * 24 * 60 * 60 * 1000,  // 7 дней
+    domain: '.example.com',   // для поддоменов
+    path: '/',
+  });
+  res.clearCookie('token');
+  
+  // === РЕНДЕРИНГ ШАБЛОНОВ ===
+  res.render('index', { title: 'Главная', user: req.user });
+  
+  // === СОСТОЯНИЕ ===
+  res.headersSent  // true если заголовки уже отправлены
+  res.finished     // true если ответ завершён
+});
+```
+
+## Паттерны ответов
+
+```javascript
+// Фабрика ответов — единый формат
+class ApiResponse {
+  static success(res, data, status = 200) {
+    return res.status(status).json({
+      success: true,
+      data,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  static created(res, data) {
+    return this.success(res, data, 201);
+  }
+
+  static noContent(res) {
+    return res.sendStatus(204);
+  }
+
+  static error(res, message, status = 500, details = null) {
+    const body = {
+      success: false,
+      error: { message },
+      timestamp: new Date().toISOString(),
+    };
+    if (details) body.error.details = details;
+    return res.status(status).json(body);
+  }
+
+  static notFound(res, resource = 'Resource') {
+    return this.error(res, `${resource} not found`, 404);
+  }
+
+  static unauthorized(res) {
+    return this.error(res, 'Unauthorized', 401);
+  }
+
+  static forbidden(res) {
+    return this.error(res, 'Forbidden', 403);
+  }
+
+  static validationError(res, details) {
+    return this.error(res, 'Validation error', 400, details);
+  }
+}
+
+// Использование
+app.get('/users/:id', async (req, res, next) => {
+  try {
+    const user = await db.findUser(req.params.id);
+    if (!user) return ApiResponse.notFound(res, 'User');
+    ApiResponse.success(res, user);
+  } catch (err) {
+    next(err);
+  }
+});
+```
+
+## Потоковая передача ответа
+
+```javascript
+const { createReadStream } = require('fs');
+
+// Стримим файл в ответ
+app.get('/download/:filename', (req, res) => {
+  const filename = req.params.filename;
+  const filepath = `./uploads/${filename}`;
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+  const stream = createReadStream(filepath);
+  stream.on('error', (err) => {
+    if (!res.headersSent) {
+      res.status(404).json({ error: 'File not found' });
+    }
+  });
+  stream.pipe(res);
+});
+
+// Server-Sent Events (SSE)
+app.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  let counter = 0;
+  const interval = setInterval(() => {
+    res.write(`data: ${JSON.stringify({ count: counter++ })}\n\n`);
+  }, 1000);
+
+  req.on('close', () => {
+    clearInterval(interval);
+  });
+});
+```
+
+## Практика
+
+1. Создай middleware, который добавляет `req.requestId` (UUID) к каждому запросу
+2. Напиши `ApiResponse` класс с методами `success`, `error`, `notFound`, `paginated`
+3. Реализуй скачивание файла через `res.download()` с проверкой прав
+4. Создай эндпоинт SSE `/events`, который каждую секунду отправляет серверное время
+5. Добавь глобальный middleware для логирования: метод, URL, статус, время ответа
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+export default function App() {
+  const [reqProps, setReqProps] = useState(null);
+  const [resAction, setResAction] = useState(null);
+
+  const showReq = () => {
+    setReqProps({
+      method: "POST", url: "/api/users?role=admin",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer xxx" },
+      params: { id: "42" }, query: { role: "admin" },
+      body: { name: "Alice", email: "alice@mail.com" },
+      ip: "192.168.1.1",
+    });
+    setResAction(null);
+  };
+
+  const showRes = (type) => {
+    const actions = {
+      json: { code: 'res.status(200).json({ ok: true })', result: '200 { "ok": true }' },
+      send: { code: 'res.send("<h1>Hello</h1>")', result: '200 <h1>Hello</h1>' },
+      redirect: { code: 'res.redirect(301, "/new-url")', result: '301 → /new-url' },
+      cookie: { code: 'res.cookie("token", "abc", { httpOnly: true })', result: 'Set-Cookie: token=abc; HttpOnly' },
+      status: { code: 'res.status(404).json({ error: "Not found" })', result: '404 { "error": "Not found" }' },
+    };
+    setResAction(actions[type]);
+    setReqProps(null);
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Request & Response</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        <button onClick={showReq} style={{ padding: "4px 10px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>req.*</button>
+        {["json", "send", "redirect", "cookie", "status"].map(t => (
+          <button key={t} onClick={() => showRes(t)}
+            style={{ padding: "4px 10px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>
+            res.{t}()
+          </button>
+        ))}
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {reqProps && (
+          <div style={{ fontSize: 12 }}>
+            {Object.entries(reqProps).map(([k, v]) => (
+              <div key={k} style={{ marginBottom: 4 }}>
+                <span style={{ color: "#3b82f6" }}>req.{k}</span>
+                <span style={{ color: "#475569" }}> = </span>
+                <span style={{ color: "#e2e8f0" }}>{typeof v === "object" ? JSON.stringify(v) : v}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {resAction && (
+          <div style={{ fontSize: 12 }}>
+            <div style={{ color: "#10b981", marginBottom: 6 }}>{resAction.code}</div>
+            <div style={{ color: "#e2e8f0" }}>→ {resAction.result}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

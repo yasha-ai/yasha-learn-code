@@ -1,0 +1,459 @@
+---
+title: "18. GraphQL Codegen"
+sidebar:
+  order: 18
+---
+import { Playground } from '@components/Playground'
+
+
+![GraphQL Codegen](/lessons/graphql-codegen.png)
+
+GraphQL Code Generator автоматически генерирует TypeScript типы из твоей схемы. Больше никакого ручного написания интерфейсов!
+
+## Зачем нужен Codegen
+
+Без Codegen — ручная типизация, которая расходится со схемой:
+
+```typescript
+// ❌ Вручную — легко пропустить изменения
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+// Эти типы могут не совпадать с реальной схемой GraphQL!
+```
+
+С Codegen — всё генерируется из схемы:
+
+```typescript
+// ✅ Автоматически из схемы
+export type User = {
+  __typename?: 'User';
+  id: Scalars['ID']['output'];
+  name: Scalars['String']['output'];
+  email: Scalars['String']['output'];
+  posts: Array<Post>;
+};
+```
+
+## Установка
+
+```bash
+npm install -D @graphql-codegen/cli
+npx graphql-code-generator init
+```
+
+Или вручную:
+
+```bash
+npm install -D \
+  @graphql-codegen/cli \
+  @graphql-codegen/typescript \
+  @graphql-codegen/typescript-operations \
+  @graphql-codegen/typescript-react-apollo
+```
+
+## Конфигурация
+
+```yaml
+# codegen.yml
+schema: "http://localhost:4000/graphql"
+
+# Или из файла схемы:
+# schema: "./schema.graphql"
+
+documents:
+  - "src/**/*.{ts,tsx}"
+  - "src/**/*.graphql"
+
+generates:
+  # Типы схемы (для клиента и сервера)
+  src/generated/graphql.ts:
+    plugins:
+      - typescript
+      - typescript-operations
+      - typescript-react-apollo
+    config:
+      withHooks: true
+      withComponent: false
+      withHOC: false
+
+  # Resolver типы (только для сервера)
+  server/generated/resolvers.ts:
+    schema: "./server/schema.graphql"
+    plugins:
+      - typescript
+      - typescript-resolvers
+    config:
+      contextType: "../src/types#Context"
+      mappers:
+        User: "../models#UserModel"
+        Post: "../models#PostModel"
+```
+
+Или в JSON:
+
+```json
+// codegen.json
+{
+  "schema": "http://localhost:4000/graphql",
+  "documents": ["src/**/*.{ts,tsx,graphql}"],
+  "generates": {
+    "src/generated/graphql.ts": {
+      "plugins": [
+        "typescript",
+        "typescript-operations",
+        "typescript-react-apollo"
+      ],
+      "config": {
+        "withHooks": true
+      }
+    }
+  }
+}
+```
+
+## Запуск
+
+```json
+// package.json
+{
+  "scripts": {
+    "codegen": "graphql-codegen --config codegen.yml",
+    "codegen:watch": "graphql-codegen --config codegen.yml --watch"
+  }
+}
+```
+
+```bash
+npm run codegen
+# Генерирует src/generated/graphql.ts
+```
+
+## Что генерируется
+
+### Типы схемы
+
+```typescript
+// src/generated/graphql.ts (автоматически)
+
+export type Scalars = {
+  ID: { input: string; output: string; };
+  String: { input: string; output: string; };
+  Int: { input: number; output: number; };
+  Float: { input: number; output: number; };
+  Boolean: { input: boolean; output: boolean; };
+  DateTime: { input: string; output: string; };
+};
+
+export type User = {
+  __typename?: 'User';
+  id: Scalars['ID']['output'];
+  name: Scalars['String']['output'];
+  email: Scalars['String']['output'];
+  role: UserRole;
+  posts: Array<Post>;
+  createdAt: Scalars['DateTime']['output'];
+};
+
+export enum UserRole {
+  Admin = 'ADMIN',
+  Editor = 'EDITOR',
+  Reader = 'READER'
+}
+
+export type CreatePostInput = {
+  title: Scalars['String']['input'];
+  body: Scalars['String']['input'];
+  tags?: InputMaybe<Array<Scalars['String']['input']>>;
+};
+```
+
+### Хуки для операций
+
+После запуска codegen с `typescript-react-apollo`, вместо:
+
+```typescript
+// ❌ Без codegen — вручную
+const GET_USER = gql`
+  query GetUser($id: ID!) {
+    user(id: $id) {
+      id
+      name
+      email
+    }
+  }
+`;
+
+// Нет типизации! data.user имеет тип any
+const { data } = useQuery(GET_USER, { variables: { id } });
+```
+
+Используешь:
+
+```typescript
+// ✅ С codegen — полная типизация
+import {
+  useGetUserQuery,
+  GetUserDocument,
+} from '../generated/graphql';
+
+// Полная типизация! data.user — типизированный объект
+const { data, loading, error } = useGetUserQuery({
+  variables: { id: userId },
+});
+
+// Автодополнение работает!
+console.log(data?.user.name);   // string
+console.log(data?.user.email);  // string
+```
+
+## Пример использования
+
+```graphql
+# src/queries/user.graphql (или прямо в tsx)
+query GetUserProfile($id: ID!) {
+  user(id: $id) {
+    id
+    name
+    email
+    avatar
+    bio
+    posts(limit: 5) {
+      id
+      title
+      createdAt
+    }
+  }
+}
+
+mutation UpdateProfile($name: String, $bio: String) {
+  updateProfile(name: $name, bio: $bio) {
+    id
+    name
+    bio
+  }
+}
+```
+
+После `npm run codegen`:
+
+```typescript
+// Автоматически сгенерировано:
+export function useGetUserProfileQuery(
+  baseOptions: Apollo.QueryHookOptions<GetUserProfileQuery, GetUserProfileQueryVariables>
+) {
+  return Apollo.useQuery<GetUserProfileQuery, GetUserProfileQueryVariables>(
+    GetUserProfileDocument,
+    baseOptions
+  );
+}
+
+export function useUpdateProfileMutation(
+  baseOptions?: Apollo.MutationHookOptions<UpdateProfileMutation, UpdateProfileMutationVariables>
+) {
+  return Apollo.useMutation<UpdateProfileMutation, UpdateProfileMutationVariables>(
+    UpdateProfileDocument,
+    baseOptions
+  );
+}
+```
+
+Используешь в компоненте:
+
+```tsx
+import {
+  useGetUserProfileQuery,
+  useUpdateProfileMutation,
+} from '../generated/graphql';
+
+function UserProfilePage({ userId }: { userId: string }) {
+  // Полная типизация!
+  const { data, loading } = useGetUserProfileQuery({
+    variables: { id: userId },
+  });
+
+  const [updateProfile, { loading: saving }] = useUpdateProfileMutation();
+
+  if (loading) return <Spinner />;
+
+  return (
+    <div>
+      <h1>{data?.user.name}</h1>
+      <p>{data?.user.bio}</p>
+      {/* TypeScript знает, что posts — массив объектов с id, title, createdAt */}
+      <ul>
+        {data?.user.posts.map(post => (
+          <li key={post.id}>
+            {post.title} — {new Date(post.createdAt).toLocaleDateString()}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+## Resolver типы (сервер)
+
+```bash
+npm install -D @graphql-codegen/typescript-resolvers
+```
+
+```typescript
+// server/generated/resolvers.ts (автоматически)
+export type Resolvers = {
+  Query: QueryResolvers;
+  Mutation: MutationResolvers;
+  User: UserResolvers;
+  Post: PostResolvers;
+};
+
+export type QueryResolvers = {
+  user?: Resolver<Maybe<ResolversTypes['User']>, ParentType, ContextType, RequireFields<QueryUserArgs, 'id'>>;
+  posts?: Resolver<Array<ResolversTypes['Post']>, ParentType, ContextType, Partial<QueryPostsArgs>>;
+  me?: Resolver<Maybe<ResolversTypes['User']>, ParentType, ContextType>;
+};
+```
+
+```typescript
+// resolvers/user.ts — типизированные resolvers
+import { Resolvers } from '../generated/resolvers';
+
+export const userResolvers: Resolvers = {
+  Query: {
+    user: (_, { id }, { db }) => db.users.findById(id),  // Типизировано!
+    me: (_, __, { user }) => user,
+  },
+  User: {
+    posts: (parent, { limit }, { db }) =>  // parent типизирован как User
+      db.posts.findByAuthor(parent.id, { limit }),
+  },
+};
+```
+
+## Кастомные скаляры в codegen
+
+```yaml
+# codegen.yml
+generates:
+  src/generated/graphql.ts:
+    plugins:
+      - typescript
+    config:
+      scalars:
+        DateTime: string
+        URL: string
+        JSON: Record<string, unknown>
+        Upload: File
+```
+
+## Near-Operation Types (продвинутый паттерн)
+
+```yaml
+# codegen.yml
+generates:
+  src/:
+    preset: near-operation-file
+    presetConfig:
+      extension: .generated.ts
+      baseTypesPath: generated/graphql.ts
+    plugins:
+      - typescript-operations
+      - typescript-react-apollo
+```
+
+Каждый файл получает свои типы рядом:
+```
+src/
+├── components/
+│   ├── PostCard.tsx
+│   └── PostCard.generated.ts  # Автоматически!
+└── pages/
+    ├── BlogPage.tsx
+    └── BlogPage.generated.ts  # Автоматически!
+```
+
+## Практика
+
+1. Установи graphql-codegen в проект с Apollo Client
+2. Настрой `codegen.yml` для генерации типов и хуков
+3. Перепиши 2-3 компонента с `useQuery` на сгенерированные хуки
+4. Добавь resolver типы на сервере
+5. Настрой watch режим для автогенерации при изменении файлов
+
+## Итого
+
+- Codegen генерирует TypeScript типы из GraphQL схемы
+- Больше нет ручных интерфейсов, которые расходятся со схемой
+- Генерируются хуки: `useGetUserQuery`, `useCreatePostMutation`, etc.
+- Resolver типы — типизация на сервере
+- `--watch` режим — автообновление при изменениях
+
+**Следующий урок** → [GraphQL vs REST →](/graphql/graphql-vs-rest/)
+
+<Playground client:visible template="vite-react" files={{
+  '/App.jsx': `import { useState } from 'react';
+
+const schema = \`type User {
+  id: ID!
+  name: String!
+  email: String!
+  role: UserRole!
+}
+
+enum UserRole { ADMIN, EDITOR, VIEWER }
+
+type Query {
+  user(id: ID!): User
+  users: [User!]!
+}\`;
+
+const generated = \`// Auto-generated by GraphQL Codegen
+export type UserRole = 'ADMIN' | 'EDITOR' | 'VIEWER';
+
+export interface User {
+  __typename: 'User';
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+}
+
+export interface GetUsersQuery {
+  users: User[];
+}
+
+export function useGetUsersQuery() {
+  return useQuery<GetUsersQuery>(GET_USERS);
+}\`;
+
+export default function App() {
+  const [showGenerated, setShowGenerated] = useState(false);
+
+  return (
+    <div style={{ padding: 20, fontFamily: 'sans-serif' }}>
+      <h2>GraphQL Codegen: Schema → TypeScript</h2>
+      <div style={{ display: 'flex', gap: 16 }}>
+        <div style={{ flex: 1 }}>
+          <h3 style={{ fontSize: 14 }}>schema.graphql</h3>
+          <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: 12, borderRadius: 8, fontSize: 12 }}>{schema}</pre>
+        </div>
+        {showGenerated && (
+          <div style={{ flex: 1 }}>
+            <h3 style={{ fontSize: 14 }}>generated/types.ts</h3>
+            <pre style={{ background: '#0d1117', color: '#7ee787', padding: 12, borderRadius: 8, fontSize: 12 }}>{generated}</pre>
+          </div>
+        )}
+      </div>
+      <button onClick={() => setShowGenerated(!showGenerated)}
+        style={{ marginTop: 12, padding: '8px 16px', cursor: 'pointer', background: '#6366f1', color: '#fff', border: 'none', borderRadius: 6 }}>
+        {showGenerated ? 'Скрыть' : 'npx graphql-codegen →'}
+      </button>
+    </div>
+  );
+}
+`
+}} />

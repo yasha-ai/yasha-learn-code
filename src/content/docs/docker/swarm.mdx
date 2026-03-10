@@ -1,0 +1,317 @@
+---
+title: "25. Docker Swarm"
+sidebar:
+  order: 25
+---
+import { Playground } from '@components/Playground'
+
+
+Docker Swarm — встроенный инструмент оркестрации контейнеров в Docker. Он позволяет управлять кластером Docker-хостов как единым виртуальным Docker Engine. Проще Kubernetes, но менее функционален.
+
+## Инициализация Swarm-кластера
+
+```bash
+# На первом узле (manager)
+docker swarm init --advertise-addr 192.168.1.10
+
+# Вывод:
+# Swarm initialized: current node (abc123) is now a manager.
+# To add a worker to this swarm, run the following command:
+#   docker swarm join --token SWMTKN-1-xxx 192.168.1.10:2377
+
+# Получить токен для добавления worker-узлов
+docker swarm join-token worker
+
+# Получить токен для добавления manager-узлов
+docker swarm join-token manager
+
+# На worker-узлах (скопируйте команду из swarm init)
+docker swarm join --token SWMTKN-1-xxx 192.168.1.10:2377
+
+# Просмотр узлов кластера
+docker node ls
+```
+
+## Сервисы в Swarm
+
+```bash
+# Создать сервис
+docker service create \
+  --name web \
+  --replicas 3 \
+  --publish published=80,target=80 \
+  nginx:alpine
+
+# Список сервисов
+docker service ls
+
+# Подробности сервиса
+docker service ps web
+docker service inspect web
+
+# Масштабировать сервис
+docker service scale web=5
+
+# Обновить образ (rolling update)
+docker service update \
+  --image nginx:1.25 \
+  --update-parallelism 1 \    # обновлять по 1 реплике за раз
+  --update-delay 30s \         # пауза между обновлениями
+  web
+
+# Откатить обновление
+docker service rollback web
+
+# Удалить сервис
+docker service rm web
+```
+
+## Docker Stack: Compose для Swarm
+
+```yaml
+# docker-stack.yml
+version: '3.8'
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first     # запустить новый до остановки старого
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == worker  # только на worker-узлах
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  api:
+    image: myapi:v1.2.3
+    deploy:
+      replicas: 2
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.api.rule=Host(`api.example.com`)"
+    secrets:
+      - db_password
+
+  postgres:
+    image: postgres:15-alpine
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.storage == ssd  # только на SSD-узлах
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    secrets:
+      - postgres_password
+
+volumes:
+  postgres_data:
+    driver: local
+
+secrets:
+  db_password:
+    external: true
+  postgres_password:
+    external: true
+```
+
+```bash
+# Развернуть stack
+docker stack deploy -c docker-stack.yml myapp
+
+# Список стеков
+docker stack ls
+
+# Сервисы в стеке
+docker stack services myapp
+
+# Удалить стек
+docker stack rm myapp
+```
+
+## Управление узлами
+
+```bash
+# Вывести узел из ротации (maintenance mode)
+docker node update --availability drain node-2
+
+# Вернуть узел в ротацию
+docker node update --availability active node-2
+
+# Добавить метку к узлу
+docker node update --label-add storage=ssd node-1
+
+# Удалить worker-узел из кластера
+# (сначала на узле)
+docker swarm leave
+
+# Затем на manager-е
+docker node rm node-2
+```
+
+## Swarm vs Kubernetes
+
+| Функция | Docker Swarm | Kubernetes |
+|---------|-------------|------------|
+| Сложность | Простой | Сложный |
+| Масштаб | Сотни узлов | Тысячи узлов |
+| Настройка | Минуты | Часы/дни |
+| Экосистема | Ограниченная | Огромная |
+| Auto-scaling | Нет | Да (HPA) |
+| Storage | Ограничено | Обширно |
+
+<Playground client:visible template="react" files={{ 'App.tsx': `export default function App() {
+  const [nodes, setNodes] = React.useState([
+    { id: 'n1', role: 'manager', status: 'Ready',    name: 'node-1', availability: 'Active', tasks: 2, ip: '10.0.0.1' },
+    { id: 'n2', role: 'worker',  status: 'Ready',    name: 'node-2', availability: 'Active', tasks: 3, ip: '10.0.0.2' },
+    { id: 'n3', role: 'worker',  status: 'Ready',    name: 'node-3', availability: 'Active', tasks: 2, ip: '10.0.0.3' },
+    { id: 'n4', role: 'worker',  status: 'Down',     name: 'node-4', availability: 'Drain',  tasks: 0, ip: '10.0.0.4' },
+  ]);
+  const [services, setServices] = React.useState([
+    { id: 's1', name: 'web',     image: 'nginx:alpine',    replicas: 3, mode: 'replicated', port: '80:80'   },
+    { id: 's2', name: 'api',     image: 'myapi:v1.2.3',    replicas: 2, mode: 'replicated', port: '3000'    },
+    { id: 's3', name: 'monitor', image: 'prom/node-exporter', replicas: null, mode: 'global',port: '9100' },
+  ]);
+  const [selected, setSelected] = React.useState(null);
+  const [scaling, setScaling] = React.useState(null);
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  const totalTasks = nodes.reduce((s, n) => s + n.tasks, 0);
+
+  const scaleService = (id, delta) => {
+    const svc = services.find(s => s.id === id);
+    if (!svc || svc.mode === 'global') return;
+    const newReplicas = Math.max(1, svc.replicas + delta);
+    setScaling(id);
+    setTimeout(() => {
+      setServices(ss => ss.map(s => s.id === id ? { ...s, replicas: newReplicas } : s));
+      setScaling(null);
+    }, 800);
+  };
+
+  const toggleNode = (id) => {
+    setNodes(ns => ns.map(n => n.id !== id ? n : {
+      ...n,
+      availability: n.availability === 'Active' ? 'Drain' : 'Active',
+      status: n.availability === 'Active' ? 'Down' : 'Ready',
+      tasks: n.availability === 'Active' ? 0 : n.tasks,
+    }));
+  };
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        🐝 Docker Swarm Кластер
+      </h2>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, maxWidth: 720, margin: '0 auto 20px', textAlign: 'center' }}>
+        {[
+          { label: 'Узлов', value: nodes.length, color: docker },
+          { label: 'Готово', value: nodes.filter(n => n.status === 'Ready').length, color: green },
+          { label: 'Сервисов', value: services.length, color: '#8b5cf6' },
+          { label: 'Задач', value: totalTasks, color: amber },
+        ].map((s, i) => (
+          <div key={i} style={{ background: card, borderRadius: 10, padding: 12, border: \`1px solid \${s.color}33\` }}>
+            <div style={{ color: s.color, fontSize: 24, fontWeight: 700 }}>{s.value}</div>
+            <div style={{ color: muted, fontSize: 11 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 16, maxWidth: 720, margin: '0 auto', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div style={{ color: muted, fontSize: 12, marginBottom: 8 }}>NODES (нажмите для drain/active)</div>
+          {nodes.map(node => (
+            <div key={node.id} onClick={() => node.role !== 'manager' && toggleNode(node.id)} style={{
+              background: card, borderRadius: 10, padding: '10px 14px', marginBottom: 8,
+              border: \`1px solid \${node.status === 'Ready' ? green : red}44\`,
+              cursor: node.role !== 'manager' ? 'pointer' : 'default',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: node.status === 'Ready' ? green : red }} />
+                <span style={{ fontWeight: 700, fontSize: 13, flex: 1 }}>{node.name}</span>
+                <span style={{
+                  background: node.role === 'manager' ? docker + '22' : '#ffffff11',
+                  color: node.role === 'manager' ? docker : muted,
+                  borderRadius: 4, padding: '1px 6px', fontSize: 10,
+                }}>{node.role}</span>
+                <span style={{ color: node.availability === 'Active' ? green : amber, fontSize: 11 }}>
+                  {node.availability}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 12, marginTop: 6, color: muted, fontSize: 11 }}>
+                <span>IP: {node.ip}</span>
+                <span>Задач: {node.tasks}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div style={{ color: muted, fontSize: 12, marginBottom: 8 }}>SERVICES</div>
+          {services.map(svc => (
+            <div key={svc.id} style={{ background: card, borderRadius: 10, padding: '12px 14px', marginBottom: 8, border: '1px solid #ffffff10' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <span style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>{svc.name}</span>
+                <span style={{ background: '#ffffff11', borderRadius: 4, padding: '1px 6px', fontSize: 10, color: muted }}>{svc.mode}</span>
+              </div>
+              <div style={{ color: muted, fontSize: 11, marginBottom: 8, fontFamily: 'monospace' }}>{svc.image}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {svc.mode === 'replicated' ? (
+                  <>
+                    <button onClick={() => scaleService(svc.id, -1)} disabled={!!scaling} style={{
+                      background: card, border: '1px solid #ffffff15', borderRadius: 6, width: 24, height: 24,
+                      color: text, cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>-</button>
+                    <span style={{ color: docker, fontWeight: 700, fontSize: 16, minWidth: 20, textAlign: 'center' }}>
+                      {scaling === svc.id ? '…' : svc.replicas}
+                    </span>
+                    <button onClick={() => scaleService(svc.id, 1)} disabled={!!scaling} style={{
+                      background: card, border: '1px solid #ffffff15', borderRadius: 6, width: 24, height: 24,
+                      color: text, cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>+</button>
+                    <span style={{ color: muted, fontSize: 11 }}>реплики</span>
+                  </>
+                ) : (
+                  <span style={{ color: amber, fontSize: 11 }}>global: {nodes.filter(n => n.status === 'Ready').length} задач</span>
+                )}
+                <span style={{ marginLeft: 'auto', color: muted, fontFamily: 'monospace', fontSize: 11 }}>{svc.port}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 720, margin: '16px auto 0', background: '#0d1117', borderRadius: 10, padding: 12, fontFamily: 'monospace', fontSize: 10, border: '1px solid #ffffff10' }}>
+        <div style={{ color: muted, marginBottom: 6 }}>$ docker node ls</div>
+        <div style={{ color: docker }}>{'ID'.padEnd(15)} {'HOSTNAME'.padEnd(10)} {'STATUS'.padEnd(8)} {'AVAILABILITY'.padEnd(14)} MANAGER STATUS</div>
+        {nodes.map(n => (
+          <div key={n.id} style={{ color: n.status === 'Ready' ? text : '#475569' }}>
+            {n.id.padEnd(15)}{n.name.padEnd(10)}{n.status.padEnd(8)}{n.availability.padEnd(14)}{n.role === 'manager' ? 'Leader' : ''}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+` }} />

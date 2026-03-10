@@ -1,0 +1,544 @@
+---
+title: "43. NgRx: Component Store"
+sidebar:
+  order: 45
+---
+import { Playground } from '@components/Playground'
+
+
+## 🧩 NgRx ComponentStore — Локальное состояние
+
+ComponentStore — это облегчённая версия NgRx для управления **локальным** состоянием компонента. Он живёт и умирает вместе с компонентом, не загрязняет глобальный Store и идеален для сложных UI-компонентов, которые не нужно видеть снаружи 🎯
+
+---
+
+## Установка
+
+```bash
+npm install @ngrx/component-store
+```
+
+---
+
+## Когда использовать ComponentStore?
+
+| Ситуация | Решение |
+|----------|---------|
+| Состояние только внутри компонента | ComponentStore |
+| Данные нужны в нескольких страницах | NgRx Store |
+| Нужна история изменений (time-travel) | NgRx Store |
+| Таблица с пагинацией/фильтром/сортировкой | ComponentStore |
+| Локальный wizard/форма из нескольких шагов | ComponentStore |
+| Загрузка данных для конкретного компонента | ComponentStore |
+
+---
+
+## Создание ComponentStore
+
+```typescript
+// components/data-table/data-table.store.ts
+import { Injectable } from '@angular/core';
+import { ComponentStore, tapResponse } from '@ngrx/component-store';
+import { Observable, EMPTY } from 'rxjs';
+import { switchMap, tap } from 'rxjs/operators';
+import { UserService } from '../../services/user.service';
+import { User } from '../../models/user.model';
+
+export interface DataTableState {
+  users: User[];
+  loading: boolean;
+  error: string | null;
+  filter: string;
+  sortField: keyof User | null;
+  sortDirection: 'asc' | 'desc';
+  page: number;
+  pageSize: number;
+  selectedIds: Set<string>;
+}
+
+@Injectable()
+export class DataTableStore extends ComponentStore<DataTableState> {
+  constructor(private userService: UserService) {
+    // Вызываем super с initialState
+    super({
+      users: [],
+      loading: false,
+      error: null,
+      filter: '',
+      sortField: 'name',
+      sortDirection: 'asc',
+      page: 1,
+      pageSize: 10,
+      selectedIds: new Set(),
+    });
+  }
+
+  // ===== SELECTORS =====
+  // select() — аналог createSelector
+  readonly users$ = this.select(state => state.users);
+  readonly loading$ = this.select(state => state.loading);
+  readonly error$ = this.select(state => state.error);
+  readonly filter$ = this.select(state => state.filter);
+  readonly sortField$ = this.select(state => state.sortField);
+  readonly selectedIds$ = this.select(state => state.selectedIds);
+
+  // Составной селектор (мемоизирован)
+  readonly filteredAndSortedUsers$ = this.select(
+    this.users$,
+    this.filter$,
+    this.sortField$,
+    this.select(state => state.sortDirection),
+    (users, filter, sortField, sortDirection) => {
+      let result = filter
+        ? users.filter(u =>
+            u.name.toLowerCase().includes(filter.toLowerCase()) ||
+            u.email.toLowerCase().includes(filter.toLowerCase())
+          )
+        : users;
+
+      if (sortField) {
+        result = [...result].sort((a, b) => {
+          const aVal = String(a[sortField]);
+          const bVal = String(b[sortField]);
+          const cmp = aVal.localeCompare(bVal);
+          return sortDirection === 'asc' ? cmp : -cmp;
+        });
+      }
+
+      return result;
+    }
+  );
+
+  readonly paginatedUsers$ = this.select(
+    this.filteredAndSortedUsers$,
+    this.select(state => state.page),
+    this.select(state => state.pageSize),
+    (users, page, pageSize) => {
+      const start = (page - 1) * pageSize;
+      return {
+        items: users.slice(start, start + pageSize),
+        total: users.length,
+        pages: Math.ceil(users.length / pageSize),
+      };
+    }
+  );
+
+  readonly stats$ = this.select(
+    this.users$,
+    this.selectedIds$,
+    (users, selectedIds) => ({
+      total: users.length,
+      selected: selectedIds.size,
+      active: users.filter(u => u.isActive).length,
+    })
+  );
+
+  // ===== UPDATERS =====
+  // updater() — аналог on() в reducer, синхронное изменение состояния
+  readonly setFilter = this.updater((state, filter: string) => ({
+    ...state,
+    filter,
+    page: 1, // Сбрасываем страницу при изменении фильтра
+  }));
+
+  readonly setPage = this.updater((state, page: number) => ({
+    ...state, page
+  }));
+
+  readonly setSort = this.updater(
+    (state, { field, direction }: { field: keyof User; direction: 'asc' | 'desc' }) => ({
+      ...state,
+      sortField: field,
+      sortDirection: direction,
+    })
+  );
+
+  readonly toggleSelect = this.updater((state, userId: string) => {
+    const selectedIds = new Set(state.selectedIds);
+    if (selectedIds.has(userId)) {
+      selectedIds.delete(userId);
+    } else {
+      selectedIds.add(userId);
+    }
+    return { ...state, selectedIds };
+  });
+
+  readonly selectAll = this.updater(state => ({
+    ...state,
+    selectedIds: new Set(state.users.map(u => u.id)),
+  }));
+
+  readonly clearSelection = this.updater(state => ({
+    ...state,
+    selectedIds: new Set<string>(),
+  }));
+
+  // ===== EFFECTS =====
+  // effect() — для асинхронной логики
+  readonly loadUsers = this.effect<void>(trigger$ =>
+    trigger$.pipe(
+      tap(() => this.patchState({ loading: true, error: null })),
+      switchMap(() =>
+        this.userService.getAll().pipe(
+          tapResponse(
+            users => this.patchState({ users, loading: false }),
+            error => this.patchState({
+              error: (error as Error).message,
+              loading: false
+            })
+          )
+        )
+      )
+    )
+  );
+
+  readonly deleteUser = this.effect<string>(userId$ =>
+    userId$.pipe(
+      switchMap(userId =>
+        this.userService.delete(userId).pipe(
+          tapResponse(
+            () => this.patchState(state => ({
+              users: state.users.filter(u => u.id !== userId),
+            })),
+            error => this.patchState({ error: (error as Error).message })
+          )
+        )
+      )
+    )
+  );
+}
+```
+
+---
+
+## Использование ComponentStore в компоненте
+
+```typescript
+// components/data-table/data-table.component.ts
+@Component({
+  standalone: true,
+  imports: [AsyncPipe, ...],
+  providers: [DataTableStore], // Scope: только этот компонент и его потомки
+  template: `
+    <!-- Stats -->
+    @if (stats$ | async; as stats) {
+      <div class="toolbar">
+        Выбрано: {{ stats.selected }} из {{ stats.total }}
+        @if (stats.selected > 0) {
+          <button (click)="deleteSelected()">Удалить выбранные</button>
+        }
+      </div>
+    }
+
+    <!-- Filter -->
+    <input
+      placeholder="Поиск..."
+      (input)="onFilter($event)"
+    />
+
+    <!-- Sort buttons -->
+    <button (click)="onSort('name')">
+      Имя {{ getSortIcon('name') }}
+    </button>
+
+    <!-- Table -->
+    @if (paginated$ | async; as data) {
+      @for (user of data.items; track user.id) {
+        <div class="row" [class.selected]="isSelected(user.id)">
+          <input
+            type="checkbox"
+            [checked]="isSelected(user.id)"
+            (change)="toggleSelect(user.id)"
+          />
+          {{ user.name }} — {{ user.email }}
+        </div>
+      }
+
+      <!-- Pagination -->
+      <app-paginator
+        [total]="data.total"
+        [pages]="data.pages"
+        (pageChange)="store.setPage($event)"
+      />
+    }
+
+    @if (loading$ | async) { <mat-progress-bar /> }
+    @if (error$ | async; as error) { <app-error [message]="error" /> }
+  `
+})
+export class DataTableComponent implements OnInit {
+  store = inject(DataTableStore);
+
+  stats$ = this.store.stats$;
+  paginated$ = this.store.paginatedUsers$;
+  loading$ = this.store.loading$;
+  error$ = this.store.error$;
+  sortField$ = this.store.sortField$;
+
+  ngOnInit() {
+    this.store.loadUsers(); // Вызываем effect
+  }
+
+  onFilter(event: Event) {
+    const filter = (event.target as HTMLInputElement).value;
+    this.store.setFilter(filter); // Вызываем updater
+  }
+
+  onSort(field: keyof User) {
+    // Логика сортировки
+    this.store.setSort({ field, direction: 'asc' });
+  }
+
+  toggleSelect(id: string) {
+    this.store.toggleSelect(id); // Вызываем updater
+  }
+
+  isSelected(id: string): boolean {
+    // Подписываемся через toSignal или async pipe
+    return false; // simplified
+  }
+
+  deleteSelected() {
+    // Получаем текущее состояние через get()
+    const selectedIds = this.store.get(state => state.selectedIds);
+    selectedIds.forEach(id => this.store.deleteUser(id));
+    this.store.clearSelection();
+  }
+}
+```
+
+---
+
+## Lifecycle hooks
+
+```typescript
+@Injectable()
+export class DataTableStore extends ComponentStore<DataTableState> {
+  constructor(private service: UserService) {
+    super(initialState);
+
+    // onStoreInit — вызывается при инициализации Store
+    // Аналог ngOnInit
+    this.onStoreInit();
+
+    // tapResponse: специальный оператор NgRx для обработки ответа
+    // Гарантирует, что ошибки не завершат Observable
+  }
+
+  private onStoreInit = this.effect<void>(
+    trigger$ => trigger$.pipe(
+      tap(() => console.log('Store initialized'))
+    )
+  );
+
+  // ngOnDestroy вызывается автоматически вместе с компонентом
+  // Все subscriptions очищаются автоматически
+}
+```
+
+---
+
+## patchState vs setState
+
+```typescript
+// patchState — частичное обновление (merge)
+this.patchState({ loading: true });
+this.patchState(state => ({ page: state.page + 1 }));
+
+// setState — полная замена состояния
+this.setState({ ...this.get(), loading: true });
+this.setState(state => ({ ...state, loading: true }));
+
+// get() — синхронное чтение текущего состояния
+const currentFilter = this.get(state => state.filter);
+```
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useReducer, useMemo, useState } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+
+interface User { id: string; name: string; dept: string; role: string; active: boolean; }
+
+const USERS: User[] = [
+  { id: '1', name: 'Яша', dept: 'Engineering', role: 'admin', active: true },
+  { id: '2', name: 'Алиса', dept: 'Design', role: 'user', active: true },
+  { id: '3', name: 'Боб', dept: 'Engineering', role: 'user', active: false },
+  { id: '4', name: 'Катя', dept: 'Marketing', role: 'user', active: true },
+  { id: '5', name: 'Дима', dept: 'Design', role: 'guest', active: true },
+  { id: '6', name: 'Аня', dept: 'Engineering', role: 'user', active: true },
+  { id: '7', name: 'Стас', dept: 'DevOps', role: 'admin', active: false },
+];
+
+interface TableState {
+  users: User[];
+  filter: string;
+  sortField: keyof User;
+  sortDir: 'asc' | 'desc';
+  page: number;
+  pageSize: number;
+  selectedIds: string[];
+  loading: boolean;
+}
+
+const init: TableState = {
+  users: USERS,
+  filter: '', sortField: 'name', sortDir: 'asc',
+  page: 1, pageSize: 4,
+  selectedIds: [],
+  loading: false,
+};
+
+function tableReducer(state: TableState, action: { type: string; payload?: any }): TableState {
+  switch (action.type) {
+    case 'SET_FILTER': return { ...state, filter: action.payload, page: 1 };
+    case 'SET_SORT': return { ...state, sortField: action.payload.field, sortDir: action.payload.dir };
+    case 'SET_PAGE': return { ...state, page: action.payload };
+    case 'TOGGLE_SELECT': {
+      const id = action.payload;
+      return { ...state, selectedIds: state.selectedIds.includes(id) ? state.selectedIds.filter(i => i !== id) : [...state.selectedIds, id] };
+    }
+    case 'SELECT_ALL': return { ...state, selectedIds: state.users.map(u => u.id) };
+    case 'CLEAR_SELECTION': return { ...state, selectedIds: [] };
+    case 'DELETE_SELECTED': return { ...state, users: state.users.filter(u => !state.selectedIds.includes(u.id)), selectedIds: [] };
+    default: return state;
+  }
+}
+
+export default function App() {
+  const [state, dispatch] = useReducer(tableReducer, init);
+  const [log, setLog] = useState<string[]>([]);
+  const addLog = (msg: string) => setLog(p => [msg, ...p.slice(0, 6)]);
+
+  // ComponentStore selectors (useMemo = memoization)
+  const filteredSorted = useMemo(() => {
+    let r = state.users;
+    if (state.filter) r = r.filter(u => u.name.toLowerCase().includes(state.filter.toLowerCase()) || u.dept.toLowerCase().includes(state.filter.toLowerCase()));
+    return [...r].sort((a, b) => {
+      const cmp = String(a[state.sortField]).localeCompare(String(b[state.sortField]));
+      return state.sortDir === 'asc' ? cmp : -cmp;
+    });
+  }, [state.users, state.filter, state.sortField, state.sortDir]);
+
+  const paginated = useMemo(() => {
+    const start = (state.page - 1) * state.pageSize;
+    return { items: filteredSorted.slice(start, start + state.pageSize), total: filteredSorted.length, pages: Math.ceil(filteredSorted.length / state.pageSize) };
+  }, [filteredSorted, state.page, state.pageSize]);
+
+  const stats = useMemo(() => ({
+    total: state.users.length,
+    selected: state.selectedIds.length,
+    active: state.users.filter(u => u.active).length,
+  }), [state.users, state.selectedIds]);
+
+  // Updater calls
+  const setFilter = (v: string) => { dispatch({ type: 'SET_FILTER', payload: v }); addLog(\`updater.setFilter("\${v}")\`); };
+  const setSort = (field: keyof User) => {
+    const dir = state.sortField === field && state.sortDir === 'asc' ? 'desc' : 'asc';
+    dispatch({ type: 'SET_SORT', payload: { field, dir } });
+    addLog(\`updater.setSort({ field: "\${field}", dir: "\${dir}" })\`);
+  };
+  const setPage = (p: number) => { dispatch({ type: 'SET_PAGE', payload: p }); addLog(\`updater.setPage(\${p})\`); };
+  const toggleSelect = (id: string) => { dispatch({ type: 'TOGGLE_SELECT', payload: id }); addLog(\`updater.toggleSelect("\${id}")\`); };
+  const deleteSelected = () => { addLog(\`effect.deleteUsers([\${state.selectedIds.join(', ')}])\`); dispatch({ type: 'DELETE_SELECTED' }); };
+
+  const sortIcon = (f: keyof User) => state.sortField === f ? (state.sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+  const thStyle = (f: keyof User): React.CSSProperties => ({
+    padding: '0.5rem 0.75rem', color: state.sortField === f ? RED : '#64748b',
+    cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem', borderBottom: \`1px solid \${BORDER}\`, textAlign: 'left', userSelect: 'none',
+  });
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🧩 ComponentStore — Data Table</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1rem' }}>
+        state() + select() + updater() + effect()
+      </p>
+
+      {/* Stats bar */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.6rem 1rem', marginBottom: '0.75rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', gap: '1rem', fontSize: '0.78rem' }}>
+          <span>Всего: <b style={{ color: '#e2e8f0' }}>{stats.total}</b></span>
+          <span>Активных: <b style={{ color: SUCCESS }}>{stats.active}</b></span>
+          <span>Выбрано: <b style={{ color: RED }}>{stats.selected}</b></span>
+        </div>
+        <div style={{ display: 'flex', gap: '0.35rem' }}>
+          <input
+            placeholder="🔍 Filter..."
+            value={state.filter}
+            onChange={e => setFilter(e.target.value)}
+            style={{ padding: '0.3rem 0.5rem', background: BG, border: \`1px solid \${BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.75rem', outline: 'none', width: '130px' }}
+          />
+          {stats.selected > 0 && <button onClick={deleteSelected} style={{ padding: '0.3rem 0.6rem', background: RED, color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.73rem', fontWeight: 700 }}>🗑️ Delete ({stats.selected})</button>}
+          <button onClick={() => { dispatch({ type: state.selectedIds.length === state.users.length ? 'CLEAR_SELECTION' : 'SELECT_ALL' }); addLog(state.selectedIds.length === state.users.length ? 'updater.clearSelection()' : 'updater.selectAll()'); }} style={{ padding: '0.3rem 0.6rem', background: '#334155', color: '#94a3b8', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.73rem' }}>
+            {state.selectedIds.length === state.users.length ? '☐ Deselect' : '☑ All'}
+          </button>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', overflow: 'hidden', marginBottom: '0.75rem' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={{ ...thStyle('name'), width: '32px', cursor: 'default' }}></th>
+              {(['name', 'dept', 'role'] as (keyof User)[]).map(f => (
+                <th key={f} style={thStyle(f)} onClick={() => setSort(f)}>
+                  {f.charAt(0).toUpperCase() + f.slice(1)}{sortIcon(f)}
+                </th>
+              ))}
+              <th style={{ ...thStyle('active'), cursor: 'default' }}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paginated.items.map((u, i) => (
+              <tr key={u.id} style={{ background: i % 2 ? '#1a2538' : CARD, borderBottom: \`1px solid \${BORDER}\` }}>
+                <td style={{ padding: '0.5rem 0.75rem' }}>
+                  <input type="checkbox" checked={state.selectedIds.includes(u.id)} onChange={() => toggleSelect(u.id)} style={{ accentColor: RED, cursor: 'pointer' }} />
+                </td>
+                <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.8rem', fontWeight: 600 }}>{u.name}</td>
+                <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.78rem', color: '#94a3b8' }}>{u.dept}</td>
+                <td style={{ padding: '0.5rem 0.75rem', fontSize: '0.75rem', color: u.role === 'admin' ? RED : '#64748b' }}>{u.role}</td>
+                <td style={{ padding: '0.5rem 0.75rem' }}>
+                  <span style={{ fontSize: '0.68rem', padding: '0.1rem 0.4rem', borderRadius: '99px', background: u.active ? SUCCESS + '20' : '#33415520', color: u.active ? SUCCESS : '#475569', border: \`1px solid \${u.active ? SUCCESS : BORDER}\` }}>
+                    {u.active ? 'active' : 'inactive'}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+        <span style={{ color: '#64748b', fontSize: '0.75rem' }}>{paginated.total} results — page {state.page}/{paginated.pages}</span>
+        <div style={{ display: 'flex', gap: '0.25rem' }}>
+          {Array.from({ length: paginated.pages }, (_, i) => (
+            <button key={i} onClick={() => setPage(i + 1)} style={{ padding: '0.25rem 0.55rem', background: state.page === i + 1 ? RED : '#334155', color: state.page === i + 1 ? '#fff' : '#94a3b8', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: state.page === i + 1 ? 700 : 400 }}>
+              {i + 1}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Log */}
+      <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', maxHeight: '110px', overflowY: 'auto' }}>
+        <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.35rem' }}>ComponentStore Log</div>
+        {log.length === 0
+          ? <div style={{ color: '#334155', fontSize: '0.78rem' }}>// Interact with the table...</div>
+          : log.map((l, i) => <div key={i} style={{ fontSize: '0.75rem', marginBottom: '0.1rem', color: i === 0 ? SUCCESS : '#475569' }}>store.{l}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+` }} />

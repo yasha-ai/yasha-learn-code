@@ -1,0 +1,528 @@
+---
+title: "57. Monorepo с Nx"
+sidebar:
+  order: 60
+---
+import { Playground } from '@components/Playground'
+
+
+## 60. Monorepo с Nx 🗂️
+
+Привет! Яша здесь. Nx — это инструмент для управления monorepo, который превращает хаос из 50 репозиториев в одну хорошо организованную рабочую область. Разберём как Nx помогает масштабировать Angular-проекты 🚀
+
+---
+
+### Зачем нужен Nx
+
+**Проблема**: Большая компания с несколькими Angular-приложениями и общим кодом.
+
+Без Nx:
+- Каждое приложение — отдельный репозиторий
+- Общие компоненты дублируются или публикуются в NPM
+- Нет уверенности что изменение одного кода не сломает другой
+- CI/CD запускает всё всегда (долго и дорого)
+
+С Nx:
+- Один репозиторий — все приложения и библиотеки вместе
+- `nx affected` — запускает только то, что изменилось
+- Граф зависимостей — видно кто от кого зависит
+- Кэш — не пересобирать если ничего не изменилось
+
+---
+
+### Создание Nx Workspace
+
+```bash
+npx create-nx-workspace@latest my-org --preset=angular-monorepo
+
+# Добавить Nx к существующему Angular проекту
+ng add @nx/angular
+
+# Структура workspace
+# my-org/
+# ├── apps/
+# │   ├── shop/           ← Angular приложение
+# │   └── admin/          ← Angular приложение
+# ├── libs/
+# │   ├── ui/             ← UI компоненты (shared)
+# │   ├── feature-auth/   ← Feature модуль
+# │   ├── data-access/    ← HTTP сервисы
+# │   └── util/           ← Утилиты
+# ├── nx.json
+# └── package.json        ← один package.json на всех
+```
+
+---
+
+### Генерация приложений и библиотек
+
+```bash
+# Создать приложение
+nx generate @nx/angular:application shop --routing --style=scss
+
+# Создать библиотеку
+nx generate @nx/angular:library ui-components --directory=shared --buildable
+
+# Типы библиотек (Convention от Nx)
+nx generate @nx/angular:library feature-login --directory=auth          # feature/
+nx generate @nx/angular:library ui-button --directory=shared            # ui/
+nx generate @nx/angular:library data-access-users --directory=users     # data-access/
+nx generate @nx/angular:library util-validators --directory=shared      # util/
+```
+
+---
+
+### Архитектура библиотек: 4 типа
+
+```
+apps/
+  shop/              ← компонует feature libraries
+  admin/             ← компонует feature libraries
+
+libs/
+  ├── feature/       ← «умные» компоненты, страницы
+  │   └── auth/      ← LoginPage, RegisterPage (специфичны для приложения)
+  │
+  ├── ui/            ← «тупые» презентационные компоненты
+  │   └── shared/    ← Button, Input, Modal (переиспользуемые везде)
+  │
+  ├── data-access/   ← HTTP сервисы, NgRx, состояние
+  │   └── users/     ← UserService, userReducer
+  │
+  └── util/          ← чистые функции, pipes, validators
+      └── shared/    ← formatDate, validators (нет Angular зависимостей)
+```
+
+```typescript
+// libs/ui/shared/src/lib/button/button.component.ts
+@Component({
+  selector: 'ui-button',
+  standalone: true,
+  template: `<button [class]="variant" [disabled]="disabled"><ng-content /></button>`,
+})
+export class ButtonComponent {
+  @Input() variant: 'primary' | 'secondary' = 'primary';
+  @Input() disabled = false;
+}
+
+// libs/ui/shared/src/index.ts — barrel export
+export { ButtonComponent } from './lib/button/button.component';
+export { InputComponent } from './lib/input/input.component';
+export { ModalComponent } from './lib/modal/modal.component';
+
+// Использование в приложении:
+// import { ButtonComponent } from '@my-org/ui/shared';
+```
+
+---
+
+### tsconfig paths: алиасы для импортов
+
+```json
+// tsconfig.base.json — автоматически обновляется Nx
+{
+  "compilerOptions": {
+    "paths": {
+      "@my-org/ui/shared": ["libs/ui/shared/src/index.ts"],
+      "@my-org/feature/auth": ["libs/feature/auth/src/index.ts"],
+      "@my-org/data-access/users": ["libs/data-access/users/src/index.ts"],
+      "@my-org/util/shared": ["libs/util/shared/src/index.ts"]
+    }
+  }
+}
+```
+
+```typescript
+// ✅ Правильный импорт через алиас (не относительный путь!)
+import { ButtonComponent } from '@my-org/ui/shared';
+import { UserService } from '@my-org/data-access/users';
+import { validateEmail } from '@my-org/util/shared';
+
+// ❌ Неправильно — относительный путь между библиотеками
+import { ButtonComponent } from '../../libs/ui/shared/src/lib/button/button.component';
+```
+
+---
+
+### nx affected: умный CI/CD
+
+```bash
+# Показать что изменилось относительно main
+nx affected:apps    # приложения затронутые изменениями
+nx affected:libs    # библиотеки затронутые изменениями
+
+# Запустить тесты только для изменённых проектов
+nx affected:test
+
+# Собрать только изменённые приложения
+nx affected:build
+
+# Запустить lint для всех затронутых
+nx affected:lint --parallel=5
+
+# Относительно конкретного коммита
+nx affected:test --base=HEAD~3 --head=HEAD
+```
+
+---
+
+### Граф зависимостей
+
+```bash
+# Открыть интерактивный граф в браузере
+nx graph
+
+# Граф только для конкретного проекта
+nx graph --focus=shop
+
+# Просмотр затронутых проектов
+nx affected:graph
+```
+
+```
+Визуализация зависимостей:
+
+shop ──→ feature/auth ──→ data-access/users ──→ util/shared
+     ──→ ui/shared
+     ──→ data-access/cart
+
+admin ──→ feature/auth
+      ──→ data-access/users
+      ──→ ui/shared
+```
+
+---
+
+### Правила зависимостей: module-boundary
+
+```json
+// .eslintrc.json — запрет на нарушение архитектуры
+{
+  "rules": {
+    "@nx/enforce-module-boundaries": [
+      "error",
+      {
+        "depConstraints": [
+          {
+            "sourceTag": "type:feature",
+            "onlyDependOnLibsWithTags": ["type:ui", "type:data-access", "type:util"]
+          },
+          {
+            "sourceTag": "type:ui",
+            "onlyDependOnLibsWithTags": ["type:util"]
+          },
+          {
+            "sourceTag": "type:data-access",
+            "onlyDependOnLibsWithTags": ["type:util"]
+          },
+          {
+            "sourceTag": "scope:shop",
+            "onlyDependOnLibsWithTags": ["scope:shop", "scope:shared"]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+---
+
+### Nx Cloud: распределённое кэширование
+
+```bash
+# Без Nx Cloud: каждая машина строит с нуля
+# С Nx Cloud: результаты кэшируются в облаке
+
+# Подключить Nx Cloud
+nx connect-to-nx-cloud
+
+# Результат: если сборка уже была на другой машине — она возьмётся из кэша
+# nx build shop → retrieved from cache in 2 seconds (instead of 45 seconds!)
+```
+
+```json
+// nx.json — настройка кэша
+{
+  "tasksRunnerOptions": {
+    "default": {
+      "runner": "nx-cloud",
+      "options": {
+        "cacheableOperations": ["build", "test", "lint", "e2e"],
+        "accessToken": "your-nx-cloud-token"
+      }
+    }
+  }
+}
+```
+
+---
+
+### Генераторы (сниппеты для команды)
+
+```typescript
+// tools/generators/feature-module/index.ts
+// Кастомный генератор для создания feature по стандарту команды
+import { Tree, formatFiles, generateFiles, names } from '@nx/devkit';
+
+export default async function (tree: Tree, options: { name: string; scope: string }) {
+  const { fileName, className } = names(options.name);
+
+  generateFiles(tree, join(__dirname, 'files'), `libs/feature/${fileName}`, {
+    ...options,
+    fileName,
+    className,
+    tmpl: '',
+  });
+
+  await formatFiles(tree);
+}
+
+// Запуск: nx generate @my-org/tools:feature-module --name=checkout --scope=shop
+```
+
+---
+
+### Nx Executor: кастомные команды
+
+```json
+// project.json — кастомный executor
+{
+  "targets": {
+    "build-storybook": {
+      "executor": "@nx/storybook:build",
+      "options": { "uiFramework": "@storybook/angular" }
+    },
+    "analyze": {
+      "executor": "@nx/webpack:webpack",
+      "options": { "statsJson": true }
+    }
+  }
+}
+```
+
+---
+
+## Playground 🎮
+
+Визуализатор графа зависимостей Nx monorepo:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const PROJECTS = {
+  'shop': { type: 'app', color: ANGULAR_RED, x: 100, y: 50, deps: ['feature-auth', 'feature-catalog', 'ui-shared', 'data-users'] },
+  'admin': { type: 'app', color: '#f97316', x: 400, y: 50, deps: ['feature-auth', 'feature-analytics', 'ui-shared', 'data-users'] },
+  'feature-auth': { type: 'feature', color: '#8b5cf6', x: 100, y: 180, deps: ['ui-shared', 'data-users', 'util-shared'] },
+  'feature-catalog': { type: 'feature', color: '#8b5cf6', x: 250, y: 180, deps: ['ui-shared', 'data-products'] },
+  'feature-analytics': { type: 'feature', color: '#8b5cf6', x: 400, y: 180, deps: ['ui-shared', 'data-users', 'util-shared'] },
+  'ui-shared': { type: 'ui', color: '#0ea5e9', x: 250, y: 310, deps: ['util-shared'] },
+  'data-users': { type: 'data-access', color: '#10b981', x: 100, y: 310, deps: ['util-shared'] },
+  'data-products': { type: 'data-access', color: '#10b981', x: 400, y: 310, deps: ['util-shared'] },
+  'util-shared': { type: 'util', color: '#f59e0b', x: 250, y: 420, deps: [] },
+};
+
+const TYPE_LABELS = { app: 'Application', feature: 'Feature Lib', ui: 'UI Lib', 'data-access': 'Data Access', util: 'Util' };
+
+function getAllDeps(projectKey, depth = 0, visited = new Set()) {
+  if (depth > 5 || visited.has(projectKey)) return visited;
+  visited.add(projectKey);
+  const project = PROJECTS[projectKey];
+  if (project) project.deps.forEach(dep => getAllDeps(dep, depth + 1, visited));
+  return visited;
+}
+
+export default function App() {
+  const [selected, setSelected] = useState(null);
+  const [focus, setFocus] = useState(null);
+  const [changedProjects, setChangedProjects] = useState(new Set());
+
+  const handleSelect = useCallback((key) => {
+    setSelected(key === selected ? null : key);
+  }, [selected]);
+
+  const toggleChanged = useCallback((key) => {
+    setChangedProjects(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  // Calculate affected projects
+  const affectedProjects = new Set();
+  changedProjects.forEach(changed => {
+    // Add the changed project itself
+    affectedProjects.add(changed);
+    // Add all projects that depend on it (reverse deps)
+    Object.entries(PROJECTS).forEach(([key, project]) => {
+      if (getAllDeps(key).has(changed)) affectedProjects.add(key);
+    });
+  });
+
+  const highlightedDeps = selected ? getAllDeps(selected) : new Set();
+
+  const getNodeOpacity = (key) => {
+    if (changedProjects.size > 0) return affectedProjects.has(key) ? 1 : 0.3;
+    if (selected) return highlightedDeps.has(key) || key === selected ? 1 : 0.3;
+    return 1;
+  };
+
+  const W = 560, H = 480;
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '720px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>🗂️ Nx Dependency Graph</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>nx graph — визуализация зависимостей</div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 200px', gap: '16px' }}>
+          {/* Graph */}
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '12px' }}>
+              Кликни на проект чтобы увидеть зависимости. Отметь «изменён» чтобы симулировать nx affected.
+            </div>
+            <svg width="100%" viewBox={\`0 0 \${W} \${H}\`} style={{ overflow: 'visible' }}>
+              {/* Edges */}
+              {Object.entries(PROJECTS).map(([key, proj]) =>
+                proj.deps.map(dep => {
+                  const target = PROJECTS[dep];
+                  if (!target) return null;
+                  const opacity = getNodeOpacity(key) > 0.5 && getNodeOpacity(dep) > 0.5 ? 0.5 : 0.1;
+                  return (
+                    <line key={\`\${key}->\${dep}\`}
+                      x1={proj.x + 50} y1={proj.y + 20}
+                      x2={target.x + 50} y2={target.y + 20}
+                      stroke={proj.color} strokeWidth="1.5" opacity={opacity}
+                      markerEnd="url(#arrow)"
+                    />
+                  );
+                })
+              )}
+              <defs>
+                <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                  <path d="M0,0 L0,6 L6,3 z" fill="#475569" />
+                </marker>
+              </defs>
+              {/* Nodes */}
+              {Object.entries(PROJECTS).map(([key, proj]) => {
+                const opacity = getNodeOpacity(key);
+                const isSelected = selected === key;
+                const isChanged = changedProjects.has(key);
+                const isAffected = affectedProjects.has(key);
+                return (
+                  <g key={key} onClick={() => handleSelect(key)} style={{ cursor: 'pointer' }}
+                    opacity={opacity}>
+                    <rect x={proj.x} y={proj.y} width={100} height={40} rx={8}
+                      fill={proj.color + '20'}
+                      stroke={isChanged ? '#fbbf24' : isAffected && changedProjects.size > 0 ? '#f87171' : isSelected ? 'white' : proj.color}
+                      strokeWidth={isSelected || isChanged ? 2.5 : 1.5}
+                    />
+                    <text x={proj.x + 50} y={proj.y + 16} textAnchor="middle"
+                      fontSize="11" fontWeight="bold" fill={proj.color}>
+                      {key.length > 14 ? key.slice(0, 12) + '..' : key}
+                    </text>
+                    <text x={proj.x + 50} y={proj.y + 30} textAnchor="middle"
+                      fontSize="9" fill="#94a3b8">
+                      {TYPE_LABELS[proj.type]}
+                    </text>
+                    {isChanged && (
+                      <circle cx={proj.x + 95} cy={proj.y + 5} r={5} fill="#fbbf24" />
+                    )}
+                    {isAffected && !isChanged && changedProjects.size > 0 && (
+                      <circle cx={proj.x + 95} cy={proj.y + 5} r={5} fill="#f87171" />
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+
+          {/* Panel */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {/* Legend */}
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '12px' }}>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '8px', fontWeight: 'bold' }}>ТИПЫ</div>
+              {[
+                { color: ANGULAR_RED, label: 'Applications' },
+                { color: '#8b5cf6', label: 'Feature libs' },
+                { color: '#0ea5e9', label: 'UI libs' },
+                { color: '#10b981', label: 'Data Access' },
+                { color: '#f59e0b', label: 'Util' },
+              ].map(({ color, label }) => (
+                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+                  <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: color }} />
+                  <span style={{ color: '#94a3b8', fontSize: '11px' }}>{label}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* nx affected simulation */}
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '12px' }}>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '8px', fontWeight: 'bold' }}>
+                nx affected (отметить изменения):
+              </div>
+              {Object.keys(PROJECTS).map(key => (
+                <div key={key} onClick={() => toggleChanged(key)} style={{
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  padding: '3px 0', cursor: 'pointer',
+                }}>
+                  <div style={{
+                    width: '12px', height: '12px', borderRadius: '2px',
+                    background: changedProjects.has(key) ? '#fbbf24' : '#334155',
+                    border: '1px solid #475569', flexShrink: 0,
+                  }} />
+                  <span style={{ color: changedProjects.has(key) ? '#fbbf24' : '#64748b', fontSize: '10px' }}>{key}</span>
+                </div>
+              ))}
+              {changedProjects.size > 0 && (
+                <div style={{ marginTop: '8px', padding: '6px', background: '#0f172a', borderRadius: '6px' }}>
+                  <div style={{ color: '#f87171', fontSize: '10px', fontWeight: 'bold' }}>Затронуто:</div>
+                  <div style={{ color: '#f87171', fontSize: '10px' }}>{affectedProjects.size} проектов</div>
+                  <button onClick={() => setChangedProjects(new Set())} style={{
+                    marginTop: '6px', padding: '3px 8px', borderRadius: '4px',
+                    border: 'none', background: '#334155', color: '#94a3b8',
+                    cursor: 'pointer', fontSize: '10px',
+                  }}>Сброс</button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Detail */}
+        {selected && (
+          <div style={{
+            marginTop: '16px', background: '#1e293b', borderRadius: '12px', padding: '14px 16px',
+          }}>
+            <div style={{ color: PROJECTS[selected].color, fontWeight: 'bold', marginBottom: '8px' }}>
+              📦 {selected} ({TYPE_LABELS[PROJECTS[selected].type]})
+            </div>
+            <div style={{ color: '#94a3b8', fontSize: '12px' }}>
+              Зависит от: {PROJECTS[selected].deps.join(', ') || 'нет'}
+            </div>
+            <div style={{ color: '#64748b', fontSize: '11px', marginTop: '6px', fontFamily: 'monospace' }}>
+              import {'{...}'} from '@my-org/{selected}';
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

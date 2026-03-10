@@ -1,0 +1,547 @@
+---
+title: "68. Effector: Продвинутый уровень"
+sidebar:
+  order: 68
+---
+import { Playground } from '@components/Playground'
+
+
+## Effector: Продвинутый уровень — оркестрация и масштабирование
+
+Ты освоил базу Effector. Теперь погружаемся в **продвинутые паттерны** — это те инструменты, которые превращают хорошее приложение в **отличное**: быстрое, предсказуемое и лёгкое для тестирования 🏆
+
+Представь `sample` как умного диспетчера аэропорта ✈️: он знает, когда самолёт готов к вылету (clock), какой груз взять (source), как его упаковать (fn) и куда отправить (target).
+
+### sample() — главный оператор Effector
+
+`sample` — это сердце реактивной логики. Он забирает данные из `source` в момент срабатывания `clock` и передаёт в `target`:
+
+```typescript
+import { sample } from 'effector';
+
+// Полная форма:
+sample({
+  clock:  trigger,    // когда срабатывать (Event | Store | Effect | массив)
+  source: $data,      // откуда брать данные (Store | Event | объект сторов)
+  filter: $condition, // условие (Store<boolean> | функция-предикат)
+  fn:     (data, clockPayload) => transform(data), // трансформация
+  target: output,     // куда отправить (Event | Effect | Store | массив)
+});
+
+// Минимальная форма (clock === source):
+sample({ clock: buttonClicked, target: submitFx });
+
+// Забрать значение стора при событии:
+sample({
+  clock:  submitClicked,
+  source: $formData,
+  target: submitFormFx,
+});
+
+// С трансформацией:
+sample({
+  clock:  userTyped,
+  source: { query: $query, filters: $filters },
+  fn:     ({ query, filters }) => ({ q: query.trim(), ...filters }),
+  target: searchFx,
+});
+```
+
+### sample с массивом источников и целей
+
+```typescript
+// Несколько источников объединяются в объект
+sample({
+  clock:  pageOpened,
+  source: { userId: $userId, token: $token },
+  fn:     ({ userId, token }) => ({ userId, headers: { Authorization: token } }),
+  target: fetchUserFx,
+});
+
+// Несколько целей — отправить в несколько мест одновременно
+sample({
+  clock:  loginSuccess,
+  source: $userData,
+  target: [$user, persistToStorageFx, analyticsTrackFx], // рассылаем всем
+});
+```
+
+### filter — условный sample
+
+```typescript
+// filter как Store<boolean>
+sample({
+  clock:  addToCartClicked,
+  source: $product,
+  filter: $isLoggedIn,          // выполнится только если пользователь залогинен
+  target: addToCartFx,
+});
+
+// filter как предикат-функция
+sample({
+  clock:  priceChanged,
+  source: $price,
+  filter: (price) => price > 0, // выполнится только при положительной цене
+  target: updatePriceFx,
+});
+
+// Типизированный guard через filter
+sample({
+  clock:  itemSelected,
+  source: $selectedItem,
+  filter: (item): item is NonNullable<typeof item> => item !== null,
+  target: editItemFx,
+});
+```
+
+### attach() — фабрика эффектов с привязкой к данным
+
+`attach` создаёт новый эффект, который автоматически получает данные из стора:
+
+```typescript
+import { attach } from 'effector';
+
+const $token = createStore<string>('');
+
+// Базовый эффект (без авторизации)
+const baseRequestFx = createEffect(async ({ url, token }: { url: string; token: string }) => {
+  const res = await fetch(url, { headers: { Authorization: \`Bearer \${token}\` } });
+  return res.json();
+});
+
+// attach: привязываем $token к baseRequestFx
+const fetchProfileFx = attach({
+  source: $token,
+  effect: baseRequestFx,
+  mapParams: (url: string, token) => ({ url, token }), // склеиваем параметры
+});
+
+// Теперь fetchProfileFx принимает только url — token берётся автоматически!
+fetchProfileFx('/api/profile');
+```
+
+### split() — маршрутизация событий
+
+```typescript
+import { split } from 'effector';
+
+const statusChanged = createEvent<'success' | 'error' | 'pending'>();
+
+// split разделяет один поток на несколько по условиям
+const { successStatus, errorStatus, pendingStatus } = split(statusChanged, {
+  successStatus: (s) => s === 'success',
+  errorStatus:   (s) => s === 'error',
+  pendingStatus: (s) => s === 'pending',
+});
+
+// Каждый поток — самостоятельное событие
+$successMessages.on(successStatus, (msgs) => [...msgs, 'Операция выполнена!']);
+$errorMessages.on(errorStatus, (msgs) => [...msgs, 'Произошла ошибка!']);
+```
+
+### Domain — группировка юнитов
+
+Domain позволяет группировать юниты и управлять ими централизованно (например, для DevTools или тестов):
+
+```typescript
+import { createDomain } from 'effector';
+
+const authDomain = createDomain('auth');
+
+// Создаём юниты через домен
+const $user   = authDomain.createStore<User | null>(null);
+const login   = authDomain.createEvent<Credentials>();
+const logout  = authDomain.createEvent();
+const loginFx = authDomain.createEffect(async (creds: Credentials) => {
+  return api.login(creds);
+});
+
+// Домен позволяет отслеживать все юниты внутри
+authDomain.onCreateStore((store) => {
+  console.log('Новый стор в домене:', store.shortName);
+});
+```
+
+### Fork API — SSR и тестирование
+
+Fork API — главное преимущество Effector для SSR и изолированного тестирования:
+
+```typescript
+import { fork, allSettled, serialize, hydrate } from 'effector';
+
+// --- SSR (сервер) ---
+async function renderPage(userId: number) {
+  // Создаём изолированный scope — не трогаем глобальное состояние!
+  const scope = fork();
+
+  // Выполняем эффекты в изолированном scope
+  await allSettled(fetchUserFx, { scope, params: userId });
+
+  // Сериализуем для передачи клиенту
+  const data = serialize(scope); // => { "$user": {...}, "$settings": {...} }
+
+  return { data };
+}
+
+// --- SSR (клиент) ---
+const scope = fork({ values: window.__EFFECTOR_DATA__ });
+
+// --- Тестирование ---
+describe('counter model', () => {
+  it('should increment', async () => {
+    const scope = fork({
+      values: [[$count, 5]],  // начальное значение стора
+    });
+
+    await allSettled(incremented, { scope });
+
+    expect(scope.getState($count)).toBe(6); // проверяем стор в scope
+  });
+
+  it('should load user', async () => {
+    const scope = fork({
+      handlers: [  // мокируем эффекты
+        [fetchUserFx, async () => ({ id: 1, name: 'Test User' })],
+      ],
+    });
+
+    await allSettled(pageOpened, { scope });
+
+    expect(scope.getState($user)).toEqual({ id: 1, name: 'Test User' });
+  });
+});
+```
+
+### scopeBind() — привязка к scope вне React
+
+```typescript
+import { scopeBind } from 'effector';
+
+// Вне React (например, в WebSocket обработчике)
+const scope = fork();
+
+// Привязываем событие к конкретному scope
+const boundIncrement = scopeBind(incremented, { scope });
+
+// Теперь boundIncrement() работает в изоляции scope
+socket.on('tick', () => boundIncrement());
+```
+
+### Patronum — утилиты для Effector
+
+```typescript
+import { debounce, throttle, every, some, condition, reset } from 'patronum';
+
+// Дебаунс события
+const debouncedSearch = debounce({ source: searchTyped, timeout: 300 });
+
+// Составной filter: оба условия должны быть true
+const $canSubmit = every({ stores: [$nameValid, $emailValid, $ageValid], predicate: Boolean });
+
+// Условие: if/else для юнитов
+condition({
+  source: submitClicked,
+  if:     $isLoggedIn,
+  then:   submitFormFx,
+  else:   redirectToLoginFx,
+});
+
+// Сброс нескольких сторов одним событием
+reset({ clock: logoutClicked, target: [$user, $token, $cart, $settings] });
+```
+
+### Полная архитектура: модульный подход
+
+```typescript
+// features/auth/model.ts
+import { createStore, createEvent, createEffect, sample } from 'effector';
+
+// Events
+export const loginFormSubmitted = createEvent<LoginForm>();
+export const logoutClicked      = createEvent();
+
+// Effects
+export const loginFx  = createEffect(api.login);
+export const logoutFx = createEffect(api.logout);
+
+// Stores
+export const $user      = createStore<User | null>(null);
+export const $authToken = createStore<string | null>(null);
+export const $isAuth    = $user.map(Boolean);
+
+// Logic
+$user
+  .on(loginFx.doneData, (_, { user }) => user)
+  .reset(logoutFx.done);
+
+$authToken
+  .on(loginFx.doneData, (_, { token }) => token)
+  .reset(logoutFx.done);
+
+sample({ clock: loginFormSubmitted, target: loginFx });
+sample({ clock: logoutClicked,      target: logoutFx });
+
+// features/profile/model.ts — зависит от auth
+import { $authToken } from '../auth/model';
+
+const fetchProfileFx = attach({
+  source: $authToken,
+  effect: async (token, userId: number) => {
+    return api.getProfile(userId, token!);
+  },
+});
+```
+
+---
+
+## 🔗 Полезные ссылки
+- [Effector: Введение](/react/effector-intro/)
+- [Effector: Stores и Events](/react/effector-stores-events/)
+- [Effector: Effects](/react/effector-effects/)
+- [Effector + React](/react/effector-react/)
+- [SSR и Hydration](/react/ssr-hydration/)
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible template="react" files={{ "/pipeline.ts": `// pipeline.ts — симуляция sample() / attach() / split() / fork()
+//
+// Реальный Effector код:
+//   sample({ clock: searchClicked, source: { query: $query, filters: $filters }, fn: ..., target: searchFx })
+//   split(resultType, { success: t => t === 'ok', error: t => t !== 'ok' })
+//   fork({ values: [[$query, '']] }) — для тестов и SSR
+
+export type FilterType = "all" | "users" | "posts" | "comments";
+export type StatusType = "idle" | "pending" | "success" | "error";
+
+export interface SearchResult {
+  id: number;
+  type: FilterType;
+  title: string;
+  subtitle: string;
+}
+
+export interface PipelineState {
+  query:    string;
+  filter:   FilterType;
+  results:  SearchResult[];
+  status:   StatusType;
+  error:    string | null;
+  history:  string[];
+  log:      string[];
+}
+
+export type PipelineEvent =
+  | { type: "QUERY_CHANGED";   payload: string }
+  | { type: "FILTER_CHANGED";  payload: FilterType }
+  | { type: "SEARCH_TRIGGERED" }
+  | { type: "SEARCH_STARTED" }
+  | { type: "SEARCH_SUCCESS";  payload: SearchResult[] }
+  | { type: "SEARCH_ERROR";    payload: string }
+  | { type: "RESULT_SELECTED"; payload: SearchResult }
+  | { type: "RESET" };
+
+export const initialPipeline: PipelineState = {
+  query: "", filter: "all", results: [], status: "idle", error: null,
+  history: [], log: [],
+};
+
+// Симуляция split() — маршрутизация по типу фильтра
+function generateMockResults(query: string, filter: FilterType): SearchResult[] {
+  const base = [
+    { id: 1, type: "users"    as FilterType, title: \`Пользователь: \${query}\`,  subtitle: "user@example.com" },
+    { id: 2, type: "posts"    as FilterType, title: \`Статья: \${query}\`,         subtitle: "5 мин чтения" },
+    { id: 3, type: "comments" as FilterType, title: \`Комментарий: \${query}\`,   subtitle: "Вчера, 15:30" },
+    { id: 4, type: "users"    as FilterType, title: \`Менеджер: \${query}\`,       subtitle: "manager@example.com" },
+    { id: 5, type: "posts"    as FilterType, title: \`Новость: \${query}\`,        subtitle: "10 мин назад" },
+  ];
+  // split: фильтруем по типу (как split() в Effector)
+  return filter === "all" ? base : base.filter(r => r.type === filter);
+}
+
+export function pipelineReducer(state: PipelineState, event: PipelineEvent): PipelineState {
+  const addLog = (msg: string) => [...state.log.slice(-4), msg];
+  switch (event.type) {
+    case "QUERY_CHANGED":
+      return { ...state, query: event.payload, log: addLog(\`queryChanged("\${event.payload}")\`) };
+    case "FILTER_CHANGED":
+      return { ...state, filter: event.payload, log: addLog(\`filterChanged("\${event.payload}")\`) };
+    case "SEARCH_TRIGGERED":
+      return { ...state, log: addLog(\`searchClicked() → sample → searchFx(\${state.query})\`) };
+    case "SEARCH_STARTED":
+      return { ...state, status: "pending", results: [], error: null, log: addLog("searchFx.pending = true") };
+    case "SEARCH_SUCCESS":
+      return { ...state, status: "success", results: event.payload, log: addLog(\`searchFx.doneData → \${event.payload.length} результатов\`) };
+    case "SEARCH_ERROR":
+      return { ...state, status: "error", error: event.payload, log: addLog(\`searchFx.failData → \${event.payload}\`) };
+    case "RESULT_SELECTED":
+      return { ...state, history: [event.payload.title, ...state.history.slice(0, 4)], log: addLog(\`resultSelected(\${event.payload.type})\`) };
+    case "RESET":
+      return { ...initialPipeline };
+    default: return state;
+  }
+}
+
+export async function runSearchPipeline(
+  query: string,
+  filter: FilterType,
+  shouldFail = false
+): Promise<SearchResult[]> {
+  await new Promise(r => setTimeout(r, 600 + Math.random() * 400));
+  if (shouldFail || query === "error") throw new Error("Сервер недоступен");
+  return generateMockResults(query, filter);
+}
+`, "/App.tsx": `import { useReducer, useCallback, useState, useRef } from "react";
+import { initialPipeline, pipelineReducer, runSearchPipeline, FilterType, SearchResult } from "./pipeline";
+
+const FILTERS: FilterType[] = ["all", "users", "posts", "comments"];
+const filterEmoji: Record<FilterType, string> = { all: "🔍", users: "👤", posts: "📝", comments: "💬" };
+const statusColors: Record<string, string> = { idle: "#64748b", pending: "#f59e0b", success: "#22c55e", error: "#ef4444" };
+const typeColors: Record<FilterType, string> = { all: "#7c3aed", users: "#3b82f6", posts: "#22c55e", comments: "#f59e0b" };
+
+export default function App() {
+  const [state, dispatch] = useReducer(pipelineReducer, initialPipeline);
+  const [failNext, setFailNext] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // sample({ clock: queryChanged, source: $query, target: ... })
+  // Симуляция дебаунс через patronum.debounce
+  const handleQueryChange = useCallback((value: string) => {
+    dispatch({ type: "QUERY_CHANGED", payload: value });
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (value.trim()) {
+      debounceRef.current = setTimeout(() => runSearch(value, state.filter), 500);
+    }
+  }, [state.filter]);
+
+  // sample({ clock: searchClicked, source: { query: $query, filter: $filter }, target: searchFx })
+  const runSearch = useCallback(async (query: string, filter: FilterType) => {
+    if (!query.trim()) return;
+    dispatch({ type: "SEARCH_TRIGGERED" });
+    dispatch({ type: "SEARCH_STARTED" });
+    try {
+      const results = await runSearchPipeline(query, filter, failNext);
+      setFailNext(false);
+      dispatch({ type: "SEARCH_SUCCESS", payload: results });
+    } catch (err) {
+      dispatch({ type: "SEARCH_ERROR", payload: err instanceof Error ? err.message : "Ошибка" });
+    }
+  }, [failNext]);
+
+  const handleFilterChange = useCallback((filter: FilterType) => {
+    dispatch({ type: "FILTER_CHANGED", payload: filter });
+    if (state.query.trim()) runSearch(state.query, filter);
+  }, [state.query, runSearch]);
+
+  const handleSelect = useCallback((result: SearchResult) => {
+    dispatch({ type: "RESULT_SELECTED", payload: result });
+  }, []);
+
+  const isLoading = state.status === "pending";
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "sans-serif", padding: 12 }}>
+      <div style={{ background: "#1e293b", borderRadius: 16, padding: 24, width: 460, boxShadow: "0 8px 32px rgba(0,0,0,.5)" }}>
+        {/* Header */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+          <span style={{ background: "#7c3aed", color: "#fff", borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px" }}>Effector</span>
+          <span style={{ background: "#1e3a5f", color: "#60a5fa", borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px" }}>sample · attach · split · fork</span>
+          <span style={{ background: "#1e293b", color: statusColors[state.status], borderRadius: 6, fontSize: 11, fontWeight: 700, padding: "2px 8px", border: \`1px solid \${statusColors[state.status]}44\` }}>
+            {state.status}
+          </span>
+        </div>
+        <h2 style={{ color: "#f8fafc", margin: "0 0 14px", fontSize: 17 }}>Поисковый пайплайн</h2>
+
+        {/* Search input */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <input
+            value={state.query}
+            onChange={e => handleQueryChange(e.target.value)}
+            placeholder='Введите запрос (или "error" для ошибки)...'
+            style={{ flex: 1, padding: "8px 12px", background: "#0f172a", border: "1px solid #334155", borderRadius: 8, color: "#f8fafc", fontSize: 13, outline: "none" }}
+          />
+          <button
+            onClick={() => runSearch(state.query, state.filter)}
+            disabled={isLoading || !state.query.trim()}
+            style={{ padding: "8px 14px", background: isLoading ? "#334155" : "#7c3aed", color: isLoading ? "#64748b" : "#fff", border: "none", borderRadius: 8, cursor: isLoading ? "wait" : "pointer", fontWeight: 700, fontSize: 12 }}
+          >
+            {isLoading ? "⏳" : "🔍"}
+          </button>
+        </div>
+
+        {/* Filters (split simulation) */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {FILTERS.map(f => (
+            <button key={f} onClick={() => handleFilterChange(f)}
+              style={{ padding: "4px 10px", background: state.filter === f ? typeColors[f] : "#0f172a", color: state.filter === f ? "#fff" : "#64748b", border: \`1px solid \${state.filter === f ? typeColors[f] : "#334155"}\`, borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 700 }}>
+              {filterEmoji[f]} {f}
+            </button>
+          ))}
+        </div>
+
+        {/* Controls */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          <button onClick={() => setFailNext(true)}
+            style={{ padding: "4px 10px", background: failNext ? "#7f1d1d" : "#1e293b", color: failNext ? "#fca5a5" : "#64748b", border: \`1px solid \${failNext ? "#ef4444" : "#334155"}\`, borderRadius: 6, cursor: "pointer", fontSize: 10 }}>
+            ⚠️ Следующий запрос упадёт
+          </button>
+          <button onClick={() => dispatch({ type: "RESET" })}
+            style={{ padding: "4px 10px", background: "#1e293b", color: "#64748b", border: "1px solid #334155", borderRadius: 6, cursor: "pointer", fontSize: 10 }}>
+            🔄 Сброс
+          </button>
+        </div>
+
+        {/* Results */}
+        <div style={{ background: "#0f172a", borderRadius: 10, padding: 12, marginBottom: 12, minHeight: 120 }}>
+          {isLoading && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 100, gap: 10 }}>
+              <div style={{ width: 24, height: 24, borderRadius: "50%", border: "3px solid #334155", borderTopColor: "#7c3aed", animation: "spin .8s linear infinite" }} />
+              <span style={{ color: "#f59e0b", fontSize: 12 }}>searchFx.pending = true</span>
+              <style>{\`@keyframes spin { to { transform: rotate(360deg) } }\`}</style>
+            </div>
+          )}
+          {!isLoading && state.error && (
+            <div style={{ textAlign: "center", padding: 16 }}>
+              <div style={{ fontSize: 28, marginBottom: 6 }}>❌</div>
+              <div style={{ color: "#ef4444", fontSize: 12 }}>{state.error}</div>
+            </div>
+          )}
+          {!isLoading && !state.error && state.results.map(r => (
+            <div key={r.id} onClick={() => handleSelect(r)}
+              style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", background: "#1e293b", borderRadius: 7, marginBottom: 5, cursor: "pointer" }}>
+              <span style={{ background: typeColors[r.type], color: "#fff", borderRadius: 4, fontSize: 9, padding: "2px 6px", fontWeight: 700 }}>{r.type}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ color: "#e2e8f0", fontSize: 12, fontWeight: 600 }}>{r.title}</div>
+                <div style={{ color: "#475569", fontSize: 10 }}>{r.subtitle}</div>
+              </div>
+            </div>
+          ))}
+          {!isLoading && !state.error && !state.results.length && state.status === "idle" && (
+            <div style={{ color: "#334155", fontSize: 12, textAlign: "center", padding: 16 }}>Введите запрос для поиска</div>
+          )}
+        </div>
+
+        {/* Event log — симуляция effector inspector */}
+        <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ flex: 1, background: "#0f172a", borderRadius: 8, padding: 10 }}>
+            <div style={{ color: "#475569", fontSize: 9, fontWeight: 700, marginBottom: 6 }}>📋 Event Log (effector inspector)</div>
+            {state.log.map((entry, i) => (
+              <div key={i} style={{ color: i === state.log.length - 1 ? "#7c3aed" : "#334155", fontSize: 9, lineHeight: 1.8 }}>{entry}</div>
+            ))}
+            {!state.log.length && <div style={{ color: "#1e293b", fontSize: 9 }}>Нет событий</div>}
+          </div>
+          {state.history.length > 0 && (
+            <div style={{ width: 130, background: "#0f172a", borderRadius: 8, padding: 10 }}>
+              <div style={{ color: "#475569", fontSize: 9, fontWeight: 700, marginBottom: 6 }}>📌 $history</div>
+              {state.history.map((h, i) => (
+                <div key={i} style={{ color: "#334155", fontSize: 8, lineHeight: 1.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

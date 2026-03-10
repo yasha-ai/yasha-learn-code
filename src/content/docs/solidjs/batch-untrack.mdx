@@ -1,0 +1,786 @@
+---
+title: "27. batch, untrack и createRoot"
+sidebar:
+  order: 27
+---
+import { Playground } from '@components/Playground'
+
+
+## 🔧 batch, untrack и createRoot
+
+Привет! 👋 Это продвинутый урок о низкоуровневых примитивах Solid.js, которые дают тебе точный контроль над реактивностью: когда обновления объединять, когда не подписываться, и как работает модель владения (ownership model).
+
+Думай об этих примитивах как о педалях в машине: большинство времени ты просто едешь (createSignal/createEffect), но иногда нужно нажать на сцепление (untrack), газ с тормозом одновременно (batch) или перезапустить двигатель (createRoot).
+
+---
+
+## 🔄 batch(): группировка обновлений
+
+По умолчанию каждое изменение сигнала немедленно уведомляет все зависимые компоненты. `batch()` откладывает все уведомления до конца блока:
+
+```tsx
+import { createSignal, createMemo, createEffect, batch } from 'solid-js';
+
+const [firstName, setFirstName] = createSignal('Яша');
+const [lastName, setLastName] = createSignal('Иванов');
+const fullName = createMemo(() => `${firstName()} ${lastName()}`);
+
+createEffect(() => {
+  console.log('fullName изменился:', fullName());
+});
+
+// ❌ БЕЗ batch — два отдельных уведомления
+setFirstName('Максим');    // → эффект запускается: "Максим Иванов"
+setLastName('Петров');     // → эффект запускается: "Максим Петров"
+// Итог: 2 обновления DOM (промежуточное состояние "Максим Иванов" мелькнуло)
+
+// ✅ С batch — одно уведомление
+batch(() => {
+  setFirstName('Максим');  // ← не уведомляет
+  setLastName('Петров');   // ← не уведомляет
+});
+// После batch: эффект запускается ОДИН РАЗ: "Максим Петров"
+// Итог: 1 обновление DOM
+```
+
+### Реальные случаи использования batch
+
+```tsx
+// Пример 1: Обновление нескольких связанных полей формы
+function resetForm() {
+  batch(() => {
+    setName('');
+    setEmail('');
+    setPhone('');
+    setErrors({});
+    setTouched({});
+    setSubmitting(false);
+  });
+  // Один рендер вместо 6!
+}
+
+// Пример 2: Загрузка данных с сервера
+async function fetchUserData(id: number) {
+  const data = await api.getUser(id);
+  batch(() => {
+    setUser(data.user);
+    setPermissions(data.permissions);
+    setPreferences(data.preferences);
+    setLoading(false);
+    setError(null);
+  });
+}
+
+// Пример 3: Оптимистичное обновление
+function optimisticToggle(itemId: number) {
+  batch(() => {
+    setItems(items => items.map(i =>
+      i.id === itemId ? { ...i, done: !i.done } : i
+    ));
+    setLastUpdated(Date.now());
+    setPendingCount(n => n + 1);
+  });
+}
+
+// Важно: batch — синхронный! Await внутри не работает
+batch(async () => {
+  setLoading(true);
+  await fetch('/api/data'); // ← batch закончится ДО await!
+  setData(result); // ← это обновление уже вне batch
+});
+```
+
+---
+
+## 🙈 untrack(): чтение без подписки
+
+`untrack()` позволяет читать сигнал внутри реактивного контекста, не создавая зависимости:
+
+```tsx
+import { createSignal, createEffect, untrack } from 'solid-js';
+
+const [count, setCount] = createSignal(0);
+const [logEnabled, setLogEnabled] = createSignal(true);
+
+// ❌ Оба сигнала создают зависимость
+createEffect(() => {
+  if (logEnabled()) {
+    console.log('Счётчик:', count()); // Запускается при изменении ОБОИХ
+  }
+});
+
+// ✅ Читаем count() без подписки
+createEffect(() => {
+  if (logEnabled()) { // ← зависимость от logEnabled
+    // count() читается, но эффект НЕ зависит от него
+    console.log('Счётчик:', untrack(() => count()));
+  }
+});
+// Теперь эффект запустится только при изменении logEnabled!
+
+// Ещё пример: снимок значения
+createEffect(() => {
+  const current = count(); // ← зависимость: эффект запустится при изменении
+  const snapshot = untrack(() => expensiveSignal()); // ← читаем без подписки
+  console.log('Изменился count:', current, 'snapshot:', snapshot);
+});
+```
+
+### Когда untrack спасает от бесконечных циклов
+
+```tsx
+const [a, setA] = createSignal(0);
+const [b, setB] = createSignal(0);
+
+// ❌ Потенциальный бесконечный цикл!
+createEffect(() => {
+  setB(a() + 1); // Читаем a — зависимость
+  // Если b тоже влияет на a — будет цикл
+});
+
+// ✅ Читаем предыдущее значение b без зависимости
+createEffect(() => {
+  const newB = a() + untrack(() => b()); // b не создаёт зависимость
+  setB(newB);
+});
+
+// Реальный случай: счётчик без подписки на себя
+const [history, setHistory] = createSignal<number[]>([]);
+const [count, setCount] = createSignal(0);
+
+createEffect(() => {
+  const c = count(); // ← зависимость
+  setHistory(untrack(() => [...history(), c])); // ← history без зависимости
+});
+```
+
+---
+
+## 🌳 Модель владения (Ownership Model)
+
+Solid использует дерево владения для автоматической очистки ресурсов:
+
+```
+Дерево владения:
+  Родительский компонент (Owner)
+  ├── createSignal → уничтожается вместе с родителем
+  ├── createEffect → уничтожается вместе с родителем
+  │   ├── createSignal (дочерний) → уничтожается когда эффект перезапускается
+  │   └── onCleanup → вызывается при перезапуске или уничтожении
+  └── Дочерний компонент (Child Owner)
+      └── createEffect → уничтожается когда дочерний компонент удалён
+```
+
+```tsx
+import { createRoot, getOwner, runWithOwner } from 'solid-js';
+
+// getOwner — получить текущего владельца
+function createManagedEffect() {
+  const owner = getOwner(); // Получаем текущий owner
+
+  // Создаём эффект в другом контексте, но с нашим владельцем
+  runWithOwner(owner, () => {
+    createEffect(() => {
+      // Этот эффект будет уничтожен вместе с owner
+      console.log('Управляемый эффект');
+    });
+  });
+}
+```
+
+---
+
+## 🔓 createRoot(): вычисления без владельца
+
+`createRoot` создаёт независимое реактивное дерево, которое не привязано ни к какому компоненту и не уничтожается автоматически:
+
+```tsx
+import { createRoot, createSignal, createEffect } from 'solid-js';
+
+// Случай 1: Синглтон-стор (живёт всё время приложения)
+const { count, increment } = createRoot(() => {
+  const [count, setCount] = createSignal(0);
+  return {
+    count,
+    increment: () => setCount(n => n + 1),
+  };
+});
+// Этот реактивный контекст живёт вечно — никто им не владеет
+
+// Случай 2: Управляемое время жизни
+const dispose = createRoot((dispose) => {
+  const [data, setData] = createSignal(null);
+
+  createEffect(() => {
+    console.log('data:', data());
+  });
+
+  // Возвращаем функцию очистки
+  return dispose;
+});
+
+// Позже — явно уничтожаем
+setTimeout(() => {
+  dispose(); // Все сигналы и эффекты внутри уничтожены
+}, 5000);
+
+// Случай 3: Тестирование сигналов вне компонентов
+function testSignal() {
+  createRoot(() => {
+    const [count, setCount] = createSignal(0);
+    const doubled = createMemo(() => count() * 2);
+
+    setCount(5);
+    console.assert(doubled() === 10, 'doubled должен быть 10');
+  });
+}
+```
+
+---
+
+## 🏃 runWithOwner() и getOwner()
+
+Позволяют создавать реактивные вычисления в произвольном контексте владения:
+
+```tsx
+import { createSignal, createEffect, getOwner, runWithOwner } from 'solid-js';
+
+// Паттерн: отложенное создание эффекта
+function ComponentWithDeferredEffect() {
+  const [count, setCount] = createSignal(0);
+  const owner = getOwner(); // Сохраняем владельца
+
+  // Создаём эффект после setTimeout (нет активного owner!)
+  setTimeout(() => {
+    runWithOwner(owner!, () => {
+      // Этот эффект привязан к компоненту, а не к setTimeout
+      createEffect(() => {
+        console.log('count из defer:', count());
+      });
+    });
+  }, 100);
+
+  return <button onClick={() => setCount(n => n + 1)}>+</button>;
+}
+
+// Паттерн: фабрика реактивных объектов
+function createReactiveResource<T>(fetchFn: () => Promise<T>) {
+  const owner = getOwner()!;
+  let dispose: () => void;
+
+  const { signal, cleanup } = createRoot((d) => {
+    dispose = d;
+    const [data, setData] = createSignal<T | null>(null);
+    runWithOwner(owner, () => {
+      createEffect(() => {
+        fetchFn().then(setData);
+      });
+    });
+    return { signal: data, cleanup: d };
+  });
+
+  return signal;
+}
+```
+
+---
+
+## 🚨 catchError() и onError(): обработка ошибок в эффектах
+
+```tsx
+import { createEffect } from 'solid-js';
+// catchError из 'solid-js'
+
+// Обработка ошибок в синхронных реактивных вычислениях
+import { catchError } from 'solid-js';
+
+function SafeComponent() {
+  const [data] = createResource(fetchData);
+
+  const result = catchError(
+    () => processData(data()), // Потенциально выбрасывает ошибку
+    (error) => {
+      console.error('Ошибка в реактивном вычислении:', error);
+      return null; // Fallback значение
+    }
+  );
+
+  return <div>{result()}</div>;
+}
+
+// onError: обработчик ошибок в дереве компонентов
+import { onError } from 'solid-js';
+
+function ParentComponent() {
+  // Ловим ошибки от ВСЕХ дочерних компонентов
+  onError((error) => {
+    console.error('Ошибка в дочернем компоненте:', error);
+    // Можно отправить в Sentry и т.д.
+  });
+
+  return <ChildComponent />;
+}
+
+// ErrorBoundary — декларативный вариант
+import { ErrorBoundary } from 'solid-js';
+
+function App() {
+  return (
+    <ErrorBoundary
+      fallback={(error, reset) => (
+        <div>
+          <p>Ошибка: {error.message}</p>
+          <button onClick={reset}>Попробовать снова</button>
+        </div>
+      )}
+    >
+      <RiskyComponent />
+    </ErrorBoundary>
+  );
+}
+```
+
+---
+
+## ⚠️ Типичные ловушки
+
+```tsx
+// ❌ batch с async — не работает как ожидается
+batch(async () => {
+  setA(1);
+  await somePromise; // batch ЗАКАНЧИВАЕТСЯ здесь, уведомления отправлены
+  setB(2); // Это уже отдельное обновление, вне batch
+});
+
+// ✅ batch только для синхронного кода
+async function asyncUpdate() {
+  const data = await somePromise;
+  batch(() => { // ← batch после await
+    setA(data.a);
+    setB(data.b);
+  });
+}
+
+// ❌ untrack в неправильном месте
+const doubled = createMemo(() =>
+  untrack(() => count()) * 2 // ← count не подписан! Memo никогда не обновится
+);
+
+// ✅ untrack только для "вторичных" значений
+createEffect(() => {
+  const primary = primarySignal(); // ← зависимость
+  const secondary = untrack(() => secondarySignal()); // ← без зависимости
+  doSomething(primary, secondary);
+});
+
+// ❌ createRoot без dispose — утечка памяти
+createRoot(() => {
+  createEffect(() => { /* heavy computation */ });
+  // Нет dispose — эффект живёт вечно!
+});
+
+// ✅ Сохраняй dispose для управления временем жизни
+let disposeRoot: () => void;
+createRoot((dispose) => {
+  disposeRoot = dispose;
+  createEffect(() => { /* heavy computation */ });
+});
+// Позже:
+// disposeRoot();
+```
+
+---
+
+## 🎯 Playground: Интерактивные демо batch, untrack, createRoot
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useCallback, useRef, useEffect } from "react";
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const RED = '#ef4444';
+
+type Tab = 'batch' | 'untrack' | 'ownership';
+
+// Симуляция реактивной системы
+class ReactiveSignal<T> {
+  private _value: T;
+  private _subscribers: Set<() => void> = new Set();
+  private _name: string;
+
+  constructor(initial: T, name: string) {
+    this._value = initial;
+    this._name = name;
+  }
+
+  get name() { return this._name; }
+
+  read(): T {
+    if (currentEffect) {
+      this._subscribers.add(currentEffect);
+    }
+    return this._value;
+  }
+
+  write(value: T | ((prev: T) => T), log: (msg: string, type?: string) => void) {
+    const next = typeof value === 'function' ? (value as (p: T) => T)(this._value) : value;
+    this._value = next;
+    log(\`📡 \${this._name} = \${JSON.stringify(next)}\`, 'signal');
+    if (!isBatching) {
+      this._notify(log);
+    } else {
+      batchQueue.add(this);
+    }
+    return this;
+  }
+
+  notify(log: (msg: string, type?: string) => void) {
+    this._notify(log);
+  }
+
+  private _notify(log: (msg: string, type?: string) => void) {
+    this._subscribers.forEach(fn => {
+      log(\`  ↳ уведомлён подписчик\`, 'effect');
+      fn();
+    });
+  }
+}
+
+let currentEffect: (() => void) | null = null;
+let isBatching = false;
+const batchQueue = new Set<{ notify: (l: any) => void }>();
+
+// ===== BATCH DEMO =====
+function BatchDemo() {
+  const [log, setLog] = useState<{ msg: string; type: string; id: number }[]>([]);
+  const [firstName, setFirstName] = useState('Яша');
+  const [lastName, setLastName] = useState('Иванов');
+  const [age, setAge] = useState(25);
+  const [updateCount, setUpdateCount] = useState(0);
+  const logId = useRef(0);
+
+  const addLog = useCallback((msg: string, type = 'info') => {
+    setLog(prev => [...prev.slice(-12), { msg, type, id: logId.current++ }]);
+  }, []);
+
+  const updateWithoutBatch = () => {
+    addLog('=== БЕЗ batch ===', 'header');
+    setFirstName('Максим');
+    addLog('setFirstName("Максим") → рендер #1', 'render');
+    setUpdateCount(n => n + 1);
+    setLastName('Петров');
+    addLog('setLastName("Петров") → рендер #2', 'render');
+    setUpdateCount(n => n + 1);
+    setAge(30);
+    addLog('setAge(30) → рендер #3', 'render');
+    setUpdateCount(n => n + 1);
+    addLog('Итого: 3 рендера!', 'warning');
+  };
+
+  const updateWithBatch = () => {
+    addLog('=== С batch() ===', 'header');
+    // Симулируем batch: группируем изменения
+    const updates = [
+      () => { setFirstName('Алексей'); addLog('  setFirstName("Алексей") — в очереди', 'signal'); },
+      () => { setLastName('Смирнов'); addLog('  setLastName("Смирнов") — в очереди', 'signal'); },
+      () => { setAge(28); addLog('  setAge(28) — в очереди', 'signal'); },
+    ];
+    // Выполняем все синхронно, один рендер в конце
+    updates.forEach(fn => fn());
+    setUpdateCount(n => n + 1);
+    addLog('batch() закончен → рендер #1 (всего!)', 'render');
+    addLog('Итого: 1 рендер!', 'success');
+  };
+
+  const logColors: Record<string, string> = {
+    header: SOLID_LIGHT,
+    render: RED,
+    signal: ORANGE,
+    effect: MUTED,
+    warning: ORANGE,
+    success: GREEN,
+    info: TEXT,
+  };
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '12px' }}>
+      <div style={{ background: CARD, borderRadius: '8px', padding: '12px', marginBottom: '10px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, fontSize: '11px', marginBottom: '8px' }}>Текущие значения:</div>
+        <div style={{ color: TEXT }}>{firstName} {lastName}, {age} лет</div>
+        <div style={{ color: MUTED, fontSize: '10px', marginTop: '4px' }}>Всего рендеров: {updateCount}</div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+        <button onClick={updateWithoutBatch}
+          style={{ flex: 1, background: RED + '22', color: RED, border: \`1px solid \${RED}44\`, borderRadius: '8px', padding: '8px', cursor: 'pointer', fontSize: '11px' }}>
+          ❌ 3 обновления без batch
+        </button>
+        <button onClick={updateWithBatch}
+          style={{ flex: 1, background: GREEN + '22', color: GREEN, border: \`1px solid \${GREEN}44\`, borderRadius: '8px', padding: '8px', cursor: 'pointer', fontSize: '11px' }}>
+          ✅ 3 обновления с batch
+        </button>
+      </div>
+
+      <div style={{ background: BG, borderRadius: '6px', padding: '8px', maxHeight: '140px', overflow: 'auto', border: \`1px solid \${BORDER}\` }}>
+        {log.length === 0 ? <div style={{ color: MUTED }}>// Нажми кнопку чтобы увидеть разницу...</div> :
+          log.map(l => (
+            <div key={l.id} style={{ color: logColors[l.type] || TEXT, marginBottom: '2px' }}>{l.msg}</div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
+
+// ===== UNTRACK DEMO =====
+function UntrackDemo() {
+  const [primary, setPrimary] = useState(0);
+  const [secondary, setSecondary] = useState(100);
+  const [trackSecondary, setTrackSecondary] = useState(false);
+  const [log, setLog] = useState<{ msg: string; type: string; id: number }[]>([]);
+  const logId = useRef(0);
+  const effectRuns = useRef(0);
+
+  const addLog = (msg: string, type = 'info') => {
+    setLog(prev => [...prev.slice(-8), { msg, type, id: logId.current++ }]);
+  };
+
+  // Симуляция эффекта
+  const effectRef = useRef({ primary, secondary, trackSecondary });
+  useEffect(() => {
+    const prev = effectRef.current;
+    const primaryChanged = prev.primary !== primary;
+    const secondaryChanged = prev.secondary !== secondary;
+    const trackChanged = prev.trackSecondary !== trackSecondary;
+
+    if (primaryChanged || (trackSecondary && secondaryChanged) || trackChanged) {
+      effectRuns.current += 1;
+      if (primaryChanged) {
+        addLog(\`📌 primary изменился → эффект запустился #\${effectRuns.current}\`, 'render');
+      }
+      if (trackSecondary && secondaryChanged) {
+        addLog(\`📌 secondary изменился → эффект запустился #\${effectRuns.current}\`, 'render');
+      }
+      addLog(\`  primary = \${primary}, secondary = \${trackSecondary ? secondary : '(untrack)'} \${untracked => secondary}\`, 'info');
+    }
+    effectRef.current = { primary, secondary, trackSecondary };
+  }, [primary, trackSecondary ? secondary : null, trackSecondary]);
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '12px' }}>
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', marginBottom: '10px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, fontSize: '11px', marginBottom: '8px' }}>Режим отслеживания secondary:</div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          <button onClick={() => setTrackSecondary(false)}
+            style={{ flex: 1, background: !trackSecondary ? GREEN + '22' : BG, color: !trackSecondary ? GREEN : MUTED, border: \`1px solid \${!trackSecondary ? GREEN : BORDER}44\`, borderRadius: '6px', padding: '6px', cursor: 'pointer', fontSize: '11px' }}>
+            untrack(secondary)
+          </button>
+          <button onClick={() => setTrackSecondary(true)}
+            style={{ flex: 1, background: trackSecondary ? RED + '22' : BG, color: trackSecondary ? RED : MUTED, border: \`1px solid \${trackSecondary ? RED : BORDER}44\`, borderRadius: '6px', padding: '6px', cursor: 'pointer', fontSize: '11px' }}>
+            track(secondary)
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px' }}>
+        <div style={{ background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${SOLID_BLUE}44\` }}>
+          <div style={{ color: SOLID_LIGHT, fontSize: '10px', marginBottom: '6px' }}>primary (с подпиской)</div>
+          <div style={{ fontSize: '24px', color: SOLID_BLUE, fontWeight: 'bold', textAlign: 'center', marginBottom: '6px' }}>{primary}</div>
+          <div style={{ display: 'flex', gap: '4px' }}>
+            <button onClick={() => { setPrimary(n => n - 1); addLog(\`setPrimary(\${primary - 1})\`, 'signal'); }} style={{ flex: 1, background: BG, color: MUTED, border: \`1px solid \${BORDER}\`, borderRadius: '4px', padding: '3px', cursor: 'pointer' }}>−</button>
+            <button onClick={() => { setPrimary(n => n + 1); addLog(\`setPrimary(\${primary + 1})\`, 'signal'); }} style={{ flex: 1, background: SOLID_BLUE, color: '#fff', border: 'none', borderRadius: '4px', padding: '3px', cursor: 'pointer' }}>+</button>
+          </div>
+        </div>
+        <div style={{ background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${trackSecondary ? RED : GREEN}44\` }}>
+          <div style={{ color: trackSecondary ? RED : GREEN, fontSize: '10px', marginBottom: '6px' }}>
+            secondary ({trackSecondary ? 'ОТСЛЕЖИВАЕТСЯ' : 'untrack'})
+          </div>
+          <div style={{ fontSize: '24px', color: trackSecondary ? RED : GREEN, fontWeight: 'bold', textAlign: 'center', marginBottom: '6px' }}>{secondary}</div>
+          <div style={{ display: 'flex', gap: '4px' }}>
+            <button onClick={() => { setSecondary(n => n - 10); addLog(\`setSecondary(\${secondary - 10})\`, 'signal'); }} style={{ flex: 1, background: BG, color: MUTED, border: \`1px solid \${BORDER}\`, borderRadius: '4px', padding: '3px', cursor: 'pointer' }}>−10</button>
+            <button onClick={() => { setSecondary(n => n + 10); addLog(\`setSecondary(\${secondary + 10})\`, 'signal'); }} style={{ flex: 1, background: trackSecondary ? RED + '33' : GREEN + '22', color: trackSecondary ? RED : GREEN, border: 'none', borderRadius: '4px', padding: '3px', cursor: 'pointer' }}>+10</button>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ background: BG, borderRadius: '6px', padding: '8px', maxHeight: '100px', overflow: 'auto', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: MUTED, fontSize: '10px', marginBottom: '4px' }}>Эффект запустился: {effectRuns.current} раз</div>
+        {log.slice(-5).map(l => (
+          <div key={l.id} style={{ color: l.type === 'render' ? ORANGE : l.type === 'signal' ? SOLID_LIGHT : TEXT, fontSize: '11px' }}>{l.msg}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ===== OWNERSHIP DEMO =====
+interface OwnerNode {
+  id: string;
+  label: string;
+  children: OwnerNode[];
+  alive: boolean;
+  color: string;
+}
+
+function OwnershipDemo() {
+  const [tree, setTree] = useState<OwnerNode>({
+    id: 'root',
+    label: '🌳 createRoot (App)',
+    children: [
+      {
+        id: 'comp-a',
+        label: '📦 Counter (компонент)',
+        color: SOLID_BLUE,
+        alive: true,
+        children: [
+          { id: 'sig-1', label: '⚡ createSignal(count)', color: SOLID_LIGHT, alive: true, children: [] },
+          { id: 'memo-1', label: '🔗 createMemo(doubled)', color: GREEN, alive: true, children: [] },
+          { id: 'eff-1', label: '🔄 createEffect', color: ORANGE, alive: true, children: [] },
+        ],
+      },
+      {
+        id: 'comp-b',
+        label: '📦 Timer (компонент)',
+        color: '#f472b6',
+        alive: true,
+        children: [
+          { id: 'sig-2', label: '⚡ createSignal(time)', color: SOLID_LIGHT, alive: true, children: [] },
+          { id: 'eff-2', label: '🔄 createEffect (interval)', color: ORANGE, alive: true, children: [] },
+        ],
+      },
+    ],
+    alive: true,
+    color: MUTED,
+  });
+
+  const [log, setLog] = useState<string[]>([]);
+
+  const addLog = (msg: string) => setLog(prev => [...prev.slice(-5), msg]);
+
+  const killNode = (id: string) => {
+    const kill = (node: OwnerNode): OwnerNode => {
+      if (node.id === id) {
+        addLog(\`💀 \${node.label} уничтожен\`);
+        const killAll = (n: OwnerNode): OwnerNode => ({
+          ...n, alive: false,
+          children: n.children.map(killAll)
+        });
+        return killAll(node);
+      }
+      return { ...node, children: node.children.map(kill) };
+    };
+    setTree(prev => kill(prev));
+  };
+
+  const revive = () => {
+    const reviveAll = (n: OwnerNode): OwnerNode => ({
+      ...n, alive: true, children: n.children.map(reviveAll)
+    });
+    setTree(reviveAll);
+    setLog([]);
+  };
+
+  const renderNode = (node: OwnerNode, depth = 0): React.ReactNode => (
+    <div key={node.id} style={{ marginLeft: depth * 16 }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '6px',
+        padding: '5px 8px', background: node.alive ? CARD : BG,
+        borderRadius: '6px', marginBottom: '3px',
+        border: \`1px solid \${node.alive ? node.color + '44' : BORDER}44\`,
+        opacity: node.alive ? 1 : 0.4,
+        transition: 'all 0.3s',
+      }}>
+        <span style={{ color: node.alive ? node.color : MUTED, fontSize: '12px', flex: 1 }}>{node.label}</span>
+        {node.children.length > 0 && node.alive && (
+          <button onClick={() => killNode(node.id)}
+            style={{ background: RED + '22', color: RED, border: 'none', borderRadius: '4px', padding: '2px 6px', cursor: 'pointer', fontSize: '10px' }}>
+            dispose()
+          </button>
+        )}
+        {!node.alive && <span style={{ color: RED, fontSize: '10px' }}>уничтожен</span>}
+      </div>
+      {node.children.map(child => renderNode(child, depth + 1))}
+    </div>
+  );
+
+  return (
+    <div style={{ fontFamily: 'monospace', fontSize: '12px' }}>
+      <div style={{ background: CARD, borderRadius: '8px', padding: '10px', marginBottom: '10px', border: \`1px solid \${BORDER}\` }}>
+        <div style={{ color: SOLID_LIGHT, fontSize: '11px', marginBottom: '4px' }}>
+          Дерево владения (Ownership Tree)
+        </div>
+        <div style={{ color: MUTED, fontSize: '10px' }}>
+          dispose() уничтожает компонент и ВСЕ его дочерние сигналы/эффекты
+        </div>
+      </div>
+
+      <div style={{ marginBottom: '10px' }}>
+        {renderNode(tree)}
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+        <button onClick={revive}
+          style={{ flex: 1, background: GREEN + '22', color: GREEN, border: \`1px solid \${GREEN}44\`, borderRadius: '6px', padding: '6px', cursor: 'pointer', fontSize: '11px' }}>
+          ↺ Восстановить всё
+        </button>
+      </div>
+
+      <div style={{ background: BG, borderRadius: '6px', padding: '8px', maxHeight: '80px', overflow: 'auto', border: \`1px solid \${BORDER}\` }}>
+        {log.length === 0 ? <div style={{ color: MUTED, fontSize: '11px' }}>// Нажми dispose() чтобы увидеть каскадное уничтожение...</div> :
+          log.map((l, i) => <div key={i} style={{ color: RED, fontSize: '11px' }}>{l}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+
+// ===== MAIN =====
+const TABS: { id: Tab; label: string; icon: string; desc: string }[] = [
+  { id: 'batch', label: 'batch()', icon: '🔄', desc: 'Группировка обновлений' },
+  { id: 'untrack', label: 'untrack()', icon: '🙈', desc: 'Чтение без подписки' },
+  { id: 'ownership', label: 'createRoot', icon: '🌳', desc: 'Модель владения' },
+];
+
+export default function App() {
+  const [tab, setTab] = useState<Tab>('batch');
+
+  return (
+    <div style={{ background: BG, color: TEXT, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ maxWidth: '520px', margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold', color: SOLID_BLUE }}>
+            🔧 Продвинутые примитивы Solid
+          </div>
+          <div style={{ color: MUTED, fontSize: '12px', marginTop: '4px' }}>
+            batch · untrack · createRoot · runWithOwner
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px', marginBottom: '16px' }}>
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              style={{ background: tab === t.id ? SOLID_BLUE : CARD, color: tab === t.id ? '#fff' : MUTED, border: \`1px solid \${tab === t.id ? SOLID_BLUE : BORDER}\`, borderRadius: '10px', padding: '8px 4px', cursor: 'pointer', textAlign: 'center' }}>
+              <div style={{ fontSize: '18px' }}>{t.icon}</div>
+              <div style={{ fontSize: '11px', fontWeight: 'bold' }}>{t.label}</div>
+              <div style={{ fontSize: '9px', opacity: 0.8, marginTop: '2px' }}>{t.desc}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: CARD, borderRadius: '12px', padding: '16px', border: \`1px solid \${BORDER}\` }}>
+          {tab === 'batch' && <BatchDemo />}
+          {tab === 'untrack' && <UntrackDemo />}
+          {tab === 'ownership' && <OwnershipDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }}
+/>

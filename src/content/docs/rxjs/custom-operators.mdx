@@ -1,0 +1,452 @@
+---
+title: "14. Создание своих операторов"
+sidebar:
+  order: 15
+---
+import { Playground } from '@components/Playground'
+
+
+## 15. Создание своих операторов 🔧
+
+Привет! Яша снова здесь. Один из признаков настоящего мастерства в RxJS — умение создавать **собственные операторы**. Это позволяет инкапсулировать повторяющуюся логику, делать цепочки читаемыми и переиспользовать код между проектами.
+
+### Как устроен оператор RxJS
+
+Любой оператор RxJS — это просто **функция, которая принимает Observable и возвращает Observable**.
+
+```typescript
+import { Observable } from 'rxjs';
+
+// Простейший кастомный оператор — вручную
+function double() {
+  return function<T extends number>(source: Observable<T>): Observable<number> {
+    return new Observable<number>(observer => {
+      const sub = source.subscribe({
+        next: value => observer.next(value * 2),
+        error: err => observer.error(err),
+        complete: () => observer.complete(),
+      });
+      return () => sub.unsubscribe(); // обязательно!
+    });
+  };
+}
+
+// Использование
+of(1, 2, 3).pipe(double()).subscribe(console.log); // 2, 4, 6
+```
+
+---
+
+### Правильный способ: через pipe()
+
+Лучший подход — использовать существующие операторы внутри кастомного. `pipe()` делает это элегантно:
+
+```typescript
+import { pipe } from 'rxjs';
+import { filter, map } from 'rxjs/operators';
+import { MonoTypeOperatorFunction, OperatorFunction } from 'rxjs';
+
+// MonoTypeOperatorFunction<T> — вход и выход одного типа
+function filterNil<T>(): MonoTypeOperatorFunction<T | null | undefined> {
+  return filter((value): value is T => value !== null && value !== undefined);
+}
+
+// OperatorFunction<T, R> — вход типа T, выход типа R
+function parseJSON<T>(): OperatorFunction<string, T> {
+  return pipe(
+    map(str => JSON.parse(str) as T)
+  );
+}
+
+// Использование
+of(1, null, 3, undefined, 5).pipe(
+  filterNil<number>()
+).subscribe(console.log); // 1, 3, 5
+```
+
+---
+
+### Типы операторов
+
+```typescript
+import { MonoTypeOperatorFunction, OperatorFunction, UnaryFunction } from 'rxjs';
+
+// MonoTypeOperatorFunction<T> — тип входа = тип выхода
+// Пример: filter, tap, distinctUntilChanged
+function myFilter<T>(pred: (v: T) => boolean): MonoTypeOperatorFunction<T> {
+  return filter(pred);
+}
+
+// OperatorFunction<T, R> — преобразует тип
+// Пример: map, switchMap, mergeMap
+function toString<T>(): OperatorFunction<T, string> {
+  return map(v => String(v));
+}
+
+// UnaryFunction<T, R> — для pipe() вне контекста Observable
+// Пример: чистые трансформации данных
+const double: UnaryFunction<number, number> = n => n * 2;
+```
+
+---
+
+### Пример: `distinctUntilChangedDeep`
+
+Стандартный `distinctUntilChanged` сравнивает ссылки. Для объектов нужно глубокое сравнение:
+
+```typescript
+import { pipe } from 'rxjs';
+import { distinctUntilChanged } from 'rxjs/operators';
+import { MonoTypeOperatorFunction } from 'rxjs';
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function distinctUntilChangedDeep<T>(): MonoTypeOperatorFunction<T> {
+  return distinctUntilChanged((prev, curr) => deepEqual(prev, curr));
+}
+
+// Без оператора — каждый рендер новый объект → всегда "новые" данные
+user$.pipe(
+  distinctUntilChangedDeep()
+).subscribe(user => heavyRender(user)); // только при реальном изменении
+```
+
+---
+
+### Пример: `logOperator`
+
+Дебаг-оператор, который логирует всё что проходит через него:
+
+```typescript
+import { pipe } from 'rxjs';
+import { tap } from 'rxjs/operators';
+import { MonoTypeOperatorFunction } from 'rxjs';
+
+function logOperator<T>(label: string): MonoTypeOperatorFunction<T> {
+  return pipe(
+    tap({
+      subscribe: () => console.log(\`[\${label}] 🔌 подписка\`),
+      next: v => console.log(\`[${label}] ▶ next:`, v),
+      error: e => console.error(\`[${label}] ❌ error:`, e),
+      complete: () => console.log(\`[\${label}] ✅ complete\`),
+      unsubscribe: () => console.log(\`[\${label}] 🔌 отписка\`),
+      finalize: () => console.log(\`[\${label}] 🏁 finalize\`),
+    })
+  );
+}
+
+// Использование — идеально для отладки
+source$.pipe(
+  logOperator('source'),
+  map(transformData),
+  logOperator('после map'),
+  filter(isValid),
+  logOperator('после filter'),
+).subscribe();
+```
+
+---
+
+### Пример: `filterNil`
+
+```typescript
+import { filter } from 'rxjs/operators';
+import { OperatorFunction } from 'rxjs';
+
+// Типизированный guard для null/undefined
+function filterNil<T>(): OperatorFunction<T | null | undefined, T> {
+  return filter((v): v is T => v != null);
+}
+
+// Теперь TypeScript знает что после filterNil() значение не может быть null
+const names$ = of('Яша', null, 'Петя', undefined, 'Маша').pipe(
+  filterNil<string>()
+);
+// Тип: Observable<string> (не Observable<string | null | undefined>)
+```
+
+---
+
+### Пример: `rateLimit`
+
+Кастомный rate-limiter: пропускает не более N значений в указанный промежуток времени.
+
+```typescript
+import { pipe, Subject, timer } from 'rxjs';
+import { mergeMap, take, bufferTime, concatMap, from } from 'rxjs/operators';
+import { OperatorFunction } from 'rxjs';
+
+function rateLimit<T>(count: number, windowMs: number): OperatorFunction<T, T> {
+  return pipe(
+    bufferTime(windowMs),                // собираем все значения за промежуток
+    concatMap(batch => from(batch.slice(0, count))), // берём не более N
+  );
+}
+
+// Не более 3 значений каждые 2 секунды
+interval(200).pipe(
+  rateLimit(3, 2000)
+).subscribe(v => console.log('rate-limited:', v));
+// 0, 1, 2 (пауза 2с) 3, 4, 5 (пауза 2с) ...
+```
+
+---
+
+### Паттерн: оператор-конфигуратор
+
+Операторы могут принимать сложные конфигурации и быть параметризованными:
+
+```typescript
+interface RetryConfig {
+  maxAttempts: number;
+  delay: number;
+  onRetry?: (attempt: number, error: unknown) => void;
+}
+
+function retryWithDelay<T>(config: RetryConfig): MonoTypeOperatorFunction<T> {
+  const { maxAttempts, delay: delayMs, onRetry } = config;
+  
+  return retryWhen(errors$ =>
+    errors$.pipe(
+      scan((attempt, error) => {
+        if (attempt >= maxAttempts) throw error;
+        onRetry?.(attempt, error);
+        return attempt + 1;
+      }, 0),
+      delayWhen(attempt => timer(attempt * delayMs))
+    )
+  );
+}
+
+// Элегантное использование
+apiRequest$.pipe(
+  retryWithDelay({
+    maxAttempts: 3,
+    delay: 1000,
+    onRetry: (attempt, err) => analytics.track('retry', { attempt }),
+  })
+).subscribe(handleResponse);
+```
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from 'react';
+import { Subject, interval, pipe, from } from 'rxjs';
+import { bufferTime, concatMap, map, filter, tap, scan } from 'rxjs/operators';
+import type { OperatorFunction, MonoTypeOperatorFunction } from 'rxjs';
+
+// ─── Кастомные операторы ─────────────────────────────────────────────────────
+
+// 1. filterNil — убирает null/undefined со строгой типизацией
+function filterNil<T>(): OperatorFunction<T | null | undefined, T> {
+  return filter((v): v is T => v != null);
+}
+
+// 2. rateLimit — не более N значений за windowMs миллисекунд
+function rateLimit<T>(count: number, windowMs: number): OperatorFunction<T, T> {
+  return pipe(
+    bufferTime(windowMs),
+    concatMap((batch: T[]) => from(batch.slice(0, count))),
+  );
+}
+
+// 3. logOperator — логирует все события потока
+function logOperator<T>(label: string, addLog: (msg: string) => void): MonoTypeOperatorFunction<T> {
+  return tap({
+    next: v => addLog(\`[\${label}] ▶ \${JSON.stringify(v)}\`),
+    error: e => addLog(\`[\${label}] ❌ \${e.message}\`),
+    complete: () => addLog(\`[\${label}] ✅ complete\`),
+  });
+}
+
+// ─── Интерфейс ────────────────────────────────────────────────────────────────
+
+interface LogEntry {
+  id: number;
+  text: string;
+  type: 'rate' | 'nil' | 'source';
+}
+
+type Demo = 'rateLimit' | 'filterNil';
+
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('rateLimit');
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [rateConfig, setRateConfig] = useState({ count: 3, window: 2000 });
+  const logIdRef = useRef(0);
+
+  const addLog = (text: string, type: LogEntry['type'] = 'source') => {
+    setLogs(prev => [...prev.slice(-24), { id: logIdRef.current++, text, type }]);
+  };
+
+  useEffect(() => {
+    setLogs([]);
+    logIdRef.current = 0;
+
+    if (demo === 'rateLimit') {
+      // Источник: значения каждые 300мс
+      const sub = interval(300).pipe(
+        logOperator<number>('входящий', t => addLog(t, 'source')),
+        rateLimit<number>(rateConfig.count, rateConfig.window),
+        logOperator<number>('после rateLimit', t => addLog(t, 'rate')),
+      ).subscribe();
+
+      return () => sub.unsubscribe();
+    }
+
+    if (demo === 'filterNil') {
+      // Источник со случайными null
+      const subject$ = new Subject<number | null>();
+      let i = 0;
+      const timer = setInterval(() => {
+        const value: number | null = Math.random() < 0.35 ? null : i++;
+        addLog(\`входящий: \${value === null ? 'null' : value}\`, 'source');
+        subject$.next(value);
+      }, 600);
+
+      const sub = subject$.pipe(
+        filterNil<number>(),
+        logOperator<number>('после filterNil', t => addLog(t, 'nil')),
+      ).subscribe();
+
+      return () => { clearInterval(timer); sub.unsubscribe(); };
+    }
+  }, [demo, rateConfig.count, rateConfig.window]);
+
+  const colors: Record<LogEntry['type'], string> = {
+    source: '#64748b',
+    rate:   '#818cf8',
+    nil:    '#4ade80',
+  };
+
+  return (
+    <div style={{
+      background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace',
+      minHeight: '100vh', padding: '24px',
+    }}>
+      <h2 style={{ color: '#818cf8', margin: '0 0 6px' }}>
+        🔧 Кастомные операторы RxJS
+      </h2>
+      <p style={{ color: '#94a3b8', margin: '0 0 20px', fontSize: '12px' }}>
+        Собственные операторы через pipe() — переиспользуемые и типизированные.
+      </p>
+
+      {/* Переключатель демо */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+        {([
+          ['rateLimit', '⏱️ rateLimit'],
+          ['filterNil', '🚫 filterNil'],
+        ] as const).map(([d, label]) => (
+          <button key={d} onClick={() => setDemo(d)} style={{
+            padding: '8px 16px', borderRadius: '8px', border: 'none',
+            cursor: 'pointer', fontSize: '13px', fontWeight: 'bold',
+            background: demo === d ? '#6366f1' : '#1e293b',
+            color: demo === d ? 'white' : '#64748b',
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {/* Конфиг rateLimit */}
+      {demo === 'rateLimit' && (
+        <div style={{
+          background: '#1e293b', borderRadius: '10px', padding: '14px',
+          marginBottom: '16px', display: 'flex', gap: '24px', alignItems: 'center',
+          fontSize: '12px',
+        }}>
+          <div>
+            <label style={{ color: '#94a3b8' }}>Лимит: </label>
+            <strong style={{ color: '#818cf8' }}>{rateConfig.count}</strong>
+            {' '}значений
+            <input
+              type="range" min={1} max={8} value={rateConfig.count}
+              onChange={e => setRateConfig(c => ({ ...c, count: +e.target.value }))}
+              style={{ marginLeft: '8px', width: '80px', accentColor: '#818cf8' }}
+            />
+          </div>
+          <div>
+            <label style={{ color: '#94a3b8' }}>Окно: </label>
+            <strong style={{ color: '#818cf8' }}>{rateConfig.window}мс</strong>
+            <input
+              type="range" min={500} max={4000} step={500} value={rateConfig.window}
+              onChange={e => setRateConfig(c => ({ ...c, window: +e.target.value }))}
+              style={{ marginLeft: '8px', width: '80px', accentColor: '#818cf8' }}
+            />
+          </div>
+          <div style={{ color: '#64748b' }}>
+            Источник тикает каждые 300мс
+          </div>
+        </div>
+      )}
+
+      {demo === 'filterNil' && (
+        <div style={{
+          background: '#1e293b', borderRadius: '10px', padding: '12px 16px',
+          marginBottom: '16px', fontSize: '12px', color: '#64748b',
+        }}>
+          ≈35% значений — <code style={{ color: '#f87171' }}>null</code>.
+          filterNil() убирает их и сужает тип: <code style={{ color: '#4ade80' }}>Observable&lt;number&gt;</code>
+        </div>
+      )}
+
+      {/* Легенда */}
+      <div style={{ display: 'flex', gap: '16px', marginBottom: '10px', fontSize: '11px' }}>
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+          <div style={{ width: 10, height: 10, borderRadius: '2px', background: colors.source }} />
+          <span style={{ color: '#64748b' }}>входящий поток</span>
+        </div>
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+          <div style={{ width: 10, height: 10, borderRadius: '2px', background: demo === 'rateLimit' ? colors.rate : colors.nil }} />
+          <span style={{ color: '#64748b' }}>после {demo === 'rateLimit' ? 'rateLimit' : 'filterNil'}</span>
+        </div>
+      </div>
+
+      {/* Лог */}
+      <div style={{
+        background: '#1e293b', borderRadius: '12px', padding: '12px',
+        minHeight: '260px', maxHeight: '380px', overflowY: 'auto',
+      }}>
+        {logs.map(log => (
+          <div key={log.id} style={{
+            padding: '3px 8px', borderRadius: '4px', fontSize: '11px',
+            color: colors[log.type],
+            borderLeft: \`2px solid \${colors[log.type]}\`,
+            marginBottom: '3px', background: '#0f172a',
+          }}>
+            {log.text}
+          </div>
+        ))}
+      </div>
+
+      {/* Код оператора */}
+      <div style={{
+        marginTop: '14px', background: '#1e293b', borderRadius: '10px',
+        padding: '14px', fontSize: '11px',
+      }}>
+        <div style={{ color: '#94a3b8', marginBottom: '8px', fontWeight: 'bold' }}>
+          Код оператора:
+        </div>
+        {demo === 'rateLimit' ? (
+          <pre style={{ margin: 0, color: '#a78bfa', lineHeight: 1.5 }}>
+{"function rateLimit<T>(count: number, windowMs: number): OperatorFunction<T, T> {\n  return pipe(\n    bufferTime(windowMs),\n    concatMap((batch: T[]) => from(batch.slice(0, count))),\n  );\n}"}
+          </pre>
+        ) : (
+          <pre style={{ margin: 0, color: '#a78bfa', lineHeight: 1.5 }}>
+{"function filterNil<T>(): OperatorFunction<T | null | undefined, T> {\n  return filter((v): v is T => v != null);\n}"}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

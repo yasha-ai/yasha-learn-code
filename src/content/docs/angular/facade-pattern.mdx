@@ -1,0 +1,630 @@
+---
+title: "61. Паттерн Facade"
+sidebar:
+  order: 64
+---
+import { Playground } from '@components/Playground'
+
+
+## 64. Паттерн Facade 🎭
+
+Привет! Яша здесь. Facade — один из самых полезных паттернов в Angular. Он прячет сложность NgRx/NGXS за простым API сервиса. Разберём как это делается, почему это важно и как тестировать фасады 🚀
+
+---
+
+### Что такое Facade паттерн
+
+Представь: у тебя NgRx с actions, reducers, effects, selectors. Компонент должен знать ВСЁ это.
+
+**Без Facade** (компонент знает про NgRx):
+```typescript
+// Компонент напрямую работает с NgRx
+constructor(
+  private store: Store<AppState>,
+  private actions$: Actions,
+) {}
+
+ngOnInit() {
+  this.users$ = this.store.select(selectUsers);
+  this.loading$ = this.store.select(selectUsersLoading);
+  this.store.dispatch(UsersActions.loadUsers({ page: 1 }));
+}
+
+deleteUser(id: string) {
+  this.store.dispatch(UsersActions.deleteUser({ id }));
+}
+```
+
+**С Facade** (компонент не знает про NgRx):
+```typescript
+// Компонент знает только про UsersFacade
+constructor(private usersFacade: UsersFacade) {}
+
+ngOnInit() {
+  this.users$ = this.usersFacade.users$;
+  this.usersFacade.loadUsers();
+}
+
+deleteUser(id: string) {
+  this.usersFacade.deleteUser(id);
+}
+```
+
+Facade — это **anti-corruption layer**: компонент не зависит от реализации стейт-менеджмента.
+
+---
+
+### NgRx Facade: полная реализация
+
+```typescript
+// users.facade.ts
+import { Injectable, inject } from '@angular/core';
+import { Store } from '@ngrx/store';
+import { Observable } from 'rxjs';
+import * as UsersActions from './store/users.actions';
+import * as UsersSelectors from './store/users.selectors';
+import { User } from './user.model';
+
+@Injectable({ providedIn: 'root' })
+export class UsersFacade {
+  private store = inject(Store);
+
+  // ─── Selectors (публичные Observable) ─────────────────────────────────────
+  readonly users$: Observable<User[]> = this.store.select(UsersSelectors.selectAllUsers);
+  readonly selectedUser$: Observable<User | null> = this.store.select(UsersSelectors.selectSelectedUser);
+  readonly loading$: Observable<boolean> = this.store.select(UsersSelectors.selectUsersLoading);
+  readonly error$: Observable<string | null> = this.store.select(UsersSelectors.selectUsersError);
+  readonly totalCount$: Observable<number> = this.store.select(UsersSelectors.selectUsersTotalCount);
+
+  // ─── Actions (публичные методы) ───────────────────────────────────────────
+  loadUsers(page = 1, limit = 20): void {
+    this.store.dispatch(UsersActions.loadUsers({ page, limit }));
+  }
+
+  loadUserById(id: string): void {
+    this.store.dispatch(UsersActions.loadUser({ id }));
+  }
+
+  selectUser(id: string): void {
+    this.store.dispatch(UsersActions.selectUser({ id }));
+  }
+
+  createUser(user: Omit<User, 'id'>): void {
+    this.store.dispatch(UsersActions.createUser({ user }));
+  }
+
+  updateUser(id: string, changes: Partial<User>): void {
+    this.store.dispatch(UsersActions.updateUser({ id, changes }));
+  }
+
+  deleteUser(id: string): void {
+    this.store.dispatch(UsersActions.deleteUser({ id }));
+  }
+
+  clearSelection(): void {
+    this.store.dispatch(UsersActions.clearSelectedUser());
+  }
+
+  resetError(): void {
+    this.store.dispatch(UsersActions.resetUsersError());
+  }
+}
+```
+
+---
+
+### ComponentStore Facade (без NgRx)
+
+```typescript
+// users-local.facade.ts — ComponentStore как Facade
+import { Injectable } from '@angular/core';
+import { ComponentStore } from '@ngrx/component-store';
+import { Observable, switchMap, tapResponse } from 'rxjs';
+import { HttpClient } from '@angular/common/http';
+import { User } from './user.model';
+
+interface UsersState {
+  users: User[];
+  loading: boolean;
+  error: string | null;
+  selectedId: string | null;
+}
+
+@Injectable()
+export class UsersLocalFacade extends ComponentStore<UsersState> {
+  constructor(private http: HttpClient) {
+    super({ users: [], loading: false, error: null, selectedId: null });
+  }
+
+  // ─── Selectors ─────────────────────────────────────────────────────────────
+  readonly users$ = this.select(state => state.users);
+  readonly loading$ = this.select(state => state.loading);
+  readonly error$ = this.select(state => state.error);
+  readonly selectedUser$ = this.select(state =>
+    state.users.find(u => u.id === state.selectedId) ?? null
+  );
+
+  // ─── Updaters (синхронные мутации) ────────────────────────────────────────
+  readonly setUsers = this.updater((state, users: User[]) => ({
+    ...state, users, loading: false, error: null,
+  }));
+
+  readonly addUser = this.updater((state, user: User) => ({
+    ...state, users: [...state.users, user],
+  }));
+
+  readonly removeUser = this.updater((state, id: string) => ({
+    ...state, users: state.users.filter(u => u.id !== id),
+  }));
+
+  // ─── Effects (асинхронные операции) ──────────────────────────────────────
+  readonly loadUsers = this.effect<void>(trigger$ =>
+    trigger$.pipe(
+      switchMap(() => {
+        this.patchState({ loading: true });
+        return this.http.get<User[]>('/api/users').pipe(
+          tapResponse(
+            users => this.setUsers(users),
+            error => this.patchState({ error: error.message, loading: false }),
+          )
+        );
+      })
+    )
+  );
+
+  // ─── Публичные методы (Facade API) ───────────────────────────────────────
+  selectUser(id: string): void {
+    this.patchState({ selectedId: id });
+  }
+
+  deleteUser(id: string): void {
+    this.removeUser(id);
+    // В реальном приложении — HTTP запрос через effect
+  }
+}
+```
+
+---
+
+### Signals Facade (Angular 17+)
+
+```typescript
+// users-signals.facade.ts
+import { Injectable, signal, computed, effect } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { User } from './user.model';
+
+@Injectable({ providedIn: 'root' })
+export class UsersSignalsFacade {
+  // ─── Приватное состояние ──────────────────────────────────────────────────
+  private _users = signal<User[]>([]);
+  private _loading = signal(false);
+  private _error = signal<string | null>(null);
+  private _selectedId = signal<string | null>(null);
+
+  // ─── Публичное состояние (readonly) ──────────────────────────────────────
+  readonly users = this._users.asReadonly();
+  readonly loading = this._loading.asReadonly();
+  readonly error = this._error.asReadonly();
+
+  // ─── Вычисляемые значения ────────────────────────────────────────────────
+  readonly selectedUser = computed(() =>
+    this._users().find(u => u.id === this._selectedId()) ?? null
+  );
+  readonly totalCount = computed(() => this._users().length);
+  readonly activeUsers = computed(() =>
+    this._users().filter(u => u.status === 'active')
+  );
+
+  constructor(private http: HttpClient) {
+    // Логируем изменения (side effect)
+    effect(() => {
+      console.log('Users updated:', this._users().length, 'total');
+    });
+  }
+
+  // ─── Публичные методы ─────────────────────────────────────────────────────
+  async loadUsers(): Promise<void> {
+    this._loading.set(true);
+    this._error.set(null);
+
+    try {
+      const users = await this.http.get<User[]>('/api/users').toPromise();
+      this._users.set(users!);
+    } catch (err: unknown) {
+      this._error.set((err as Error).message);
+    } finally {
+      this._loading.set(false);
+    }
+  }
+
+  selectUser(id: string): void {
+    this._selectedId.set(id);
+  }
+
+  updateUser(id: string, changes: Partial<User>): void {
+    this._users.update(users =>
+      users.map(u => u.id === id ? { ...u, ...changes } : u)
+    );
+  }
+
+  deleteUser(id: string): void {
+    this._users.update(users => users.filter(u => u.id !== id));
+  }
+}
+```
+
+---
+
+### Тестирование Facade
+
+```typescript
+// users.facade.spec.ts
+import { TestBed } from '@angular/core/testing';
+import { MockStore, provideMockStore } from '@ngrx/store/testing';
+import { UsersFacade } from './users.facade';
+import * as UsersActions from './store/users.actions';
+import * as UsersSelectors from './store/users.selectors';
+
+describe('UsersFacade', () => {
+  let facade: UsersFacade;
+  let store: MockStore;
+
+  const initialState = {
+    users: {
+      users: [{ id: '1', name: 'Яша', email: 'yasha@test.com', role: 'admin' }],
+      loading: false,
+      error: null,
+      selectedId: null,
+    }
+  };
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      providers: [
+        UsersFacade,
+        provideMockStore({ initialState }),
+      ]
+    });
+
+    facade = TestBed.inject(UsersFacade);
+    store = TestBed.inject(MockStore);
+    store.overrideSelector(UsersSelectors.selectAllUsers, initialState.users.users);
+  });
+
+  it('должен вернуть users из store', (done) => {
+    facade.users$.subscribe(users => {
+      expect(users.length).toBe(1);
+      expect(users[0].name).toBe('Яша');
+      done();
+    });
+  });
+
+  it('должен диспатчить loadUsers action', () => {
+    const dispatchSpy = spyOn(store, 'dispatch');
+    facade.loadUsers(1, 20);
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      UsersActions.loadUsers({ page: 1, limit: 20 })
+    );
+  });
+
+  it('должен диспатчить deleteUser action', () => {
+    const dispatchSpy = spyOn(store, 'dispatch');
+    facade.deleteUser('1');
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      UsersActions.deleteUser({ id: '1' })
+    );
+  });
+});
+
+// В компонентах — мокируем Facade, а не Store!
+@Injectable()
+class MockUsersFacade {
+  users$ = of([{ id: '1', name: 'Test User', email: 'test@test.com', role: 'user' }]);
+  loading$ = of(false);
+  error$ = of(null);
+  loadUsers = jasmine.createSpy('loadUsers');
+  deleteUser = jasmine.createSpy('deleteUser');
+}
+```
+
+---
+
+## Playground 🎮
+
+Визуализатор паттерна Facade: до и после:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const WITHOUT_FACADE = {
+  title: 'Без Facade (компонент знает NgRx)',
+  code: \`// Компонент — 80+ строк NgRx кода
+export class UsersComponent {
+  users$: Observable<User[]>;
+  loading$: Observable<boolean>;
+  error$: Observable<string>;
+  
+  constructor(
+    private store: Store<AppState>,
+    private actions$: Actions,
+    private router: Router,
+  ) {
+    // Прямой доступ к Store
+    this.users$ = this.store.select(
+      (state) => state.users.entities
+    );
+    this.loading$ = this.store.select(
+      selectUsersLoading
+    );
+  }
+  
+  ngOnInit() {
+    // Компонент знает про actions
+    this.store.dispatch(
+      UsersActions.loadUsers({ page: 1 })
+    );
+    // Слушает effects
+    this.actions$.pipe(
+      ofType(UsersActions.loadUsersSuccess),
+      takeUntil(this.destroy$)
+    ).subscribe(() => ...);
+  }
+  
+  delete(id: string) {
+    this.store.dispatch(
+      UsersActions.deleteUser({ id })
+    );
+  }
+}\`,
+  problems: [
+    'Компонент зависит от NgRx — сложно тестировать',
+    'Actions разбросаны по компонентам',
+    'При смене NgRx → Signals придётся менять все компоненты',
+    'Логика дублируется если компонентов несколько',
+    'Компонент знает детали реализации стейта',
+  ],
+};
+
+const WITH_FACADE = {
+  title: 'С Facade (изоляция через сервис)',
+  code: \`// UsersFacade — единая точка входа в стейт
+@Injectable({ providedIn: 'root' })
+export class UsersFacade {
+  private store = inject(Store);
+  
+  // API: только то, что нужно компонентам
+  readonly users$ = this.store.select(
+    UsersSelectors.selectAllUsers
+  );
+  readonly loading$ = this.store.select(
+    UsersSelectors.selectLoading
+  );
+  
+  loadUsers(page = 1): void {
+    this.store.dispatch(
+      UsersActions.loadUsers({ page })
+    );
+  }
+  
+  deleteUser(id: string): void {
+    this.store.dispatch(
+      UsersActions.deleteUser({ id })
+    );
+  }
+}
+
+// Компонент — 15 строк чистого кода!
+export class UsersComponent {
+  users$ = this.facade.users$;
+  loading$ = this.facade.loading$;
+  
+  constructor(private facade: UsersFacade) {}
+  
+  ngOnInit() {
+    this.facade.loadUsers();
+  }
+  
+  delete(id: string) {
+    this.facade.deleteUser(id);
+  }
+}\`,
+  benefits: [
+    'Компонент не знает про NgRx — легко тестировать',
+    'Можно заменить NgRx → Signals без изменения компонентов',
+    'Единая точка доступа к стейту',
+    'Тесты компонента: мокируем только Facade',
+    'Бизнес-логика в Facade, а не в компонентах',
+  ],
+};
+
+function CodeBlock({ code }) {
+  return (
+    <pre style={{
+      margin: 0, fontSize: '11px', color: '#a78bfa',
+      fontFamily: 'monospace', lineHeight: 1.6, overflowX: 'auto',
+      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+    }}>
+      {code}
+    </pre>
+  );
+}
+
+const STATES = ['NgRx', 'NGXS', 'ComponentStore', 'Signals'];
+
+export default function App() {
+  const [view, setView] = useState('compare');
+  const [stateLib, setStateLib] = useState('NgRx');
+  const [facadeActive, setFacadeActive] = useState(false);
+
+  // Симуляция состояния
+  const [users, setUsers] = useState([
+    { id: '1', name: 'Яша Петров', role: 'admin', active: true },
+    { id: '2', name: 'Маша Иванова', role: 'dev', active: true },
+    { id: '3', name: 'Коля Сидоров', role: 'qa', active: false },
+  ]);
+  const [logs, setLogs] = useState([]);
+
+  const addLog = useCallback((text, color) => {
+    setLogs(prev => [...prev.slice(-15), { text, color, time: new Date().toLocaleTimeString() }]);
+  }, []);
+
+  const loadUsers = useCallback(() => {
+    if (facadeActive) {
+      addLog('facade.loadUsers() → dispatches action internally', '#4ade80');
+    } else {
+      addLog(\`store.dispatch(UsersActions.loadUsers({ page: 1 }))\`, '#f87171');
+      addLog('Component knows NgRx implementation!', '#fbbf24');
+    }
+  }, [facadeActive, addLog]);
+
+  const deleteUser = useCallback((id) => {
+    const user = users.find(u => u.id === id);
+    setUsers(prev => prev.filter(u => u.id !== id));
+    if (facadeActive) {
+      addLog(\`facade.deleteUser('\${id}') → \${user?.name} удалён\`, '#4ade80');
+    } else {
+      addLog(\`store.dispatch(UsersActions.deleteUser({ id: '\${id}' }))\`, '#f87171');
+    }
+  }, [users, facadeActive, addLog]);
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>🎭 Facade Pattern Visualizer</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>Anti-corruption layer над стейт-менеджментом</div>
+        </div>
+
+        {/* View switcher */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+          {[
+            { key: 'compare', label: '📊 Сравнение кода' },
+            { key: 'demo', label: '🎮 Live Demo' },
+          ].map(v => (
+            <button key={v.key} onClick={() => setView(v.key)} style={{
+              padding: '8px 20px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+              background: view === v.key ? ANGULAR_RED : '#1e293b',
+              color: 'white', fontWeight: view === v.key ? 'bold' : 'normal', fontSize: '14px',
+            }}>{v.label}</button>
+          ))}
+        </div>
+
+        {view === 'compare' ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+            {/* Without */}
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', border: '1px solid #7f1d1d' }}>
+              <div style={{ color: '#f87171', fontWeight: 'bold', fontSize: '13px', marginBottom: '12px' }}>
+                ❌ {WITHOUT_FACADE.title}
+              </div>
+              <div style={{ background: '#0f172a', borderRadius: '8px', padding: '12px', marginBottom: '12px', maxHeight: '200px', overflowY: 'auto' }}>
+                <CodeBlock code={WITHOUT_FACADE.code} />
+              </div>
+              <div>
+                {WITHOUT_FACADE.problems.map((p, i) => (
+                  <div key={i} style={{ color: '#f87171', fontSize: '12px', marginBottom: '6px' }}>⚠️ {p}</div>
+                ))}
+              </div>
+            </div>
+
+            {/* With */}
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', border: '1px solid #14532d' }}>
+              <div style={{ color: '#4ade80', fontWeight: 'bold', fontSize: '13px', marginBottom: '12px' }}>
+                ✅ {WITH_FACADE.title}
+              </div>
+              <div style={{ background: '#0f172a', borderRadius: '8px', padding: '12px', marginBottom: '12px', maxHeight: '200px', overflowY: 'auto' }}>
+                <CodeBlock code={WITH_FACADE.code} />
+              </div>
+              <div>
+                {WITH_FACADE.benefits.map((b, i) => (
+                  <div key={i} style={{ color: '#4ade80', fontSize: '12px', marginBottom: '6px' }}>✅ {b}</div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px' }}>
+              <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>НАСТРОЙКИ</div>
+              <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <span style={{ color: '#94a3b8', fontSize: '13px' }}>State lib:</span>
+                  {STATES.map(s => (
+                    <button key={s} onClick={() => setStateLib(s)} style={{
+                      padding: '4px 10px', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                      background: stateLib === s ? ANGULAR_RED : '#334155', color: 'white', fontSize: '12px',
+                    }}>{s}</button>
+                  ))}
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: '#94a3b8', fontSize: '13px' }}>
+                  <div onClick={() => setFacadeActive(v => !v)} style={{
+                    width: '40px', height: '22px', borderRadius: '11px',
+                    background: facadeActive ? '#4ade80' : '#334155', cursor: 'pointer', position: 'relative',
+                  }}>
+                    <div style={{ position: 'absolute', top: '3px', left: facadeActive ? '20px' : '3px', width: '16px', height: '16px', borderRadius: '50%', background: 'white', transition: 'left 0.2s' }} />
+                  </div>
+                  Использовать Facade
+                </label>
+              </div>
+            </div>
+
+            {/* Component simulation */}
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px' }}>
+              <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>
+                UsersComponent {facadeActive ? '→ inject(UsersFacade)' : \`→ inject(Store<\${stateLib}>)\`}
+              </div>
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+                <button onClick={loadUsers} style={{
+                  padding: '8px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+                  background: facadeActive ? '#4ade80' : ANGULAR_RED, color: facadeActive ? '#0f172a' : 'white', fontWeight: 'bold',
+                }}>
+                  {facadeActive ? 'facade.loadUsers()' : 'store.dispatch(loadUsers)'}
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {users.map(u => (
+                  <div key={u.id} style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    background: '#0f172a', borderRadius: '8px', padding: '10px 14px',
+                  }}>
+                    <span style={{ color: '#f1f5f9' }}>{u.name} <span style={{ color: '#94a3b8', fontSize: '12px' }}>({u.role})</span></span>
+                    <button onClick={() => deleteUser(u.id)} style={{
+                      padding: '4px 12px', borderRadius: '6px', border: 'none',
+                      background: facadeActive ? '#7f1d1d' : ANGULAR_RED + '40',
+                      color: '#f87171', cursor: 'pointer', fontSize: '12px',
+                    }}>
+                      {facadeActive ? 'facade.deleteUser()' : 'dispatch(delete)'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px' }}>
+              <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '8px', fontWeight: 'bold' }}>LOG</div>
+              {logs.map((log, i) => (
+                <div key={i} style={{ fontSize: '12px', color: log.color, marginBottom: '4px', fontFamily: 'monospace' }}>
+                  <span style={{ color: '#475569' }}>{log.time} </span>{log.text}
+                </div>
+              ))}
+              {logs.length === 0 && <div style={{ color: '#475569', fontSize: '12px' }}>Нажмите кнопки выше...</div>}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

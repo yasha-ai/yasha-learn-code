@@ -1,0 +1,311 @@
+---
+title: "25. CI/CD и тесты"
+sidebar:
+  order: 24
+---
+import { Playground } from '@components/Playground'
+
+
+![CI/CD](/lessons/ci-cd.png)
+
+## Зачем тесты в CI/CD?
+
+```
+Developer → Push → CI Pipeline
+                    ├── Lint (ESLint, Prettier)
+                    ├── Unit/Integration Tests
+                    ├── E2E Tests
+                    ├── Coverage Check
+                    └── Deploy (если всё зелёное)
+```
+
+Каждый пуш и Pull Request автоматически проверяется. Сломанный код не попадёт в main.
+
+## GitHub Actions: базовый пайплайн
+
+```yaml
+# .github/workflows/test.yml
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: test
+          POSTGRES_PASSWORD: test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run unit tests
+        run: npm run test:coverage
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/test
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage/lcov.info
+```
+
+## E2E тесты в CI
+
+```yaml
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test  # запускается после unit тестов
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Build app
+        run: npm run build
+
+      - name: Run E2E tests
+        run: npx playwright test --project=chromium
+        env:
+          BASE_URL: http://localhost:3000
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+```
+
+## Матрица: тесты в разных окружениях
+
+```yaml
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+        database: [postgres, sqlite]
+      fail-fast: false  # не останавливать если одна комбинация падает
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm ci
+      - run: npm test
+        env:
+          DB_TYPE: ${{ matrix.database }}
+```
+
+## Кэширование зависимостей
+
+```yaml
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+```
+
+## Coverage badges и пороги
+
+```yaml
+      - name: Check coverage thresholds
+        run: |
+          npx jest --coverage --coverageThresholds='{"global":{"statements":80,"branches":70}}'
+```
+
+```markdown
+<!-- README.md badge -->
+[![codecov](https://codecov.io/gh/user/repo/branch/main/graph/badge.svg)](https://codecov.io/gh/user/repo)
+```
+
+## PR комментарий с результатами
+
+```yaml
+      - name: Comment PR with coverage
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          message: |
+            ## Test Results ✅
+            - Unit tests: passed
+            - Coverage: 85.3%
+            - E2E tests: 42/42 passed
+```
+
+## GitLab CI (альтернатива)
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - test
+  - e2e
+  - deploy
+
+unit-tests:
+  stage: test
+  image: node:20
+  services:
+    - postgres:16
+  variables:
+    POSTGRES_DB: test
+    POSTGRES_PASSWORD: test
+    DATABASE_URL: postgres://postgres:test@postgres/test
+  script:
+    - npm ci
+    - npm run test:coverage
+  coverage: '/Statements\s*:\s*(\d+\.?\d*)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+
+e2e-tests:
+  stage: e2e
+  image: mcr.microsoft.com/playwright:v1.40.0-jammy
+  script:
+    - npm ci
+    - npx playwright test
+  artifacts:
+    when: always
+    paths:
+      - playwright-report/
+```
+
+## Pre-commit hooks (локально)
+
+```bash
+npm install --save-dev husky lint-staged
+npx husky install
+npx husky add .husky/pre-commit "npx lint-staged"
+npx husky add .husky/pre-push "npm test"
+```
+
+```json
+// package.json
+{
+  "lint-staged": {
+    "*.{ts,tsx}": ["eslint --fix", "prettier --write"],
+    "*.test.{ts,tsx}": ["vitest related --run"]
+  }
+}
+```
+
+## Стратегия тестирования в CI
+
+```
+Push to feature branch:
+  └── Unit + Integration tests (~2 min)
+
+Pull Request:
+  ├── Unit + Integration tests (~2 min)
+  ├── E2E tests (Chromium only, ~5 min)
+  └── Coverage check
+
+Merge to main:
+  ├── Full test suite (~3 min)
+  ├── E2E all browsers (~10 min)
+  └── Deploy to staging
+
+Release tag:
+  ├── Full test suite
+  ├── E2E all browsers + mobile
+  ├── Visual regression
+  └── Deploy to production
+```
+
+## Практические задания
+
+1. Настрой GitHub Actions для запуска тестов при каждом пуше
+2. Добавь E2E тесты Playwright в CI с upload артефактов
+3. Настрой pre-commit hook с lint-staged
+
+## Итоги
+
+- CI/CD = автоматическая проверка каждого коммита
+- GitHub Actions — самый популярный CI для open source
+- Кэширование зависимостей ускоряет пайплайн в 2-3 раза
+- Pre-commit hooks ловят проблемы ДО пуша
+- Стратегия: больше тестов при merge → ещё больше при release
+
+<Playground client:visible template="vanilla" files={{
+  '/index.js': `// Пример тестового кода (для запуска используйте Jest/Vitest)
+// CI/CD: автоматический запуск тестов
+
+console.log('=== GitHub Actions: тесты в CI ===\n');
+
+console.log(\`# .github/workflows/test.yml
+name: Tests
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test -- --coverage
+      - run: npx playwright install --with-deps
+      - run: npx playwright test
+
+      # Upload coverage
+      - uses: codecov/codecov-action@v4
+        with:
+          token: \$\{\{ secrets.CODECOV_TOKEN \}\}\`);
+
+console.log('\n=== Стратегия тестов в CI ===\n');
+console.log('1. Lint → быстрая проверка стиля');
+console.log('2. Unit → быстрые, изолированные');
+console.log('3. Integration → средние');
+console.log('4. E2E → медленные, но проверяют всё');
+console.log('\n❌ Если любой шаг падает — PR не мержится');
+`
+}} />

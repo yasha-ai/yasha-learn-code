@@ -1,0 +1,1071 @@
+---
+title: "20. Svelte 5: Новая реактивность"
+sidebar:
+  order: 20
+---
+import { Playground } from '@components/Playground'
+
+
+## 🔬 Svelte 5: Глубокое погружение в реактивность
+
+Привет! 👋 Svelte 5 переписал систему реактивности с нуля. Это уже не просто "компилятор-магия" — это настоящая **система сигналов** (signals), которая даёт тебе точный контроль над тем, что и когда перерисовывается. Если Svelte 4 был как автоматическая коробка передач, то Svelte 5 — это механическая с турбонаддувом 🏎️.
+
+Думай о `$state` как о GPS-трекере: он следит за каждым изменением данных и точно знает, кого нужно уведомить. Никаких лишних перерисовок, никакого виртуального DOM — только хирургически точные обновления.
+
+---
+
+## 🧠 Как работает реактивность Svelte 5 изнутри
+
+Svelte 5 использует концепцию **fine-grained reactivity** (тонко-зернистой реактивности). Это та же идея, что и в SolidJS, MobX и Angular Signals.
+
+```
+Svelte 4 (старый подход):
+  Изменилась переменная → перекомпилировать весь компонент
+  
+Svelte 5 (новый подход):
+  Изменился $state → уведомить только тех, кто подписан → обновить только нужный DOM-узел
+```
+
+**Три кита реактивности Svelte 5:**
+
+1. **Sources (источники)** — `$state()` — хранят значения и уведомляют зависимостей
+2. **Derivations (производные)** — `$derived()` — вычисляются при изменении источников
+3. **Effects (эффекты)** — `$effect()` — запускаются при изменении зависимостей
+
+---
+
+## 📦 $state() с объектами и массивами: глубокие реактивные прокси
+
+Простые значения — это понятно. Но что происходит, когда ты передаёшь объект или массив в `$state()`?
+
+```svelte
+<script lang="ts">
+  // $state() оборачивает объект в Proxy
+  let user = $state({
+    name: 'Яша',
+    age: 25,
+    address: {
+      city: 'Москва',
+      street: 'Арбат',
+    },
+    hobbies: ['программирование', 'кофе', 'кошки'],
+  });
+
+  // Svelte 5 создаёт ГЛУБОКИЙ прокси — все вложенные объекты тоже реактивны!
+  function updateCity() {
+    user.address.city = 'Питер'; // ✅ Реактивно! Даже вложенное свойство
+  }
+
+  function addHobby() {
+    user.hobbies.push('музыка'); // ✅ Реактивно! Мутация массива работает
+  }
+
+  function replaceHobbies() {
+    user.hobbies = ['только сон']; // ✅ Тоже реактивно
+  }
+</script>
+
+<p>Имя: {user.name}</p>
+<p>Город: {user.address.city}</p>
+<ul>
+  {#each user.hobbies as hobby}
+    <li>{hobby}</li>
+  {/each}
+</ul>
+
+<button onclick={updateCity}>Переехать в Питер</button>
+<button onclick={addHobby}>Новое хобби</button>
+```
+
+**Важно понять:** `$state()` создаёт рекурсивный `Proxy`. Когда ты обращаешься к `user.address`, ты получаешь ещё один `Proxy` для объекта адреса. Это называется **deep reactive proxy**.
+
+```svelte
+<script lang="ts">
+  let items = $state<string[]>(['яблоко', 'банан']);
+
+  // Все методы массива работают реактивно:
+  function demo() {
+    items.push('вишня');           // ✅
+    items.pop();                   // ✅
+    items.splice(0, 1);            // ✅
+    items.sort();                  // ✅
+    items.reverse();               // ✅
+    items[0] = 'манго';            // ✅ Индексированное присвоение тоже!
+    items.length = 0;              // ✅ Даже это работает!
+  }
+</script>
+```
+
+---
+
+## 🧊 $state.raw(): когда реактивность не нужна
+
+Иногда тебе нужно хранить большой объект, который не должен быть реактивным. Например, данные из API, которые ты показываешь один раз. Для этого есть `$state.raw()`:
+
+```svelte
+<script lang="ts">
+  // $state.raw() НЕ создаёт прокси — это просто хранилище
+  // Обновления возможны только через переприсвоение всего значения
+  let bigData = $state.raw<Record<string, number>>({});
+
+  // ❌ Это НЕ вызовет обновление UI
+  // bigData.newKey = 123;
+
+  // ✅ Это вызовет обновление UI — полное переприсвоение
+  async function fetchData() {
+    const response = await fetch('/api/data');
+    bigData = await response.json(); // Весь объект заменяется
+  }
+
+  // Зачем это нужно?
+  // 1. Производительность — нет overhead от Proxy
+  // 2. Совместимость — некоторые библиотеки не любят Proxy
+  // 3. Явность — ты явно говоришь "этот объект изменяется целиком"
+
+  // Другой пример — канвас или WebGL данные:
+  let vertices = $state.raw<Float32Array>(new Float32Array(1000));
+
+  function updateGeometry() {
+    const newVertices = new Float32Array(1000);
+    // ... заполнить новые данные ...
+    vertices = newVertices; // Только так!
+  }
+</script>
+```
+
+**Сравнение производительности:**
+
+```
+$state({...})     → Proxy overhead, но автоматические точечные обновления
+$state.raw({...}) → Нет overhead, но нужно полное переприсвоение
+
+Используй $state.raw() для:
+- Больших неизменяемых данных
+- Данных, которые обновляются целиком (fetch результаты)
+- Объектов, которые несовместимы с Proxy (например, некоторые классы)
+```
+
+---
+
+## 📸 $state.snapshot(): снимок состояния без реактивности
+
+```svelte
+<script lang="ts">
+  let form = $state({
+    name: '',
+    email: '',
+    message: '',
+  });
+
+  async function handleSubmit() {
+    // $state.snapshot() создаёт обычный объект (не Proxy)
+    // Это полезно когда нужно сериализовать данные или отправить в API
+    const snapshot = $state.snapshot(form);
+
+    console.log(snapshot); // { name: '...', email: '...', message: '...' }
+    console.log(typeof snapshot); // 'object' (не Proxy!)
+
+    // Можно безопасно JSON.stringify:
+    const json = JSON.stringify(snapshot);
+
+    // Можно передать в функцию, которая не ожидает Proxy:
+    await sendToServer(snapshot);
+  }
+
+  // Зачем нужен snapshot а не просто spread?
+  // Потому что для вложенных объектов spread не убирает Proxy:
+  const shallowCopy = { ...form };          // address всё ещё Proxy!
+  const deepSnapshot = $state.snapshot(form); // Всё чистые объекты
+</script>
+```
+
+---
+
+## 🔗 $derived() и $derived.by(): вычисляемые значения
+
+`$derived()` — это автоматически пересчитываемое значение. Думай о нём как о формуле в Excel: изменился входные ячейки → автоматически пересчиталась формула.
+
+```svelte
+<script lang="ts">
+  let items = $state([
+    { name: 'Ноутбук', price: 80000, qty: 1 },
+    { name: 'Мышь', price: 2000, qty: 2 },
+    { name: 'Монитор', price: 30000, qty: 1 },
+  ]);
+
+  // Простые производные значения:
+  let total = $derived(items.reduce((sum, item) => sum + item.price * item.qty, 0));
+  let itemCount = $derived(items.reduce((sum, item) => sum + item.qty, 0));
+  let avgPrice = $derived(total / itemCount);
+
+  // $derived.by() для сложной логики с блоком кода:
+  let analysis = $derived.by(() => {
+    if (items.length === 0) return { status: 'empty', message: 'Корзина пуста' };
+
+    const mostExpensive = items.reduce((max, item) =>
+      item.price > max.price ? item : max
+    );
+
+    const cheapest = items.reduce((min, item) =>
+      item.price < min.price ? item : min
+    );
+
+    const discount = total > 100000 ? 0.1 : total > 50000 ? 0.05 : 0;
+
+    return {
+      status: 'filled',
+      mostExpensive: mostExpensive.name,
+      cheapest: cheapest.name,
+      discount,
+      finalPrice: total * (1 - discount),
+      message: discount > 0 ? `Скидка ${discount * 100}%!` : 'Скидок нет',
+    };
+  });
+
+  // $derived.by() также полезен для асинхронных зависимостей
+  // и когда нужно ранний return:
+  let formError = $derived.by(() => {
+    const name = form.name.trim();
+    const email = form.email.trim();
+
+    if (!name) return 'Имя обязательно';
+    if (name.length < 2) return 'Имя слишком короткое';
+    if (!email) return 'Email обязателен';
+    if (!email.includes('@')) return 'Неверный email';
+    return null; // Нет ошибки
+  });
+
+  let form = $state({ name: '', email: '' });
+</script>
+
+<p>Сумма: {total} ₽</p>
+<p>Статус: {analysis.message}</p>
+{#if formError}
+  <p style="color: red">{formError}</p>
+{/if}
+```
+
+**Ключевое отличие `$derived()` от `$derived.by()`:**
+
+```svelte
+<script lang="ts">
+  let x = $state(10);
+
+  // $derived() — только выражение (одна строка):
+  let doubled = $derived(x * 2);
+
+  // $derived.by() — полный блок кода:
+  let processed = $derived.by(() => {
+    // Можно использовать if/else, циклы, early return
+    if (x < 0) return 'отрицательное';
+    if (x === 0) return 'ноль';
+
+    let result = '';
+    for (let i = 0; i < x; i++) {
+      result += '★';
+    }
+    return result;
+  });
+</script>
+```
+
+---
+
+## ⚡ $effect(): когда и как использовать
+
+`$effect()` запускается после монтирования компонента и после каждого изменения реактивных зависимостей.
+
+```svelte
+<script lang="ts">
+  let count = $state(0);
+  let name = $state('Яша');
+
+  // $effect автоматически отслеживает зависимости
+  $effect(() => {
+    // Читаем count и name — они становятся зависимостями
+    console.log(`count изменился: ${count}, name: ${name}`);
+    // Этот эффект запустится когда изменится count ИЛИ name
+  });
+
+  // Эффект с очисткой:
+  $effect(() => {
+    const id = setInterval(() => {
+      count++;
+    }, 1000);
+
+    // Возвращаем функцию очистки — она вызовется перед следующим запуском
+    // или при размонтировании компонента
+    return () => {
+      clearInterval(id);
+      console.log('Таймер очищен!');
+    };
+  });
+
+  // Практический пример — синхронизация с localStorage:
+  $effect(() => {
+    localStorage.setItem('user-name', name);
+  });
+
+  // Подписка на WebSocket:
+  $effect(() => {
+    const ws = new WebSocket('wss://example.com/live');
+
+    ws.onmessage = (event) => {
+      // обработка сообщения
+    };
+
+    return () => ws.close(); // Закрываем при очистке
+  });
+</script>
+```
+
+---
+
+## 🔮 $effect.pre(): действовать ДО обновления DOM
+
+Обычный `$effect()` запускается **после** обновления DOM. Но иногда нужно что-то сделать **до** — например, запомнить позицию скролла перед тем, как DOM изменится.
+
+```svelte
+<script lang="ts">
+  let items = $state<string[]>([]);
+  let listElement: HTMLUListElement;
+  let scrollPosition = 0;
+
+  // $effect.pre() запускается СИНХРОННО перед обновлением DOM
+  $effect.pre(() => {
+    // Запоминаем позицию скролла перед изменением списка
+    if (items) { // Подписываемся на items
+      scrollPosition = listElement?.scrollTop ?? 0;
+    }
+  });
+
+  // Обычный $effect запустится ПОСЛЕ и восстановит скролл:
+  $effect(() => {
+    if (listElement && scrollPosition > 0) {
+      listElement.scrollTop = scrollPosition;
+    }
+  });
+
+  // Другой пример — анимации перед удалением:
+  $effect.pre(() => {
+    // Запускаем анимацию исчезновения ДО того, как элемент удалится из DOM
+    void items; // читаем для подписки
+    document.querySelectorAll('.leaving').forEach(el => {
+      el.classList.add('fade-out');
+    });
+  });
+</script>
+```
+
+**Последовательность выполнения:**
+
+```
+1. Изменился $state
+2. $effect.pre() запускается (DOM ещё не обновлён)
+3. Svelte обновляет DOM
+4. $effect() запускается (DOM уже обновлён)
+```
+
+---
+
+## 🕵️ $effect.tracking(): проверяем, отслеживаем ли мы
+
+```svelte
+<script lang="ts">
+  let count = $state(0);
+
+  // $effect.tracking() возвращает true если мы внутри reactive context
+  $effect(() => {
+    console.log('Внутри эффекта:', $effect.tracking()); // true
+
+    // Полезно для создания утилитных функций, которые ведут себя
+    // по-разному в зависимости от контекста:
+    logWithTracking('Что-то произошло');
+  });
+
+  // Вне reactive context:
+  console.log('Снаружи:', $effect.tracking()); // false
+
+  function logWithTracking(message: string) {
+    if ($effect.tracking()) {
+      // Мы внутри $effect или $derived — зависимости отслеживаются
+      console.log('[REACTIVE]', message);
+    } else {
+      // Обычный вызов
+      console.log('[NORMAL]', message);
+    }
+  }
+</script>
+```
+
+---
+
+## 🛑 untrack(): читаем без подписки
+
+Иногда нужно прочитать реактивное значение внутри эффекта, но **не** подписываться на его изменения:
+
+```svelte
+<script lang="ts">
+  import { untrack } from 'svelte';
+
+  let a = $state(0);
+  let b = $state(0);
+
+  // Этот эффект запускается только когда изменяется `a`
+  // Изменение `b` не вызовет перезапуск
+  $effect(() => {
+    console.log('a изменился:', a);
+
+    // untrack() читает b без создания зависимости
+    const bValue = untrack(() => b);
+    console.log('Текущее b (без подписки):', bValue);
+  });
+
+  // Практичный пример — дебаунс с актуальным значением:
+  let searchQuery = $state('');
+  let searchResults = $state<string[]>([]);
+
+  $effect(() => {
+    // Подписываемся только на searchQuery
+    const query = searchQuery;
+
+    const timer = setTimeout(() => {
+      // Читаем дополнительные фильтры без подписки на них
+      const filters = untrack(() => currentFilters);
+      performSearch(query, filters);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  });
+
+  let currentFilters = $state({ category: 'all', sort: 'name' });
+
+  async function performSearch(query: string, filters: typeof currentFilters) {
+    // поиск...
+  }
+</script>
+```
+
+---
+
+## 🏛️ Реактивные классы с $state полями
+
+Svelte 5 позволяет создавать классы с реактивными полями — это мощный паттерн для создания переиспользуемой логики:
+
+```svelte
+<script lang="ts">
+  // Класс с реактивными полями — каждый экземпляр независим!
+  class Counter {
+    count = $state(0);
+    step = $state(1);
+
+    get doubled() {
+      return $derived(this.count * 2); // Нет! Так нельзя внутри класса
+    }
+
+    // $derived в классах — через геттер с $derived.by() — нет...
+    // На самом деле нужно использовать геттеры напрямую:
+    get doubled() {
+      return this.count * 2; // Это работает через Proxy magic!
+    }
+
+    increment() {
+      this.count += this.step;
+    }
+
+    decrement() {
+      this.count = Math.max(0, this.count - this.step);
+    }
+
+    reset() {
+      this.count = 0;
+    }
+  }
+
+  // Создаём несколько независимых счётчиков:
+  let counter1 = new Counter();
+  let counter2 = new Counter();
+
+  counter2.step = 5; // Разный шаг для разных экземпляров
+</script>
+
+<div>
+  <p>Счётчик 1: {counter1.count} (удвоен: {counter1.doubled})</p>
+  <button onclick={() => counter1.increment()}>+1</button>
+  <button onclick={() => counter1.decrement()}>-1</button>
+</div>
+
+<div>
+  <p>Счётчик 2: {counter2.count} (шаг: {counter2.step})</p>
+  <button onclick={() => counter2.increment()}>+{counter2.step}</button>
+</div>
+```
+
+**Более сложный пример — реактивная форма:**
+
+```svelte
+<script lang="ts">
+  class FormField {
+    value = $state('');
+    touched = $state(false);
+    
+    constructor(
+      private validator: (v: string) => string | null
+    ) {}
+
+    get error() {
+      if (!this.touched) return null;
+      return this.validator(this.value);
+    }
+
+    get isValid() {
+      return this.error === null;
+    }
+
+    touch() {
+      this.touched = true;
+    }
+  }
+
+  class LoginForm {
+    email = new FormField((v) => {
+      if (!v) return 'Email обязателен';
+      if (!v.includes('@')) return 'Неверный формат';
+      return null;
+    });
+
+    password = new FormField((v) => {
+      if (!v) return 'Пароль обязателен';
+      if (v.length < 8) return 'Минимум 8 символов';
+      return null;
+    });
+
+    isSubmitting = $state(false);
+
+    get isValid() {
+      return this.email.isValid && this.password.isValid;
+    }
+
+    async submit() {
+      this.email.touch();
+      this.password.touch();
+
+      if (!this.isValid) return;
+
+      this.isSubmitting = true;
+      try {
+        await login(this.email.value, this.password.value);
+      } finally {
+        this.isSubmitting = false;
+      }
+    }
+  }
+
+  const form = new LoginForm();
+
+  async function login(email: string, password: string) {
+    // API call
+  }
+</script>
+
+<form onsubmit={(e) => { e.preventDefault(); form.submit(); }}>
+  <input
+    type="email"
+    bind:value={form.email.value}
+    onblur={() => form.email.touch()}
+  />
+  {#if form.email.error}
+    <span class="error">{form.email.error}</span>
+  {/if}
+
+  <input
+    type="password"
+    bind:value={form.password.value}
+    onblur={() => form.password.touch()}
+  />
+  {#if form.password.error}
+    <span class="error">{form.password.error}</span>
+  {/if}
+
+  <button type="submit" disabled={form.isSubmitting}>
+    {form.isSubmitting ? 'Входим...' : 'Войти'}
+  </button>
+</form>
+```
+
+---
+
+## 🔄 Паттерны реактивности: что использовать когда
+
+```
+Ситуация                          → Инструмент
+──────────────────────────────────────────────────
+Простое значение (число, строка)  → $state()
+Объект/массив с мутациями         → $state()
+Большие данные (только замена)    → $state.raw()
+Нужен снимок для API              → $state.snapshot()
+Формула из других данных          → $derived()
+Сложная логика вычисления         → $derived.by()
+Синхронизация с внешним миром     → $effect()
+До обновления DOM                 → $effect.pre()
+Проверить контекст                → $effect.tracking()
+Читать без подписки               → untrack()
+Переиспользуемая логика           → Реактивный класс
+```
+
+---
+
+## 💡 Частые ошибки и как их избежать
+
+```svelte
+<script lang="ts">
+  // ❌ Ошибка: деструктуризация теряет реактивность
+  let user = $state({ name: 'Яша', age: 25 });
+  let { name, age } = user; // name и age — обычные переменные, не реактивные!
+
+  // ✅ Правильно: читаем через объект
+  $effect(() => {
+    console.log(user.name, user.age); // Реактивно!
+  });
+
+  // ❌ Ошибка: $derived в условии
+  let condition = $state(true);
+  // if (condition) { let x = $derived(...) } // Нельзя! Рунасы должны быть на верхнем уровне
+
+  // ✅ Правильно: $derived на верхнем уровне
+  let x = $derived(condition ? 'да' : 'нет');
+
+  // ❌ Ошибка: бесконечный цикл в $effect
+  let counter = $state(0);
+  $effect(() => {
+    counter++; // Читаем counter (зависимость) и меняем его → бесконечный цикл!
+  });
+
+  // ✅ Правильно: используем untrack для изменения зависимости
+  $effect(() => {
+    void someOtherDependency; // Подписываемся на что-то другое
+    untrack(() => { counter++; }); // Меняем без создания цикла
+  });
+</script>
+```
+
+---
+
+## 📊 Сравнение с Svelte 4
+
+```svelte
+<!-- Svelte 4 -->
+<script lang="ts">
+  let count = 0; // Реактивная переменная (магия компилятора)
+  
+  $: doubled = count * 2; // Реактивное объявление
+  $: console.log(count);  // Реактивный оператор
+  $: {
+    // Реактивный блок
+    if (count > 10) alert('Много!');
+  }
+</script>
+
+<!-- Svelte 5 -->
+<script lang="ts">
+  let count = $state(0); // Явный сигнал
+  
+  let doubled = $derived(count * 2); // Явное производное
+  $effect(() => console.log(count)); // Явный эффект
+  $effect(() => {
+    if (count > 10) alert('Много!');
+  });
+</script>
+```
+
+**Преимущества Svelte 5:**
+- Явность — видно что реактивно, а что нет
+- Переиспользование — логика в классах и функциях (не только в компонентах)
+- Предсказуемость — никаких сюрпризов с реактивностью
+- TypeScript — лучший вывод типов
+
+---
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useMemo, useCallback } from "react";
+
+const SVELTE_ORANGE = "#ff3e00";
+const SVELTE_YELLOW = "#ffba00";
+const BG = "#0f172a";
+const BG2 = "#1e293b";
+const BG3 = "#334155";
+
+// Симуляция $state с объектами (глубокая реактивность)
+function useDeepState<T extends object>(initial: T) {
+  const [state, setState] = useState<T>(initial);
+  
+  const update = useCallback((updater: (prev: T) => T) => {
+    setState(updater);
+  }, []);
+  
+  return [state, update] as const;
+}
+
+type Tab = "state" | "derived" | "effect" | "classes";
+
+const tabs: { id: Tab; label: string; emoji: string }[] = [
+  { id: "state", label: "$state()", emoji: "📦" },
+  { id: "derived", label: "$derived()", emoji: "🔗" },
+  { id: "effect", label: "$effect()", emoji: "⚡" },
+  { id: "classes", label: "Классы", emoji: "🏛️" },
+];
+
+// === $state демо ===
+function StateDemo() {
+  const [user, setUser] = useState({
+    name: "Яша",
+    age: 25,
+    address: { city: "Москва" },
+    hobbies: ["программирование", "кофе"],
+  });
+
+  const [rawData, setRawData] = useState<Record<string, number>>({});
+  const [log, setLog] = useState<string[]>(["Объект создан как $state()"]);
+
+  const addLog = (msg: string) =>
+    setLog((prev) => [...prev.slice(-4), msg]);
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+        <div style={{ background: BG3, borderRadius: "8px", padding: "12px" }}>
+          <div style={{ color: SVELTE_YELLOW, fontFamily: "monospace", fontSize: "12px", marginBottom: "8px" }}>
+            $state() — глубокий прокси
+          </div>
+          <div style={{ fontFamily: "system-ui", fontSize: "13px", color: "#e2e8f0" }}>
+            <div>👤 {user.name}, {user.age} лет</div>
+            <div>🏙️ {user.address.city}</div>
+            <div>🎯 {user.hobbies.join(", ")}</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "10px" }}>
+            <button
+              onClick={() => {
+                setUser((u) => ({ ...u, address: { city: "Питер" } }));
+                addLog("user.address.city = 'Питер' → реактивно!");
+              }}
+              style={{ background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "6px", padding: "5px 10px", cursor: "pointer", fontSize: "12px" }}
+            >
+              Переехать в Питер
+            </button>
+            <button
+              onClick={() => {
+                setUser((u) => ({ ...u, hobbies: [...u.hobbies, "музыка"] }));
+                addLog("hobbies.push('музыка') → реактивно!");
+              }}
+              style={{ background: BG, color: SVELTE_YELLOW, border: \`1px solid \${SVELTE_YELLOW}\`, borderRadius: "6px", padding: "5px 10px", cursor: "pointer", fontSize: "12px" }}
+            >
+              + Новое хобби
+            </button>
+            <button
+              onClick={() => {
+                setUser((u) => ({ ...u, age: u.age + 1 }));
+                addLog(\`user.age++ → \${user.age + 1}\`);
+              }}
+              style={{ background: BG, color: "#94a3b8", border: "1px solid #334155", borderRadius: "6px", padding: "5px 10px", cursor: "pointer", fontSize: "12px" }}
+            >
+              День рождения 🎂
+            </button>
+          </div>
+        </div>
+
+        <div style={{ background: BG3, borderRadius: "8px", padding: "12px" }}>
+          <div style={{ color: SVELTE_YELLOW, fontFamily: "monospace", fontSize: "12px", marginBottom: "8px" }}>
+            $state.raw() — без прокси
+          </div>
+          <div style={{ fontFamily: "system-ui", fontSize: "12px", color: "#94a3b8", marginBottom: "8px" }}>
+            Обновляется только при полной замене
+          </div>
+          <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#e2e8f0", background: BG, padding: "8px", borderRadius: "6px", minHeight: "40px" }}>
+            {Object.keys(rawData).length === 0 ? "(пусто)" : JSON.stringify(rawData, null, 2).slice(0, 80)}
+          </div>
+          <button
+            onClick={() => {
+              setRawData({ timestamp: Date.now(), value: Math.floor(Math.random() * 100) });
+              addLog("rawData = newObject → полная замена!");
+            }}
+            style={{ marginTop: "8px", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "6px", padding: "5px 10px", cursor: "pointer", fontSize: "12px", width: "100%" }}
+          >
+            Fetch данные
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: "10px", background: BG, borderRadius: "8px", padding: "10px" }}>
+        <div style={{ color: SVELTE_YELLOW, fontSize: "11px", fontFamily: "monospace", marginBottom: "6px" }}>
+          📋 Лог изменений:
+        </div>
+        {log.map((entry, i) => (
+          <div key={i} style={{ fontSize: "11px", fontFamily: "monospace", color: i === log.length - 1 ? SVELTE_ORANGE : "#64748b", padding: "2px 0" }}>
+            → {entry}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// === $derived демо ===
+function DerivedDemo() {
+  const [items, setItems] = useState([
+    { name: "Ноутбук", price: 80000, qty: 1 },
+    { name: "Мышь", price: 2000, qty: 2 },
+    { name: "Монитор", price: 30000, qty: 1 },
+  ]);
+
+  // Симуляция $derived
+  const total = useMemo(() =>
+    items.reduce((sum, item) => sum + item.price * item.qty, 0),
+    [items]
+  );
+
+  const itemCount = useMemo(() =>
+    items.reduce((sum, item) => sum + item.qty, 0),
+    [items]
+  );
+
+  // Симуляция $derived.by()
+  const analysis = useMemo(() => {
+    if (items.length === 0) return { discount: 0, finalPrice: 0, message: "Пусто" };
+    const discount = total > 100000 ? 0.1 : total > 50000 ? 0.05 : 0;
+    return {
+      discount,
+      finalPrice: Math.round(total * (1 - discount)),
+      message: discount > 0 ? \`Скидка \${discount * 100}%! 🎉\` : "Скидок нет",
+    };
+  }, [total, items]);
+
+  return (
+    <div>
+      <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+        Изменяй количество — производные пересчитываются автоматически
+      </div>
+      {items.map((item, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px", background: BG3, borderRadius: "6px", padding: "8px" }}>
+          <span style={{ flex: 1, fontSize: "13px", color: "#e2e8f0" }}>{item.name}</span>
+          <span style={{ fontSize: "12px", color: "#94a3b8" }}>{item.price.toLocaleString()} ₽</span>
+          <button onClick={() => setItems((prev) => prev.map((it, j) => j === i ? { ...it, qty: Math.max(0, it.qty - 1) } : it))}
+            style={{ background: BG, color: "#e2e8f0", border: "1px solid #475569", borderRadius: "4px", width: "24px", height: "24px", cursor: "pointer", fontSize: "14px" }}>−</button>
+          <span style={{ color: SVELTE_ORANGE, fontWeight: "bold", minWidth: "20px", textAlign: "center", fontSize: "13px" }}>{item.qty}</span>
+          <button onClick={() => setItems((prev) => prev.map((it, j) => j === i ? { ...it, qty: it.qty + 1 } : it))}
+            style={{ background: BG, color: "#e2e8f0", border: "1px solid #475569", borderRadius: "4px", width: "24px", height: "24px", cursor: "pointer", fontSize: "14px" }}>+</button>
+        </div>
+      ))}
+
+      <div style={{ background: BG, borderRadius: "8px", padding: "12px", marginTop: "10px", border: \`1px solid \${analysis.discount > 0 ? SVELTE_ORANGE : "#334155"}\` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
+          <span style={{ fontSize: "12px", color: "#94a3b8", fontFamily: "monospace" }}>$derived(total)</span>
+          <span style={{ fontSize: "13px", color: "#e2e8f0" }}>{total.toLocaleString()} ₽</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
+          <span style={{ fontSize: "12px", color: "#94a3b8", fontFamily: "monospace" }}>$derived(itemCount)</span>
+          <span style={{ fontSize: "13px", color: "#e2e8f0" }}>{itemCount} шт.</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <span style={{ fontSize: "12px", color: SVELTE_YELLOW, fontFamily: "monospace" }}>$derived.by(analysis)</span>
+          <span style={{ fontSize: "13px", color: analysis.discount > 0 ? SVELTE_ORANGE : "#e2e8f0" }}>{analysis.message}</span>
+        </div>
+        {analysis.discount > 0 && (
+          <div style={{ textAlign: "right", marginTop: "4px", fontSize: "14px", fontWeight: "bold", color: SVELTE_ORANGE }}>
+            Итого: {analysis.finalPrice.toLocaleString()} ₽
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// === $effect демо ===
+function EffectDemo() {
+  const [count, setCount] = useState(0);
+  const [effectLog, setEffectLog] = useState<{ time: string; msg: string }[]>([]);
+  const [timerActive, setTimerActive] = useState(false);
+
+  const addEffectLog = useCallback((msg: string) => {
+    const time = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    setEffectLog((prev) => [...prev.slice(-6), { time, msg }]);
+  }, []);
+
+  // Симуляция $effect
+  useEffect(() => {
+    addEffectLog(\`count изменился → \${count}\`);
+  }, [count]);
+
+  // Симуляция $effect с очисткой (таймер)
+  useEffect(() => {
+    if (!timerActive) return;
+    addEffectLog("Таймер запущен ▶");
+    const id = setInterval(() => {
+      setCount((c) => c + 1);
+    }, 1000);
+    return () => {
+      addEffectLog("Таймер очищен ■");
+      clearInterval(id);
+    };
+  }, [timerActive]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "12px" }}>
+        <div style={{ fontSize: "32px", fontWeight: "bold", color: SVELTE_ORANGE, fontFamily: "monospace", minWidth: "60px", textAlign: "center" }}>
+          {count}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+          <div style={{ display: "flex", gap: "6px" }}>
+            <button onClick={() => setCount((c) => c - 1)} style={{ background: BG3, color: "#e2e8f0", border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer" }}>−1</button>
+            <button onClick={() => setCount((c) => c + 1)} style={{ background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer" }}>+1</button>
+            <button onClick={() => setCount(0)} style={{ background: BG3, color: "#94a3b8", border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer" }}>Reset</button>
+          </div>
+          <button
+            onClick={() => setTimerActive((a) => !a)}
+            style={{ background: timerActive ? "#dc2626" : "#16a34a", color: "#fff", border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer", fontSize: "12px" }}
+          >
+            {timerActive ? "⏹ Стоп (cleanup!)" : "▶ Автотаймер"}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ background: BG, borderRadius: "8px", padding: "10px" }}>
+        <div style={{ color: SVELTE_YELLOW, fontSize: "11px", fontFamily: "monospace", marginBottom: "6px" }}>
+          $effect() лог:
+        </div>
+        {effectLog.length === 0 ? (
+          <div style={{ fontSize: "11px", color: "#64748b", fontFamily: "monospace" }}>Нажми кнопку...</div>
+        ) : (
+          effectLog.map((entry, i) => (
+            <div key={i} style={{ fontSize: "11px", fontFamily: "monospace", color: i === effectLog.length - 1 ? SVELTE_ORANGE : "#64748b", padding: "1px 0" }}>
+              [{entry.time}] {entry.msg}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// === Reactive Classes демо ===
+class Counter {
+  private _count: number;
+  private _step: number;
+  private _onChange: () => void;
+
+  constructor(step = 1, onChange: () => void = () => {}) {
+    this._count = 0;
+    this._step = step;
+    this._onChange = onChange;
+  }
+
+  get count() { return this._count; }
+  get step() { return this._step; }
+  get doubled() { return this._count * 2; }
+
+  increment() { this._count += this._step; this._onChange(); }
+  decrement() { this._count = Math.max(0, this._count - this._step); this._onChange(); }
+  reset() { this._count = 0; this._onChange(); }
+  setStep(s: number) { this._step = s; this._onChange(); }
+}
+
+function ClassesDemo() {
+  const [, forceUpdate] = useState(0);
+  const rerender = useCallback(() => forceUpdate((n) => n + 1), []);
+
+  const [counter1] = useState(() => new Counter(1, rerender));
+  const [counter2] = useState(() => new Counter(5, rerender));
+
+  return (
+    <div>
+      <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+        Два независимых экземпляра Counter — каждый со своим $state
+      </div>
+
+      {[
+        { label: "counter1 (шаг 1)", c: counter1 },
+        { label: "counter2 (шаг 5)", c: counter2 },
+      ].map(({ label, c }, i) => (
+        <div key={i} style={{ background: BG3, borderRadius: "8px", padding: "12px", marginBottom: "10px" }}>
+          <div style={{ fontSize: "12px", color: "#94a3b8", fontFamily: "monospace", marginBottom: "8px" }}>{label}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: "28px", fontWeight: "bold", color: SVELTE_ORANGE, fontFamily: "monospace" }}>{c.count}</div>
+              <div style={{ fontSize: "10px", color: "#64748b" }}>count</div>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: "20px", color: SVELTE_YELLOW, fontFamily: "monospace" }}>{c.doubled}</div>
+              <div style={{ fontSize: "10px", color: "#64748b" }}>doubled</div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px", flex: 1 }}>
+              <div style={{ display: "flex", gap: "4px" }}>
+                <button onClick={() => c.decrement()} style={{ flex: 1, background: BG, color: "#e2e8f0", border: "1px solid #475569", borderRadius: "5px", padding: "5px", cursor: "pointer" }}>−</button>
+                <button onClick={() => c.increment()} style={{ flex: 1, background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "5px", padding: "5px", cursor: "pointer" }}>+</button>
+                <button onClick={() => c.reset()} style={{ flex: 1, background: BG, color: "#94a3b8", border: "1px solid #334155", borderRadius: "5px", padding: "5px", cursor: "pointer", fontSize: "10px" }}>reset</button>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <span style={{ fontSize: "11px", color: "#64748b" }}>шаг:</span>
+                <input
+                  type="range" min={1} max={10} value={c.step}
+                  onChange={(e) => c.setStep(Number(e.target.value))}
+                  style={{ flex: 1, accentColor: SVELTE_ORANGE }}
+                />
+                <span style={{ fontSize: "12px", color: SVELTE_YELLOW, minWidth: "20px" }}>{c.step}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("state");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "20px", fontFamily: "system-ui, sans-serif", color: "#e2e8f0" }}>
+      <div style={{ maxWidth: "600px", margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: "20px" }}>
+          <div style={{ fontSize: "28px", fontWeight: "bold", color: SVELTE_ORANGE }}>
+            Svelte 5 Reactivity
+          </div>
+          <div style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>
+            Интерактивное демо: $state, $derived, $effect, Reactive Classes
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: "6px", marginBottom: "16px", background: BG2, padding: "4px", borderRadius: "10px" }}>
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              style={{
+                flex: 1, padding: "8px 4px", border: "none", borderRadius: "7px", cursor: "pointer",
+                background: activeTab === tab.id ? SVELTE_ORANGE : "transparent",
+                color: activeTab === tab.id ? "#fff" : "#94a3b8",
+                fontSize: "11px", fontWeight: activeTab === tab.id ? "bold" : "normal",
+                transition: "all 0.15s",
+              }}
+            >
+              {tab.emoji} {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: BG2, borderRadius: "12px", padding: "16px", border: "1px solid #1e293b" }}>
+          {activeTab === "state" && <StateDemo />}
+          {activeTab === "derived" && <DerivedDemo />}
+          {activeTab === "effect" && <EffectDemo />}
+          {activeTab === "classes" && <ClassesDemo />}
+        </div>
+
+        <div style={{ marginTop: "12px", padding: "10px", background: BG2, borderRadius: "8px", border: \`1px solid \${SVELTE_ORANGE}33\` }}>
+          <div style={{ fontSize: "11px", color: "#64748b", fontFamily: "monospace" }}>
+            💡 В реальном Svelte 5 это работает через компилятор — без ручных хуков!
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

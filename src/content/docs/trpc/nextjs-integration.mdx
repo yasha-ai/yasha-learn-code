@@ -1,0 +1,289 @@
+---
+title: "11. Интеграция с Next.js"
+sidebar:
+  order: 11
+---
+import { Playground } from '@components/Playground'
+
+
+Next.js — одна из наиболее популярных платформ для деплоя tRPC приложений. Пакет `@trpc/next` предоставляет специализированные адаптеры и хелперы для бесшовной интеграции с обоими роутерами Next.js.
+
+## Pages Router
+
+В Pages Router tRPC API маршрутизируется через catch-all файл `pages/api/trpc/[trpc].ts`. Используйте `createNextApiHandler` для создания обработчика. Все запросы к `/api/trpc/*` будут перехвачены этим хендлером.
+
+## App Router
+
+В App Router используйте `fetchRequestHandler` в файле `app/api/trpc/[trpc]/route.ts`. Он поддерживает Edge Runtime и Server Components. Запросы обрабатываются через стандартные `GET` и `POST` обработчики.
+
+## getServerSideProps с tRPC
+
+Для серверного рендеринга в Pages Router используйте `createServerSideHelpers`. Это позволяет вызывать tRPC процедуры прямо в `getServerSideProps` и предзаполнять кеш React Query данными с сервера.
+
+## Server Components и tRPC
+
+В App Router tRPC процедуры можно вызывать напрямую из Server Components через вызов процедуры как функции (без HTTP): `const caller = appRouter.createCaller(ctx)`. Это самый эффективный способ — нет сетевого overhead.
+
+## CORS конфигурация
+
+При использовании tRPC с отдельным фронтендом необходимо настроить CORS. Для Next.js это делается через `next.config.js` headers или через middleware.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const ORANGE = '#f97316';
+const PURPLE = '#a855f7';
+
+type RouterType = 'pages' | 'app';
+type ComponentType = 'api-handler' | 'client-setup' | 'usage' | 'ssr' | 'server-component';
+
+const pagesComponents: { key: ComponentType; label: string; color: string; file: string; description: string; code: string }[] = [
+  {
+    key: 'api-handler',
+    label: 'API Handler',
+    color: TRPC,
+    file: 'pages/api/trpc/[trpc].ts',
+    description: 'Catch-all API route обрабатывает все tRPC запросы. createNextApiHandler принимает router и createContext.',
+    code:
+      'import { createNextApiHandler } from\n' +
+      '  "@trpc/server/adapters/next";\n' +
+      'import { appRouter } from "../../../server/router";\n' +
+      'import { createContext } from "../../../server/context";\n\n' +
+      'export default createNextApiHandler({\n' +
+      '  router: appRouter,\n' +
+      '  createContext,\n' +
+      '  onError: ({ error }) => {\n' +
+      '    if (error.code === "INTERNAL_SERVER_ERROR") {\n' +
+      '      console.error("tRPC Error:", error);\n' +
+      '    }\n' +
+      '  },\n' +
+      '});',
+  },
+  {
+    key: 'client-setup',
+    label: 'Клиент',
+    color: GREEN,
+    file: 'src/utils/trpc.ts',
+    description: 'Создание типизированного tRPC клиента для React. withTRPC оборачивает приложение нужными провайдерами.',
+    code:
+      'import { httpBatchLink } from "@trpc/client";\n' +
+      'import { createTRPCNext } from "@trpc/next";\n' +
+      'import type { AppRouter } from "../server/router";\n\n' +
+      'export const trpc = createTRPCNext<AppRouter>({\n' +
+      '  config: () => ({\n' +
+      '    links: [\n' +
+      '      httpBatchLink({\n' +
+      '        url: "/api/trpc",\n' +
+      '      }),\n' +
+      '    ],\n' +
+      '  }),\n' +
+      '  ssr: false,\n' +
+      '});',
+  },
+  {
+    key: 'usage',
+    label: 'Хуки',
+    color: YELLOW,
+    file: 'pages/index.tsx',
+    description: 'Использование tRPC хуков в компонентах Pages Router. Полная типизация из router.',
+    code:
+      'import { trpc } from "../utils/trpc";\n\n' +
+      'export default function Home() {\n' +
+      '  const { data, isLoading } =\n' +
+      '    trpc.user.getAll.useQuery();\n\n' +
+      '  const createUser = trpc.user.create\n' +
+      '    .useMutation({\n' +
+      '      onSuccess: () =>\n' +
+      '        trpc.useContext().user.getAll\n' +
+      '          .invalidate(),\n' +
+      '    });\n\n' +
+      '  if (isLoading) return <div>Loading...</div>;\n' +
+      '  return <div>{data?.map(u => u.name)}</div>;\n' +
+      '}',
+  },
+  {
+    key: 'ssr',
+    label: 'SSR',
+    color: ORANGE,
+    file: 'pages/users/[id].tsx',
+    description: 'Предзаполнение кеша через getServerSideProps. Данные доступны сразу при рендере.',
+    code:
+      'export const getServerSideProps = async (ctx) => {\n' +
+      '  const helpers = createServerSideHelpers({\n' +
+      '    router: appRouter,\n' +
+      '    ctx: await createContext(),\n' +
+      '  });\n\n' +
+      '  await helpers.user.getById.prefetch({\n' +
+      '    id: ctx.params.id,\n' +
+      '  });\n\n' +
+      '  return {\n' +
+      '    props: {\n' +
+      '      trpcState: helpers.dehydrate(),\n' +
+      '    },\n' +
+      '  };\n' +
+      '};',
+  },
+];
+
+const appComponents: { key: ComponentType; label: string; color: string; file: string; description: string; code: string }[] = [
+  {
+    key: 'api-handler',
+    label: 'Route Handler',
+    color: TRPC,
+    file: 'app/api/trpc/[trpc]/route.ts',
+    description: 'В App Router используется fetchRequestHandler. Поддерживает Edge Runtime.',
+    code:
+      'import { fetchRequestHandler } from\n' +
+      '  "@trpc/server/adapters/fetch";\n' +
+      'import { appRouter } from "../../../../server/router";\n\n' +
+      'const handler = (req: Request) =>\n' +
+      '  fetchRequestHandler({\n' +
+      '    endpoint: "/api/trpc",\n' +
+      '    req,\n' +
+      '    router: appRouter,\n' +
+      '    createContext: () => ({}),\n' +
+      '  });\n\n' +
+      'export { handler as GET, handler as POST };',
+  },
+  {
+    key: 'server-component',
+    label: 'Server Component',
+    color: GREEN,
+    file: 'app/users/page.tsx',
+    description: 'В Server Components вызывайте процедуры напрямую через createCaller — без HTTP round-trip.',
+    code:
+      '// Server Component (нет "use client")\n' +
+      'import { appRouter } from "../../server/router";\n' +
+      'import { createContext } from "../../server/context";\n\n' +
+      'export default async function UsersPage() {\n' +
+      '  const ctx = await createContext();\n' +
+      '  const caller = appRouter.createCaller(ctx);\n\n' +
+      '  // Прямой вызов — без HTTP!\n' +
+      '  const users = await caller.user.getAll();\n\n' +
+      '  return (\n' +
+      '    <ul>\n' +
+      '      {users.map(u => <li key={u.id}>{u.name}</li>)}\n' +
+      '    </ul>\n' +
+      '  );\n' +
+      '}',
+  },
+  {
+    key: 'client-setup',
+    label: 'Client Setup',
+    color: YELLOW,
+    file: 'app/providers.tsx',
+    description: 'Провайдеры для Client Components в App Router.',
+    code:
+      '"use client";\n' +
+      'import { QueryClient, QueryClientProvider } from\n' +
+      '  "@tanstack/react-query";\n' +
+      'import { trpc } from "../utils/trpc";\n\n' +
+      'const queryClient = new QueryClient();\n' +
+      'const trpcClient = trpc.createClient({\n' +
+      '  links: [httpBatchLink({ url: "/api/trpc" })],\n' +
+      '});\n\n' +
+      'export function Providers({ children }) {\n' +
+      '  return (\n' +
+      '    <trpc.Provider client={trpcClient}\n' +
+      '      queryClient={queryClient}>\n' +
+      '      <QueryClientProvider client={queryClient}>\n' +
+      '        {children}\n' +
+      '      </QueryClientProvider>\n' +
+      '    </trpc.Provider>\n' +
+      '  );\n' +
+      '}',
+  },
+  {
+    key: 'usage',
+    label: 'Client Component',
+    color: PURPLE,
+    file: 'app/components/UserList.tsx',
+    description: 'Использование tRPC хуков в Client Components App Router.',
+    code:
+      '"use client";\n' +
+      'import { trpc } from "../../utils/trpc";\n\n' +
+      'export function UserList() {\n' +
+      '  const { data, isLoading } =\n' +
+      '    trpc.user.getAll.useQuery();\n\n' +
+      '  if (isLoading) return <p>Loading...</p>;\n\n' +
+      '  return (\n' +
+      '    <ul>\n' +
+      '      {data?.map(user => (\n' +
+      '        <li key={user.id}>{user.name}</li>\n' +
+      '      ))}\n' +
+      '    </ul>\n' +
+      '  );\n' +
+      '}',
+  },
+];
+
+export default function App() {
+  const [routerType, setRouterType] = useState<RouterType>('pages');
+  const [selected, setSelected] = useState<ComponentType>('api-handler');
+
+  const components = routerType === 'pages' ? pagesComponents : appComponents;
+  const currentComp = components.find(c => c.key === selected) || components[0];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        tRPC + Next.js — архитектура
+      </h2>
+
+      <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', marginBottom: '16px' }}>
+        {(['pages', 'app'] as RouterType[]).map(rt => (
+          <button key={rt} onClick={() => { setRouterType(rt); setSelected('api-handler'); }} style={{
+            background: routerType === rt ? TRPC : CARD,
+            color: routerType === rt ? '#fff' : TEXT,
+            border: '1px solid ' + (routerType === rt ? TRPC : '#334155'),
+            borderRadius: '8px', padding: '8px 24px', cursor: 'pointer', fontSize: '13px',
+          }}>
+            {rt === 'pages' ? '📄 Pages Router' : '🚀 App Router'}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: '200px', flex: '0 0 auto' }}>
+          {components.map(comp => (
+            <div key={comp.key}
+              onClick={() => setSelected(comp.key)}
+              style={{
+                background: selected === comp.key ? 'rgba(57,140,203,0.15)' : CARD,
+                border: '1px solid ' + (selected === comp.key ? comp.color : '#334155'),
+                borderRadius: '8px', padding: '10px 14px', marginBottom: '6px', cursor: 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              <div style={{ color: comp.color, fontWeight: 'bold', fontSize: '12px' }}>{comp.label}</div>
+              <div style={{ color: TEXT, opacity: 0.5, fontSize: '10px', marginTop: '2px' }}>{comp.file}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ flex: '1', minWidth: '280px' }}>
+          <div style={{ background: CARD, border: '2px solid ' + currentComp.color, borderRadius: '10px', padding: '16px', transition: 'border-color 0.3s' }}>
+            <div style={{ color: currentComp.color, fontWeight: 'bold', fontSize: '14px', marginBottom: '6px' }}>
+              {currentComp.label}
+            </div>
+            <div style={{ background: '#0a0f1a', borderRadius: '4px', padding: '4px 10px', color: TEXT, opacity: 0.6, fontSize: '10px', marginBottom: '10px', display: 'inline-block' }}>
+              📁 {currentComp.file}
+            </div>
+            <p style={{ color: TEXT, opacity: 0.75, fontSize: '12px', margin: '0 0 14px 0', lineHeight: '1.5' }}>
+              {currentComp.description}
+            </p>
+            <pre style={{ margin: 0, background: BG, borderRadius: '8px', padding: '12px', fontSize: '10px', color: TEXT, lineHeight: '1.7', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+              {currentComp.code}
+            </pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

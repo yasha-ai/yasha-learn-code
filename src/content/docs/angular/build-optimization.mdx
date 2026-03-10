@@ -1,0 +1,584 @@
+---
+title: "56. Оптимизация сборки"
+sidebar:
+  order: 59
+---
+import { Playground } from '@components/Playground'
+
+
+## 59. Оптимизация сборки 📦
+
+Привет! Яша здесь. Размер бандла напрямую влияет на время загрузки — каждые 100KB JavaScript добавляют ~1 секунду на мобильных устройствах. Сегодня разберём как сделать Angular-приложение максимально компактным 🚀
+
+---
+
+### Что происходит при ng build --prod
+
+```bash
+ng build --configuration=production
+```
+
+Angular выполняет следующие оптимизации:
+
+1. **AOT компиляция** — шаблоны компилируются в TypeScript
+2. **Tree shaking** — удаление неиспользуемого кода
+3. **Minification** — сжатие JavaScript и CSS
+4. **Dead code elimination** — удаление мёртвого кода
+5. **Scope hoisting** — объединение модулей
+6. **Differential loading** — отдельные бандлы для ES5/ES2015+
+
+---
+
+### AOT vs JIT компиляция
+
+```typescript
+// ❌ JIT (Just-in-Time) — компиляция в браузере
+// angular.json: "aot": false
+// Браузер получает: Angular компилятор + шаблоны (строки) + код
+// Размер: большой, компиляция при каждом запуске
+
+// ✅ AOT (Ahead-of-Time) — компиляция при сборке
+// angular.json: "aot": true (по умолчанию с Angular 9)
+// Браузер получает: скомпилированный код, без компилятора
+// Преимущества:
+// - Меньший бандл (нет компилятора ~300KB)
+// - Быстрый старт
+// - Ошибки шаблонов найдены на этапе сборки
+// - Безопаснее (нет eval())
+
+@Component({
+  // AOT проверяет это при компиляции:
+  template: `
+    <h1>{{ titl }}</h1>  // ← Ошибка TypeScript: Property 'titl' does not exist
+  `
+})
+export class AppComponent {
+  title = 'Hello';
+}
+```
+
+---
+
+### Бюджеты сборки
+
+```json
+// angular.json — строгий контроль размера
+{
+  "configurations": {
+    "production": {
+      "budgets": [
+        {
+          "type": "initial",
+          "maximumWarning": "500kb",
+          "maximumError": "1mb"
+        },
+        {
+          "type": "anyComponentStyle",
+          "maximumWarning": "2kb",
+          "maximumError": "4kb"
+        },
+        {
+          "type": "allScript",
+          "maximumWarning": "1mb",
+          "maximumError": "2mb"
+        },
+        {
+          "type": "any",
+          "maximumWarning": "500kb",
+          "maximumError": "1mb"
+        }
+      ]
+    }
+  }
+}
+```
+
+---
+
+### Анализ бандла: webpack-bundle-analyzer
+
+```bash
+ng build --stats-json --configuration=production
+
+# 2. Анализ
+npx webpack-bundle-analyzer dist/my-app/browser/stats.json
+
+# Скрипт в package.json:
+# "analyze": "ng build --stats-json && npx webpack-bundle-analyzer dist/my-app/browser/stats.json"
+```
+
+Что искать в анализаторе:
+- 🔴 `moment.js` — 65KB gzip → заменить на `date-fns` или `Temporal`
+- 🔴 Полный `lodash` → импортировать только нужные функции
+- 🔴 Дублирующиеся библиотеки (несколько версий)
+- 🟡 Большие компоненты, которые должны быть lazy loaded
+
+---
+
+### Tree Shaking: правильные импорты
+
+```typescript
+// ❌ Импорт всего lodash — 71KB gzip
+import _ from 'lodash';
+const arr = _.uniq([1, 2, 2, 3]);
+
+// ✅ Импорт только нужной функции — 2KB
+import uniq from 'lodash/uniq';
+const arr = uniq([1, 2, 2, 3]);
+
+// ✅ Ещё лучше — нативный JavaScript
+const arr = [...new Set([1, 2, 2, 3])];
+
+// ❌ moment.js — огромный (не tree-shakeable)
+import moment from 'moment';
+const date = moment().format('YYYY-MM-DD');
+
+// ✅ date-fns — полностью tree-shakeable
+import { format } from 'date-fns';
+const date = format(new Date(), 'yyyy-MM-dd');
+```
+
+---
+
+### esbuild: новый строитель Angular (v17+)
+
+```json
+// angular.json — переход на esbuild
+{
+  "projects": {
+    "my-app": {
+      "architect": {
+        "build": {
+          "builder": "@angular-devkit/build-angular:application",
+          "options": {
+            "browser": "src/main.ts"
+          }
+        },
+        "serve": {
+          "builder": "@angular-devkit/build-angular:dev-server"
+        }
+      }
+    }
+  }
+}
+```
+
+```bash
+# Результаты с esbuild (Angular 17+):
+# ng build: 15 секунд → 4 секунды (3-4x быстрее!)
+# ng serve hot reload: 2 секунды → 0.3 секунды
+```
+
+---
+
+### Differential Loading (устаревает в Angular 17)
+
+```html
+<!-- index.html — Angular генерирует автоматически -->
+<!-- Современные браузеры (ES2017): type="module" -->
+<script type="module" src="main-es2017.js"></script>
+
+<!-- Старые браузеры (ES5): nomodule -->
+<script nomodule src="main-es5.js"></script>
+```
+
+```json
+// tsconfig.json — настройка target
+{
+  "compilerOptions": {
+    "target": "ES2022",        // ← Angular 17+ рекомендует ES2022
+    "useDefineForClassFields": false
+  }
+}
+```
+
+---
+
+### Lazy Loading: влияние на бандл
+
+```typescript
+// ❌ Всё в одном бандле — initial chunk 2MB
+@NgModule({
+  imports: [
+    AdminModule,     // 500KB
+    ReportsModule,   // 400KB
+    SettingsModule,  // 200KB
+  ]
+})
+export class AppModule {}
+
+// ✅ Lazy loading — initial chunk 200KB
+const routes: Routes = [
+  {
+    path: 'admin',
+    loadChildren: () => import('./admin/admin.module').then(m => m.AdminModule),
+    // → отдельный chunk: admin.chunk.js (500KB) загружается только при /admin
+  },
+  {
+    path: 'reports',
+    loadChildren: () => import('./reports/reports.module').then(m => m.ReportsModule),
+    // → отдельный chunk: reports.chunk.js
+  },
+];
+
+// Результат:
+// Было: initial 2MB (все пользователи ждут 2MB)
+// Стало: initial 200KB + chunks по требованию
+```
+
+---
+
+### @defer: ленивая загрузка компонентов
+
+```html
+<!-- Angular 17+ — встроенная ленивая загрузка -->
+
+<!-- Загрузить когда элемент появился во viewport -->
+@defer (on viewport) {
+  <app-heavy-chart [data]="chartData" />
+} @placeholder {
+  <div class="chart-skeleton" style="height: 300px;">
+    Загружаю график...
+  </div>
+} @loading (minimum 500ms) {
+  <app-spinner />
+} @error {
+  <p>Не удалось загрузить компонент</p>
+}
+
+<!-- Загрузить когда браузер idle -->
+@defer (on idle) {
+  <app-recommendations />
+}
+
+<!-- Загрузить по условию -->
+@defer (when isLoggedIn) {
+  <app-user-dashboard />
+}
+
+<!-- Предзагрузить (hover) -->
+@defer (on hover; prefetch on idle) {
+  <app-tooltip />
+}
+```
+
+---
+
+### Source Maps в production
+
+```json
+// angular.json
+{
+  "configurations": {
+    "production": {
+      "sourceMap": false,  // ← не публикуй source maps в production!
+
+      // Или скрытые source maps (для Sentry без публичного доступа)
+      "sourceMap": {
+        "scripts": true,
+        "styles": false,
+        "hidden": true    // ← файлы создаются, но не ссылаются из бандла
+      }
+    }
+  }
+}
+```
+
+---
+
+### Оптимизация зависимостей
+
+```typescript
+// ngx-translate — только нужные части
+// ❌
+import { TranslateModule } from '@ngx-translate/core'; // весь модуль
+
+// ✅ Standalone import — tree-shaking работает
+@Component({
+  imports: [TranslatePipe], // только pipe
+})
+
+// RxJS — правильные импорты
+// ❌ Старый стиль
+import { Observable } from 'rxjs/Observable';
+import { map } from 'rxjs/operators/map';
+
+// ✅ Современный — tree-shakeable
+import { Observable, map } from 'rxjs';
+
+// Angular Material — только нужные модули
+// ❌
+import { MaterialModule } from './material.module'; // всё сразу
+
+// ✅
+import { MatButtonModule } from '@angular/material/button';
+import { MatInputModule } from '@angular/material/input';
+```
+
+---
+
+### Профилирование производительности сборки
+
+```bash
+# Время сборки с деталями
+ng build --verbose
+
+# Профилирование webpack
+ng build --stats-json
+# Открой stats.json на https://webpack.github.io/analyse/
+
+# Проверить размеры чанков
+ls -lh dist/my-app/browser/*.js
+
+# ng build с таймингом
+time ng build --configuration=production
+```
+
+---
+
+## Playground 🎮
+
+Визуализатор размера бандла с анализом оптимизаций:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const BASE_CONFIG = {
+  aot: true, treeshaking: true, minification: true,
+  lazyLoading: true, deferComponents: true, esbuild: true,
+  sourceMap: false, strictTemplates: true,
+};
+
+const INITIAL_CHUNKS = {
+  main: 800,      // KB
+  polyfills: 80,
+  styles: 50,
+  runtime: 5,
+};
+
+const LAZY_CHUNKS = {
+  admin: 450,
+  reports: 320,
+  settings: 180,
+  analytics: 280,
+};
+
+function calcBundleSize(config) {
+  let main = INITIAL_CHUNKS.main;
+  let description = [];
+
+  if (!config.aot) { main += 300; description.push('+300KB (JIT компилятор)'); }
+  else description.push('-300KB (AOT: компилятор убран)');
+
+  if (!config.treeshaking) { main += 200; description.push('+200KB (без tree shaking)'); }
+  else description.push('-200KB (tree shaking)');
+
+  if (!config.minification) { main *= 2.5; description.push('x2.5 (без минификации)'); }
+  else description.push('-60% (minification+gzip)');
+
+  let lazyTotal = Object.values(LAZY_CHUNKS).reduce((a, b) => a + b, 0);
+  if (!config.lazyLoading) {
+    main += lazyTotal;
+    lazyTotal = 0;
+    description.push(\`+\${lazyTotal}KB (всё в initial)\`);
+  } else {
+    description.push(\`\${Object.keys(LAZY_CHUNKS).length} lazy chunks (\${lazyTotal}KB)\`);
+  }
+
+  if (config.deferComponents) { main -= 80; description.push('-80KB (@defer компоненты)'); }
+  if (config.esbuild) { description.push('⚡ esbuild: 4x быстрее сборка'); }
+  if (config.sourceMap) { main += 2000; description.push('+2000KB (source maps)'); }
+
+  const polyfills = config.aot ? INITIAL_CHUNKS.polyfills : INITIAL_CHUNKS.polyfills * 2;
+
+  return {
+    main: Math.round(Math.max(main, 100)),
+    polyfills,
+    styles: INITIAL_CHUNKS.styles,
+    runtime: INITIAL_CHUNKS.runtime,
+    lazyChunks: config.lazyLoading ? LAZY_CHUNKS : {},
+    description,
+  };
+}
+
+function SizeBar({ label, size, maxSize, color }) {
+  const width = Math.min((size / maxSize) * 100, 100);
+  return (
+    <div style={{ marginBottom: '8px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+        <span style={{ color: '#94a3b8', fontSize: '12px' }}>{label}</span>
+        <span style={{ color: '#f1f5f9', fontSize: '12px', fontWeight: 'bold' }}>{size}KB</span>
+      </div>
+      <div style={{ background: '#334155', borderRadius: '4px', height: '8px' }}>
+        <div style={{
+          background: color, borderRadius: '4px', height: '100%',
+          width: \`\${width}%\`, transition: 'width 0.4s ease',
+        }} />
+      </div>
+    </div>
+  );
+}
+
+function Toggle({ label, desc, checked, onChange }) {
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      padding: '10px 0', borderBottom: '1px solid #1e293b',
+    }}>
+      <div>
+        <div style={{ color: '#f1f5f9', fontSize: '13px' }}>{label}</div>
+        {desc && <div style={{ color: '#64748b', fontSize: '11px' }}>{desc}</div>}
+      </div>
+      <div onClick={onChange} style={{
+        width: '40px', height: '22px', borderRadius: '11px',
+        background: checked ? '#4ade80' : '#334155',
+        cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0,
+      }}>
+        <div style={{
+          position: 'absolute', top: '3px',
+          left: checked ? '20px' : '3px',
+          width: '16px', height: '16px', borderRadius: '50%',
+          background: 'white', transition: 'left 0.2s',
+        }} />
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [config, setConfig] = useState(BASE_CONFIG);
+  const [showLazy, setShowLazy] = useState(false);
+
+  const toggle = useCallback((key) => {
+    setConfig(prev => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  const resetOptimal = () => setConfig(BASE_CONFIG);
+  const resetWorst = () => setConfig({
+    aot: false, treeshaking: false, minification: false,
+    lazyLoading: false, deferComponents: false, esbuild: false,
+    sourceMap: true, strictTemplates: false,
+  });
+
+  const bundle = calcBundleSize(config);
+  const initialTotal = bundle.main + bundle.polyfills + bundle.styles + bundle.runtime;
+  const lazyTotal = Object.values(bundle.lazyChunks).reduce((a, b) => a + b, 0);
+  const maxChunk = Math.max(bundle.main, 1000);
+  const grade = initialTotal < 300 ? 'A' : initialTotal < 600 ? 'B' : initialTotal < 1000 ? 'C' : 'D';
+  const gradeColor = { A: '#4ade80', B: '#fbbf24', C: '#fb923c', D: '#f87171' }[grade];
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>📦 Bundle Analyzer</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>Симулятор оптимизации сборки Angular</div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: '20px' }}>
+          {/* Controls */}
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+            <div style={{ color: ANGULAR_RED, fontWeight: 'bold', fontSize: '13px', marginBottom: '12px' }}>
+              ⚙️ ОПТИМИЗАЦИИ
+            </div>
+            <Toggle label="AOT Compilation" desc="-300KB компилятор" checked={config.aot} onChange={() => toggle('aot')} />
+            <Toggle label="Tree Shaking" desc="-200KB мёртвый код" checked={config.treeshaking} onChange={() => toggle('treeshaking')} />
+            <Toggle label="Minification" desc="-60% размер" checked={config.minification} onChange={() => toggle('minification')} />
+            <Toggle label="Lazy Loading" desc="chunks по требованию" checked={config.lazyLoading} onChange={() => toggle('lazyLoading')} />
+            <Toggle label="@defer Components" desc="-80KB initial" checked={config.deferComponents} onChange={() => toggle('deferComponents')} />
+            <Toggle label="esbuild builder" desc="Angular 17+" checked={config.esbuild} onChange={() => toggle('esbuild')} />
+            <Toggle label="Source Maps" desc="+2MB (не в prod!)" checked={config.sourceMap} onChange={() => toggle('sourceMap')} />
+            <div style={{ display: 'flex', gap: '8px', marginTop: '14px' }}>
+              <button onClick={resetOptimal} style={{
+                flex: 1, padding: '8px', borderRadius: '6px', border: 'none',
+                background: '#14532d', color: '#4ade80', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold',
+              }}>✅ Optimal</button>
+              <button onClick={resetWorst} style={{
+                flex: 1, padding: '8px', borderRadius: '6px', border: 'none',
+                background: '#7f1d1d', color: '#f87171', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold',
+              }}>❌ Worst</button>
+            </div>
+          </div>
+
+          {/* Results */}
+          <div>
+            {/* Score */}
+            <div style={{
+              background: '#1e293b', borderRadius: '12px', padding: '16px',
+              marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '20px',
+            }}>
+              <div style={{
+                width: '64px', height: '64px', borderRadius: '50%',
+                border: \`4px solid \${gradeColor}\`, display: 'flex',
+                alignItems: 'center', justifyContent: 'center',
+                fontSize: '28px', fontWeight: 'bold', color: gradeColor, flexShrink: 0,
+              }}>{grade}</div>
+              <div>
+                <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#f1f5f9' }}>
+                  Initial: {initialTotal}KB
+                </div>
+                <div style={{ color: '#94a3b8', fontSize: '13px' }}>
+                  {config.lazyLoading ? \`+ \${lazyTotal}KB lazy chunks\` : 'Всё в одном бандле'}
+                </div>
+                <div style={{ color: '#64748b', fontSize: '12px' }}>
+                  {config.esbuild ? '⚡ esbuild (~4с сборка)' : '🐢 Webpack (~15с сборка)'}
+                </div>
+              </div>
+            </div>
+
+            {/* Bars */}
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+              <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '12px', fontWeight: 'bold' }}>
+                INITIAL CHUNKS
+              </div>
+              <SizeBar label="main.js" size={bundle.main} maxSize={maxChunk} color={bundle.main > 800 ? '#f87171' : bundle.main > 400 ? '#fbbf24' : '#4ade80'} />
+              <SizeBar label="polyfills.js" size={bundle.polyfills} maxSize={maxChunk} color="#60a5fa" />
+              <SizeBar label="styles.css" size={bundle.styles} maxSize={maxChunk} color="#a78bfa" />
+              <SizeBar label="runtime.js" size={bundle.runtime} maxSize={maxChunk} color="#94a3b8" />
+            </div>
+
+            {config.lazyLoading && (
+              <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', marginBottom: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <div style={{ color: '#94a3b8', fontSize: '12px', fontWeight: 'bold' }}>LAZY CHUNKS</div>
+                  <button onClick={() => setShowLazy(v => !v)} style={{ background: 'none', border: 'none', color: '#60a5fa', cursor: 'pointer', fontSize: '12px' }}>
+                    {showLazy ? '▲ скрыть' : '▼ показать'}
+                  </button>
+                </div>
+                {showLazy && Object.entries(bundle.lazyChunks).map(([name, size]) => (
+                  <SizeBar key={name} label={name + '.chunk.js'} size={size} maxSize={500} color="#60a5fa" />
+                ))}
+                {!showLazy && <div style={{ color: '#64748b', fontSize: '12px' }}>{Object.keys(bundle.lazyChunks).length} чанков, загружаются по требованию</div>}
+              </div>
+            )}
+
+            {/* Description */}
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px' }}>
+              <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '8px', fontWeight: 'bold' }}>
+                ЭФФЕКТ ОПТИМИЗАЦИЙ:
+              </div>
+              {bundle.description.map((d, i) => (
+                <div key={i} style={{ fontSize: '12px', color: d.startsWith('+') ? '#f87171' : '#4ade80', marginBottom: '4px' }}>
+                  {d}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,307 @@
+---
+title: "17. Health Checks"
+sidebar:
+  order: 17
+---
+import { Playground } from '@components/Playground'
+
+
+Docker healthcheck позволяет Docker Engine периодически проверять, работает ли контейнер корректно. На основе результатов Docker помечает контейнер как `healthy`, `unhealthy` или `starting`.
+
+## Инструкция HEALTHCHECK в Dockerfile
+
+```dockerfile
+# Базовый синтаксис
+HEALTHCHECK [OPTIONS] CMD command
+
+# Основные параметры:
+# --interval=30s  — интервал между проверками (по умолчанию 30с)
+# --timeout=30s   — максимальное время ожидания ответа (по умолчанию 30с)
+# --start-period=0s — время перед первой проверкой (для медленного запуска)
+# --retries=3     — количество неудачных проверок до unhealthy
+
+# Пример для Node.js API
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+
+# Пример с curl
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+
+# Пример для PostgreSQL
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
+  CMD pg_isready -U postgres -d mydb || exit 1
+
+# Пример для Redis
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD redis-cli ping || exit 1
+
+# Отключить healthcheck из родительского образа
+HEALTHCHECK NONE
+```
+
+## Статусы healthcheck
+
+| Статус | Описание |
+|--------|----------|
+| `starting` | Контейнер только запустился, ожидание `start-period` |
+| `healthy` | Последняя проверка прошла успешно |
+| `unhealthy` | Последние `retries` проверок провалились |
+
+## Просмотр статуса healthcheck
+
+```bash
+# Статус в docker ps
+docker ps
+# CONTAINER ID ... STATUS
+# abc123       ... Up 5 minutes (healthy)
+# def456       ... Up 2 minutes (unhealthy)
+# ghi789       ... Up 30 seconds (health: starting)
+
+# Подробная информация
+docker inspect --format='{{json .State.Health}}' mycontainer
+
+# Вывод JSON с историей проверок
+{
+  "Status": "healthy",
+  "FailingStreak": 0,
+  "Log": [
+    {
+      "Start": "2024-01-15T10:00:00Z",
+      "End": "2024-01-15T10:00:01Z",
+      "ExitCode": 0,
+      "Output": "OK"
+    }
+  ]
+}
+```
+
+## Endpoint /health в приложении
+
+```javascript
+// Express.js health endpoint
+app.get('/health', (req, res) => {
+  // Проверить зависимости
+  const dbOk = checkDatabase();
+  const cacheOk = checkRedis();
+
+  if (!dbOk || !cacheOk) {
+    return res.status(503).json({
+      status: 'unhealthy',
+      db: dbOk ? 'ok' : 'error',
+      cache: cacheOk ? 'ok' : 'error',
+    });
+  }
+
+  res.json({
+    status: 'healthy',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+```
+
+## Healthcheck в Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  api:
+    image: myapi
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s   # подождать 40с перед первой проверкой
+
+  worker:
+    image: myworker
+    depends_on:
+      api:
+        condition: service_healthy  # ждать healthy статуса!
+      postgres:
+        condition: service_healthy
+```
+
+## Реакция на unhealthy контейнер
+
+Docker сам не перезапускает unhealthy контейнеры — это задача оркестратора:
+
+```bash
+# Docker Compose: restart policy
+services:
+  api:
+    restart: unless-stopped  # перезапуск при сбое
+
+# Docker Swarm автоматически заменяет unhealthy контейнеры
+# Kubernetes использует liveness и readiness probes
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `export default function App() {
+  const [config, setConfig] = React.useState({ interval: 30, timeout: 10, retries: 3, startPeriod: 30 });
+  const [running, setRunning] = React.useState(false);
+  const [checks, setChecks] = React.useState([]);
+  const [status, setStatus] = React.useState('stopped');
+  const [failAt, setFailAt] = React.useState(null);
+  const intervalRef = React.useRef(null);
+  const checkCountRef = React.useRef(0);
+
+  const bg = '#0f172a';
+  const card = '#1e293b';
+  const docker = '#2496ed';
+  const text = '#e2e8f0';
+  const muted = '#64748b';
+  const green = '#22c55e';
+  const red = '#ef4444';
+  const amber = '#f59e0b';
+
+  const start = () => {
+    setRunning(true);
+    setChecks([]);
+    setStatus('starting');
+    checkCountRef.current = 0;
+    let failStreak = 0;
+
+    const runCheck = () => {
+      const num = ++checkCountRef.current;
+      const shouldFail = failAt && num >= failAt;
+      const success = !shouldFail;
+      const duration = Math.floor(Math.random() * 200) + 50;
+
+      setChecks(cs => [...cs.slice(-9), {
+        num, success, duration,
+        time: new Date().toLocaleTimeString(),
+        output: success ? 'HTTP/1.1 200 OK' : 'curl: (7) Failed to connect',
+      }]);
+
+      if (!success) {
+        failStreak++;
+        if (failStreak >= config.retries) {
+          setStatus('unhealthy');
+          return;
+        }
+      } else {
+        failStreak = 0;
+        if (num > 0) setStatus('healthy');
+      }
+    };
+
+    setTimeout(() => {
+      setStatus('healthy');
+      intervalRef.current = setInterval(runCheck, 1000);
+    }, config.startPeriod * 20);
+  };
+
+  const stop = () => {
+    clearInterval(intervalRef.current);
+    setRunning(false);
+    setStatus('stopped');
+    setChecks([]);
+    checkCountRef.current = 0;
+  };
+
+  React.useEffect(() => () => clearInterval(intervalRef.current), []);
+
+  const statusColor = { healthy: green, unhealthy: red, starting: amber, stopped: muted };
+  const statusIcon  = { healthy: '✅', unhealthy: '❌', starting: '⏳', stopped: '⬛' };
+
+  const dockerfile = \`HEALTHCHECK \\\\
+  --interval=\${config.interval}s \\\\
+  --timeout=\${config.timeout}s \\\\
+  --start-period=\${config.startPeriod}s \\\\
+  --retries=\${config.retries} \\\\
+  CMD curl -f http://localhost:3000/health || exit 1\`;
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 24, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ textAlign: 'center', color: docker, marginBottom: 16, fontSize: 20 }}>
+        💓 Health Check Конфигуратор
+      </h2>
+
+      <div style={{ display: 'flex', gap: 16, maxWidth: 720, margin: '0 auto', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 14 }}>
+            <div style={{ color: docker, fontWeight: 700, fontSize: 13, marginBottom: 14 }}>⚙️ Параметры</div>
+            {[
+              { key: 'interval', label: 'interval (секунды)', min: 5, max: 120 },
+              { key: 'timeout', label: 'timeout (секунды)', min: 1, max: 30 },
+              { key: 'retries', label: 'retries', min: 1, max: 10 },
+              { key: 'startPeriod', label: 'start-period (секунды)', min: 0, max: 120 },
+            ].map(p => (
+              <div key={p.key} style={{ marginBottom: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <label style={{ color: muted, fontSize: 12 }}>--{p.label}</label>
+                  <span style={{ color: docker, fontFamily: 'monospace', fontSize: 13, fontWeight: 600 }}>{config[p.key]}</span>
+                </div>
+                <input type="range" min={p.min} max={p.max} value={config[p.key]}
+                  onChange={e => setConfig(c => ({ ...c, [p.key]: +e.target.value }))}
+                  disabled={running}
+                  style={{ width: '100%', accentColor: docker }} />
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: card, borderRadius: 12, padding: 14, marginBottom: 14 }}>
+            <div style={{ color: muted, fontSize: 12, marginBottom: 6 }}>Симуляция сбоя на проверке #:</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {[null, 3, 5, 7].map(n => (
+                <button key={String(n)} onClick={() => setFailAt(n)} disabled={running} style={{
+                  background: failAt === n ? red + '33' : card, border: \`1px solid \${failAt === n ? red : '#ffffff15'}44\`,
+                  borderRadius: 6, padding: '4px 10px', color: failAt === n ? red : muted,
+                  cursor: running ? 'default' : 'pointer', fontSize: 11,
+                }}>{n === null ? 'Без сбоев' : \`Сбой #\${n}\`}</button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={start} disabled={running} style={{
+              flex: 1, background: running ? muted : green, border: 'none', borderRadius: 8,
+              padding: '10px', color: '#fff', cursor: running ? 'default' : 'pointer', fontSize: 13, fontWeight: 600,
+            }}>▶ Запустить</button>
+            <button onClick={stop} disabled={!running} style={{
+              flex: 1, background: !running ? muted : red, border: 'none', borderRadius: 8,
+              padding: '10px', color: '#fff', cursor: !running ? 'default' : 'pointer', fontSize: 13, fontWeight: 600,
+            }}>■ Остановить</button>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 14, border: \`1px solid \${statusColor[status]}44\` }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 40 }}>{statusIcon[status]}</div>
+              <div style={{ color: statusColor[status], fontWeight: 700, fontSize: 20, marginTop: 6 }}>{status.toUpperCase()}</div>
+              <div style={{ color: muted, fontSize: 12, marginTop: 4 }}>
+                {status === 'healthy' && \`Последние \${checks.filter(c => c.success).length} проверок успешны\`}
+                {status === 'unhealthy' && \`\${config.retries} проверок подряд провалились\`}
+                {status === 'starting' && \`Ожидание start-period: \${config.startPeriod}с\`}
+                {status === 'stopped' && 'Контейнер не запущен'}
+              </div>
+            </div>
+          </div>
+
+          {checks.length > 0 && (
+            <div style={{ background: '#0d1117', borderRadius: 12, padding: 12, marginBottom: 14, maxHeight: 200, overflowY: 'auto' }}>
+              <div style={{ color: muted, fontSize: 11, marginBottom: 6 }}>История проверок:</div>
+              {[...checks].reverse().map((c, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ color: c.success ? green : red, fontSize: 12 }}>{c.success ? '✓' : '✗'}</span>
+                  <span style={{ color: muted, fontSize: 10 }}>#{c.num}</span>
+                  <span style={{ color: text, fontSize: 11, fontFamily: 'monospace', flex: 1 }}>{c.output}</span>
+                  <span style={{ color: muted, fontSize: 10 }}>{c.duration}ms</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ background: '#0d1117', borderRadius: 10, padding: 12 }}>
+            <div style={{ color: muted, fontSize: 11, marginBottom: 6 }}>Dockerfile:</div>
+            <pre style={{ color: docker, fontFamily: 'monospace', fontSize: 10, whiteSpace: 'pre-wrap', margin: 0 }}>{dockerfile}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

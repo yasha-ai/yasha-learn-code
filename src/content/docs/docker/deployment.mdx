@@ -1,0 +1,373 @@
+---
+title: "26. Деплой на сервер"
+sidebar:
+  order: 26
+---
+import { Playground } from '@components/Playground'
+
+
+Деплой Docker-контейнеров в production отличается от разработки: необходимы стабильность, возможность отката, мониторинг и минимальный downtime. Рассмотрим основные стратегии и инструменты.
+
+## docker run в Production
+
+В простейшем случае production деплой — это запуск контейнера с явными параметрами:
+
+```bash
+docker run -d \
+  --name myapp \
+  --restart=always \           # автоперезапуск при падении
+  -p 80:3000 \
+  -e NODE_ENV=production \
+  -e DATABASE_URL=postgres://... \
+  --memory=512m \
+  --cpus=1 \
+  --log-driver=json-file \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
+  myapp:v1.2.3
+```
+
+**Политики перезапуска:**
+- `no` — не перезапускать (по умолчанию)
+- `always` — всегда перезапускать
+- `on-failure[:N]` — при ненулевом коде, максимум N раз
+- `unless-stopped` — как `always`, но не после `docker stop`
+
+Для production рекомендуется `unless-stopped`: контейнер стартует с демоном Docker, но вы можете его остановить вручную.
+
+## Docker Compose в Production
+
+Для приложений с несколькими сервисами используйте Compose:
+
+```yaml
+# docker-compose.prod.yml
+services:
+  app:
+    image: myapp:${APP_VERSION}   # версия из переменной окружения
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"     # только localhost, не наружу
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - .env.production
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+```
+
+Деплой:
+```bash
+# Обновить образ и перезапустить
+APP_VERSION=v1.2.3 docker compose -f docker-compose.prod.yml up -d --pull always
+
+# Только пересоздать изменившиеся сервисы
+docker compose up -d --no-deps app
+```
+
+## Environment-specific Конфиги
+
+Разделяйте конфигурацию по средам с помощью множественных Compose-файлов:
+
+```
+docker-compose.yml          # базовая конфигурация
+docker-compose.dev.yml      # переопределения для разработки
+docker-compose.prod.yml     # переопределения для production
+docker-compose.test.yml     # для тестирования
+```
+
+```bash
+# Разработка
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+# Production
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+Пример базовой и dev-конфигурации:
+
+```yaml
+# docker-compose.yml (базовая)
+services:
+  app:
+    build: .
+    environment:
+      - NODE_ENV=development
+
+# docker-compose.prod.yml (переопределение)
+services:
+  app:
+    image: registry.example.com/myapp:${VERSION}
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+```
+
+## Blue-Green Деплой
+
+Blue-green деплой исключает downtime: поднимаете новую версию (green) рядом со старой (blue), затем переключаете трафик.
+
+```bash
+# Текущая версия (blue) работает на порту 3000
+docker run -d --name app-blue -p 3000:3000 myapp:v1.0.0
+
+# Поднимаем новую версию (green) на порту 3001
+docker run -d --name app-green -p 3001:3000 myapp:v1.1.0
+
+# Проверяем green
+curl http://localhost:3001/health
+
+# Переключаем Nginx
+# В nginx.conf: proxy_pass http://localhost:3001;
+nginx -s reload
+
+# Убираем старую версию
+docker stop app-blue && docker rm app-blue
+```
+
+С Docker Compose и Nginx upstream можно автоматизировать переключение без изменения конфига.
+
+## Rolling Updates
+
+Rolling update обновляет контейнеры по одному, не останавливая весь сервис:
+
+```bash
+# Скачать новый образ
+docker pull myapp:v1.1.0
+
+# Обновить и пересоздать только сервис app
+docker compose up -d --no-deps --build app
+
+# Docker Swarm: встроенные rolling updates
+docker service update \
+  --image myapp:v1.1.0 \
+  --update-parallelism 1 \
+  --update-delay 30s \
+  --update-failure-action rollback \
+  myapp-service
+```
+
+## Откат на предыдущую версию
+
+```bash
+# Тегируйте образы конкретными версиями!
+docker pull myapp:v1.0.0
+
+# С Compose
+APP_VERSION=v1.0.0 docker compose up -d
+
+# Docker Swarm
+docker service rollback myapp-service
+```
+
+## Health Check и Graceful Shutdown
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+```
+
+Для graceful shutdown обрабатывайте SIGTERM в вашем приложении:
+
+```js
+// Node.js
+process.on('SIGTERM', async () => {
+  console.log('Shutting down gracefully...');
+  await server.close();
+  await db.disconnect();
+  process.exit(0);
+});
+```
+
+```bash
+# Остановка с таймаутом (по умолчанию 10 секунд)
+docker stop --time=30 myapp
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `export default function App() {
+  const bg = '#0f172a', card = '#1e293b', docker = '#2496ed', text = '#e2e8f0', muted = '#64748b';
+  const green = '#22c55e', red = '#ef4444', amber = '#f59e0b', border = '#334155';
+  const purple = '#a855f7', teal = '#14b8a6';
+
+  const strategies = {
+    bluegreen: {
+      label: 'Blue-Green',
+      color: '#2563eb',
+      altColor: '#16a34a',
+      description: 'Две идентичные среды. Переключение трафика мгновенное. Откат — переключить обратно.',
+      steps: [
+        { label: 'Blue (v1.0) активна',    state: 'active'   },
+        { label: 'Поднимаем Green (v1.1)',  state: 'starting' },
+        { label: 'Проверяем Green',         state: 'testing'  },
+        { label: 'Трафик → Green',          state: 'switch'   },
+        { label: 'Blue остановлена',        state: 'done'     },
+      ],
+    },
+    rolling: {
+      label: 'Rolling Update',
+      color: docker,
+      altColor: teal,
+      description: 'Контейнеры заменяются по одному. Нулевой downtime при достаточном количестве реплик.',
+      steps: [
+        { label: 'Реплика 1/3 заменяется', state: 'starting' },
+        { label: 'Реплика 1 готова',       state: 'active'   },
+        { label: 'Реплика 2/3 заменяется', state: 'starting' },
+        { label: 'Реплика 2 готова',       state: 'active'   },
+        { label: 'Реплика 3/3 заменяется', state: 'starting' },
+        { label: 'Деплой завершён ✓',      state: 'done'     },
+      ],
+    },
+    canary: {
+      label: 'Canary',
+      color: amber,
+      altColor: green,
+      description: 'Небольшой процент трафика направляется на новую версию. Риск ограничен.',
+      steps: [
+        { label: '100% трафика → v1.0',    state: 'active'  },
+        { label: '10% трафика → v1.1',     state: 'testing' },
+        { label: 'Мониторинг метрик…',     state: 'testing' },
+        { label: '50% трафика → v1.1',     state: 'switch'  },
+        { label: '100% трафика → v1.1',    state: 'done'    },
+      ],
+    },
+  };
+
+  const [selected, setSelected] = React.useState('bluegreen');
+  const [stepIdx, setStepIdx] = React.useState(-1);
+  const [running, setRunning] = React.useState(false);
+
+  const strategy = strategies[selected];
+
+  const runDeploy = () => {
+    if (running) return;
+    setRunning(true);
+    setStepIdx(0);
+    const steps = strategies[selected].steps;
+    steps.forEach((_, i) => {
+      setTimeout(() => {
+        setStepIdx(i);
+        if (i === steps.length - 1) setRunning(false);
+      }, i * 900);
+    });
+  };
+
+  const reset = () => {
+    if (!running) { setStepIdx(-1); }
+  };
+
+  const stepColor = (state) => {
+    if (state === 'done')     return green;
+    if (state === 'switch')   return amber;
+    if (state === 'testing')  return purple;
+    if (state === 'starting') return docker;
+    return muted;
+  };
+
+  const Replicas = ({ version, color, count, label }) => (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ fontSize: 11, color: muted, marginBottom: 6 }}>{label}</div>
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+        {Array.from({ length: count }).map((_, i) => (
+          <div key={i} style={{ width: 36, height: 36, borderRadius: 8, background: color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#fff', fontWeight: 'bold', boxShadow: '0 0 10px ' + color + '60' }}>
+            {version}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ background: bg, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: text }}>
+      <h2 style={{ color: docker, textAlign: 'center', marginBottom: 20, fontSize: 18 }}>
+        🚀 Deployment Strategy Visualizer
+      </h2>
+
+      <div style={{ maxWidth: 760, margin: '0 auto' }}>
+        {/* Strategy selector */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          {Object.entries(strategies).map(([key, s]) => (
+            <button key={key} onClick={() => { setSelected(key); setStepIdx(-1); setRunning(false); }}
+              style={{ flex: 1, padding: '10px 0', background: selected === key ? s.color : card, color: text, border: selected === key ? 'none' : '1px solid ' + border, borderRadius: 8, cursor: 'pointer', fontWeight: selected === key ? 'bold' : 'normal', fontSize: 13, transition: 'all 0.2s' }}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: card, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+          <p style={{ color: muted, fontSize: 13, margin: '0 0 16px 0' }}>{strategy.description}</p>
+
+          {/* Container visualization */}
+          <div style={{ background: bg, borderRadius: 8, padding: 16, marginBottom: 16, display: 'flex', justifyContent: 'space-around', alignItems: 'center', minHeight: 80 }}>
+            {selected === 'bluegreen' && (
+              <>
+                <Replicas version="v1" color={stepIdx < 3 ? '#2563eb' : muted} count={1} label="Blue (v1.0)" />
+                <div style={{ color: stepIdx >= 3 ? green : muted, fontSize: 20 }}>→</div>
+                <Replicas version="v2" color={stepIdx >= 1 ? '#16a34a' : border} count={1} label="Green (v1.1)" />
+              </>
+            )}
+            {selected === 'rolling' && (
+              <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+                {[0, 1, 2].map(i => {
+                  const replaced = stepIdx >= (i * 2 + 1);
+                  const replacing = stepIdx === i * 2;
+                  return (
+                    <div key={i} style={{ textAlign: 'center' }}>
+                      <div style={{ width: 44, height: 44, borderRadius: 10, background: replacing ? amber : replaced ? teal : docker, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: '#fff', fontWeight: 'bold', transition: 'background 0.5s', boxShadow: replacing ? '0 0 14px ' + amber + '80' : 'none' }}>
+                        {replaced ? 'v1.1' : 'v1.0'}
+                      </div>
+                      <div style={{ fontSize: 10, color: muted, marginTop: 4 }}>pod-{i + 1}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {selected === 'canary' && (
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+                {[0,1,2,3,4,5,6,7,8,9].map(i => {
+                  const canaryCount = stepIdx <= 0 ? 0 : stepIdx <= 2 ? 1 : stepIdx <= 3 ? 5 : 10;
+                  const isCanary = i < canaryCount;
+                  return (
+                    <div key={i} style={{ width: 32, height: 32, borderRadius: 6, background: isCanary ? amber : docker, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: '#fff', fontWeight: 'bold', transition: 'background 0.5s' }}>
+                      {isCanary ? 'new' : 'v1'}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Steps */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {strategy.steps.map((step, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px', background: i === stepIdx ? '#1a2744' : '#0a0f1e', borderRadius: 6, border: '1px solid ' + (i === stepIdx ? strategy.color : border), transition: 'all 0.3s', opacity: i > stepIdx && stepIdx >= 0 ? 0.5 : 1 }}>
+                <span style={{ width: 20, height: 20, borderRadius: '50%', background: i <= stepIdx ? stepColor(step.state) : border, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: '#fff', fontWeight: 'bold', flexShrink: 0 }}>
+                  {i <= stepIdx ? '✓' : i + 1}
+                </span>
+                <span style={{ fontSize: 13, color: i <= stepIdx ? text : muted }}>{step.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={runDeploy} disabled={running}
+            style={{ flex: 1, padding: '10px 0', background: running ? muted : green, color: '#fff', border: 'none', borderRadius: 8, cursor: running ? 'not-allowed' : 'pointer', fontSize: 14, fontWeight: 'bold' }}>
+            {running ? '⏳ Deploying…' : '▶ Run Deployment'}
+          </button>
+          <button onClick={reset} disabled={running}
+            style={{ padding: '10px 20px', background: card, color: text, border: '1px solid ' + border, borderRadius: 8, cursor: running ? 'not-allowed' : 'pointer', fontSize: 14 }}>
+            ↺ Reset
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

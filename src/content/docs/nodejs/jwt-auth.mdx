@@ -1,0 +1,367 @@
+---
+title: "17. JWT аутентификация"
+sidebar:
+  order: 17
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-jwt.png)
+
+**JWT** (JSON Web Token) — стандарт для передачи данных между клиентом и сервером в виде подписанного токена. Основа аутентификации в REST API.
+
+## Структура JWT
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOjEsInJvbGUiOiJ1c2VyIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+      ↑ Header              ↑ Payload                          ↑ Signature
+
+Header:    { "alg": "HS256", "typ": "JWT" }
+Payload:   { "userId": 1, "role": "user", "iat": 1234567890, "exp": 1234654290 }
+Signature: HMACSHA256(base64(header) + "." + base64(payload), secret)
+```
+
+```bash
+npm install jsonwebtoken bcryptjs
+```
+
+## Создание и проверка токенов
+
+```javascript
+const jwt = require('jsonwebtoken');
+const { JWT_SECRET, JWT_EXPIRES_IN } = require('./config');
+
+// Создание токена
+function createToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, {
+    expiresIn: JWT_EXPIRES_IN || '7d',
+    // algorithm: 'HS256', // по умолчанию
+  });
+}
+
+// Проверка токена
+function verifyToken(token) {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+    // Возвращает payload: { userId: 1, role: 'user', iat: ..., exp: ... }
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') throw new Error('Токен истёк');
+    if (err.name === 'JsonWebTokenError') throw new Error('Неверный токен');
+    throw err;
+  }
+}
+
+// Пример использования
+const token = createToken({ userId: 42, role: 'admin' });
+const payload = verifyToken(token);
+console.log(payload.userId);  // 42
+```
+
+## Хэширование паролей
+
+```javascript
+const bcrypt = require('bcryptjs');
+
+// Хэширование (при регистрации)
+async function hashPassword(password) {
+  const saltRounds = 12;  // чем больше — тем безопаснее и медленнее
+  return bcrypt.hash(password, saltRounds);
+}
+
+// Проверка пароля (при входе)
+async function comparePassword(password, hash) {
+  return bcrypt.compare(password, hash);
+}
+
+// Использование
+const hash = await hashPassword('mySecretPassword123');
+console.log(hash); // $2a$12$...
+
+const isValid = await comparePassword('mySecretPassword123', hash);
+console.log(isValid); // true
+```
+
+## Полная реализация Auth
+
+```javascript
+// routes/auth.js
+const { Router } = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { z } = require('zod');
+const { validate } = require('../middleware/validate');
+const { authenticate } = require('../middleware/auth');
+const { db } = require('../db');
+const config = require('../config');
+
+const router = Router();
+
+const registerSchema = z.object({
+  name: z.string().min(2).max(50),
+  email: z.string().email().toLowerCase(),
+  password: z.string().min(8).max(72)
+    .regex(/[A-Z]/, 'Минимум одна заглавная буква')
+    .regex(/[0-9]/, 'Минимум одна цифра'),
+});
+
+const loginSchema = z.object({
+  email: z.string().email().toLowerCase(),
+  password: z.string().min(1),
+});
+
+// Регистрация
+router.post('/register',
+  validate(registerSchema),
+  async (req, res, next) => {
+    try {
+      const { name, email, password } = req.body;
+
+      // Проверяем уникальность email
+      const existing = await db.user.findUnique({ where: { email } });
+      if (existing) {
+        return res.status(409).json({ error: 'Email уже зарегистрирован' });
+      }
+
+      // Хэшируем пароль
+      const passwordHash = await bcrypt.hash(password, 12);
+
+      // Создаём пользователя
+      const user = await db.user.create({
+        data: { name, email, passwordHash },
+        select: { id: true, name: true, email: true, createdAt: true },
+      });
+
+      // Создаём токен
+      const token = jwt.sign(
+        { userId: user.id, role: 'user' },
+        config.jwt.secret,
+        { expiresIn: config.jwt.expiresIn }
+      );
+
+      res.status(201).json({
+        message: 'Аккаунт создан!',
+        token,
+        user,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Вход
+router.post('/login',
+  validate(loginSchema),
+  async (req, res, next) => {
+    try {
+      const { email, password } = req.body;
+
+      // Находим пользователя
+      const user = await db.user.findUnique({
+        where: { email },
+        select: { id: true, name: true, email: true, passwordHash: true, role: true },
+      });
+
+      // Одинаковое сообщение для безопасности!
+      const errorMsg = 'Неверный email или пароль';
+      if (!user) return res.status(401).json({ error: errorMsg });
+
+      // Проверяем пароль
+      const isValid = await bcrypt.compare(password, user.passwordHash);
+      if (!isValid) return res.status(401).json({ error: errorMsg });
+
+      // Токен
+      const token = jwt.sign(
+        { userId: user.id, role: user.role },
+        config.jwt.secret,
+        { expiresIn: config.jwt.expiresIn }
+      );
+
+      const { passwordHash: _, ...userData } = user;
+      res.json({ token, user: userData });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Текущий пользователь
+router.get('/me', authenticate, async (req, res, next) => {
+  try {
+    const user = await db.user.findUnique({
+      where: { id: req.user.userId },
+      select: { id: true, name: true, email: true, role: true, createdAt: true },
+    });
+    res.json({ data: user });
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;
+```
+
+## Refresh Tokens
+
+```javascript
+// Access token — короткоживущий (15 мин)
+// Refresh token — долгоживущий (30 дней), хранится в httpOnly cookie
+
+router.post('/refresh', async (req, res, next) => {
+  try {
+    const refreshToken = req.cookies.refreshToken;
+    if (!refreshToken) {
+      return res.status(401).json({ error: 'Refresh токен не найден' });
+    }
+
+    // Проверяем refresh токен
+    const payload = jwt.verify(refreshToken, config.jwt.refreshSecret);
+
+    // Проверяем в БД (чтобы можно было отозвать)
+    const stored = await db.refreshToken.findFirst({
+      where: { token: refreshToken, userId: payload.userId },
+    });
+    if (!stored) {
+      return res.status(401).json({ error: 'Токен отозван' });
+    }
+
+    // Создаём новый access token
+    const accessToken = jwt.sign(
+      { userId: payload.userId, role: payload.role },
+      config.jwt.secret,
+      { expiresIn: '15m' }
+    );
+
+    res.json({ accessToken });
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Refresh токен истёк, войдите заново' });
+    }
+    next(err);
+  }
+});
+
+// Выход — инвалидируем refresh токен
+router.post('/logout', authenticate, async (req, res) => {
+  const refreshToken = req.cookies.refreshToken;
+  if (refreshToken) {
+    await db.refreshToken.deleteMany({ where: { token: refreshToken } });
+  }
+  res.clearCookie('refreshToken');
+  res.json({ message: 'Вышли из системы' });
+});
+```
+
+## Middleware аутентификации
+
+```javascript
+// middleware/auth.js
+const jwt = require('jsonwebtoken');
+const config = require('../config');
+
+function authenticate(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Токен не предоставлен' });
+  }
+
+  try {
+    const token = authHeader.slice(7);
+    req.user = jwt.verify(token, config.jwt.secret);
+    next();
+  } catch (err) {
+    const msg = err.name === 'TokenExpiredError' ? 'Токен истёк' : 'Неверный токен';
+    res.status(401).json({ error: msg });
+  }
+}
+
+// Опциональная авторизация — продолжает даже без токена
+function optionalAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    try {
+      req.user = jwt.verify(authHeader.slice(7), config.jwt.secret);
+    } catch {}  // игнорируем ошибки
+  }
+  next();
+}
+
+module.exports = { authenticate, optionalAuth };
+```
+
+## Практика
+
+1. Реализуй регистрацию с bcrypt хэшированием пароля
+2. Реализуй вход с генерацией JWT токена
+3. Создай middleware `authenticate` и защити им несколько роутов
+4. Добавь эндпоинт `GET /auth/me` для получения текущего пользователя
+5. Реализуй систему refresh токенов (access 15 мин + refresh 30 дней в httpOnly cookie)
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+export default function App() {
+  const [token, setToken] = useState(null);
+  const [log, setLog] = useState([]);
+
+  const add = (msg, color = "#e2e8f0") => setLog(prev => [...prev.slice(-6), { msg, color }]);
+
+  const login = () => {
+    add("POST /api/login { email, password }", "#3b82f6");
+    add("✓ Credentials valid", "#10b981");
+    const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+    const payload = btoa(JSON.stringify({ userId: 42, role: "admin", exp: Date.now() + 3600000 }));
+    const sig = "mock_signature_hmac256";
+    const jwt = header + "." + payload + "." + sig;
+    setToken(jwt);
+    add("✓ Token issued: " + jwt.slice(0, 40) + "...", "#10b981");
+  };
+
+  const accessProtected = () => {
+    if (!token) {
+      add("GET /api/profile (no token)", "#ef4444");
+      add("✕ 401 Unauthorized", "#ef4444");
+      return;
+    }
+    add("GET /api/profile", "#3b82f6");
+    add("Authorization: Bearer " + token.slice(0, 30) + "...", "#94a3b8");
+    add("✓ Token verified (userId: 42, role: admin)", "#10b981");
+    add('→ 200 { "name": "Alice", "role": "admin" }', "#10b981");
+  };
+
+  const decodeToken = () => {
+    if (!token) { add("Нет токена для декодирования", "#ef4444"); return; }
+    const parts = token.split(".");
+    add("// JWT = header.payload.signature", "#475569");
+    add("Header: " + atob(parts[0]), "#f59e0b");
+    add("Payload: " + atob(parts[1]), "#a78bfa");
+    add("Signature: HMACSHA256(header + payload, secret)", "#94a3b8");
+  };
+
+  const logout = () => { setToken(null); add("Token удалён", "#94a3b8"); };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>JWT аутентификация</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        <button onClick={login} disabled={!!token} style={{ padding: "5px 10px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Login</button>
+        <button onClick={accessProtected} style={{ padding: "5px 10px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>GET /profile</button>
+        <button onClick={decodeToken} style={{ padding: "5px 10px", background: "#a78bfa", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Decode JWT</button>
+        <button onClick={logout} style={{ padding: "5px 10px", background: "#ef4444", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Logout</button>
+      </div>
+      <div style={{ color: token ? "#10b981" : "#ef4444", fontSize: 11, marginBottom: 8 }}>
+        {token ? "✓ Авторизован" : "✕ Не авторизован"}
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 80 }}>
+        {log.map((l, i) => <div key={i} style={{ fontSize: 12, color: l.color }}>{l.msg}</div>)}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

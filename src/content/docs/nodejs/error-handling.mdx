@@ -1,0 +1,331 @@
+---
+title: "14. Обработка ошибок"
+sidebar:
+  order: 14
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-errors.png)
+
+Правильная обработка ошибок — признак профессионального кода. В Node.js/Express есть несколько слоёв защиты.
+
+## Кастомные классы ошибок
+
+```javascript
+// utils/errors.js
+
+// Базовый класс ошибок приложения
+class AppError extends Error {
+  constructor(message, status = 500, code = null) {
+    super(message);
+    this.name = this.constructor.name;
+    this.status = status;
+    this.code = code;
+    this.isOperational = true;  // известная ошибка (не баг)
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+// Специфичные ошибки
+class NotFoundError extends AppError {
+  constructor(resource = 'Resource') {
+    super(`${resource} не найден`, 404, 'NOT_FOUND');
+  }
+}
+
+class ValidationError extends AppError {
+  constructor(details) {
+    super('Ошибка валидации', 400, 'VALIDATION_ERROR');
+    this.details = details;
+  }
+}
+
+class UnauthorizedError extends AppError {
+  constructor(message = 'Не авторизован') {
+    super(message, 401, 'UNAUTHORIZED');
+  }
+}
+
+class ForbiddenError extends AppError {
+  constructor(message = 'Нет доступа') {
+    super(message, 403, 'FORBIDDEN');
+  }
+}
+
+class ConflictError extends AppError {
+  constructor(message = 'Конфликт') {
+    super(message, 409, 'CONFLICT');
+  }
+}
+
+module.exports = {
+  AppError,
+  NotFoundError,
+  ValidationError,
+  UnauthorizedError,
+  ForbiddenError,
+  ConflictError,
+};
+```
+
+## Централизованный обработчик ошибок
+
+```javascript
+// middleware/errorHandler.js
+const {
+  AppError,
+  ValidationError,
+  NotFoundError,
+} = require('../utils/errors');
+
+function errorHandler(err, req, res, next) {
+  // Логируем всё
+  if (err.isOperational) {
+    console.warn(`[WARN] ${err.status} ${err.message}`, {
+      url: req.originalUrl,
+      method: req.method,
+      code: err.code,
+    });
+  } else {
+    // Неизвестная ошибка — это баг, логируем со стеком
+    console.error('[ERROR] Неизвестная ошибка:', err);
+  }
+
+  // Кастомные AppError
+  if (err instanceof AppError) {
+    const body = {
+      error: {
+        message: err.message,
+        code: err.code,
+      },
+    };
+    if (err instanceof ValidationError && err.details) {
+      body.error.details = err.details;
+    }
+    return res.status(err.status).json(body);
+  }
+
+  // Prisma ошибки
+  if (err.code === 'P2002') {
+    return res.status(409).json({
+      error: { message: 'Запись уже существует', code: 'DUPLICATE' },
+    });
+  }
+  if (err.code === 'P2025') {
+    return res.status(404).json({
+      error: { message: 'Запись не найдена', code: 'NOT_FOUND' },
+    });
+  }
+
+  // JWT ошибки
+  if (err.name === 'JsonWebTokenError') {
+    return res.status(401).json({
+      error: { message: 'Неверный токен', code: 'INVALID_TOKEN' },
+    });
+  }
+  if (err.name === 'TokenExpiredError') {
+    return res.status(401).json({
+      error: { message: 'Токен истёк', code: 'TOKEN_EXPIRED' },
+    });
+  }
+
+  // Zod ошибки
+  if (err.name === 'ZodError') {
+    return res.status(400).json({
+      error: {
+        message: 'Ошибка валидации',
+        code: 'VALIDATION_ERROR',
+        details: err.flatten().fieldErrors,
+      },
+    });
+  }
+
+  // Неизвестные ошибки — 500
+  const isProd = process.env.NODE_ENV === 'production';
+  res.status(500).json({
+    error: {
+      message: isProd ? 'Внутренняя ошибка сервера' : err.message,
+      code: 'INTERNAL_ERROR',
+      ...(isProd ? {} : { stack: err.stack }),
+    },
+  });
+}
+
+// 404 handler — для неизвестных роутов
+function notFoundHandler(req, res) {
+  res.status(404).json({
+    error: {
+      message: `Маршрут ${req.method} ${req.path} не найден`,
+      code: 'ROUTE_NOT_FOUND',
+    },
+  });
+}
+
+module.exports = { errorHandler, notFoundHandler };
+```
+
+## Использование в роутах
+
+```javascript
+const { NotFoundError, ValidationError, ConflictError } = require('../utils/errors');
+
+// Выбрасываем ошибки — errorHandler их поймает
+app.get('/users/:id', asyncHandler(async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    throw new ValidationError({ id: ['Должен быть числом'] });
+  }
+
+  const user = await db.users.findUnique({ where: { id } });
+  if (!user) {
+    throw new NotFoundError('Пользователь');
+  }
+
+  res.json({ data: user });
+}));
+
+app.post('/users', asyncHandler(async (req, res) => {
+  const { email } = req.body;
+  
+  const existing = await db.users.findUnique({ where: { email } });
+  if (existing) {
+    throw new ConflictError(`Email ${email} уже занят`);
+  }
+
+  const user = await db.users.create({ data: req.body });
+  res.status(201).json({ data: user });
+}));
+```
+
+## Try/Catch паттерны
+
+```javascript
+// asyncHandler — обёртка для async роутов
+function asyncHandler(fn) {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+// Обёртка для сервисов
+class UserService {
+  async findById(id) {
+    const user = await db.users.findUnique({ where: { id } });
+    if (!user) throw new NotFoundError('Пользователь');
+    return user;
+  }
+
+  async create(data) {
+    try {
+      return await db.users.create({ data });
+    } catch (err) {
+      // Перехватываем специфичные ошибки БД
+      if (err.code === 'P2002') {
+        throw new ConflictError('Email уже занят');
+      }
+      throw err;  // остальное прокидываем дальше
+    }
+  }
+}
+```
+
+## Глобальные обработчики ошибок
+
+```javascript
+// index.js — защита от падения процесса
+
+// Необработанные ошибки в промисах
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Необработанный rejection:', reason);
+  // В production — завершаем процесс (PM2/k8s перезапустит)
+  process.exit(1);
+});
+
+// Синхронные исключения
+process.on('uncaughtException', (err) => {
+  console.error('Необработанное исключение:', err);
+  // Дожидаемся завершения активных запросов
+  server.close(() => process.exit(1));
+  // Если за 10 сек не закрылся — принудительно
+  setTimeout(() => process.exit(1), 10000).unref();
+});
+
+// SIGTERM — от Docker/Kubernetes
+process.on('SIGTERM', async () => {
+  console.log('Получен SIGTERM, graceful shutdown...');
+  server.close(() => {
+    console.log('HTTP сервер закрыт');
+    // Закрываем БД соединения
+    db.$disconnect().then(() => process.exit(0));
+  });
+});
+```
+
+## Практика
+
+1. Создай иерархию кастомных ошибок: `AppError → NotFoundError, ValidationError, ConflictError`
+2. Напиши централизованный `errorHandler` с обработкой Prisma, JWT и Zod ошибок
+3. Добавь `asyncHandler` обёртку для всех async роутов
+4. Подключи `process.on('uncaughtException')` и `process.on('unhandledRejection')`
+5. Протестируй: намеренно вызови каждый тип ошибки и убедись в правильных ответах
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+export default function App() {
+  const [log, setLog] = useState([]);
+
+  const add = (msg, color) => setLog(prev => [...prev.slice(-6), { msg, color }]);
+
+  const tryCatch = () => {
+    add("try {", "#94a3b8");
+    add('  const data = JSON.parse("invalid json");', "#e2e8f0");
+    add("} catch (err) {", "#94a3b8");
+    add("  SyntaxError: Unexpected token i", "#ef4444");
+    add("  → 400 Bad Request", "#f59e0b");
+    add("}", "#94a3b8");
+  };
+
+  const asyncError = () => {
+    add("app.get('/api/user/:id', async (req, res, next) => {", "#94a3b8");
+    add("  const user = await User.findById(id);", "#e2e8f0");
+    add("  if (!user) throw new NotFoundError('User');", "#ef4444");
+    add("  // Express error middleware catches it:", "#475569");
+    add('  → 404 { "error": "User not found" }', "#f59e0b");
+    add("});", "#94a3b8");
+  };
+
+  const errorMiddleware = () => {
+    add("// Error middleware (4 аргумента!)", "#475569");
+    add("app.use((err, req, res, next) => {", "#94a3b8");
+    add("  const status = err.status || 500;", "#e2e8f0");
+    add("  logger.error(err.stack);", "#ef4444");
+    add("  res.status(status).json({", "#e2e8f0");
+    add('    error: err.message || "Server Error"', "#e2e8f0");
+    add("  });", "#e2e8f0");
+    add("});", "#94a3b8");
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Обработка ошибок</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        <button onClick={tryCatch} style={{ padding: "4px 10px", background: "#ef4444", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>try/catch</button>
+        <button onClick={asyncError} style={{ padding: "4px 10px", background: "#f59e0b", color: "#000", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Async error</button>
+        <button onClick={errorMiddleware} style={{ padding: "4px 10px", background: "#a78bfa", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Error middleware</button>
+        <button onClick={() => setLog([])} style={{ padding: "4px 10px", background: "#334155", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>Clear</button>
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {log.map((l, i) => <div key={i} style={{ fontSize: 12, color: l.color }}>{l.msg}</div>)}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

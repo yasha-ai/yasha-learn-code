@@ -1,0 +1,360 @@
+---
+title: "5. Socket.io: комнаты и Namespaces"
+sidebar:
+  order: 5
+---
+
+import { Playground } from "@components/Playground"
+
+Комнаты и Namespaces — ключевые механизмы Socket.io для организации соединений.
+
+## Rooms (Комнаты)
+
+Комнаты позволяют группировать сокеты и отправлять события группам:
+
+```javascript
+// Войти в комнату
+socket.join('room-1');
+socket.join(['room-1', 'room-2']); // Несколько комнат
+
+// Выйти из комнаты
+socket.leave('room-1');
+
+// Отправить в комнату
+io.to('room-1').emit('event', data);              // всем в комнате
+socket.to('room-1').emit('event', data);          // всем кроме себя
+io.to('room-1').to('room-2').emit('event', data); // в несколько комнат
+
+// Узнать в каких комнатах находится сокет
+console.log(socket.rooms); // Set { socket.id, 'room-1', 'room-2' }
+```
+
+### Пример: чат по комнатам
+
+```javascript
+io.on('connection', (socket) => {
+  // Войти в комнату чата
+  socket.on('join-room', ({ roomId, username }) => {
+    socket.join(roomId);
+    socket.data.username = username;
+    socket.data.roomId = roomId;
+
+    // Уведомить остальных в комнате
+    socket.to(roomId).emit('user-joined', {
+      username,
+      message: `${username} вошёл в чат`,
+    });
+
+    // Отправить историю новому пользователю
+    const history = getMessageHistory(roomId);
+    socket.emit('message-history', history);
+  });
+
+  // Сообщение в комнату
+  socket.on('send-message', ({ text }) => {
+    const { username, roomId } = socket.data;
+    
+    const message = {
+      id: generateId(),
+      username,
+      text,
+      timestamp: new Date().toISOString(),
+    };
+
+    // Сохранить и отправить всем в комнате
+    saveMessage(roomId, message);
+    io.to(roomId).emit('new-message', message);
+  });
+
+  // Покинуть комнату
+  socket.on('leave-room', ({ roomId }) => {
+    socket.leave(roomId);
+    socket.to(roomId).emit('user-left', {
+      username: socket.data.username,
+    });
+  });
+
+  // Авто-выход при отключении
+  socket.on('disconnect', () => {
+    const { username, roomId } = socket.data;
+    if (roomId) {
+      socket.to(roomId).emit('user-left', { username });
+    }
+  });
+});
+```
+
+### Список сокетов в комнате
+
+```javascript
+// Получить сокеты в комнате
+async function getSocketsInRoom(roomId) {
+  const sockets = await io.in(roomId).fetchSockets();
+  return sockets.map(s => ({
+    id: s.id,
+    username: s.data.username,
+  }));
+}
+
+// Количество пользователей в комнате
+const room = io.sockets.adapter.rooms.get('room-1');
+const count = room ? room.size : 0;
+```
+
+## Namespaces
+
+Namespace — логическое разделение одного Socket.io сервера:
+
+```
+Один сервер, разные пространства:
+/          — главный namespace (по умолчанию)
+/admin     — административная панель
+/chat      — чат
+/game      — игровая логика
+/notifications — уведомления
+```
+
+```javascript
+// Сервер — создаём namespaces
+const chatNs = io.of('/chat');
+const adminNs = io.of('/admin');
+
+// Middleware только для /admin
+adminNs.use((socket, next) => {
+  if (socket.handshake.auth.role === 'admin') {
+    next();
+  } else {
+    next(new Error('Только для администраторов'));
+  }
+});
+
+chatNs.on('connection', (socket) => {
+  console.log('Chat клиент:', socket.id);
+});
+
+adminNs.on('connection', (socket) => {
+  console.log('Admin клиент:', socket.id);
+  
+  // Отправить статистику
+  socket.emit('stats', {
+    connections: chatNs.sockets.size,
+    uptime: process.uptime(),
+  });
+});
+
+// Клиент — подключиться к namespace
+import { io } from 'socket.io-client';
+
+const chatSocket = io('http://localhost:3000/chat');
+const adminSocket = io('http://localhost:3000/admin', {
+  auth: { role: 'admin', token: adminToken },
+});
+```
+
+## Dynamic Namespaces
+
+Динамически создаваемые пространства (например, для multi-tenant):
+
+```javascript
+// Regex pattern
+io.of(/^\/workspace-[a-z0-9]+$/).on('connection', (socket) => {
+  const namespace = socket.nsp.name; // '/workspace-abc123'
+  const workspaceId = namespace.slice(11); // 'abc123'
+  
+  console.log(`Подключение к workspace: ${workspaceId}`);
+  
+  // Middleware для проверки доступа
+  socket.nsp.use(async (socket, next) => {
+    const userId = socket.handshake.auth.userId;
+    const hasAccess = await checkWorkspaceAccess(userId, workspaceId);
+    if (hasAccess) next();
+    else next(new Error('Нет доступа'));
+  });
+});
+```
+
+## Rooms vs Namespaces
+
+| | Rooms | Namespaces |
+|---|-------|------------|
+| Создание | Динамически (`socket.join`) | Явно (`io.of('/ns')`) |
+| Middleware | Нет | Есть |
+| Разные соединения | Нет (одно TCP) | Да (разные соединения) |
+| Использование | Группировка в рамках фичи | Разные фичи/секции |
+
+## Практический пример: система уведомлений
+
+```javascript
+// Сервер
+const io = new Server(httpServer);
+const notifNs = io.of('/notifications');
+
+// Каждый пользователь в своей "комнате"
+notifNs.on('connection', async (socket) => {
+  const userId = socket.handshake.auth.userId;
+  
+  // Пользователь подписывается на свои уведомления
+  socket.join(`user:${userId}`);
+  
+  // Отправить непрочитанные уведомления
+  const unread = await getUnreadNotifications(userId);
+  socket.emit('unread-notifications', unread);
+  
+  // Отметить как прочитанное
+  socket.on('mark-read', async (notificationId) => {
+    await markAsRead(notificationId, userId);
+    socket.emit('notification-read', notificationId);
+  });
+});
+
+// В другом месте кода — отправить уведомление пользователю
+async function sendNotification(userId, notification) {
+  await db.notifications.create({ data: { ...notification, userId } });
+  notifNs.to(`user:${userId}`).emit('new-notification', notification);
+}
+
+// Клиент
+const notifSocket = io('/notifications', {
+  auth: { userId: currentUser.id, token: authToken },
+});
+
+notifSocket.on('new-notification', (notification) => {
+  showNotificationBanner(notification);
+  updateNotificationCount();
+});
+
+notifSocket.on('unread-notifications', (notifications) => {
+  renderNotificationList(notifications);
+});
+```
+
+## Emit на все namespace/rooms
+
+```javascript
+// Всем во всех namespace (исключая sender)
+io.emit('server-restart', { in: 60 });
+
+// Конкретный socket по ID
+io.to(socketId).emit('private-message', data);
+
+// Исключить сокеты
+io.except(socket.id).emit('broadcast', data);
+
+// Всем в комнате, кроме конкретных сокетов
+io.to('room-1').except([socket1.id, socket2.id]).emit('event', data);
+```
+
+## Persistent rooms с Redis
+
+Для горизонтального масштабирования нужен адаптер:
+
+```javascript
+const { createAdapter } = require('@socket.io/redis-adapter');
+const { createClient } = require('redis');
+
+const pubClient = createClient({ url: 'redis://localhost:6379' });
+const subClient = pubClient.duplicate();
+
+await Promise.all([pubClient.connect(), subClient.connect()]);
+
+io.adapter(createAdapter(pubClient, subClient));
+
+// Теперь io.to('room').emit() работает на всех серверах!
+```
+
+## Задания
+
+1. Создай систему чата с несколькими комнатами. Покажи список онлайн-пользователей
+2. Реализуй namespace `/admin` с проверкой роли через middleware
+3. Добавь "typing indicator" (кто сейчас печатает) в комнату чата
+4. Как отправить сообщение конкретному пользователю, зная только его userId?
+
+## Итог
+
+Rooms — для группировки внутри одной логики (чат-комнаты, игровые сессии). Namespaces — для разных фич (чат / админка / уведомления). В следующем уроке — Server-Sent Events как более простая альтернатива для однонаправленных потоков.
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+const ROOMS = ["general", "tech", "random"];
+
+export default function App() {
+  const [joined, setJoined] = useState(new Set());
+  const [active, setActive] = useState("general");
+  const [messages, setMessages] = useState({
+    general: [{ user: "Bot", text: "Добро пожаловать в #general!" }],
+    tech: [{ user: "Bot", text: "Обсуждаем технологии в #tech" }],
+    random: [{ user: "Bot", text: "Всё подряд в #random" }],
+  });
+  const [input, setInput] = useState("");
+
+  const join = (room) => {
+    setJoined(prev => new Set([...prev, room]));
+    setMessages(prev => ({
+      ...prev,
+      [room]: [...prev[room], { user: "System", text: "Вы присоединились к комнате" }]
+    }));
+  };
+
+  const leave = (room) => {
+    setJoined(prev => { const s = new Set(prev); s.delete(room); return s; });
+  };
+
+  const send = () => {
+    if (!input.trim() || !joined.has(active)) return;
+    setMessages(prev => ({
+      ...prev,
+      [active]: [...prev[active].slice(-5), { user: "Ты", text: input }]
+    }));
+    setInput("");
+    // Simulate echo
+    setTimeout(() => {
+      setMessages(prev => ({
+        ...prev,
+        [active]: [...prev[active].slice(-5), { user: "Echo", text: "→ " + input }]
+      }));
+    }, 400);
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Socket.io Rooms</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {ROOMS.map(r => (
+          <div key={r} style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "center" }}>
+            <button onClick={() => setActive(r)}
+              style={{ padding: "4px 12px", background: active === r ? "#3b82f6" : "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>
+              #{r}
+            </button>
+            <button onClick={() => joined.has(r) ? leave(r) : join(r)}
+              style={{ fontSize: 10, padding: "2px 8px", background: joined.has(r) ? "#ef4444" : "#10b981", color: "#fff", border: "none", borderRadius: 3, cursor: "pointer" }}>
+              {joined.has(r) ? "leave" : "join"}
+            </button>
+          </div>
+        ))}
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100, marginBottom: 8 }}>
+        {(messages[active] || []).map((m, i) => (
+          <div key={i} style={{ fontSize: 12, color: m.user === "System" ? "#f59e0b" : m.user === "Ты" ? "#a78bfa" : "#94a3b8" }}>
+            <b>{m.user}:</b> {m.text}
+          </div>
+        ))}
+        {!joined.has(active) && <div style={{ color: "#ef4444", fontSize: 12 }}>Вы не в этой комнате. Нажмите join.</div>}
+      </div>
+      {joined.has(active) && (
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()}
+            style={{ flex: 1, padding: "6px 10px", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4 }} />
+          <button onClick={send} style={{ padding: "6px 14px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Send</button>
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

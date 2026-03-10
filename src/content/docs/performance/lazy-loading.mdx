@@ -1,0 +1,403 @@
+---
+title: "6. Lazy Loading"
+sidebar:
+  order: 5
+---
+import { Playground } from '@components/Playground'
+
+
+Lazy Loading — это паттерн **отложенной загрузки ресурсов** до момента, когда они действительно нужны.
+
+## Нативный Lazy Loading (HTML)
+
+```html
+<!-- Изображения -->
+<img src="photo.jpg" loading="lazy" alt="Photo">
+<img src="hero.jpg" loading="eager" alt="Hero (выше fold — eager!)">
+
+<!-- iframes -->
+<iframe src="video-embed.html" loading="lazy"></iframe>
+<iframe src="map.html" loading="lazy"></iframe>
+```
+
+**Браузер сам решает когда загружать** — обычно 2000-3000px до viewport.
+
+## Intersection Observer API
+
+Для контроля над lazy loading используйте `IntersectionObserver`:
+
+```javascript
+// Базовый lazy loader для изображений
+const lazyImages = document.querySelectorAll('img[data-src]');
+
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const img = entry.target;
+      img.src = img.dataset.src;
+      img.removeAttribute('data-src');
+      observer.unobserve(img); // больше не следим
+    }
+  });
+}, {
+  rootMargin: '200px', // начинаем загрузку за 200px до viewport
+  threshold: 0.01,
+});
+
+lazyImages.forEach(img => observer.observe(img));
+```
+
+```html
+<!-- HTML с data-src -->
+<img
+  data-src="photo.jpg"
+  src="placeholder.jpg"
+  alt="Photo"
+  width="800"
+  height="600"
+>
+```
+
+## Lazy Loading компонентов (React)
+
+```jsx
+import { lazy, Suspense, useState } from 'react';
+
+// Загружается только при первом рендере
+const HeavyModal = lazy(() => import('./HeavyModal'));
+const DataTable = lazy(() => import('./DataTable'));
+const RichEditor = lazy(() => import('./RichEditor'));
+
+function App() {
+  const [showModal, setShowModal] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
+
+  return (
+    <>
+      <button onClick={() => setShowModal(true)}>Открыть Modal</button>
+      
+      {showModal && (
+        <Suspense fallback={<div>Загрузка...</div>}>
+          <HeavyModal onClose={() => setShowModal(false)} />
+        </Suspense>
+      )}
+
+      <button onClick={() => setShowEditor(true)}>Открыть Editor</button>
+      
+      <Suspense fallback={<EditorSkeleton />}>
+        {showEditor && <RichEditor />}
+      </Suspense>
+    </>
+  );
+}
+```
+
+## Intersection Observer для компонентов
+
+```jsx
+import { useRef, useState, useEffect } from 'react';
+
+// Хук для lazy rendering
+function useLazyRender(options = {}) {
+  const [isVisible, setIsVisible] = useState(false);
+  const ref = useRef();
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setIsVisible(true);
+        observer.disconnect();
+      }
+    }, {
+      rootMargin: options.rootMargin || '300px',
+      threshold: options.threshold || 0,
+    });
+
+    if (ref.current) observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, []);
+
+  return { ref, isVisible };
+}
+
+// Использование
+function LazySection({ children, fallback }) {
+  const { ref, isVisible } = useLazyRender();
+
+  return (
+    <div ref={ref}>
+      {isVisible ? children : (fallback || <div style={{ height: 400 }} />)}
+    </div>
+  );
+}
+
+// В компоненте
+function Page() {
+  return (
+    <>
+      <HeroSection />
+      
+      <LazySection fallback={<Skeleton />}>
+        <HeavyChartSection />
+      </LazySection>
+      
+      <LazySection>
+        <CommentsSection />
+      </LazySection>
+    </>
+  );
+}
+```
+
+## Lazy Loading данных
+
+```javascript
+// Pagination — загружаем по странице
+async function loadPage(page, pageSize = 20) {
+  const response = await fetch(`/api/items?page=${page}&limit=${pageSize}`);
+  return response.json();
+}
+
+// Infinite Scroll с IntersectionObserver
+function InfiniteList() {
+  const [items, setItems] = useState([]);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const loaderRef = useRef();
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(async ([entry]) => {
+      if (entry.isIntersecting && hasMore) {
+        const newItems = await loadPage(page);
+        if (newItems.length === 0) {
+          setHasMore(false);
+        } else {
+          setItems(prev => [...prev, ...newItems]);
+          setPage(p => p + 1);
+        }
+      }
+    });
+
+    if (loaderRef.current) observer.observe(loaderRef.current);
+    return () => observer.disconnect();
+  }, [page, hasMore]);
+
+  return (
+    <>
+      <ul>{items.map(item => <Item key={item.id} {...item} />)}</ul>
+      <div ref={loaderRef}>
+        {hasMore ? <Spinner /> : <p>Всё загружено!</p>}
+      </div>
+    </>
+  );
+}
+```
+
+## Виртуализация списков
+
+Для очень больших списков — рендерим только видимые элементы:
+
+```jsx
+// react-window
+import { FixedSizeList } from 'react-window';
+
+function Row({ index, style }) {
+  return (
+    <div style={style}>
+      Строка {index}
+    </div>
+  );
+}
+
+function VirtualList({ items }) {
+  return (
+    <FixedSizeList
+      height={600}
+      width={800}
+      itemCount={items.length}
+      itemSize={50} // высота строки
+    >
+      {({ index, style }) => (
+        <div style={style}>{items[index].title}</div>
+      )}
+    </FixedSizeList>
+  );
+}
+```
+
+## Практический пример
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html>
+<head>
+  <title>Lazy Loading Demo</title>
+  <style>
+    body { font-family: sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; max-width: 700px; }
+    h1 { color: #89b4fa; }
+    h2 { color: #cba6f7; margin: 20px 0 10px; font-size: 16px; }
+    .demo { background: #313244; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    .scroll-area { height: 300px; overflow-y: auto; border: 1px solid #45475a; border-radius: 6px; }
+    .list-item { padding: 12px 16px; border-bottom: 1px solid #45475a; display: flex; align-items: center; gap: 12px; }
+    .list-item:last-child { border-bottom: none; }
+    .avatar { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #1e1e2e; flex-shrink: 0; }
+    .skeleton { background: #45475a; border-radius: 4px; animation: pulse 1.5s infinite; }
+    .skeleton-line { height: 14px; margin: 4px 0; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .loader { text-align: center; padding: 16px; color: #6c7086; }
+    .stat { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; }
+    .stat-value { color: #a6e3a1; font-weight: bold; }
+    .progress { background: #45475a; border-radius: 4px; height: 6px; margin: 8px 0; }
+    .progress-bar { background: #89b4fa; height: 100%; border-radius: 4px; transition: width 0.3s; }
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin: 4px; }
+    .img-demo { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0; }
+    .img-placeholder { aspect-ratio: 1; border-radius: 8px; overflow: hidden; position: relative; background: #45475a; }
+    .img-status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Lazy Loading Demo</h1>
+
+  <div class="demo">
+    <h2>1. Infinite Scroll с Intersection Observer</h2>
+    <div class="stat">
+      <span>Загружено элементов:</span>
+      <span class="stat-value" id="item-count">0</span>
+    </div>
+    <div class="stat">
+      <span>API запросов:</span>
+      <span class="stat-value" id="api-calls">0</span>
+    </div>
+    <div class="scroll-area" id="scroll-list">
+      <div id="list-container"></div>
+      <div id="list-loader" class="loader">⏳ Прокрутите вниз для загрузки...</div>
+    </div>
+  </div>
+
+  <div class="demo">
+    <h2>2. Lazy Loading изображений</h2>
+    <p style="font-size: 13px; color: #6c7086; margin-bottom: 8px">Симуляция загрузки изображений при попадании в viewport</p>
+    <div class="img-demo" id="img-grid"></div>
+    <button onclick="resetImages()">Сбросить</button>
+  </div>
+
+  <div class="demo">
+    <h2>3. Статистика загрузки</h2>
+    <p style="font-size: 13px; color: #6c7086; margin-bottom: 8px">Преимущество Lazy Loading vs обычной загрузки</p>
+    <div class="stat"><span>Обычная загрузка (20 элементов сразу):</span><span class="stat-value">~2.4 MB</span></div>
+    <div class="stat"><span>Lazy Loading (по 5 элементов):</span><span class="stat-value" id="lazy-mb">0 KB</span></div>
+    <div class="progress"><div class="progress-bar" id="data-bar" style="width: 0%"></div></div>
+    <p id="savings" style="font-size: 13px; color: #a6e3a1;"></p>
+  </div>
+
+  <script>
+    let page = 0;
+    let loading = false;
+    let totalItems = 0;
+    let apiCalls = 0;
+    const TOTAL_PAGES = 5;
+    const PAGE_SIZE = 5;
+    const colors = ['#89b4fa','#a6e3a1','#cba6f7','#f9e2af','#f38ba8'];
+
+    async function loadItems() {
+      if (loading || page >= TOTAL_PAGES) return;
+      loading = true;
+      
+      // Симулируем API запрос
+      await new Promise(r => setTimeout(r, 800));
+      
+      const items = Array.from({ length: PAGE_SIZE }, (_, i) => ({
+        id: page * PAGE_SIZE + i + 1,
+        name: \`Пользователь \${page * PAGE_SIZE + i + 1}\`,
+        color: colors[(page * PAGE_SIZE + i) % colors.length],
+        text: ['Frontend Dev', 'Backend Dev', 'Designer', 'DevOps', 'PM'][i % 5]
+      }));
+
+      const container = document.getElementById('list-container');
+      items.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'list-item';
+        div.innerHTML = \`
+          <div class="avatar" style="background: \${item.color}">\${item.name[0]}</div>
+          <div><strong>\${item.name}</strong><br><small style="color: #6c7086">\${item.text}</small></div>
+          <div style="margin-left: auto; font-size: 12px; color: #6c7086">ID: \${item.id}</div>
+        \`;
+        container.appendChild(div);
+      });
+
+      page++;
+      apiCalls++;
+      totalItems += items.length;
+      document.getElementById('item-count').textContent = totalItems;
+      document.getElementById('api-calls').textContent = apiCalls;
+      
+      const mbLoaded = (totalItems * 0.12).toFixed(1);
+      document.getElementById('lazy-mb').textContent = mbLoaded + ' MB';
+      document.getElementById('data-bar').style.width = (totalItems / (TOTAL_PAGES * PAGE_SIZE) * 100) + '%';
+      
+      const savings = (2.4 - parseFloat(mbLoaded)).toFixed(1);
+      document.getElementById('savings').textContent = 
+        savings > 0 ? \`Сэкономлено: \${savings} MB трафика!\` : 'Все данные загружены';
+
+      if (page >= TOTAL_PAGES) {
+        document.getElementById('list-loader').textContent = '✅ Все данные загружены!';
+      }
+
+      loading = false;
+    }
+
+    // Настраиваем Intersection Observer
+    const listObserver = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) loadItems();
+    }, { root: document.getElementById('scroll-list'), threshold: 0.5 });
+
+    listObserver.observe(document.getElementById('list-loader'));
+    loadItems(); // загружаем первую страницу
+
+    // Изображения
+    function initImages() {
+      const grid = document.getElementById('img-grid');
+      grid.innerHTML = '';
+      
+      for (let i = 0; i < 9; i++) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'img-placeholder';
+        wrapper.innerHTML = \`<div class="img-status skeleton" style="inset:0;position:absolute"></div><div class="img-status" style="z-index:1">⏳</div>\`;
+        wrapper.dataset.index = i;
+        grid.appendChild(wrapper);
+        
+        // Observer для каждого изображения
+        const imgObserver = new IntersectionObserver(([entry]) => {
+          if (entry.isIntersecting) {
+            const el = entry.target;
+            const idx = el.dataset.index;
+            
+            el.querySelector('.img-status:last-child').textContent = '⚡ Загружаю...';
+            
+            setTimeout(() => {
+              const colors2 = ['#89b4fa','#a6e3a1','#cba6f7','#f9e2af','#f38ba8','#fab387','#94e2d5','#eba0ac','#b4befe'];
+              el.querySelector('.skeleton').style.background = colors2[idx % colors2.length];
+              el.querySelector('.skeleton').style.animation = 'none';
+              el.querySelector('.img-status:last-child').textContent = '✅';
+              setTimeout(() => { el.querySelector('.img-status:last-child').textContent = ''; }, 1000);
+              imgObserver.disconnect();
+            }, 300 + Math.random() * 500);
+          }
+        }, { rootMargin: '50px' });
+        
+        imgObserver.observe(wrapper);
+      }
+    }
+
+    function resetImages() {
+      initImages();
+    }
+
+    initImages();
+  </script>
+</body>
+</html>`
+  }}
+/>

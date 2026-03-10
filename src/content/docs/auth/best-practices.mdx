@@ -1,0 +1,452 @@
+---
+title: "15. Best Practices: чеклист"
+sidebar:
+  order: 14
+---
+import { Playground } from '@components/Playground'
+
+## Чеклист: Пароли и хранение
+
+```
+☐ Пароли хэшируются bcrypt (rounds ≥ 12) или Argon2id
+☐ Пароли НИКОГДА не логируются
+☐ Пароли НИКОГДА не хранятся в открытом виде
+☐ Минимальные требования к паролю: 8+ символов
+☐ Проверка пароля на утечку (HaveIBeenPwned API)
+☐ Ограничение попыток входа (rate limiting)
+☐ Временная блокировка после N неудачных попыток
+☐ API ключи и секреты в .env, НЕ в коде
+```
+
+### HaveIBeenPwned API интеграция
+
+```javascript
+import crypto from 'crypto';
+
+async function isPasswordPwned(password) {
+  // Хэшируем пароль и отправляем только первые 5 символов SHA1
+  const sha1 = crypto.createHash('sha1').update(password).digest('hex').toUpperCase();
+  const prefix = sha1.slice(0, 5);
+  const suffix = sha1.slice(5);
+  
+  const response = await fetch(
+    `https://api.pwnedpasswords.com/range/${prefix}`
+  );
+  
+  const text = await response.text();
+  const hashes = text.split('\n').map(line => line.split(':'));
+  
+  return hashes.some(([hash]) => hash === suffix);
+}
+
+// При регистрации
+async function validatePassword(password) {
+  if (password.length < 8) {
+    throw new Error('Password too short');
+  }
+  
+  const isPwned = await isPasswordPwned(password);
+  if (isPwned) {
+    throw new Error('This password has been found in data breaches. Choose another.');
+  }
+}
+```
+
+### Rate Limiting
+
+```bash
+npm install express-rate-limit
+```
+
+```javascript
+import rateLimit from 'express-rate-limit';
+
+// Ограничение для login endpoint
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 минут
+  max: 5,                   // 5 попыток
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts, try again in 15 minutes' },
+  
+  // Блокируем по IP + email
+  keyGenerator: (req) => `${req.ip}:${req.body.email}`,
+  
+  // Не считаем успешные логины
+  skipSuccessfulRequests: true,
+});
+
+app.post('/login', loginLimiter, loginHandler);
+
+// Глобальный rate limit для всего API
+const globalLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 минута
+  max: 100,            // 100 запросов
+});
+
+app.use('/api/', globalLimiter);
+```
+
+## Чеклист: Сессии и токены
+
+```
+☐ SESSION_SECRET длинный (64+ символов), случайный
+☐ JWT_SECRET длинный (64+ символов), случайный
+☐ Сессионные куки: HttpOnly + Secure + SameSite
+☐ Access токены короткоживущие (15 мин)
+☐ Refresh токены хранятся в HttpOnly cookie
+☐ Session ID регенерируется после логина
+☐ Logout уничтожает сессию на сервере
+☐ JWT содержат только необходимые данные (не пароли!)
+☐ JWT всегда имеют exp (срок истечения)
+```
+
+## Чеклист: HTTPS и заголовки
+
+```
+☐ HTTPS включён везде (редирект с HTTP)
+☐ HSTS заголовок настроен
+☐ CSP заголовок настроен
+☐ X-Content-Type-Options: nosniff
+☐ X-Frame-Options: DENY или SAMEORIGIN
+☐ Referrer-Policy настроен
+☐ CORS whitelist настроен (не *)
+☐ Проверка на securityheaders.com: A или A+
+```
+
+## Чеклист: Аутентификация и авторизация
+
+```
+☐ Все endpoint'ы требуют аутентификации (кроме публичных)
+☐ Авторизация проверяется на сервере (не только на клиенте)
+☐ Пользователь видит только свои данные (data isolation)
+☐ RBAC/ABAC настроен
+☐ Admin роут отделён и дополнительно защищён
+☐ OAuth state параметр используется против CSRF
+☐ PKCE используется для публичных OAuth клиентов
+```
+
+## Чеклист: Защита от атак
+
+```
+☐ XSS: все пользовательские данные экранированы
+☐ XSS: Rich text санитизируется через DOMPurify
+☐ CSRF: SameSite куки + CSRF токены для форм
+☐ SQL Injection: используются Prepared Statements или ORM
+☐ Path Traversal: проверяются пути к файлам
+☐ SSRF: валидируются внешние URL в запросах
+☐ Open Redirect: whitelist для redirect URL
+```
+
+## Опасные паттерны которых нужно избегать
+
+### Open Redirect
+
+```javascript
+// ОПАСНО
+app.get('/redirect', (req, res) => {
+  res.redirect(req.query.url); // злоумышленник может перенаправить на свой сайт
+});
+
+// БЕЗОПАСНО
+const allowedRedirects = ['/dashboard', '/profile', '/settings'];
+
+app.get('/redirect', (req, res) => {
+  const url = req.query.url;
+  
+  if (allowedRedirects.includes(url)) {
+    res.redirect(url);
+  } else {
+    res.redirect('/');
+  }
+});
+```
+
+### Mass Assignment
+
+```javascript
+// ОПАСНО: пользователь может передать role: 'admin'
+app.post('/profile', async (req, res) => {
+  await db.users.update(userId, req.body); // опасно!
+});
+
+// БЕЗОПАСНО: белый список полей
+const { name, bio, avatar } = req.body;
+await db.users.update(userId, { name, bio, avatar }); // только разрешённые поля
+```
+
+### SSRF (Server-Side Request Forgery)
+
+```javascript
+// ОПАСНО: сервер делает запрос по URL от пользователя
+app.post('/fetch-url', async (req, res) => {
+  const data = await fetch(req.body.url); // может обратиться к внутренней сети!
+  res.json(data);
+});
+
+// БЕЗОПАСНО: валидация URL
+function isAllowedURL(url) {
+  try {
+    const parsed = new URL(url);
+    
+    // Только HTTP/HTTPS
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    
+    // Запрет внутренних адресов
+    const blockedHosts = ['localhost', '127.0.0.1', '0.0.0.0', '::1'];
+    if (blockedHosts.includes(parsed.hostname)) return false;
+    
+    // Запрет RFC 1918 диапазонов (приватные IP)
+    const privateRanges = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/;
+    if (privateRanges.test(parsed.hostname)) return false;
+    
+    return true;
+  } catch {
+    return false;
+  }
+}
+```
+
+## Аудит и мониторинг
+
+### Логирование событий безопасности
+
+```javascript
+import winston from 'winston';
+
+const securityLogger = winston.createLogger({
+  transports: [new winston.transports.File({ filename: 'security.log' })],
+});
+
+// Логируем важные события
+function logSecurityEvent(event, details) {
+  securityLogger.info({
+    event,
+    timestamp: new Date().toISOString(),
+    ...details,
+  });
+}
+
+// Примеры
+logSecurityEvent('LOGIN_SUCCESS', { userId, ip: req.ip });
+logSecurityEvent('LOGIN_FAILURE', { email, ip: req.ip, reason: 'invalid_password' });
+logSecurityEvent('PASSWORD_RESET', { userId, ip: req.ip });
+logSecurityEvent('ROLE_CHANGED', { userId, from: 'user', to: 'admin', changedBy: adminId });
+logSecurityEvent('SUSPICIOUS_ACTIVITY', { userId, ip: req.ip, action: 'multiple_failed_logins' });
+```
+
+### Мониторинг подозрительной активности
+
+```javascript
+// Детектирование необычной активности
+async function detectSuspiciousActivity(userId, ip) {
+  const recentFailures = await redis.incr(`login_failures:${userId}`);
+  await redis.expire(`login_failures:${userId}`, 3600); // 1 час
+  
+  if (recentFailures >= 10) {
+    // Временная блокировка
+    await redis.setex(`user_blocked:${userId}`, 1800, '1'); // 30 минут
+    
+    // Уведомление пользователя
+    await sendEmail(user.email, 'Подозрительная активность', 
+      'Ваш аккаунт временно заблокирован из-за множественных неудачных попыток входа.'
+    );
+    
+    // Алерт администратору
+    logSecurityEvent('ACCOUNT_BLOCKED', { userId, ip, failures: recentFailures });
+  }
+}
+```
+
+## 2FA (Two-Factor Authentication)
+
+### TOTP (Google Authenticator совместимый)
+
+```bash
+npm install speakeasy qrcode
+```
+
+```javascript
+import speakeasy from 'speakeasy';
+import QRCode from 'qrcode';
+
+// Генерация секрета для пользователя
+function generate2FASecret(email) {
+  const secret = speakeasy.generateSecret({
+    name: `MyApp (${email})`,
+    length: 20,
+  });
+  
+  return {
+    secret: secret.base32,
+    otpauthUrl: secret.otpauth_url,
+  };
+}
+
+// Генерация QR кода
+async function generate2FAQR(otpauthUrl) {
+  return QRCode.toDataURL(otpauthUrl);
+}
+
+// Верификация кода
+function verify2FA(secret, token) {
+  return speakeasy.totp.verify({
+    secret,
+    encoding: 'base32',
+    token,
+    window: 1, // допуск ±30 секунд
+  });
+}
+
+// Роуты
+app.post('/2fa/setup', authMiddleware, async (req, res) => {
+  const { secret, otpauthUrl } = generate2FASecret(req.user.email);
+  
+  // Временно сохраняем секрет (не активируем пока не подтверждён)
+  await db.users.update(req.user.id, { twoFactorSecretTemp: encrypt(secret) });
+  
+  const qrCode = await generate2FAQR(otpauthUrl);
+  res.json({ qrCode, secret }); // показываем QR + backup код
+});
+
+app.post('/2fa/verify', authMiddleware, async (req, res) => {
+  const user = await db.users.findById(req.user.id);
+  const secret = decrypt(user.twoFactorSecretTemp);
+  
+  if (!verify2FA(secret, req.body.token)) {
+    return res.status(400).json({ error: 'Invalid code' });
+  }
+  
+  // Активируем 2FA
+  await db.users.update(req.user.id, {
+    twoFactorSecret: encrypt(secret),
+    twoFactorEnabled: true,
+    twoFactorSecretTemp: null,
+  });
+  
+  res.json({ success: true });
+});
+```
+
+## Dependency Security
+
+```bash
+# Проверка уязвимостей в зависимостях
+npm audit
+
+# Автоматическое исправление
+npm audit fix
+
+# Регулярные обновления
+npx npm-check-updates -u && npm install
+```
+
+## Итоговый Security Score
+
+Оцени свой проект:
+
+| Область | Баллы | Мой статус |
+|---------|-------|------------|
+| HTTPS + HSTS | 10 | ☐ |
+| Security Headers (A+) | 15 | ☐ |
+| Bcrypt/Argon2 для паролей | 15 | ☐ |
+| Rate Limiting | 10 | ☐ |
+| XSS защита | 10 | ☐ |
+| CSRF защита | 10 | ☐ |
+| RBAC авторизация | 10 | ☐ |
+| Аудит логи | 10 | ☐ |
+| 2FA | 10 | ☐ |
+| **Итого** | **100** | |
+
+**80+** — отлично  
+**60-79** — хорошо, есть над чем работать  
+**< 60** — критические проблемы, нужно исправить немедленно
+
+## Дополнительные ресурсы
+
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [OWASP Cheat Sheet Series](https://cheatsheetseries.owasp.org/)
+- [NodeJS Security Checklist](https://blog.risingstack.com/node-js-security-checklist/)
+- [Auth0 Security Blog](https://auth0.com/blog/security/)
+- [HaveIBeenPwned](https://haveibeenpwned.com/)
+- [SecurityHeaders.com](https://securityheaders.com/)
+
+## Попробуй: Security Audit Scorecard
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    '/App.js': `import { useState } from 'react';
+
+const checks = [
+  { area: 'Пароли', items: [
+    { name: 'bcrypt/Argon2 хэширование', points: 15 },
+    { name: 'Rate limiting на логин', points: 10 },
+  ]},
+  { area: 'Сессии', items: [
+    { name: 'HttpOnly + Secure + SameSite куки', points: 10 },
+    { name: 'JWT с exp, короткий срок', points: 10 },
+  ]},
+  { area: 'HTTPS', items: [
+    { name: 'HTTPS + HSTS', points: 10 },
+    { name: 'Security Headers (CSP, X-Frame)', points: 15 },
+  ]},
+  { area: 'Защита', items: [
+    { name: 'XSS: экранирование + CSP', points: 10 },
+    { name: 'CSRF: SameSite + токены', points: 10 },
+  ]},
+  { area: 'Доступ', items: [
+    { name: 'RBAC/ABAC авторизация', points: 10 },
+  ]},
+];
+
+export default function App() {
+  const [checked, setChecked] = useState({});
+  const toggle = (key) => setChecked(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const total = checks.flatMap(c => c.items).reduce((s, i) => s + i.points, 0);
+  const score = checks.flatMap(c => c.items).reduce((s, i) => s + (checked[i.name] ? i.points : 0), 0);
+  const grade = score >= 80 ? 'A+' : score >= 60 ? 'B' : score < 40 ? 'F' : 'C';
+  const gradeColor = score >= 80 ? '#22c55e' : score >= 60 ? '#f59e0b' : '#ef4444';
+  const verdict = score >= 80 ? 'Отлично!' : score >= 60 ? 'Хорошо, но есть пробелы' : 'Критические проблемы!';
+
+  return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff' }}>
+      <h2>Security Audit Scorecard</h2>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20, background: '#0f0f23', padding: 16, borderRadius: 10 }}>
+        <div style={{ width: 64, height: 64, borderRadius: '50%', background: gradeColor + '22', border: '3px solid ' + gradeColor, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 26, fontWeight: 700, color: gradeColor }}>
+          {grade}
+        </div>
+        <div>
+          <div style={{ fontSize: 24, fontWeight: 700 }}>{score} <span style={{ fontSize: 14, color: '#64748b' }}>/ {total}</span></div>
+          <div style={{ color: gradeColor, fontSize: 14 }}>{verdict}</div>
+        </div>
+        <div style={{ marginLeft: 'auto', width: 100, height: 8, background: '#1e293b', borderRadius: 4, overflow: 'hidden' }}>
+          <div style={{ width: (score/total*100) + '%', height: '100%', background: gradeColor, transition: 'all 0.3s' }} />
+        </div>
+      </div>
+      {checks.map(c => (
+        <div key={c.area} style={{ marginBottom: 12 }}>
+          <div style={{ color: '#94a3b8', fontSize: 12, textTransform: 'uppercase', marginBottom: 4 }}>{c.area}</div>
+          {c.items.map(item => (
+            <div key={item.name} onClick={() => toggle(item.name)} style={{
+              padding: '8px 12px', marginBottom: 4, borderRadius: 6, cursor: 'pointer',
+              background: checked[item.name] ? '#22c55e11' : '#0f0f23',
+              border: '1px solid ' + (checked[item.name] ? '#22c55e33' : '#ffffff0d'),
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <span style={{ fontSize: 13 }}>
+                <span style={{ marginRight: 8 }}>{checked[item.name] ? '☑' : '☐'}</span>
+                {item.name}
+              </span>
+              <span style={{ fontSize: 12, color: '#64748b' }}>+{item.points}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+`
+  }}
+/>

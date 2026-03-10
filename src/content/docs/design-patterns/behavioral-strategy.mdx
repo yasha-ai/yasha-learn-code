@@ -1,0 +1,276 @@
+---
+title: "14. Strategy"
+sidebar:
+  order: 14
+---
+import { Playground } from '@components/Playground'
+
+## Design Patterns. Урок: Strategy (Стратегия)
+
+**Strategy** — поведенческий паттерн, определяющий семейство алгоритмов, инкапсулирует каждый из них и делает их взаимозаменяемыми. Позволяет менять алгоритм независимо от клиента, который его использует.
+
+---
+
+### Проблема: условная логика разрастается
+
+```typescript
+// ❌ Логика сортировки внутри клиентского кода
+class DataSorter {
+  sort(data: number[], algorithm: string): number[] {
+    if (algorithm === 'bubble') {
+      // 30 строк bubble sort
+    } else if (algorithm === 'quick') {
+      // 50 строк quick sort
+    } else if (algorithm === 'merge') {
+      // 40 строк merge sort
+    } else if (algorithm === 'heap') {
+      // 35 строк heap sort — добавили позже
+    }
+    return data;
+  }
+}
+```
+
+Каждый новый алгоритм — правка существующего класса. Трудно тестировать каждый алгоритм отдельно.
+
+---
+
+### Strategy Pattern
+
+```typescript
+// Интерфейс стратегии
+interface SortStrategy {
+  sort(data: number[]): number[];
+  get name(): string;
+}
+
+// Конкретные стратегии
+class BubbleSortStrategy implements SortStrategy {
+  get name() { return 'Bubble Sort'; }
+  
+  sort(data: number[]): number[] {
+    const arr = [...data];
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = 0; j < arr.length - i - 1; j++) {
+        if (arr[j] > arr[j + 1]) {
+          [arr[j], arr[j + 1]] = [arr[j + 1], arr[j]];
+        }
+      }
+    }
+    return arr;
+  }
+}
+
+class QuickSortStrategy implements SortStrategy {
+  get name() { return 'Quick Sort'; }
+  
+  sort(data: number[]): number[] {
+    if (data.length <= 1) return data;
+    const pivot = data[Math.floor(data.length / 2)];
+    const left = data.filter(x => x < pivot);
+    const middle = data.filter(x => x === pivot);
+    const right = data.filter(x => x > pivot);
+    return [...this.sort(left), ...middle, ...this.sort(right)];
+  }
+}
+
+// Контекст использует стратегию
+class DataSorter {
+  constructor(private strategy: SortStrategy) {}
+
+  setStrategy(strategy: SortStrategy): void {
+    this.strategy = strategy;
+  }
+
+  sort(data: number[]): number[] {
+    console.log(`Sorting with ${this.strategy.name}`);
+    return this.strategy.sort(data);
+  }
+}
+
+// Переключаем стратегию в рантайме
+const sorter = new DataSorter(new BubbleSortStrategy());
+sorter.sort([3, 1, 4, 1, 5]); // BubbleSort
+
+// Данных много — переключаемся на QuickSort
+sorter.setStrategy(new QuickSortStrategy());
+sorter.sort([3, 1, 4, 1, 5]); // QuickSort
+```
+
+---
+
+### Практический пример: стратегии авторизации
+
+```typescript
+interface AuthStrategy {
+  authenticate(credentials: any): Promise<User>;
+  validate(token: string): Promise<User | null>;
+}
+
+class JwtAuthStrategy implements AuthStrategy {
+  constructor(private secret: string) {}
+
+  async authenticate(credentials: { email: string; password: string }): Promise<User> {
+    const user = await userRepo.findByEmail(credentials.email);
+    if (!user || !await bcrypt.compare(credentials.password, user.passwordHash)) {
+      throw new AuthError('Invalid credentials');
+    }
+    return user;
+  }
+
+  async validate(token: string): Promise<User | null> {
+    try {
+      const payload = jwt.verify(token, this.secret) as { userId: string };
+      return await userRepo.findById(payload.userId);
+    } catch {
+      return null;
+    }
+  }
+}
+
+class GoogleOAuthStrategy implements AuthStrategy {
+  constructor(private clientId: string, private clientSecret: string) {}
+
+  async authenticate(credentials: { code: string }): Promise<User> {
+    const tokens = await googleOAuth.exchangeCode(credentials.code);
+    const profile = await googleOAuth.getUserProfile(tokens.accessToken);
+    return await userRepo.findOrCreateByGoogleId(profile.id, profile);
+  }
+
+  async validate(token: string): Promise<User | null> {
+    try {
+      const payload = await googleOAuth.verifyIdToken(token);
+      return await userRepo.findByGoogleId(payload.sub);
+    } catch {
+      return null;
+    }
+  }
+}
+
+class ApiKeyStrategy implements AuthStrategy {
+  async authenticate(credentials: { apiKey: string }): Promise<User> {
+    const keyRecord = await apiKeyRepo.findByKey(credentials.apiKey);
+    if (!keyRecord || keyRecord.isExpired()) throw new AuthError('Invalid API key');
+    return await userRepo.findById(keyRecord.userId);
+  }
+
+  async validate(token: string): Promise<User | null> {
+    const keyRecord = await apiKeyRepo.findByKey(token);
+    if (!keyRecord || keyRecord.isExpired()) return null;
+    return await userRepo.findById(keyRecord.userId);
+  }
+}
+
+// Контекст
+class AuthService {
+  private strategies = new Map<string, AuthStrategy>();
+
+  register(name: string, strategy: AuthStrategy): void {
+    this.strategies.set(name, strategy);
+  }
+
+  async authenticate(strategyName: string, credentials: any): Promise<User> {
+    const strategy = this.strategies.get(strategyName);
+    if (!strategy) throw new Error(`Unknown auth strategy: ${strategyName}`);
+    return strategy.authenticate(credentials);
+  }
+}
+```
+
+---
+
+### Strategy через функции (функциональный подход)
+
+В TypeScript стратегии часто реализуют как функции, а не классы:
+
+```typescript
+// Стратегия — просто функция
+type PricingStrategy = (basePrice: number, quantity: number) => number;
+
+const standardPricing: PricingStrategy = (price, qty) => price * qty;
+
+const bulkDiscountPricing: PricingStrategy = (price, qty) => {
+  const discount = qty > 100 ? 0.15 : qty > 50 ? 0.10 : qty > 20 ? 0.05 : 0;
+  return price * qty * (1 - discount);
+};
+
+const premiumPricing: PricingStrategy = (price, qty) => {
+  return price * qty * 0.85; // 15% скидка для premium
+};
+
+// Конфигурация стратегии
+function calculateOrderTotal(
+  items: OrderItem[],
+  pricingStrategy: PricingStrategy = standardPricing,
+): number {
+  return items.reduce((total, item) => {
+    return total + pricingStrategy(item.price, item.quantity);
+  }, 0);
+}
+
+// Легко передавать как параметр
+const total = calculateOrderTotal(items, bulkDiscountPricing);
+```
+
+---
+
+### Практические задания
+
+1. Создай систему валидации паролей с несколькими стратегиями: `StrictStrategy` (минимум 12 символов, цифры, спецсимволы), `StandardStrategy` (8+ символов, буквы + цифры), `LaxStrategy` (любые 6+ символов).
+
+2. Реализуй `ExportStrategy` с реализациями `CsvExport`, `JsonExport`, `XmlExport`.
+
+3. Создай `RenderStrategy` для компонентов UI: `MobileRenderStrategy` и `DesktopRenderStrategy`.
+
+4. Чем Strategy отличается от State паттерна?
+
+5. Как Strategy соотносится с принципом OCP? (Подсказка: они тесно связаны)
+
+---
+
+### Playground: Strategy в действии
+
+<Playground client:visible template="vanilla" files={{ '/index.js': `// Strategy: взаимозаменяемые алгоритмы
+
+const bubbleSort = (arr) => {
+  const a = [...arr];
+  for (let i = 0; i < a.length; i++)
+    for (let j = 0; j < a.length - i - 1; j++)
+      if (a[j] > a[j + 1]) [a[j], a[j + 1]] = [a[j + 1], a[j]];
+  return a;
+};
+
+const quickSort = (arr) => {
+  if (arr.length <= 1) return arr;
+  const pivot = arr[Math.floor(arr.length / 2)];
+  return [
+    ...quickSort(arr.filter(x => x < pivot)),
+    ...arr.filter(x => x === pivot),
+    ...quickSort(arr.filter(x => x > pivot)),
+  ];
+};
+
+// Контекст переключает стратегию
+class Sorter {
+  constructor(strategy) { this.strategy = strategy; }
+  setStrategy(s) { this.strategy = s; }
+  sort(data) {
+    const start = performance.now();
+    const result = this.strategy(data);
+    const ms = (performance.now() - start).toFixed(3);
+    console.log("Sorted in " + ms + "ms:", result.slice(0, 8).join(", ") + "...");
+    return result;
+  }
+}
+
+const data = Array.from({ length: 20 }, () => Math.floor(Math.random() * 100));
+console.log("Input:", data.join(", "));
+
+const sorter = new Sorter(bubbleSort);
+console.log("\\n--- Bubble Sort ---");
+sorter.sort(data);
+
+console.log("\\n--- Quick Sort ---");
+sorter.setStrategy(quickSort);
+sorter.sort(data);
+` }} />

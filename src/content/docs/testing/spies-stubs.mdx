@@ -1,0 +1,237 @@
+---
+title: "9. Spies и Stubs"
+sidebar:
+  order: 8
+---
+import { Playground } from '@components/Playground'
+
+
+![Spies](/lessons/spies.png)
+
+## Spy: наблюдать за реальной функцией
+
+Spy оборачивает реальную функцию, позволяя следить за вызовами, но сохраняя оригинальное поведение.
+
+```javascript
+import { jest } from '@jest/globals'; // или vi from 'vitest'
+
+// Базовый spy
+const arr = [1, 2, 3];
+const spy = jest.spyOn(arr, 'push');
+
+arr.push(4); // реальный push выполнится
+
+expect(spy).toHaveBeenCalledWith(4);
+expect(arr).toEqual([1, 2, 3, 4]); // данные изменились по-настоящему
+
+spy.mockRestore(); // восстановить оригинал
+```
+
+## Практический пример: spy на методе класса
+
+```javascript
+class Logger {
+  log(message) {
+    console.log(`[${new Date().toISOString()}] ${message}`);
+  }
+  error(message) {
+    console.error(`ERROR: ${message}`);
+  }
+}
+
+class UserService {
+  constructor(db, logger) {
+    this.db = db;
+    this.logger = logger;
+  }
+
+  async createUser(userData) {
+    this.logger.log(`Creating user: ${userData.email}`);
+    const user = await this.db.insert(userData);
+    this.logger.log(`User created: ${user.id}`);
+    return user;
+  }
+}
+
+// Тест
+test('logs creation events', async () => {
+  const logger = new Logger();
+  const db = { insert: jest.fn().mockResolvedValue({ id: 1, email: 'alice@test.com' }) };
+
+  const logSpy = jest.spyOn(logger, 'log');
+
+  const service = new UserService(db, logger);
+  await service.createUser({ email: 'alice@test.com' });
+
+  expect(logSpy).toHaveBeenCalledTimes(2);
+  expect(logSpy).toHaveBeenNthCalledWith(1, 'Creating user: alice@test.com');
+  expect(logSpy).toHaveBeenNthCalledWith(2, expect.stringContaining('User created'));
+
+  logSpy.mockRestore();
+});
+```
+
+## Spy на встроенных объектах
+
+```javascript
+// Spy на console
+test('logs error on failure', async () => {
+  const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+  await processWithLogging(() => { throw new Error('Failed'); });
+
+  expect(consoleSpy).toHaveBeenCalledWith(
+    expect.stringContaining('Failed')
+  );
+
+  consoleSpy.mockRestore();
+});
+
+// Spy на Date
+test('uses current date', () => {
+  const fixedDate = new Date('2024-01-15');
+  jest.spyOn(global, 'Date').mockImplementation(() => fixedDate);
+
+  const result = getFormattedDate();
+  expect(result).toBe('2024-01-15');
+
+  jest.restoreAllMocks();
+});
+```
+
+## Stub: полная замена
+
+Stub заменяет функцию фиктивной реализацией.
+
+```javascript
+// Stub через mockImplementation
+const fetchUser = jest.fn().mockImplementation(async (id) => {
+  if (id === 1) return { id: 1, name: 'Alice' };
+  if (id === 2) return { id: 2, name: 'Bob' };
+  throw new Error(`User ${id} not found`);
+});
+
+test('handles multiple users', async () => {
+  expect(await fetchUser(1)).toMatchObject({ name: 'Alice' });
+  expect(await fetchUser(2)).toMatchObject({ name: 'Bob' });
+  await expect(fetchUser(999)).rejects.toThrow();
+});
+```
+
+## Fake Timers
+
+```javascript
+// Тестирование кода с setTimeout / setInterval / Date.now
+
+test('debounce waits before executing', () => {
+  jest.useFakeTimers();
+
+  const callback = jest.fn();
+  const debounced = debounce(callback, 300);
+
+  debounced(); // запустить
+  expect(callback).not.toHaveBeenCalled(); // ещё не вызван
+
+  jest.advanceTimersByTime(200);            // прошло 200мс
+  expect(callback).not.toHaveBeenCalled();
+
+  jest.advanceTimersByTime(100);            // ещё 100мс = итого 300мс
+  expect(callback).toHaveBeenCalledTimes(1);
+
+  jest.useRealTimers(); // восстановить
+});
+
+test('polling stops after max retries', async () => {
+  jest.useFakeTimers();
+
+  const poll = jest.fn()
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce(null)
+    .mockResolvedValue({ data: 'ready' });
+
+  const result = pollWithRetry(poll, { interval: 1000, maxRetries: 3 });
+
+  await jest.runAllTimersAsync();
+
+  expect(await result).toEqual({ data: 'ready' });
+  expect(poll).toHaveBeenCalledTimes(3);
+
+  jest.useRealTimers();
+});
+```
+
+## Разница Spy, Stub, Mock
+
+| | Spy | Stub | Mock |
+|--|-----|------|------|
+| Реальный код | ✅ работает | ❌ заменён | ❌ заменён |
+| Записывает вызовы | ✅ | ✅ | ✅ |
+| Поведение задаётся | Нет | Явно | Через setup |
+| Использование | Проверить вызов | Фиксировать ответ | Комплексные сценарии |
+
+## Практические задания
+
+1. Создай spy на `localStorage.setItem` и проверь что данные сохраняются
+2. Используй fake timers для теста retry-логики (5 попыток с интервалом)
+3. Замени реальный `axios.get` стабом, возвращающим разные данные при разных URL
+
+## Итоги
+
+- Spy = наблюдатель, реальная функция продолжает работать
+- Stub = полная замена с заданным поведением
+- jest.useFakeTimers() — для тестирования taймаутов и интервалов
+- Всегда вызывай mockRestore() или jest.restoreAllMocks() в afterEach
+
+<Playground client:visible template="vanilla" files={{
+  '/index.js': `// Пример тестового кода (для запуска используйте Jest/Vitest)
+// Spies наблюдают за вызовами, Stubs подменяют реализацию
+
+function test(name, fn) {
+  try { fn(); console.log('✅ ' + name); }
+  catch (e) { console.log('❌ ' + name + ': ' + e.message); }
+}
+function expect(v) {
+  return {
+    toBe(e) { if (v !== e) throw new Error(v + ' !== ' + e); },
+  };
+}
+
+// Spy — обёртка вокруг реальной функции
+function createSpy(obj, method) {
+  const original = obj[method];
+  const calls = [];
+  obj[method] = (...args) => {
+    calls.push(args);
+    return original.apply(obj, args);
+  };
+  return { calls, restore: () => { obj[method] = original; } };
+}
+
+// Stub — полная замена
+function createStub(returnValue) {
+  const calls = [];
+  const fn = (...args) => { calls.push(args); return returnValue; };
+  fn.calls = calls;
+  return fn;
+}
+
+console.log('=== Spy ===');
+const math = { add(a, b) { return a + b; } };
+const spy = createSpy(math, 'add');
+
+test('spy вызывает оригинал', () => {
+  expect(math.add(2, 3)).toBe(5);
+  expect(spy.calls.length).toBe(1);
+});
+spy.restore();
+
+console.log('\n=== Stub ===');
+const fetchData = createStub({ users: ['Алексей'] });
+
+test('stub возвращает подменённые данные', () => {
+  const result = fetchData('/api/users');
+  expect(result.users[0]).toBe('Алексей');
+  expect(fetchData.calls.length).toBe(1);
+});
+`
+}} />

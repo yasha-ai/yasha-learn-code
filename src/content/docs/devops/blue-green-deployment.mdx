@@ -1,0 +1,348 @@
+---
+title: "16. Blue-green deployment"
+sidebar:
+  order: 16
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/devops-blue-green.png)
+
+**Blue-Green Deployment** — стратегия развёртывания с нулевым даунтаймом. Два идентичных окружения (Blue и Green), трафик переключается между ними мгновенно.
+
+## Идея
+
+```
+Blue  (текущий production) ←── 100% трафика
+Green (новая версия)       ←── 0% трафика, тест
+
+Деплой новой версии:
+├── Деплоим в Green (Blue всё ещё работает!)
+├── Тестируем Green
+├── Переключаем трафик: Blue → Green
+└── Blue становится резервом (быстрый rollback)
+
+После успешного деплоя:
+Green ←── 100% трафика (новый production)
+Blue  ←── 0% трафика (готов к следующему деплою)
+```
+
+## Преимущества
+
+```
+✅ Нулевой даунтайм — трафик переключается мгновенно
+✅ Мгновенный rollback — переключить обратно на Blue
+✅ Тестирование в production-like окружении
+✅ Нет смешивания версий — либо старая, либо новая
+```
+
+## Реализация с Nginx
+
+```nginx
+# /etc/nginx/sites-available/myapp.com
+
+# Blue — версия 1.2.3
+upstream blue {
+    server 127.0.0.1:3001;
+}
+
+# Green — версия 1.3.0
+upstream green {
+    server 127.0.0.1:3002;
+}
+
+# Активный upstream — переключаем между blue/green
+upstream active {
+    server 127.0.0.1:3001;    # ← меняем на 3002 при деплое Green
+}
+
+server {
+    listen 443 ssl;
+    server_name myapp.com;
+
+    location / {
+        proxy_pass http://active;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+```bash
+#!/bin/bash
+# scripts/switch-to-green.sh
+
+NGINX_CONFIG="/etc/nginx/sites-available/myapp.com"
+
+echo "Switching traffic from Blue to Green..."
+
+# Меняем upstream в конфиге
+sed -i 's|server 127.0.0.1:3001;|server 127.0.0.1:3002;|g' $NGINX_CONFIG
+
+# Проверяем конфиг
+nginx -t || { echo "❌ Nginx config error!"; exit 1; }
+
+# Мягкая перезагрузка (без даунтайма)
+systemctl reload nginx
+
+echo "✅ Traffic switched to Green (port 3002)"
+```
+
+## Реализация с Docker
+
+```bash
+#!/bin/bash
+# scripts/blue-green-deploy.sh
+
+CURRENT=$1  # blue или green
+NEW_IMAGE=$2
+
+if [ "$CURRENT" = "blue" ]; then
+    DEPLOY_TO="green"
+    DEPLOY_PORT=3002
+    KEEP_PORT=3001
+else
+    DEPLOY_TO="blue"
+    DEPLOY_PORT=3001
+    KEEP_PORT=3002
+fi
+
+echo "🚀 Deploying to $DEPLOY_TO (port $DEPLOY_PORT)..."
+
+# Запустить новую версию
+docker pull $NEW_IMAGE
+docker stop myapp-$DEPLOY_TO 2>/dev/null || true
+docker rm myapp-$DEPLOY_TO 2>/dev/null || true
+docker run -d \
+    --name myapp-$DEPLOY_TO \
+    -p $DEPLOY_PORT:3000 \
+    --env-file .env.production \
+    $NEW_IMAGE
+
+# Подождать запуска
+echo "Waiting for $DEPLOY_TO to be healthy..."
+for i in {1..30}; do
+    if curl -sf http://localhost:$DEPLOY_PORT/health > /dev/null; then
+        echo "✅ $DEPLOY_TO is healthy!"
+        break
+    fi
+    echo "Attempt $i/30..."
+    sleep 2
+done
+
+# Проверить что healthy
+if ! curl -sf http://localhost:$DEPLOY_PORT/health > /dev/null; then
+    echo "❌ $DEPLOY_TO failed health check! Rolling back..."
+    docker stop myapp-$DEPLOY_TO
+    exit 1
+fi
+
+# Переключить трафик
+echo "Switching traffic to $DEPLOY_TO..."
+sed -i "s|server 127.0.0.1:$KEEP_PORT|server 127.0.0.1:$DEPLOY_PORT|g" \
+    /etc/nginx/sites-available/myapp.com
+nginx -t && systemctl reload nginx
+
+echo "✅ Blue-Green deploy complete! Active: $DEPLOY_TO"
+echo "Old version ($CURRENT) on port $KEEP_PORT — kept for rollback"
+
+# Сохранить текущее состояние
+echo "$DEPLOY_TO" > /tmp/active-color
+```
+
+## GitHub Actions: Blue-Green
+
+```yaml
+# .github/workflows/blue-green.yml
+name: Blue-Green Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ghcr.io/myorg/myapp:${{ github.sha }} .
+          docker push ghcr.io/myorg/myapp:${{ github.sha }}
+
+      - name: Deploy Blue-Green
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: deploy
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            CURRENT=$(cat /tmp/active-color 2>/dev/null || echo "blue")
+            NEW_IMAGE=ghcr.io/myorg/myapp:${{ github.sha }}
+            
+            /home/deploy/scripts/blue-green-deploy.sh $CURRENT $NEW_IMAGE
+
+      - name: Verify deployment
+        run: |
+          sleep 10
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://myapp.com/health)
+          if [ "$STATUS" != "200" ]; then
+            echo "❌ Production health check failed!"
+            exit 1
+          fi
+          echo "✅ Production is healthy"
+```
+
+## Blue-Green с Vercel (автоматически)
+
+Vercel делает blue-green из коробки:
+
+```
+1. Push в main
+2. Vercel билдит новую версию
+3. При успешном билде — мгновенное переключение
+4. Старая версия доступна через Instant Rollback
+
+Rollback в Vercel:
+Dashboard → Deployments → выбрать старый → Promote to Production
+```
+
+## Canary Deployment (вариация)
+
+Постепенное переключение трафика:
+
+```nginx
+# 10% на новую версию (canary)
+upstream canary_split {
+    server 127.0.0.1:3001 weight=9;   # 90% на старую
+    server 127.0.0.1:3002 weight=1;   # 10% на новую
+}
+
+# Через неделю:
+# weight=5 / weight=5  — 50/50
+# weight=0 / weight=10 — 100% новая
+```
+
+## Rollback
+
+```bash
+#!/bin/bash
+# scripts/rollback.sh
+
+ACTIVE=$(cat /tmp/active-color)
+
+if [ "$ACTIVE" = "green" ]; then
+    ROLLBACK_TO="blue"
+    ROLLBACK_PORT=3001
+    CURRENT_PORT=3002
+else
+    ROLLBACK_TO="green"
+    ROLLBACK_PORT=3002
+    CURRENT_PORT=3001
+fi
+
+echo "🔄 Rolling back to $ROLLBACK_TO..."
+
+# Проверить что rollback target работает
+if ! curl -sf http://localhost:$ROLLBACK_PORT/health > /dev/null; then
+    echo "❌ Rollback target is not healthy!"
+    exit 1
+fi
+
+# Переключить трафик обратно
+sed -i "s|server 127.0.0.1:$CURRENT_PORT|server 127.0.0.1:$ROLLBACK_PORT|g" \
+    /etc/nginx/sites-available/myapp.com
+nginx -t && systemctl reload nginx
+
+echo "$ROLLBACK_TO" > /tmp/active-color
+echo "✅ Rolled back to $ROLLBACK_TO"
+```
+
+## Ключевые моменты
+
+- Blue-Green — два окружения, мгновенное переключение
+- Нулевой даунтайм — трафик переключается через Nginx reload
+- Rollback = переключить обратно (секунды, не часы)
+- Health check перед переключением — обязателен
+- Vercel делает blue-green автоматически
+- Canary — постепенное переключение (10% → 50% → 100%)
+- Старое окружение держи живым после деплоя — на случай rollback
+
+## Интерактивный пример
+
+Визуализация переключения Blue-Green:
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": {
+      code: `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0f172a; color: #e2e8f0; padding: 20px; }
+h3 { color: #818cf8; margin-bottom: 12px; }
+.env { display: flex; gap: 16px; justify-content: center; margin-bottom: 16px; }
+.box { width: 130px; border-radius: 10px; padding: 16px; text-align: center; border: 2px solid; transition: all .4s; }
+.blue { background: #172554; border-color: #3b82f6; }
+.green { background: #052e16; border-color: #22c55e; }
+.box .ver { font-size: 18px; font-weight: 700; margin: 6px 0; }
+.box .status { font-size: 11px; margin-top: 4px; }
+.box.active .status { font-weight: 700; }
+.box.inactive { opacity: 0.4; }
+.lb { text-align: center; margin-bottom: 12px; }
+.lb .icon { font-size: 28px; }
+.lb .label { font-size: 12px; color: #94a3b8; }
+.arrow { text-align: center; font-size: 20px; color: #64748b; margin: 6px 0; transition: color .3s; }
+.arrow.to-blue { color: #3b82f6; }
+.arrow.to-green { color: #22c55e; }
+.controls { text-align: center; }
+button { padding: 8px 18px; border-radius: 6px; border: none; cursor: pointer; font-weight: 700; font-size: 13px; margin: 0 4px; }
+.btn-switch { background: #f59e0b; color: #0f172a; }
+.btn-rollback { background: #475569; color: #e2e8f0; }
+</style>
+</head>
+<body>
+<div class="lb"><div class="icon">⚖️</div><div class="label">Load Balancer</div></div>
+<div class="arrow to-blue" id="arrow">↓ Traffic</div>
+<div class="env">
+  <div class="box blue active" id="blue"><div>🔵 Blue</div><div class="ver">v1.0</div><div class="status">LIVE</div></div>
+  <div class="box green inactive" id="green"><div>🟢 Green</div><div class="ver">v2.0</div><div class="status">Standby</div></div>
+</div>
+<div class="controls">
+  <button class="btn-switch" onclick="switchEnv()">Switch Traffic</button>
+  <button class="btn-rollback" onclick="rollback()">Rollback</button>
+</div>
+<script>
+let current = "blue";
+function switchEnv() {
+  current = current === "blue" ? "green" : "blue";
+  update();
+}
+function rollback() {
+  current = current === "blue" ? "green" : "blue";
+  update();
+}
+function update() {
+  const blue = document.getElementById("blue");
+  const green = document.getElementById("green");
+  const arrow = document.getElementById("arrow");
+  if (current === "blue") {
+    blue.className = "box blue active"; blue.querySelector(".status").textContent = "LIVE";
+    green.className = "box green inactive"; green.querySelector(".status").textContent = "Standby";
+    arrow.className = "arrow to-blue";
+  } else {
+    green.className = "box green active"; green.querySelector(".status").textContent = "LIVE";
+    blue.className = "box blue inactive"; blue.querySelector(".status").textContent = "Standby";
+    arrow.className = "arrow to-green";
+  }
+}
+<\/script>
+</body>
+</html>`,
+      active: true,
+    },
+  }}
+/>

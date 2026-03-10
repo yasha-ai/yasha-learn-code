@@ -1,0 +1,555 @@
+---
+title: "62. MobX + React"
+sidebar:
+  order: 62
+---
+import { Playground } from '@components/Playground'
+
+
+## MobX + React: Observer и реактивные компоненты 🔗
+
+MobX и React — это идеальный союз. MobX управляет состоянием, React рисует UI. Связующее звено — `observer()` из библиотеки `mobx-react-lite`. Как пульт управления телевизором: нажал кнопку (action) — телевизор (компонент) обновился! 📺
+
+---
+
+### 1. `observer()` — Делаем компонент реактивным 👁️
+
+`observer()` — это HOC (Higher-Order Component), который **оборачивает компонент** и делает его реактивным. Компонент автоматически перерендерится когда изменяются observable-данные, которые он читает.
+
+```tsx
+import { observer } from 'mobx-react-lite';
+import { counterStore } from './stores';
+
+// Без observer — не будет реагировать на изменения MobX
+function BadCounter() {
+  return <div>{counterStore.count}</div>; // ❌ не обновится!
+}
+
+// С observer — автоматически перерендерится при изменении count
+const GoodCounter = observer(() => {
+  return <div>{counterStore.count}</div>; // ✅ работает!
+});
+
+// Или для именованного компонента
+const Counter = observer(function Counter() {
+  return (
+    <button onClick={() => counterStore.increment()}>
+      Клики: {counterStore.count}
+    </button>
+  );
+});
+```
+
+---
+
+### 2. Как работает `observer()` под капотом 🔧
+
+`observer()` оборачивает рендер-функцию компонента в специальный **tracking context**. Во время рендера MobX запоминает все observable-значения, которые были прочитаны. Если любое из них изменится — компонент перерендерится.
+
+```tsx
+const ProductCard = observer(({ productId }: { productId: number }) => {
+  // MobX запоминает что этот компонент читает:
+  // - products.find() — следит за массивом products
+  // - product.name, product.price, product.inStock — следит за этими полями
+  const product = productsStore.products.find(p => p.id === productId);
+  
+  if (!product) return null;
+  
+  return (
+    <div>
+      <h3>{product.name}</h3>       {/* отслеживается */}
+      <p>{product.price} ₽</p>      {/* отслеживается */}
+      {product.inStock && <span>В наличии</span>} {/* отслеживается */}
+    </div>
+  );
+  // Важно: изменение product.description НЕ вызовет рендер,
+  // если мы его не читаем в этом компоненте!
+});
+```
+
+---
+
+### 3. `useLocalObservable()` — Локальный стейт в компоненте 🏠
+
+Когда стейт нужен только в одном компоненте и не стоит выносить его в глобальный стор:
+
+```tsx
+import { useLocalObservable } from 'mobx-react-lite';
+import { observer } from 'mobx-react-lite';
+
+const SearchBox = observer(() => {
+  // Создаёт observable объект, живущий всё время монтирования компонента
+  const state = useLocalObservable(() => ({
+    query: '',
+    results: [] as string[],
+    isLoading: false,
+    
+    get hasResults() {
+      return this.results.length > 0;
+    },
+    
+    setQuery(q: string) {
+      this.query = q;
+    },
+    
+    async search() {
+      this.isLoading = true;
+      // имитация поиска
+      await new Promise(r => setTimeout(r, 500));
+      this.results = ['Результат 1', 'Результат 2'];
+      this.isLoading = false;
+    },
+  }));
+
+  return (
+    <div>
+      <input
+        value={state.query}
+        onChange={e => state.setQuery(e.target.value)}
+        onKeyDown={e => e.key === 'Enter' && state.search()}
+      />
+      {state.isLoading && <span>Загрузка...</span>}
+      {state.hasResults && state.results.map(r => <div key={r}>{r}</div>)}
+    </div>
+  );
+});
+```
+
+---
+
+### 4. Правила MobX + React: как избежать проблем ⚠️
+
+#### Правило 1: Каждый компонент — observer() 🔍
+
+```tsx
+// ❌ Плохо: только родитель — observer, дети нет
+const Parent = observer(() => {
+  return <Child name={store.user.name} />; // передаём значение
+});
+
+// child НЕ обновится при изменении store.user.age!
+const Child = ({ name }: { name: string }) => <div>{name}</div>;
+
+// ✅ Хорошо: дети тоже observer, и они сами читают из стора
+const Parent = observer(() => {
+  return <Child />;
+});
+
+const Child = observer(() => {
+  return <div>{store.user.name} ({store.user.age})</div>; // ✅
+});
+```
+
+#### Правило 2: Не деструктурируй observable вне observer! 📦
+
+```tsx
+// ❌ Плохо: деструктуризация разрывает связь с observable
+const { name, age } = store.user; // MobX теряет трекинг!
+const Broken = () => <div>{name} {age}</div>; // не обновится!
+
+// ✅ Хорошо: читаем свойства прямо в render
+const Good = observer(() => <div>{store.user.name} {store.user.age}</div>);
+
+// ✅ Тоже хорошо: деструктуризация ВНУТРИ observer
+const AlsoGood = observer(() => {
+  const { name, age } = store.user; // ✅ внутри observer — OK
+  return <div>{name} {age}</div>;
+});
+```
+
+#### Правило 3: Observer-батчинг — автоматически 🎯
+
+MobX автоматически батчит обновления. Несколько изменений в одном action приводят к **одному** рендеру:
+
+```tsx
+// Один action — один рендер (не три!)
+store.runInAction(() => {
+  store.name = 'Яша';   // изменение 1
+  store.age = 25;       // изменение 2
+  store.city = 'Москва'; // изменение 3
+  // React перерендерится ОДИН РАЗ после всего этого
+});
+```
+
+---
+
+### 5. Context + MobX — распределяем сторы 🌐
+
+```tsx
+import { createContext, useContext } from 'react';
+import { RootStore } from './stores/RootStore';
+
+const StoreContext = createContext<RootStore | null>(null);
+
+// Провайдер
+export function StoreProvider({ children }: { children: React.ReactNode }) {
+  const [store] = useState(() => new RootStore());
+  return (
+    <StoreContext.Provider value={store}>
+      {children}
+    </StoreContext.Provider>
+  );
+}
+
+// Хук для использования стора
+export function useStore() {
+  const store = useContext(StoreContext);
+  if (!store) throw new Error('useStore must be used within StoreProvider');
+  return store;
+}
+
+// В компоненте
+const CartButton = observer(() => {
+  const { cartStore } = useStore();
+  return (
+    <button onClick={() => cartStore.checkout()}>
+      🛒 {cartStore.itemCount}
+    </button>
+  );
+});
+```
+
+---
+
+### 6. Оптимизация рендеров 🚀
+
+**Granular updates** — чем точнее компонент читает данные, тем реже он рендерится:
+
+```tsx
+// ❌ Весь список рендерится при изменении любого todo
+const BadTodoList = observer(() => {
+  return (
+    <ul>
+      {store.todos.map(todo => (
+        <li key={todo.id}>{todo.text} — {todo.done ? '✓' : '○'}</li>
+      ))}
+    </ul>
+  );
+});
+
+// ✅ Каждый todo — отдельный observer, рендерится только изменившийся
+const GoodTodoList = observer(() => (
+  <ul>
+    {store.todos.map(todo => <TodoItem key={todo.id} todo={todo} />)}
+  </ul>
+));
+
+const TodoItem = observer(({ todo }: { todo: Todo }) => (
+  <li>{todo.text} — {todo.done ? '✓' : '○'}</li>
+  // Этот компонент рендерится ТОЛЬКО при изменении THIS todo!
+));
+```
+
+---
+
+### Практика 🎮
+
+<Playground client:visible template="react" files={{
+  "/App.tsx": `import { makeAutoObservable } from 'mobx';
+import { observer, useLocalObservable } from 'mobx-react-lite';
+
+interface CartItem {
+  id: number;
+  name: string;
+  price: number;
+  qty: number;
+  emoji: string;
+}
+
+const PRODUCTS = [
+  { id: 1, name: 'Ноутбук', price: 89990, emoji: '💻' },
+  { id: 2, name: 'Мышь', price: 2490, emoji: '🖱️' },
+  { id: 3, name: 'Клавиатура', price: 5990, emoji: '⌨️' },
+  { id: 4, name: 'Монитор', price: 34990, emoji: '🖥️' },
+  { id: 5, name: 'Наушники', price: 12990, emoji: '🎧' },
+  { id: 6, name: 'Веб-камера', price: 4990, emoji: '📷' },
+];
+
+class CartStore {
+  items: CartItem[] = [];
+  promoCode = '';
+  promoApplied = false;
+
+  constructor() {
+    makeAutoObservable(this);
+  }
+
+  get subtotal() {
+    return this.items.reduce((sum, item) => sum + item.price * item.qty, 0);
+  }
+
+  get discount() {
+    return this.promoApplied ? this.subtotal * 0.1 : 0;
+  }
+
+  get total() {
+    return this.subtotal - this.discount;
+  }
+
+  get itemCount() {
+    return this.items.reduce((sum, item) => sum + item.qty, 0);
+  }
+
+  get isEmpty() {
+    return this.items.length === 0;
+  }
+
+  addProduct(product: typeof PRODUCTS[0]) {
+    const existing = this.items.find(i => i.id === product.id);
+    if (existing) {
+      existing.qty++;
+    } else {
+      this.items.push({ ...product, qty: 1 });
+    }
+  }
+
+  removeItem(id: number) {
+    const idx = this.items.findIndex(i => i.id === id);
+    if (idx !== -1) this.items.splice(idx, 1);
+  }
+
+  changeQty(id: number, delta: number) {
+    const item = this.items.find(i => i.id === id);
+    if (!item) return;
+    item.qty = Math.max(1, item.qty + delta);
+  }
+
+  applyPromo() {
+    if (this.promoCode.toLowerCase() === 'mobx10') {
+      this.promoApplied = true;
+    }
+  }
+
+  setPromoCode(code: string) {
+    this.promoCode = code;
+    this.promoApplied = false;
+  }
+
+  clear() {
+    this.items = [];
+    this.promoApplied = false;
+    this.promoCode = '';
+  }
+}
+
+const cart = new CartStore();
+
+const formatPrice = (n: number) => n.toLocaleString('ru-RU') + ' ₽';
+
+// observer на каждом компоненте — оптимальные перерендеры!
+const ProductCard = observer(({ product }: { product: typeof PRODUCTS[0] }) => {
+  const inCart = cart.items.find(i => i.id === product.id);
+  return (
+    <div style={{
+      background: '#1e293b',
+      borderRadius: 10,
+      padding: '12px',
+      border: inCart ? '1px solid #7c3aed88' : '1px solid #334155',
+      transition: 'border-color 0.2s',
+    }}>
+      <div style={{ fontSize: 28, marginBottom: 6 }}>{product.emoji}</div>
+      <div style={{ color: '#e2e8f0', fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+        {product.name}
+      </div>
+      <div style={{ color: '#38bdf8', fontSize: 13, marginBottom: 10 }}>
+        {formatPrice(product.price)}
+      </div>
+      <button
+        onClick={() => cart.addProduct(product)}
+        style={{
+          width: '100%',
+          background: inCart ? '#4c1d95' : '#7c3aed',
+          color: '#fff',
+          border: 'none',
+          borderRadius: 6,
+          padding: '6px 0',
+          cursor: 'pointer',
+          fontSize: 12,
+          fontWeight: 600,
+        }}
+      >{inCart ? \`✓ x\${inCart.qty}\` : '+ В корзину'}</button>
+    </div>
+  );
+});
+
+const CartItemRow = observer(({ item }: { item: CartItem }) => (
+  <div style={{
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '10px 0',
+    borderBottom: '1px solid #1e293b',
+  }}>
+    <span style={{ fontSize: 20 }}>{item.emoji}</span>
+    <div style={{ flex: 1 }}>
+      <div style={{ color: '#e2e8f0', fontSize: 13 }}>{item.name}</div>
+      <div style={{ color: '#64748b', fontSize: 12 }}>{formatPrice(item.price)} × {item.qty}</div>
+    </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <button
+        onClick={() => cart.changeQty(item.id, -1)}
+        style={{ background: '#334155', color: '#e2e8f0', border: 'none', borderRadius: 4, width: 24, height: 24, cursor: 'pointer', fontSize: 14 }}
+      >−</button>
+      <span style={{ color: '#e2e8f0', fontSize: 13, minWidth: 16, textAlign: 'center' }}>{item.qty}</span>
+      <button
+        onClick={() => cart.changeQty(item.id, 1)}
+        style={{ background: '#334155', color: '#e2e8f0', border: 'none', borderRadius: 4, width: 24, height: 24, cursor: 'pointer', fontSize: 14 }}
+      >+</button>
+    </div>
+    <div style={{ color: '#38bdf8', fontSize: 13, minWidth: 80, textAlign: 'right' }}>
+      {formatPrice(item.price * item.qty)}
+    </div>
+    <button
+      onClick={() => cart.removeItem(item.id)}
+      style={{ background: 'transparent', border: 'none', color: '#475569', cursor: 'pointer', fontSize: 16 }}
+    >×</button>
+  </div>
+));
+
+const CartSummary = observer(() => (
+  <div style={{ background: '#1e293b', borderRadius: 12, padding: 16 }}>
+    <div style={{ color: '#94a3b8', fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
+      🛒 Корзина {cart.itemCount > 0 && \`(\${cart.itemCount} товаров)\`}
+    </div>
+
+    {cart.isEmpty ? (
+      <div style={{ color: '#475569', fontSize: 13, padding: '12px 0', textAlign: 'center' }}>
+        Корзина пуста 📭
+      </div>
+    ) : (
+      <>
+        {cart.items.map(item => <CartItemRow key={item.id} item={item} />)}
+
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <input
+              value={cart.promoCode}
+              onChange={e => cart.setPromoCode(e.target.value)}
+              placeholder='Промокод (попробуй "mobx10")'
+              style={{
+                flex: 1,
+                background: '#0f172a',
+                border: \`1px solid \${cart.promoApplied ? '#34d399' : '#334155'}\`,
+                borderRadius: 6,
+                padding: '7px 10px',
+                color: '#e2e8f0',
+                fontSize: 12,
+                outline: 'none',
+              }}
+            />
+            <button
+              onClick={() => cart.applyPromo()}
+              style={{
+                background: '#7c3aed',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 6,
+                padding: '7px 14px',
+                cursor: 'pointer',
+                fontSize: 12,
+              }}
+            >Применить</button>
+          </div>
+          {cart.promoApplied && (
+            <div style={{ color: '#34d399', fontSize: 12, marginBottom: 10 }}>
+              ✓ Промокод применён! Скидка 10%
+            </div>
+          )}
+        </div>
+
+        <div style={{ borderTop: '1px solid #334155', paddingTop: 12, marginTop: 4 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+            <span style={{ color: '#64748b', fontSize: 13 }}>Сумма:</span>
+            <span style={{ color: '#94a3b8', fontSize: 13 }}>{formatPrice(cart.subtotal)}</span>
+          </div>
+          {cart.promoApplied && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+              <span style={{ color: '#34d399', fontSize: 13 }}>Скидка:</span>
+              <span style={{ color: '#34d399', fontSize: 13 }}>−{formatPrice(cart.discount)}</span>
+            </div>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10 }}>
+            <span style={{ color: '#e2e8f0', fontSize: 15, fontWeight: 700 }}>Итого:</span>
+            <span style={{ color: '#38bdf8', fontSize: 15, fontWeight: 700 }}>{formatPrice(cart.total)}</span>
+          </div>
+          <button
+            onClick={() => cart.clear()}
+            style={{
+              width: '100%',
+              marginTop: 14,
+              background: '#7c3aed',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 8,
+              padding: '10px',
+              cursor: 'pointer',
+              fontSize: 14,
+              fontWeight: 600,
+            }}
+          >Оформить заказ 🎉</button>
+          <button
+            onClick={() => cart.clear()}
+            style={{
+              width: '100%',
+              marginTop: 6,
+              background: 'transparent',
+              color: '#475569',
+              border: '1px solid #334155',
+              borderRadius: 8,
+              padding: '7px',
+              cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >Очистить корзину</button>
+        </div>
+      </>
+    )}
+  </div>
+));
+
+export default observer(function App() {
+  return (
+    <div style={{
+      minHeight: '100vh',
+      background: '#0f172a',
+      padding: '20px 16px',
+      fontFamily: 'system-ui, sans-serif',
+      color: '#e2e8f0',
+    }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <h1 style={{ color: '#7c3aed', marginBottom: 4, fontSize: 22 }}>
+          🔗 MobX + React: Shopping Cart
+        </h1>
+        <p style={{ color: '#64748b', fontSize: 13, marginBottom: 20 }}>
+          observer() на каждом компоненте — точечные перерендеры
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+          {PRODUCTS.map(p => <ProductCard key={p.id} product={p} />)}
+        </div>
+
+        <CartSummary />
+
+        <div style={{
+          marginTop: 16,
+          padding: 14,
+          background: '#1e293b',
+          borderRadius: 10,
+          border: '1px solid #7c3aed33',
+        }}>
+          <div style={{ color: '#7c3aed', fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
+            💡 Архитектура observer()
+          </div>
+          <div style={{ color: '#64748b', fontSize: 12, lineHeight: 1.7 }}>
+            🎯 <b style={{ color: '#38bdf8' }}>ProductCard</b>: observer — рендерится при добавлении в корзину<br/>
+            🛒 <b style={{ color: '#38bdf8' }}>CartItemRow</b>: observer — рендерится только при изменении СВОЕГО товара<br/>
+            📊 <b style={{ color: '#38bdf8' }}>CartSummary</b>: observer — видит subtotal, discount, total (computed)<br/>
+            🏠 <b style={{ color: '#a78bfa' }}>useLocalObservable</b>: для локального стейта компонента
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+`
+}} />

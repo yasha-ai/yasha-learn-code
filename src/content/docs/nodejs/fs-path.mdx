@@ -1,0 +1,318 @@
+---
+title: "4. Файловая система (fs, path)"
+sidebar:
+  order: 4
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-fs.png)
+
+Модуль `fs` даёт полный доступ к файловой системе: чтение, запись, удаление, создание папок.
+
+## Чтение файлов
+
+```javascript
+const { readFile, readFileSync } = require('fs');
+const { readFile: readFileAsync } = require('fs/promises');
+
+// ✅ Async/await (рекомендуется)
+async function readConfig() {
+  try {
+    const content = await readFileAsync('./config.json', 'utf8');
+    return JSON.parse(content);
+  } catch (err) {
+    console.error('Ошибка чтения:', err.message);
+    return null;
+  }
+}
+
+// Callback стиль
+readFile('./data.txt', 'utf8', (err, data) => {
+  if (err) throw err;
+  console.log(data);
+});
+
+// Синхронный (блокирует Event Loop — только для запуска приложения)
+const data = readFileSync('./config.json', 'utf8');
+const config = JSON.parse(data);
+```
+
+## Запись файлов
+
+```javascript
+const { writeFile, appendFile } = require('fs/promises');
+
+// Перезапись файла
+await writeFile('./output.txt', 'Привет, файл!', 'utf8');
+
+// Запись JSON
+const users = [{ id: 1, name: 'Яша' }, { id: 2, name: 'Лёха' }];
+await writeFile('./users.json', JSON.stringify(users, null, 2), 'utf8');
+
+// Добавление в конец файла
+await appendFile('./log.txt', `${new Date().toISOString()} — событие\n`);
+
+// Запись бинарных данных (Buffer)
+const buffer = Buffer.from([0x48, 0x65, 0x6c, 0x6c, 0x6f]);
+await writeFile('./binary.bin', buffer);
+```
+
+## Работа с директориями
+
+```javascript
+const { mkdir, readdir, rmdir, rm } = require('fs/promises');
+
+// Создание директории
+await mkdir('./uploads', { recursive: true }); // recursive — создаёт вложенные папки
+
+// Список файлов в папке
+const files = await readdir('./src');
+console.log(files); // ['index.js', 'utils.js', ...]
+
+// С информацией о файлах
+const entries = await readdir('./src', { withFileTypes: true });
+for (const entry of entries) {
+  if (entry.isDirectory()) {
+    console.log(`📁 ${entry.name}/`);
+  } else {
+    console.log(`📄 ${entry.name}`);
+  }
+}
+
+// Удаление директории с содержимым (Node.js 14.14+)
+await rm('./temp', { recursive: true, force: true });
+```
+
+## Информация о файле
+
+```javascript
+const { stat, access } = require('fs/promises');
+const { constants } = require('fs');
+
+// Статистика файла
+const info = await stat('./data.json');
+console.log(info.size);          // размер в байтах
+console.log(info.isFile());      // true/false
+console.log(info.isDirectory()); // true/false
+console.log(info.mtime);         // дата изменения
+console.log(info.birthtime);     // дата создания
+
+// Проверка существования файла
+async function fileExists(path) {
+  try {
+    await access(path, constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const exists = await fileExists('./config.json');
+if (!exists) {
+  console.log('Файл не найден, создаём по умолчанию...');
+}
+```
+
+## Наблюдение за файлами (watch)
+
+```javascript
+const { watch } = require('fs');
+
+// Следить за изменениями файла
+const watcher = watch('./config.json', (eventType, filename) => {
+  console.log(`Событие: ${eventType}, файл: ${filename}`);
+  // eventType: 'change' или 'rename'
+});
+
+// Следить за директорией
+watch('./src', { recursive: true }, (eventType, filename) => {
+  console.log(`${eventType}: ${filename}`);
+});
+
+// Остановить слежение
+watcher.close();
+```
+
+## path — работа с путями
+
+```javascript
+const path = require('path');
+
+// Основные методы
+path.join('/home', 'user', 'file.txt')    // /home/user/file.txt
+path.resolve('src', 'index.js')           // /cwd/src/index.js
+path.basename('/home/user/file.txt')      // file.txt
+path.dirname('/home/user/file.txt')       // /home/user
+path.extname('photo.jpg')                 // .jpg
+path.parse('/home/user/file.txt')
+// { root: '/', dir: '/home/user', base: 'file.txt', ext: '.txt', name: 'file' }
+
+// Проверка абсолютности пути
+path.isAbsolute('/home/user')  // true
+path.isAbsolute('./src')       // false
+
+// Нормализация пути
+path.normalize('/home/user/../user/./file') // /home/user/file
+```
+
+## Практический пример: менеджер файлов
+
+```javascript
+const { readFile, writeFile, readdir, mkdir, stat } = require('fs/promises');
+const path = require('path');
+
+class FileManager {
+  constructor(baseDir) {
+    this.baseDir = baseDir;
+  }
+
+  // Полный путь
+  resolve(...parts) {
+    return path.join(this.baseDir, ...parts);
+  }
+
+  // Читать JSON файл
+  async readJSON(filename) {
+    const content = await readFile(this.resolve(filename), 'utf8');
+    return JSON.parse(content);
+  }
+
+  // Записать JSON файл
+  async writeJSON(filename, data) {
+    await writeFile(
+      this.resolve(filename),
+      JSON.stringify(data, null, 2),
+      'utf8'
+    );
+  }
+
+  // Список всех файлов
+  async listFiles(subdir = '') {
+    const dir = this.resolve(subdir);
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.map(e => ({
+      name: e.name,
+      type: e.isDirectory() ? 'dir' : 'file',
+    }));
+  }
+
+  // Создать папку
+  async ensureDir(subdir) {
+    await mkdir(this.resolve(subdir), { recursive: true });
+  }
+}
+
+// Использование
+const fm = new FileManager('./data');
+await fm.ensureDir('uploads');
+await fm.writeJSON('users.json', [{ id: 1, name: 'Яша' }]);
+const users = await fm.readJSON('users.json');
+console.log(users);
+```
+
+## Потоки для больших файлов
+
+```javascript
+const { createReadStream, createWriteStream } = require('fs');
+const { pipeline } = require('stream/promises');
+const { createGzip } = require('zlib');
+
+// Копирование большого файла через поток (без загрузки в память)
+async function copyFile(src, dest) {
+  const readable = createReadStream(src);
+  const writable = createWriteStream(dest);
+  await pipeline(readable, writable);
+  console.log('Скопировано!');
+}
+
+// Сжатие файла gzip
+async function compressFile(src, dest) {
+  const readable = createReadStream(src);
+  const gzip = createGzip();
+  const writable = createWriteStream(dest);
+  await pipeline(readable, gzip, writable);
+  console.log('Сжато!');
+}
+```
+
+## Практика
+
+1. Создай функцию `readJSON(path)` — читает JSON файл и возвращает объект
+2. Создай функцию `saveLog(message)` — добавляет строку с датой в `logs/app.log`
+3. Напиши скрипт, который рекурсивно обходит папку и выводит все `.js` файлы
+4. Создай простой конфиг-менеджер: `getConfig()`, `setConfig(key, value)`, `resetConfig()`
+5. Реализуй функцию `copyDir(src, dest)` — копирует директорию со всем содержимым
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+export default function App() {
+  const [fs, setFs] = useState({
+    "/app": { type: "dir", children: {
+      "config.json": { type: "file", content: '{ "port": 3000 }' },
+      "data": { type: "dir", children: {} },
+    }}
+  });
+  const [output, setOutput] = useState([]);
+  const [path, setPath] = useState("");
+  const [content, setContent] = useState("");
+
+  const log = (msg, color = "#e2e8f0") => setOutput(p => [...p.slice(-6), { msg, color }]);
+
+  const readFile = () => {
+    if (path === "/app/config.json") {
+      log("fs.readFile('" + path + "')", "#10b981");
+      log('→ { "port": 3000 }');
+    } else {
+      log("fs.readFile('" + path + "')", "#ef4444");
+      log("→ Error: ENOENT: no such file", "#ef4444");
+    }
+  };
+
+  const writeFile = () => {
+    const name = path || "/app/data/output.txt";
+    log("fs.writeFile('" + name + "', ...)", "#3b82f6");
+    log("→ Файл записан: " + (content || "Hello Node.js"));
+  };
+
+  const listDir = () => {
+    log("fs.readdir('/app')", "#f59e0b");
+    log("→ ['config.json', 'data']");
+  };
+
+  const pathOps = () => {
+    log("path.join('/app', 'data', 'file.txt')", "#a78bfa");
+    log("→ /app/data/file.txt");
+    log("path.extname('photo.png')", "#a78bfa");
+    log("→ .png");
+    log("path.basename('/app/config.json')", "#a78bfa");
+    log("→ config.json");
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>fs & path</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        <input value={path} onChange={e => setPath(e.target.value)} placeholder="/app/config.json"
+          style={{ flex: 1, padding: "5px 8px", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, fontSize: 12 }} />
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        <button onClick={readFile} style={{ padding: "4px 10px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>readFile</button>
+        <button onClick={writeFile} style={{ padding: "4px 10px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>writeFile</button>
+        <button onClick={listDir} style={{ padding: "4px 10px", background: "#f59e0b", color: "#000", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>readdir</button>
+        <button onClick={pathOps} style={{ padding: "4px 10px", background: "#a78bfa", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>path.*</button>
+      </div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {output.map((o, i) => <div key={i} style={{ fontSize: 12, color: o.color }}>{o.msg}</div>)}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

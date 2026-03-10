@@ -1,0 +1,635 @@
+---
+title: "39. NgRx: Store и Reducers"
+sidebar:
+  order: 41
+---
+import { Playground } from '@components/Playground'
+
+
+## 🏪 NgRx Store — Actions, Reducers, Selectors
+
+Это практический урок по NgRx Store. Здесь ты напишешь полный цикл: от создания action creators до подписки на селекторы в компоненте. NgRx — это строгая архитектура, которая окупается на больших проектах 💪
+
+---
+
+## Установка NgRx Store
+
+```bash
+ng add @ngrx/store
+npm install @ngrx/store @ngrx/store-devtools
+```
+
+---
+
+## createAction() — создание действий
+
+`createAction()` создаёт type-safe фабрику actions. Это гораздо лучше строковых констант:
+
+```typescript
+// store/users/users.actions.ts
+import { createAction, props } from '@ngrx/store';
+import { User, UserCreateDto } from '../../models/user.model';
+
+// Actions без пейлоада
+export const loadUsers = createAction('[Users Page] Load Users');
+export const clearUsers = createAction('[Users Page] Clear Users');
+
+// Actions с пейлоадом через props<T>()
+export const loadUsersSuccess = createAction(
+  '[Users API] Load Users Success',
+  props<{ users: User[]; total: number }>()
+);
+
+export const loadUsersFailure = createAction(
+  '[Users API] Load Users Failure',
+  props<{ error: string }>()
+);
+
+export const createUser = createAction(
+  '[Users Page] Create User',
+  props<{ user: UserCreateDto }>()
+);
+
+export const createUserSuccess = createAction(
+  '[Users API] Create User Success',
+  props<{ user: User }>()
+);
+
+export const updateUser = createAction(
+  '[Users Page] Update User',
+  props<{ id: string; changes: Partial<User> }>()
+);
+
+export const deleteUser = createAction(
+  '[Users Page] Delete User',
+  props<{ id: string }>()
+);
+
+export const selectUser = createAction(
+  '[Users Page] Select User',
+  props<{ userId: string | null }>()
+);
+
+export const setUsersFilter = createAction(
+  '[Users Page] Set Filter',
+  props<{ filter: string }>()
+);
+
+export const setUsersPage = createAction(
+  '[Users Page] Set Page',
+  props<{ page: number; pageSize: number }>()
+);
+```
+
+---
+
+## createReducer() и on() — редьюсер
+
+Редьюсер — это **чистая функция**. Никаких HTTP-запросов, никаких побочных эффектов, только `(state, action) => newState`:
+
+```typescript
+// store/users/users.reducer.ts
+import { createReducer, on } from '@ngrx/store';
+import * as UsersActions from './users.actions';
+import { User } from '../../models/user.model';
+
+export interface UsersState {
+  users: User[];
+  selectedUserId: string | null;
+  loading: boolean;
+  creating: boolean;
+  error: string | null;
+  total: number;
+  filter: string;
+  page: number;
+  pageSize: number;
+}
+
+export const initialState: UsersState = {
+  users: [],
+  selectedUserId: null,
+  loading: false,
+  creating: false,
+  error: null,
+  total: 0,
+  filter: '',
+  page: 1,
+  pageSize: 10,
+};
+
+export const usersReducer = createReducer(
+  initialState,
+
+  // Загрузка списка
+  on(UsersActions.loadUsers, state => ({
+    ...state,
+    loading: true,
+    error: null,
+  })),
+
+  on(UsersActions.loadUsersSuccess, (state, { users, total }) => ({
+    ...state,
+    users,
+    total,
+    loading: false,
+  })),
+
+  on(UsersActions.loadUsersFailure, (state, { error }) => ({
+    ...state,
+    error,
+    loading: false,
+  })),
+
+  // Создание пользователя
+  on(UsersActions.createUser, state => ({
+    ...state,
+    creating: true,
+  })),
+
+  on(UsersActions.createUserSuccess, (state, { user }) => ({
+    ...state,
+    users: [...state.users, user],
+    total: state.total + 1,
+    creating: false,
+  })),
+
+  // Обновление (иммутабельно)
+  on(UsersActions.updateUser, (state, { id, changes }) => ({
+    ...state,
+    users: state.users.map(user =>
+      user.id === id ? { ...user, ...changes } : user
+    ),
+  })),
+
+  // Удаление
+  on(UsersActions.deleteUser, (state, { id }) => ({
+    ...state,
+    users: state.users.filter(u => u.id !== id),
+    total: state.total - 1,
+  })),
+
+  // Выбор пользователя
+  on(UsersActions.selectUser, (state, { userId }) => ({
+    ...state,
+    selectedUserId: userId,
+  })),
+
+  // Фильтр и пагинация
+  on(UsersActions.setUsersFilter, (state, { filter }) => ({
+    ...state,
+    filter,
+    page: 1, // Сбрасываем на первую страницу при фильтрации
+  })),
+
+  on(UsersActions.setUsersPage, (state, { page, pageSize }) => ({
+    ...state,
+    page,
+    pageSize,
+  })),
+
+  on(UsersActions.clearUsers, () => initialState)
+);
+```
+
+---
+
+## Регистрация Store
+
+### С provideStore() (Standalone)
+
+```typescript
+// app.config.ts
+import { provideStore } from '@ngrx/store';
+import { provideStoreDevtools } from '@ngrx/store-devtools';
+import { usersReducer } from './store/users/users.reducer';
+import { authReducer } from './store/auth/auth.reducer';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideStore({
+      users: usersReducer,
+      auth: authReducer,
+    }),
+    provideStoreDevtools({
+      maxAge: 25,
+      logOnly: environment.production,
+    })
+  ]
+};
+```
+
+### Feature Store (Lazy Loading)
+
+```typescript
+// features/admin/admin.routes.ts
+import { provideState } from '@ngrx/store';
+import { adminReducer } from './store/admin.reducer';
+
+export const adminRoutes: Routes = [
+  {
+    path: 'admin',
+    loadComponent: () => import('./admin.component'),
+    providers: [
+      provideState({ name: 'admin', reducer: adminReducer })
+    ]
+  }
+];
+```
+
+---
+
+## createSelector() — селекторы
+
+Селекторы — это мемоизированные запросы к Store. Пересчитываются только при изменении зависимостей:
+
+```typescript
+// store/users/users.selectors.ts
+import { createFeatureSelector, createSelector } from '@ngrx/store';
+import { UsersState } from './users.reducer';
+
+// Базовый feature selector
+export const selectUsersState = createFeatureSelector<UsersState>('users');
+
+// Простые селекторы
+export const selectAllUsers = createSelector(
+  selectUsersState,
+  state => state.users
+);
+
+export const selectUsersLoading = createSelector(
+  selectUsersState,
+  state => state.loading
+);
+
+export const selectUsersError = createSelector(
+  selectUsersState,
+  state => state.error
+);
+
+export const selectUsersFilter = createSelector(
+  selectUsersState,
+  state => state.filter
+);
+
+export const selectSelectedUserId = createSelector(
+  selectUsersState,
+  state => state.selectedUserId
+);
+
+// Составные селекторы (мемоизированы)
+export const selectFilteredUsers = createSelector(
+  selectAllUsers,
+  selectUsersFilter,
+  (users, filter) => {
+    if (!filter.trim()) return users;
+    const lowerFilter = filter.toLowerCase();
+    return users.filter(u =>
+      u.name.toLowerCase().includes(lowerFilter) ||
+      u.email.toLowerCase().includes(lowerFilter)
+    );
+  }
+);
+
+export const selectSelectedUser = createSelector(
+  selectAllUsers,
+  selectSelectedUserId,
+  (users, selectedId) =>
+    selectedId ? users.find(u => u.id === selectedId) ?? null : null
+);
+
+export const selectUsersStats = createSelector(
+  selectAllUsers,
+  users => ({
+    total: users.length,
+    active: users.filter(u => u.isActive).length,
+    admins: users.filter(u => u.role === 'admin').length,
+  })
+);
+```
+
+---
+
+## store.dispatch() и store.select() в компоненте
+
+```typescript
+// features/users/users-page.component.ts
+import { Component, OnInit } from '@angular/core';
+import { Store } from '@ngrx/store';
+import { AsyncPipe } from '@angular/common';
+import * as UsersActions from '../../store/users/users.actions';
+import * as UsersSelectors from '../../store/users/users.selectors';
+
+@Component({
+  standalone: true,
+  imports: [AsyncPipe, ...],
+  template: `
+    <!-- Loading state -->
+    @if (loading$ | async) {
+      <mat-progress-bar mode="indeterminate" />
+    }
+
+    <!-- Error state -->
+    @if (error$ | async; as error) {
+      <app-error-banner [message]="error" />
+    }
+
+    <!-- Filter -->
+    <mat-form-field>
+      <input matInput placeholder="Поиск..." (input)="onFilter($event)" />
+    </mat-form-field>
+
+    <!-- Users list -->
+    @for (user of filteredUsers$ | async; track user.id) {
+      <app-user-card
+        [user]="user"
+        [selected]="(selectedUser$ | async)?.id === user.id"
+        (select)="onSelect(user.id)"
+        (delete)="onDelete(user.id)"
+      />
+    }
+
+    <!-- Stats -->
+    @if (stats$ | async; as stats) {
+      <div class="stats">
+        Всего: {{ stats.total }} | Активных: {{ stats.active }}
+      </div>
+    }
+  `
+})
+export class UsersPageComponent implements OnInit {
+  private store = inject(Store);
+
+  // Подписка через async pipe — автоматический unsubscribe
+  loading$ = this.store.select(UsersSelectors.selectUsersLoading);
+  error$ = this.store.select(UsersSelectors.selectUsersError);
+  filteredUsers$ = this.store.select(UsersSelectors.selectFilteredUsers);
+  selectedUser$ = this.store.select(UsersSelectors.selectSelectedUser);
+  stats$ = this.store.select(UsersSelectors.selectUsersStats);
+
+  // Или через toSignal() (Angular 16+)
+  // loading = toSignal(this.store.select(UsersSelectors.selectUsersLoading));
+
+  ngOnInit() {
+    // Инициируем загрузку при входе на страницу
+    this.store.dispatch(UsersActions.loadUsers());
+  }
+
+  onFilter(event: Event) {
+    const filter = (event.target as HTMLInputElement).value;
+    this.store.dispatch(UsersActions.setUsersFilter({ filter }));
+  }
+
+  onSelect(userId: string) {
+    this.store.dispatch(UsersActions.selectUser({ userId }));
+  }
+
+  onDelete(id: string) {
+    this.store.dispatch(UsersActions.deleteUser({ id }));
+  }
+
+  ngOnDestroy() {
+    // Опционально: очистить состояние при уходе
+    this.store.dispatch(UsersActions.clearUsers());
+  }
+}
+```
+
+---
+
+## Reducer composition — составные редьюсеры
+
+```typescript
+// Несколько фичей в одном store
+export interface AppState {
+  users: UsersState;
+  auth: AuthState;
+  ui: UiState;
+}
+
+// Общий root reducer
+export const reducers: ActionReducerMap<AppState> = {
+  users: usersReducer,
+  auth: authReducer,
+  ui: uiReducer,
+};
+
+// Meta-reducer: логирование всех actions
+export function logger(
+  reducer: ActionReducer<AppState>
+): ActionReducer<AppState> {
+  return (state, action) => {
+    console.group(action.type);
+    console.log('prev state', state);
+    const result = reducer(state, action);
+    console.log('next state', result);
+    console.groupEnd();
+    return result;
+  };
+}
+
+export const metaReducers: MetaReducer<AppState>[] = [logger];
+```
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useReducer, useState } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+
+// ===== ACTIONS =====
+const ADD_TODO = '[Todos] Add Todo';
+const TOGGLE_TODO = '[Todos] Toggle Todo';
+const DELETE_TODO = '[Todos] Delete Todo';
+const SET_FILTER = '[Todos] Set Filter';
+const INCREMENT = '[Counter] Increment';
+const DECREMENT = '[Counter] Decrement';
+const RESET = '[Counter] Reset';
+
+// ===== STATE =====
+interface Todo { id: number; text: string; done: boolean; }
+interface AppState {
+  counter: number;
+  todos: Todo[];
+  filter: 'all' | 'active' | 'done';
+}
+
+const initialState: AppState = {
+  counter: 0,
+  todos: [{ id: 1, text: 'Изучить NgRx Store', done: false }],
+  filter: 'all',
+};
+
+// ===== REDUCER (pure function) =====
+function rootReducer(state: AppState, action: { type: string; payload?: any }): AppState {
+  switch (action.type) {
+    case INCREMENT: return { ...state, counter: state.counter + 1 };
+    case DECREMENT: return { ...state, counter: state.counter - 1 };
+    case RESET: return { ...state, counter: 0 };
+    case ADD_TODO:
+      return { ...state, todos: [...state.todos, { id: Date.now(), text: action.payload, done: false }] };
+    case TOGGLE_TODO:
+      return { ...state, todos: state.todos.map(t => t.id === action.payload ? { ...t, done: !t.done } : t) };
+    case DELETE_TODO:
+      return { ...state, todos: state.todos.filter(t => t.id !== action.payload) };
+    case SET_FILTER:
+      return { ...state, filter: action.payload };
+    default: return state;
+  }
+}
+
+// ===== SELECTORS =====
+const selectCounter = (s: AppState) => s.counter;
+const selectAllTodos = (s: AppState) => s.todos;
+const selectFilter = (s: AppState) => s.filter;
+const selectFilteredTodos = (s: AppState) =>
+  s.todos.filter(t => s.filter === 'all' ? true : s.filter === 'done' ? t.done : !t.done);
+const selectTodosStats = (s: AppState) => ({
+  total: s.todos.length,
+  done: s.todos.filter(t => t.done).length,
+  active: s.todos.filter(t => !t.done).length,
+});
+
+let actionLog: Array<{ type: string; payload?: any; id: number }> = [];
+let logId = 0;
+
+export default function App() {
+  const [state, dispatch] = useReducer(rootReducer, initialState);
+  const [log, setLog] = useState<typeof actionLog>([]);
+  const [newTodo, setNewTodo] = useState('');
+  const [activeTab, setActiveTab] = useState<'counter' | 'todos'>('counter');
+
+  const dispatchAndLog = (type: string, payload?: any) => {
+    dispatch({ type, payload });
+    const entry = { type, payload, id: ++logId };
+    setLog(prev => [entry, ...prev.slice(0, 9)]);
+  };
+
+  const filteredTodos = selectFilteredTodos(state);
+  const stats = selectTodosStats(state);
+
+  const addTodo = () => {
+    if (!newTodo.trim()) return;
+    dispatchAndLog(ADD_TODO, newTodo.trim());
+    setNewTodo('');
+  };
+
+  const filterColors = { all: '#64748b', active: '#3b82f6', done: SUCCESS };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🏪 NgRx Store Playground</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+        createAction + createReducer + createSelector
+      </p>
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: '0.25rem', marginBottom: '1rem', borderBottom: \`1px solid \${BORDER}\` }}>
+        {(['counter', 'todos'] as const).map(t => (
+          <button key={t} onClick={() => setActiveTab(t)} style={{
+            padding: '0.45rem 1rem', background: 'transparent',
+            color: activeTab === t ? RED : '#64748b',
+            border: 'none', borderBottom: activeTab === t ? \`2px solid \${RED}\` : '2px solid transparent',
+            cursor: 'pointer', fontSize: '0.82rem', fontWeight: 600, marginBottom: '-1px', textTransform: 'capitalize',
+          }}>{t}</button>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        {/* Left: store feature */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          {activeTab === 'counter' && (
+            <>
+              <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>Counter Feature</div>
+              <div style={{ textAlign: 'center', marginBottom: '1rem' }}>
+                <div style={{ fontSize: '3rem', fontWeight: 700, color: RED }}>{selectCounter(state)}</div>
+                <div style={{ color: '#475569', fontSize: '0.75rem' }}>select(selectCounter)</div>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button onClick={() => dispatchAndLog(DECREMENT)} style={actionBtn('#334155', '#e2e8f0')}>− Decrement</button>
+                <button onClick={() => dispatchAndLog(INCREMENT)} style={actionBtn(RED)}>+ Increment</button>
+              </div>
+              <button onClick={() => dispatchAndLog(RESET)} style={{ ...actionBtn('#334155', '#94a3b8'), width: '100%', marginTop: '0.4rem' }}>↺ Reset</button>
+            </>
+          )}
+          {activeTab === 'todos' && (
+            <>
+              <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+                Todos Feature — {stats.active} active / {stats.done} done
+              </div>
+              <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.75rem' }}>
+                <input
+                  value={newTodo}
+                  onChange={e => setNewTodo(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addTodo()}
+                  placeholder="Новая задача..."
+                  style={{ flex: 1, padding: '0.4rem 0.6rem', background: BG, border: \`1px solid \${BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.78rem', outline: 'none' }}
+                />
+                <button onClick={addTodo} style={{ ...actionBtn(RED), marginBottom: 0 }}>+</button>
+              </div>
+              <div style={{ display: 'flex', gap: '0.3rem', marginBottom: '0.75rem' }}>
+                {(['all', 'active', 'done'] as const).map(f => (
+                  <button key={f} onClick={() => dispatchAndLog(SET_FILTER, f)} style={{
+                    padding: '0.2rem 0.5rem', background: state.filter === f ? (filterColors[f] + '30') : 'transparent',
+                    border: \`1px solid \${state.filter === f ? filterColors[f] : BORDER}\`,
+                    color: state.filter === f ? filterColors[f] : '#475569',
+                    borderRadius: '4px', cursor: 'pointer', fontSize: '0.72rem',
+                  }}>{f}</button>
+                ))}
+              </div>
+              <div style={{ maxHeight: '140px', overflowY: 'auto' }}>
+                {filteredTodos.map(todo => (
+                  <div key={todo.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.35rem 0', borderBottom: \`1px solid \${BORDER}\` }}>
+                    <input type="checkbox" checked={todo.done} onChange={() => dispatchAndLog(TOGGLE_TODO, todo.id)} style={{ accentColor: SUCCESS, cursor: 'pointer' }} />
+                    <span style={{ flex: 1, textDecoration: todo.done ? 'line-through' : 'none', color: todo.done ? '#475569' : '#e2e8f0', fontSize: '0.8rem' }}>
+                      {todo.text}
+                    </span>
+                    <button onClick={() => dispatchAndLog(DELETE_TODO, todo.id)} style={{ background: 'transparent', border: 'none', color: RED, cursor: 'pointer', fontSize: '0.9rem' }}>×</button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Right: store snapshot */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>Store Snapshot</div>
+          <pre style={{ margin: 0, fontSize: '0.7rem', color: '#94a3b8', overflowX: 'auto', maxHeight: '200px', overflowY: 'auto' }}>
+{JSON.stringify({
+  counter: state.counter,
+  todos: state.todos.map(t => ({ id: t.id, text: t.text.slice(0, 20), done: t.done })),
+  filter: state.filter,
+}, null, 2)}
+          </pre>
+        </div>
+      </div>
+
+      {/* Action log */}
+      <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', maxHeight: '130px', overflowY: 'auto' }}>
+        <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.35rem' }}>Action Log (DevTools)</div>
+        {log.length === 0
+          ? <div style={{ color: '#334155', fontSize: '0.78rem' }}>// Dispatch an action...</div>
+          : log.map((a, i) => (
+            <div key={a.id} style={{ fontSize: '0.75rem', marginBottom: '0.1rem', display: 'flex', gap: '0.5rem' }}>
+              <span style={{ color: i === 0 ? SUCCESS : '#334155' }}>▶</span>
+              <span style={{ color: i === 0 ? '#e2e8f0' : '#475569', fontWeight: 600 }}>{a.type}</span>
+              {a.payload !== undefined && <span style={{ color: '#334155' }}>{JSON.stringify(a.payload)}</span>}
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
+
+const actionBtn = (bg: string, color = '#fff'): React.CSSProperties => ({
+  flex: 1, padding: '0.4rem 0.5rem', background: bg, color,
+  border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600, marginBottom: '0.4rem',
+});
+` }} />

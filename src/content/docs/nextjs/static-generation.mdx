@@ -1,0 +1,532 @@
+---
+title: "7. Статическая генерация (SSG)"
+sidebar:
+  order: 7
+---
+import { Playground } from '@components/Playground'
+
+
+## 🏗️ Статическая генерация (SSG) в Next.js
+
+Static Site Generation — это когда HTML генерируется **один раз при сборке проекта** и раздаётся всем пользователям как статический файл. Представь: ты испёк 1000 пирогов заранее и раздаёшь их без готовки — вместо того чтобы готовить каждый раз по заказу! 🥧
+
+```
+Обычный SSR:              SSG:
+──────────────────         ────────────────────────────────
+Запрос → Сервер           При сборке (build time):
+→ загружает данные        → generateStaticParams()
+→ рендерит HTML           → fetch/db запросы
+→ отправляет клиенту      → рендеринг HTML
+→ 200ms для каждого       → сохранение .html файлов
+                          
+                          Запрос → CDN
+                          → отдаёт .html файл
+                          → 5ms для каждого ⚡
+```
+
+---
+
+### 🔧 Как работает SSG в App Router
+
+В App Router **компонент статичен по умолчанию**, если не использует динамические API:
+
+```typescript
+// app/about/page.tsx — автоматически SSG!
+// Нет cookies(), headers(), searchParams → статическая страница
+
+export default async function AboutPage() {
+  // Этот fetch выполнится ОДИН РАЗ при сборке
+  const team = await fetch('https://api.example.com/team', {
+    cache: 'force-cache', // или next: { revalidate: false }
+  }).then(r => r.json());
+  
+  return (
+    <main>
+      <h1>О нас</h1>
+      <TeamList members={team} />
+    </main>
+  );
+}
+// → Генерирует /about.html при npm run build
+// → Хранится на CDN, отдаётся мгновенно
+```
+
+---
+
+### 📋 generateStaticParams: Динамические страницы → Статика
+
+Для динамических роутов нужно указать, какие params генерировать:
+
+```typescript
+// app/blog/[slug]/page.tsx
+
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+// Говорим Next.js: сгенерируй эти страницы при сборке
+export async function generateStaticParams() {
+  // Запрашиваем все возможные slug при сборке
+  const posts = await fetch('https://api.blog.com/posts').then(r => r.json());
+  
+  return posts.map((post: { slug: string }) => ({
+    slug: post.slug,
+  }));
+  // Например: [{ slug: 'hello-world' }, { slug: 'next-js-guide' }, ...]
+}
+
+export default async function BlogPost({ params }: Props) {
+  const { slug } = await params;
+  
+  // Этот fetch тоже выполнится при сборке (для каждого slug)
+  const post = await fetch(`https://api.blog.com/posts/${slug}`, {
+    cache: 'force-cache',
+  }).then(r => r.json());
+  
+  if (!post) notFound();
+  
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <time>{post.publishedAt}</time>
+      <div dangerouslySetInnerHTML={{ __html: post.content }} />
+    </article>
+  );
+}
+```
+
+**Несколько параметров:**
+
+```typescript
+// app/[lang]/blog/[slug]/page.tsx
+export async function generateStaticParams() {
+  const languages = ['ru', 'en', 'de'];
+  const posts = await getAllPosts();
+  
+  // Возвращаем все комбинации lang + slug
+  return languages.flatMap(lang =>
+    posts.map(post => ({
+      lang,
+      slug: post.slug,
+    }))
+  );
+  // [{ lang: 'ru', slug: 'hello' }, { lang: 'en', slug: 'hello' }, ...]
+}
+```
+
+---
+
+### 🔀 dynamicParams: Что делать с неизвестными params?
+
+```typescript
+// app/blog/[slug]/page.tsx
+
+// По умолчанию: true — неизвестные slug генерируются динамически
+// Установи false — 404 для неизвестных slug
+export const dynamicParams = false; // или true (default)
+
+export async function generateStaticParams() {
+  return [
+    { slug: 'hello-world' },
+    { slug: 'about-nextjs' },
+  ];
+}
+
+export default async function BlogPost({ params }: Props) {
+  // ...
+}
+
+// При dynamicParams = false:
+// /blog/hello-world → ✅ статическая страница
+// /blog/new-post    → ❌ 404 (не в generateStaticParams)
+
+// При dynamicParams = true (default):
+// /blog/hello-world → ✅ статическая (из кеша)
+// /blog/new-post    → ✅ рендерится динамически, затем кешируется
+```
+
+---
+
+### 📊 Как это выглядит при сборке
+
+```bash
+$ npm run build
+
+Route (app)                              Size     First Load JS
+┌ ○ /                                   142 B    87.1 kB
+├ ○ /about                              180 B    87.1 kB
+├ ● /blog                               320 B    87.3 kB
+├ ● /blog/[slug]                        275 B    87.3 kB
+│   ├  /blog/hello-world
+│   ├  /blog/nextjs-guide
+│   └  /blog/typescript-tips
+└ ○ /contact                            200 B    87.1 kB
+
+○  (Static)   prerendered as static content
+●  (SSG)      prerendered as static HTML (uses generateStaticParams)
+ƒ  (Dynamic)  server-rendered on demand
+
+✓ Generating static pages (8/8)
+✓ Collecting page data
+✓ Finalizing page optimization
+```
+
+---
+
+### ⏰ Когда использовать SSG?
+
+```typescript
+// ✅ ОТЛИЧНО для SSG:
+
+// 1. Блог / статьи — контент редко меняется
+export async function generateStaticParams() {
+  const posts = await cms.getPosts(); // Обычно десятки/сотни постов
+  return posts.map(p => ({ slug: p.slug }));
+}
+
+// 2. Документация — очень стабильный контент
+export async function generateStaticParams() {
+  const docs = await getAllDocs();
+  return docs.map(d => ({ slug: d.path.split('/') }));
+}
+
+// 3. Страницы товаров (e-commerce) — тысячи товаров
+export async function generateStaticParams() {
+  const products = await db.product.findMany({
+    select: { slug: true },
+    where: { published: true },
+  });
+  return products.map(p => ({ slug: p.slug }));
+}
+
+// 4. Лендинги, маркетинговые страницы
+// ✅ Максимальная производительность
+
+// 5. Страницы профилей (если их немного)
+export async function generateStaticParams() {
+  const users = await db.user.findMany({
+    select: { username: true },
+    where: { public: true },
+    take: 1000, // Ограничиваем при сборке
+  });
+  return users.map(u => ({ username: u.username }));
+}
+```
+
+```typescript
+// ❌ НЕ подходит для SSG:
+
+// 1. Персонализированный контент (зависит от пользователя)
+// 2. Данные, меняющиеся чаще чем раз в минуту
+// 3. Страницы с авторизацией (корзина, профиль с приватными данными)
+// 4. Реальный-тайм данные (чаты, live трекинг)
+// 5. Поисковые результаты (infinite combinations)
+```
+
+---
+
+### 📊 Сравнение: SSG vs SSR vs ISR vs CSR
+
+| Аспект | SSG | SSR | ISR | CSR |
+|--------|-----|-----|-----|-----|
+| **Когда рендерит** | При сборке | При запросе | При сборке + периодически | В браузере |
+| **Скорость** | ⚡⚡⚡ | ⚡⚡ | ⚡⚡⚡ | ⚡ |
+| **Свежесть данных** | При сборке | Всегда свежие | Настраивается | Всегда свежие |
+| **SEO** | ✅✅ | ✅✅ | ✅✅ | ❌ |
+| **Нагрузка на сервер** | Минимальная | Высокая | Низкая | Минимальная |
+| **CDN-friendy** | ✅✅ | ❌ | ✅✅ | ✅ |
+| **Деплой** | Простой | Нужен сервер | Нужен сервер | Любой |
+
+---
+
+### 🚀 Оптимизация SSG: Стратегии
+
+```typescript
+// 1. Генерация только популярных страниц при сборке
+// Остальные — по требованию (dynamicParams = true)
+export async function generateStaticParams() {
+  // Только топ-100 самых популярных постов
+  const posts = await db.post.findMany({
+    orderBy: { views: 'desc' },
+    take: 100,
+    select: { slug: true },
+  });
+  
+  return posts.map(p => ({ slug: p.slug }));
+}
+// Новые посты: генерируются при первом запросе и кешируются
+
+// 2. Параллельная генерация данных
+export async function generateStaticParams() {
+  // Запускаем все источники данных параллельно
+  const [enPosts, ruPosts, dePosts] = await Promise.all([
+    getPostsByLang('en'),
+    getPostsByLang('ru'),
+    getPostsByLang('de'),
+  ]);
+  
+  return [
+    ...enPosts.map(p => ({ lang: 'en', slug: p.slug })),
+    ...ruPosts.map(p => ({ lang: 'ru', slug: p.slug })),
+    ...dePosts.map(p => ({ lang: 'de', slug: p.slug })),
+  ];
+}
+
+// 3. Частичная предгенерация + ISR
+export const revalidate = 3600; // Обновлять статику каждый час
+
+export async function generateStaticParams() {
+  // Генерируем при сборке
+  return await getPopularSlugs();
+}
+// Остальные — на лету, с кешем на 1 час
+```
+
+---
+
+### 🔧 Конфигурация SSG: export
+
+```typescript
+// Экспорт статического сайта (без сервера!)
+// next.config.mjs
+const nextConfig = {
+  output: 'export', // Генерирует static HTML/CSS/JS
+  // trailingSlash: true, // /about → /about/index.html
+};
+
+// При npm run build создаст папку 'out' со статическими файлами!
+// Можно деплоить на GitHub Pages, S3, Netlify без сервера
+
+// Ограничения output: 'export':
+// ❌ API Routes (нет сервера)
+// ❌ Server Actions
+// ❌ Middleware (кроме edge)
+// ❌ ISR (нет сервера для регенерации)
+// ✅ SSG → ✅
+// ✅ Client Components → ✅
+```
+
+---
+
+### 🎯 Резюме урока
+
+1. **SSG по умолчанию** — компонент без динамических API = статичный
+2. **generateStaticParams** — список params для предгенерации
+3. **dynamicParams** — `false` = 404 для неизвестных, `true` = динамический рендеринг
+4. **cache: 'force-cache'** — все fetch() кешируются при сборке
+5. **output: 'export'** — полностью статический сайт (без сервера)
+6. **Идеально** для: блоги, документация, лендинги, каталоги товаров
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+interface Post {
+  id: number;
+  slug: string;
+  title: string;
+  views: number;
+  pregenerated: boolean;
+}
+
+const allPosts: Post[] = [
+  { id: 1, slug: "nextjs-intro", title: "Введение в Next.js", views: 15420, pregenerated: true },
+  { id: 2, slug: "react-hooks", title: "React Hooks глубоко", views: 12300, pregenerated: true },
+  { id: 3, slug: "typescript-tips", title: "TypeScript советы", views: 9800, pregenerated: true },
+  { id: 4, slug: "css-grid", title: "CSS Grid мастерство", views: 7600, pregenerated: true },
+  { id: 5, slug: "nodejs-basics", title: "Node.js основы", views: 6200, pregenerated: true },
+  { id: 6, slug: "prisma-guide", title: "Prisma ORM гайд", views: 4100, pregenerated: false },
+  { id: 7, slug: "tailwind-v4", title: "Tailwind v4 новинки", views: 2800, pregenerated: false },
+  { id: 8, slug: "docker-nextjs", title: "Docker + Next.js", views: 1900, pregenerated: false },
+  { id: 9, slug: "turbopack-deep", title: "Turbopack deep dive", views: 980, pregenerated: false },
+  { id: 10, slug: "bun-runtime", title: "Bun runtime обзор", views: 420, pregenerated: false },
+];
+
+type DynamicParams = "false" | "true";
+
+export default function App() {
+  const [dynamicParams, setDynamicParams] = useState<DynamicParams>("true");
+  const [visitedSlug, setVisitedSlug] = useState<string | null>(null);
+  const [buildComplete, setBuildComplete] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [dynamicCache, setDynamicCache] = useState<string[]>([]);
+
+  const pregenerated = allPosts.filter(p => p.pregenerated);
+
+  const runBuild = async () => {
+    setBuildComplete(false);
+    setBuilding(true);
+    setDynamicCache([]);
+    setVisitedSlug(null);
+    await new Promise(r => setTimeout(r, 1500));
+    setBuildComplete(true);
+    setBuilding(false);
+  };
+
+  const visitPost = async (post: Post) => {
+    setVisitedSlug(post.slug);
+
+    if (!post.pregenerated) {
+      if (dynamicParams === "false") return; // 404
+      if (!dynamicCache.includes(post.slug)) {
+        await new Promise(r => setTimeout(r, 600));
+        setDynamicCache(prev => [...prev, post.slug]);
+      }
+    }
+  };
+
+  const getPostStatus = (post: Post) => {
+    if (!buildComplete) return "not-built";
+    if (post.pregenerated) return "static";
+    if (dynamicParams === "false") return "404";
+    if (dynamicCache.includes(post.slug)) return "cached";
+    return "dynamic";
+  };
+
+  const statusConfig = {
+    "not-built": { label: "Не собрано", color: "#475569", bg: "#1e293b" },
+    static: { label: "⚡ Статика", color: "#4ade80", bg: "#052e16" },
+    "404": { label: "❌ 404", color: "#f87171", bg: "#2d1515" },
+    cached: { label: "🗂️ Кешировано", color: "#a78bfa", bg: "#1e0a3c" },
+    dynamic: { label: "⚙️ Динамически", color: "#60a5fa", bg: "#0c1a3a" },
+  };
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: 24,
+      fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ maxWidth: 680, margin: "0 auto" }}>
+        <h2 style={{ color: "#fff", fontSize: 20, marginBottom: 4 }}>
+          🏗️ Симулятор SSG (Static Site Generation)
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 13, marginBottom: 20 }}>
+          Топ-5 постов предгенерируются. Остальные — по настройке dynamicParams
+        </p>
+
+        {/* Config */}
+        <div style={{
+          background: "#1e293b", borderRadius: 10, padding: 16, marginBottom: 16
+        }}>
+          <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 10 }}>
+            КОНФИГУРАЦИЯ:
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ color: "#64748b", fontSize: 11, marginBottom: 4 }}>
+                export const dynamicParams =
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {(["true", "false"] as DynamicParams[]).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setDynamicParams(v)}
+                    style={{
+                      padding: "6px 16px", borderRadius: 6, border: "none",
+                      background: dynamicParams === v ? "#334155" : "#0f172a",
+                      color: dynamicParams === v ? "#fff" : "#475569",
+                      cursor: "pointer", fontSize: 13, fontFamily: "monospace",
+                      fontWeight: dynamicParams === v ? 700 : 400
+                    }}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ color: "#475569", fontSize: 12 }}>
+              {dynamicParams === "true"
+                ? "✅ Неизвестные slug рендерятся динамически"
+                : "❌ Неизвестные slug возвращают 404"}
+            </div>
+          </div>
+        </div>
+
+        {/* Build button */}
+        <button
+          onClick={runBuild}
+          disabled={building}
+          style={{
+            width: "100%", padding: "12px", borderRadius: 8, border: "none",
+            background: building ? "#334155" : buildComplete ? "#1e293b" : "#000",
+            color: building ? "#64748b" : buildComplete ? "#4ade80" : "#fff",
+            fontWeight: 700, cursor: building ? "not-allowed" : "pointer",
+            fontSize: 14, marginBottom: 20,
+            border: buildComplete ? "1px solid #4ade80" : "1px solid #334155"
+          }}
+        >
+          {building ? "⚙️ npm run build..." : buildComplete ? "✅ Build завершён — запусти страницу!" : "▶ npm run build"}
+        </button>
+
+        {building && (
+          <div style={{
+            background: "#111827", borderRadius: 8, padding: 12, marginBottom: 16,
+            fontFamily: "monospace", fontSize: 12, color: "#4ade80"
+          }}>
+            <div>▲ Next.js 15.0.0</div>
+            <div style={{ color: "#64748b" }}>Generating static pages...</div>
+            {pregenerated.map((p, i) => (
+              <div key={p.id} style={{ color: "#94a3b8", marginLeft: 8 }}>
+                ○ /blog/{p.slug}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Posts list */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {allPosts.map(post => {
+            const status = getPostStatus(post);
+            const config = statusConfig[status];
+            const isVisited = visitedSlug === post.slug;
+
+            return (
+              <div
+                key={post.id}
+                onClick={() => buildComplete && visitPost(post)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 12,
+                  padding: "10px 14px", borderRadius: 8,
+                  background: isVisited ? config.bg : "#1e293b",
+                  border: \`1px solid \${isVisited ? config.color + "44" : "#1e293b"}\`,
+                  cursor: buildComplete ? "pointer" : "default",
+                  transition: "all 0.3s", opacity: buildComplete ? 1 : 0.5
+                }}
+              >
+                <span style={{
+                  width: 28, height: 28, borderRadius: "50%",
+                  background: post.pregenerated ? "#052e16" : "#1e293b",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 12, color: post.pregenerated ? "#4ade80" : "#475569",
+                  flexShrink: 0, fontWeight: 700
+                }}>
+                  {post.id}
+                </span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#e2e8f0", fontSize: 13 }}>{post.title}</div>
+                  <div style={{ color: "#475569", fontSize: 11 }}>
+                    /blog/{post.slug} · {post.views.toLocaleString()} просмотров
+                  </div>
+                </div>
+                <span style={{
+                  fontSize: 11, padding: "3px 8px", borderRadius: 5,
+                  background: config.bg, color: config.color,
+                  whiteSpace: "nowrap"
+                }}>
+                  {config.label}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{
+          marginTop: 16, background: "#171717", borderRadius: 8, padding: 12,
+          fontSize: 12, color: "#475569"
+        }}>
+          💡 generateStaticParams() вернул топ-5 самых популярных постов.
+          Нажми на пост после build, чтобы симулировать запрос.
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

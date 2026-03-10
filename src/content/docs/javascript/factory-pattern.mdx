@@ -1,0 +1,283 @@
+---
+title: "90. Фабричные функции"
+sidebar:
+  order: 92
+---
+import { Playground } from '@components/Playground'
+
+
+Фабрика — функция или метод, создающий объекты без указания конкретного класса. Вместо `new SomeClass()` вы вызываете `createSomething()` и получаете готовый объект. Фабрики дают гибкость: один интерфейс — разные реализации.
+
+## Фабричная функция vs Конструктор
+
+```javascript
+// Конструктор — нужен new, this, prototype
+function UserConstructor(name, role) {
+  this.name = name
+  this.role = role
+  this.greet = function() { return `Привет, я ${this.name}!` }
+}
+const u1 = new UserConstructor('Алексей', 'admin')
+
+// Фабричная функция — просто возвращает объект
+function createUser(name, role) {
+  return {
+    name,
+    role,
+    greet() { return `Привет, я ${name}!` },
+    isAdmin() { return role === 'admin' },
+  }
+}
+const u2 = createUser('Алексей', 'admin')
+
+// Оба подхода работают, но фабрика:
+// ✅ Не нужен new
+// ✅ Лёгкий возврат разных типов объектов
+// ✅ Нет проблем с this
+// ✅ Настоящая приватность через замыкание
+```
+
+## Фабрика с приватным состоянием
+
+```javascript
+function createCounter(initial = 0, { min = -Infinity, max = Infinity } = {}) {
+  let count = initial
+
+  const clamp = (val) => Math.min(Math.max(val, min), max)
+
+  return {
+    increment(by = 1) { count = clamp(count + by); return this },
+    decrement(by = 1) { count = clamp(count - by); return this },
+    reset() { count = initial; return this },
+    get value() { return count },
+    toString() { return `Counter(${count})` },
+  }
+}
+
+const c = createCounter(0, { min: 0, max: 10 })
+c.increment(5).increment(3).increment(5) // зажато на 10
+console.log(c.value) // 10
+
+const unlimited = createCounter(100)
+unlimited.decrement(150)
+console.log(unlimited.value) // -50
+```
+
+## Abstract Factory — семейство объектов
+
+Абстрактная фабрика создаёт **семейства связанных объектов**:
+
+```javascript
+// Абстрактная фабрика UI-компонентов
+function createTheme(variant) {
+  const themes = {
+    dark: {
+      button: () => ({
+        render: (text) => `<button style="background:#1a1a2e;color:#e0e0ff">${text}</button>`
+      }),
+      input: () => ({
+        render: (placeholder) => `<input style="background:#16213e;color:#e0e0ff" placeholder="${placeholder}">`
+      }),
+      modal: () => ({
+        render: (content) => `<div style="background:#0f3460;color:white">${content}</div>`
+      }),
+    },
+    light: {
+      button: () => ({
+        render: (text) => `<button style="background:#4361ee;color:white">${text}</button>`
+      }),
+      input: () => ({
+        render: (placeholder) => `<input style="background:#white;border:1px solid #4361ee" placeholder="${placeholder}">`
+      }),
+      modal: () => ({
+        render: (content) => `<div style="background:white;border:1px solid #4361ee">${content}</div>`
+      }),
+    }
+  }
+
+  const theme = themes[variant]
+  if (!theme) throw new Error(`Неизвестная тема: ${variant}`)
+
+  return {
+    createButton: theme.button,
+    createInput: theme.input,
+    createModal: theme.modal,
+  }
+}
+
+// Используем фабрику — не знаем про конкретные реализации
+function renderForm(factory) {
+  const button = factory.createButton()
+  const input = factory.createInput()
+  return input.render('Введите имя') + button.render('Отправить')
+}
+
+console.log(renderForm(createTheme('dark')))
+console.log(renderForm(createTheme('light')))
+```
+
+## Factory Method в классах
+
+```javascript
+class Transport {
+  constructor(speed, fuel) {
+    this.speed = speed
+    this.fuel = fuel
+  }
+
+  describe() {
+    return `${this.constructor.name}: ${this.speed}км/ч, топливо: ${this.fuel}`
+  }
+
+  // Фабричный метод
+  static create(type) {
+    const types = {
+      car:   () => new Car(120, 'бензин'),
+      bike:  () => new Bike(30, 'мышечная сила'),
+      plane: () => new Plane(900, 'керосин'),
+    }
+    const factory = types[type]
+    if (!factory) throw new Error(`Неизвестный тип: ${type}`)
+    return factory()
+  }
+}
+
+class Car extends Transport {
+  honk() { return 'Бип!' }
+}
+
+class Bike extends Transport {
+  ring() { return 'Дзынь!' }
+}
+
+class Plane extends Transport {
+  takeoff() { return 'Взлетаем!' }
+}
+
+const car = Transport.create('car')
+const bike = Transport.create('bike')
+const plane = Transport.create('plane')
+
+console.log(car.describe())   // Car: 120км/ч, топливо: бензин
+console.log(bike.describe())  // Bike: 30км/ч, топливо: мышечная сила
+console.log(plane.takeoff())  // Взлетаем!
+```
+
+## Registry Pattern — реестр фабрик
+
+```javascript
+class PluginRegistry {
+  #factories = new Map()
+
+  register(name, factory) {
+    this.#factories.set(name, factory)
+    return this
+  }
+
+  create(name, ...args) {
+    const factory = this.#factories.get(name)
+    if (!factory) throw new Error(`Плагин "${name}" не найден`)
+    return factory(...args)
+  }
+
+  list() { return [...this.#factories.keys()] }
+}
+
+const registry = new PluginRegistry()
+
+registry
+  .register('json', (data) => ({
+    parse: (str) => JSON.parse(str),
+    stringify: (obj) => JSON.stringify(obj, null, 2),
+  }))
+  .register('csv', (delimiter = ',') => ({
+    parse: (str) => str.split('\n').map(row => row.split(delimiter)),
+    stringify: (data) => data.map(row => row.join(delimiter)).join('\n'),
+  }))
+
+const jsonParser = registry.create('json')
+console.log(jsonParser.parse('{"name":"Яша"}')) // { name: 'Яша' }
+
+const csvParser = registry.create('csv', ';')
+console.log(csvParser.stringify([['a', 'b'], ['1', '2']])) // a;b\n1;2
+```
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 20px; margin: 0; }
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; margin: 4px; font-size: 14px; }
+    button:hover { background: #74c7ec; }
+    h3 { color: #89b4fa; margin: 16px 0 8px; }
+    .box { background: #313244; border-radius: 8px; padding: 16px; margin: 10px 0; }
+    .output { background: #181825; border-radius: 6px; padding: 12px; font-family: monospace; font-size: 13px; min-height: 60px; color: #a6e3a1; white-space: pre; }
+    input { background: #313244; color: #cdd6f4; border: 1px solid #45475a; padding: 6px 10px; border-radius: 4px; font-size: 14px; width: 140px; }
+    label { font-size: 13px; color: #a6adc8; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <h3>🏭 Factory Pattern</h3>
+  <div class="box">
+    <label>Имя:</label><input id="name" value="Яша" />
+    <label style="margin-left:10px">Роль:</label>
+    <select id="role" style="background:#313244;color:#cdd6f4;border:1px solid #45475a;padding:6px 10px;border-radius:4px;font-size:14px">
+      <option value="admin">Admin</option>
+      <option value="editor">Editor</option>
+      <option value="viewer">Viewer</option>
+    </select>
+    <br><br>
+    <button onclick="createUser()">👤 createUser()</button>
+    <button onclick="createCar()">🚗 createCar()</button>
+    <button onclick="createProduct()">📦 createProduct()</button>
+  </div>
+  <div class="output" id="out">// Нажмите кнопку для создания объекта через фабрику</div>
+  <script>
+    function userFactory(name, role) {
+      const permissions = { admin: ['read','write','delete'], editor: ['read','write'], viewer: ['read'] };
+      return {
+        name,
+        role,
+        permissions: permissions[role] || ['read'],
+        greet() { return \`Привет, \${this.name} (\${this.role})!\`; },
+        can(action) { return this.permissions.includes(action); }
+      };
+    }
+    function carFactory(name) {
+      let speed = 0;
+      return {
+        brand: name,
+        accelerate(n) { speed = Math.min(speed + n, 200); },
+        brake(n) { speed = Math.max(speed - n, 0); },
+        getSpeed() { return speed; }
+      };
+    }
+    function productFactory(name) {
+      return { id: Math.floor(Math.random()*1000), name, createdAt: new Date().toISOString().slice(0,10), inStock: true };
+    }
+    function show(obj) {
+      document.getElementById('out').textContent = JSON.stringify(obj, (k,v) => typeof v === 'function' ? '[Function]' : v, 2);
+    }
+    window.createUser = function() {
+      const u = userFactory(document.getElementById('name').value || 'User', document.getElementById('role').value);
+      show({ ...u, greet: u.greet(), can_write: u.can('write'), can_delete: u.can('delete') });
+    }
+    window.createCar = function() {
+      const c = carFactory(document.getElementById('name').value || 'Tesla');
+      c.accelerate(60); c.accelerate(40);
+      show({ brand: c.brand, speed: c.getSpeed() + ' km/h', note: 'accelerated twice' });
+    }
+    window.createProduct = function() {
+      show(productFactory(document.getElementById('name').value || 'Widget'));
+    }
+  </script>
+</body>
+</html>`,
+  }}
+/>

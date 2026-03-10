@@ -1,0 +1,370 @@
+---
+title: "14. Логирование"
+sidebar:
+  order: 14
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/devops-logging.png)
+
+**Логирование** — запись событий приложения. Без логов ты слепой: не знаешь что происходит, не можешь дебажить production.
+
+## Принципы хорошего логирования
+
+```
+❌ Плохо:
+console.log('here')
+console.log('user', user)
+console.log(JSON.stringify(data))
+
+✅ Хорошо:
+logger.info('User logged in', { userId: user.id, ip: req.ip })
+logger.error('Payment failed', { orderId, error: err.message, stack: err.stack })
+```
+
+Правила:
+- Структурированные логи (JSON) — не строки
+- Уровни важности: error, warn, info, debug
+- Контекст: кто, что, когда, откуда
+- Не логировать секреты
+- Не логировать бесполезный шум
+
+## Winston — популярный логгер
+
+```bash
+npm install winston
+```
+
+```typescript
+// lib/logger.ts
+import winston from 'winston';
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    process.env.NODE_ENV === 'production'
+      ? winston.format.json()          // JSON в production
+      : winston.format.combine(        // Красивый вывод в dev
+          winston.format.colorize(),
+          winston.format.simple()
+        )
+  ),
+  
+  transports: [
+    new winston.transports.Console(),
+    
+    // В production — пишем в файлы
+    ...(process.env.NODE_ENV === 'production' ? [
+      new winston.transports.File({
+        filename: 'logs/error.log',
+        level: 'error',
+        maxsize: 5 * 1024 * 1024,    // 5MB
+        maxFiles: 5,
+        tailable: true,
+      }),
+      new winston.transports.File({
+        filename: 'logs/combined.log',
+        maxsize: 10 * 1024 * 1024,   // 10MB
+        maxFiles: 5,
+        tailable: true,
+      }),
+    ] : []),
+  ],
+  
+  // Не крашиться при необработанных исключениях
+  exceptionHandlers: [
+    new winston.transports.File({ filename: 'logs/exceptions.log' }),
+  ],
+  rejectionHandlers: [
+    new winston.transports.File({ filename: 'logs/rejections.log' }),
+  ],
+});
+
+export default logger;
+```
+
+## Pino — быстрый логгер
+
+```bash
+npm install pino pino-pretty
+```
+
+```typescript
+// lib/logger.ts
+import pino from 'pino';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  
+  transport: process.env.NODE_ENV !== 'production'
+    ? {
+        target: 'pino-pretty',
+        options: {
+          colorize: true,
+          translateTime: 'HH:MM:ss',
+          ignore: 'pid,hostname',
+        },
+      }
+    : undefined,
+    
+  redact: {
+    paths: ['password', 'token', 'authorization', '*.password'],
+    remove: true,
+  },
+});
+
+export default logger;
+```
+
+## Child loggers и контекст
+
+```typescript
+import logger from './logger';
+
+// HTTP middleware — добавляем requestId к каждому запросу
+app.use((req, res, next) => {
+  req.log = logger.child({
+    requestId: crypto.randomUUID(),
+    method: req.method,
+    url: req.url,
+    ip: req.ip,
+  });
+  next();
+});
+
+// В обработчике
+app.post('/api/orders', async (req, res) => {
+  const log = req.log.child({ userId: req.user?.id });
+  
+  log.info('Creating order', { items: req.body.items?.length });
+  
+  try {
+    const order = await createOrder(req.body);
+    log.info('Order created', { orderId: order.id, total: order.total });
+    res.json(order);
+  } catch (error) {
+    log.error('Order creation failed', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+```
+
+## Уровни логирования
+
+```typescript
+// Когда использовать каждый уровень:
+
+logger.error('Database connection failed', { error });   // Критичная ошибка
+logger.warn('Rate limit approaching', { current, limit }); // Предупреждение
+logger.info('User registered', { userId });              // Важное событие
+logger.debug('Cache hit', { key, ttl });                 // Детали для дебага
+logger.trace('SQL query', { query, params });            // Очень детальные логи
+```
+
+```bash
+# Управление уровнем через env
+LOG_LEVEL=debug npm start    # видим всё
+LOG_LEVEL=info npm start     # только info и выше (production)
+LOG_LEVEL=warn npm start     # только warn и error
+```
+
+## Express/Fastify HTTP логирование
+
+```bash
+npm install morgan     # для Express
+```
+
+```typescript
+import morgan from 'morgan';
+
+// Формат для production — JSON
+const format = process.env.NODE_ENV === 'production'
+  ? (tokens: any, req: any, res: any) => JSON.stringify({
+      method: tokens.method(req, res),
+      url: tokens.url(req, res),
+      status: Number(tokens.status(req, res)),
+      duration: Number(tokens['response-time'](req, res)),
+      size: tokens.res(req, res, 'content-length'),
+    })
+  : 'dev';  // красивый вывод для разработки
+
+app.use(morgan(format, {
+  stream: {
+    write: (message: string) => logger.http(message.trim()),
+  },
+  skip: (req) => req.url === '/health',  // не логировать health checks
+}));
+```
+
+## Логирование в Next.js
+
+```typescript
+// middleware.ts — логируем каждый запрос
+import { NextRequest, NextResponse } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const start = Date.now();
+  const response = NextResponse.next();
+  
+  response.headers.set('x-request-id', crypto.randomUUID());
+  
+  // Логируем после обработки (через waitUntil в edge)
+  console.log(JSON.stringify({
+    level: 'info',
+    method: request.method,
+    url: request.url,
+    duration: Date.now() - start,
+    timestamp: new Date().toISOString(),
+  }));
+  
+  return response;
+}
+```
+
+## Централизованные логи (ELK Stack)
+
+```yaml
+# docker-compose.yml — ELK Stack для production
+services:
+  elasticsearch:
+    image: elasticsearch:8.12.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  logstash:
+    image: logstash:8.12.0
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf
+
+  kibana:
+    image: kibana:8.12.0
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+```
+
+## Просмотр логов в production
+
+```bash
+# Journalctl (systemd)
+sudo journalctl -u myapp -f          # follow
+sudo journalctl -u myapp -n 100      # последние 100 строк
+sudo journalctl -u myapp --since "1 hour ago"
+
+# Docker логи
+docker logs myapp -f
+docker logs myapp --tail 100
+docker logs myapp --since 2h
+
+# Docker Compose
+docker compose logs app -f
+docker compose logs --since 30m
+
+# PM2
+pm2 logs myapp
+pm2 logs myapp --lines 200
+
+# Поиск в логах
+sudo journalctl -u myapp | grep ERROR
+sudo journalctl -u myapp | jq 'select(.level == "error")'
+```
+
+## Ключевые моменты
+
+- Структурированные JSON логи — лучше строк (поиск и анализ)
+- Pino — быстрый, Winston — популярный, оба хороши
+- Child loggers с requestId — для трассировки запроса через систему
+- Не логируй секреты — используй `redact` в pino или фильтры
+- Уровни: error > warn > info > debug > trace
+- В production — info уровень, в dev — debug
+- Централизованные логи (ELK, Loki+Grafana) — для серьёзных проектов
+
+## Интерактивный пример
+
+Уровни логирования и фильтрация:
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": {
+      code: `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0f172a; color: #e2e8f0; padding: 20px; }
+h3 { color: #818cf8; margin-bottom: 12px; }
+.filters { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+.filter { padding: 4px 10px; border-radius: 4px; border: 1px solid #334155; cursor: pointer; font-size: 11px; background: #1e293b; }
+.filter.active { border-color: currentColor; }
+.console { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px; max-height: 250px; overflow-y: auto; font-size: 11px; }
+.log-line { padding: 3px 0; border-bottom: 1px solid #0f172a; display: flex; gap: 8px; }
+.log-line .time { color: #64748b; min-width: 70px; }
+.log-line .level { min-width: 50px; font-weight: 700; }
+.debug { color: #94a3b8; }
+.info { color: #60a5fa; }
+.warn { color: #fbbf24; }
+.error { color: #f87171; }
+button { background: #6366f1; color: #fff; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h3>Log Levels</h3>
+<div class="filters" id="filters"></div>
+<div class="console" id="console"></div>
+<button onclick="addRandom()">+ Add Log Entry</button>
+<script>
+const levels = ["debug", "info", "warn", "error"];
+const active = new Set(levels);
+const logs = [
+  { level: "debug", msg: "Database query: SELECT * FROM users WHERE id=42" },
+  { level: "info", msg: "Server started on port 3000" },
+  { level: "info", msg: "User login: user@example.com" },
+  { level: "warn", msg: "Deprecated API endpoint called: /api/v1/users" },
+  { level: "warn", msg: "Memory usage above 80%: 847MB / 1024MB" },
+  { level: "error", msg: "Connection refused: Redis at 127.0.0.1:6379" },
+  { level: "error", msg: "Unhandled rejection: Cannot read property id of null" },
+  { level: "debug", msg: "Cache miss for key: user:42:profile" },
+  { level: "info", msg: "Request: GET /api/users 200 OK (12ms)" },
+];
+const filtersEl = document.getElementById("filters");
+const consoleEl = document.getElementById("console");
+levels.forEach(l => {
+  const btn = document.createElement("div");
+  btn.className = "filter active " + l;
+  btn.style.color = getComputedStyle(document.createElement("span")).color;
+  btn.textContent = l.toUpperCase();
+  btn.style.color = l === "debug" ? "#94a3b8" : l === "info" ? "#60a5fa" : l === "warn" ? "#fbbf24" : "#f87171";
+  btn.onclick = () => {
+    if (active.has(l)) { active.delete(l); btn.classList.remove("active"); } else { active.add(l); btn.classList.add("active"); }
+    render();
+  };
+  filtersEl.appendChild(btn);
+});
+const allLogs = [...logs];
+function render() {
+  consoleEl.innerHTML = allLogs.filter(l => active.has(l.level)).map(l => {
+    const time = new Date().toLocaleTimeString();
+    return "<div class=\\"log-line\\"><span class=\\"time\\">" + time + "</span><span class=\\"level " + l.level + "\\">" + l.level.toUpperCase() + "</span><span>" + l.msg + "</span></div>";
+  }).join("");
+}
+function addRandom() {
+  allLogs.unshift(logs[Math.floor(Math.random() * logs.length)]);
+  render();
+}
+render();
+<\/script>
+</body>
+</html>`,
+      active: true,
+    },
+  }}
+/>

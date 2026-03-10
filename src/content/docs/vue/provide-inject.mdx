@@ -1,0 +1,610 @@
+---
+title: "13. Provide / Inject"
+sidebar:
+  order: 13
+---
+import { Playground } from '@components/Playground'
+
+
+## 🔌 Provide / Inject в Vue 3
+
+Imagine у тебя компонент `App` → `Layout` → `Sidebar` → `UserAvatar`. Хочешь передать данные пользователя в `UserAvatar`. Прокидывать через все 3 уровня через props — это **prop drilling**, и это больно 😩
+
+`provide` / `inject` — это как "телепорт для данных". Родитель делает `provide`, а любой потомок на любой глубине делает `inject` и получает данные. Никаких цепочек пропсов! 🚀
+
+---
+
+## Базовый синтаксис
+
+```vue
+<!-- Родительский компонент (или App.vue) -->
+<script setup lang="ts">
+import { provide, ref } from 'vue'
+
+const user = ref({ name: 'Яша', role: 'admin' })
+const theme = ref<'light' | 'dark'>('dark')
+
+// Делаем данные доступными для всех потомков
+provide('user', user)
+provide('theme', theme)
+provide('appVersion', '1.0.0') // Можно и простые значения
+</script>
+```
+
+```vue
+<!-- Дочерний компонент (на любой глубине!) -->
+<script setup lang="ts">
+import { inject, ref } from 'vue'
+
+// Получаем данные от предка
+const user = inject('user') // Тип: unknown 😢
+const theme = inject('theme')
+const version = inject('appVersion')
+
+// С дефолтным значением (если provide не было)
+const locale = inject('locale', 'ru')
+</script>
+
+<template>
+  <div>Привет, {{ user?.name }}!</div>
+</template>
+```
+
+> ⚠️ Проблема: `inject('user')` возвращает тип `unknown`. Нет TypeScript поддержки! Для этого есть `InjectionKey`.
+
+---
+
+## InjectionKey — типизированный provide/inject
+
+`InjectionKey<T>` — это специальный Symbol с дженериком для типобезопасного provide/inject:
+
+```typescript
+// keys.ts — общие ключи для всего приложения
+import type { InjectionKey, Ref } from 'vue'
+
+interface User {
+  id: number
+  name: string
+  email: string
+  role: 'admin' | 'user' | 'guest'
+}
+
+interface Theme {
+  mode: 'light' | 'dark'
+  primary: string
+}
+
+// Символ-ключ с типом!
+export const UserKey = Symbol() as InjectionKey<Ref<User>>
+export const ThemeKey = Symbol() as InjectionKey<Ref<Theme>>
+export const LocaleKey = Symbol() as InjectionKey<Ref<string>>
+export const RouterKey = Symbol() as InjectionKey<ReturnType<typeof useRouter>>
+```
+
+```vue
+<!-- Провайдер с типами -->
+<script setup lang="ts">
+import { provide, ref } from 'vue'
+import { UserKey, ThemeKey } from '@/keys'
+
+const user = ref<User>({
+  id: 1,
+  name: 'Яша',
+  email: 'yasha@example.com',
+  role: 'admin'
+})
+
+const theme = ref<Theme>({
+  mode: 'dark',
+  primary: '#42b883'
+})
+
+provide(UserKey, user)      // TypeScript знает тип!
+provide(ThemeKey, theme)
+</script>
+```
+
+```vue
+<!-- Потребитель с типами -->
+<script setup lang="ts">
+import { inject } from 'vue'
+import { UserKey, ThemeKey } from '@/keys'
+
+// user имеет тип Ref<User> — автодополнение работает! 🎉
+const user = inject(UserKey)
+const theme = inject(ThemeKey)
+
+// С обязательным дефолтным значением
+const locale = inject(LocaleKey, ref('ru'))
+
+// Если значение гарантированно есть — используй !
+// Но лучше всегда давать default
+</script>
+
+<template>
+  <div :style="{ color: theme?.primary }">
+    {{ user?.name }} ({{ user?.role }})
+  </div>
+</template>
+```
+
+---
+
+## App-level Provide
+
+Можно делать provide на уровне всего приложения — идеально для глобальных сервисов:
+
+```typescript
+// main.ts
+import { createApp } from 'vue'
+import App from './App.vue'
+import { ApiService } from './services/api'
+import { I18n } from './i18n'
+
+const app = createApp(App)
+
+// Глобальный provide — доступен везде в приложении
+app.provide('apiService', new ApiService())
+app.provide('i18n', new I18n('ru'))
+app.provide('featureFlags', {
+  darkMode: true,
+  betaFeatures: false,
+})
+
+app.mount('#app')
+```
+
+---
+
+## Реактивность в provide/inject
+
+Если передаёшь ref или reactive — изменения **автоматически** отразятся у всех потребителей:
+
+```vue
+<!-- ThemeProvider.vue -->
+<script setup lang="ts">
+import { provide, ref, computed } from 'vue'
+import type { InjectionKey, Ref } from 'vue'
+
+interface ThemeContext {
+  isDark: Ref<boolean>
+  toggleTheme: () => void
+  primary: Ref<string>
+}
+
+export const ThemeContextKey = Symbol() as InjectionKey<ThemeContext>
+
+const isDark = ref(true)
+const primary = computed(() => isDark.value ? '#42b883' : '#2196f3')
+
+// Предоставляем как данные, так и методы!
+provide(ThemeContextKey, {
+  isDark,
+  toggleTheme: () => { isDark.value = !isDark.value },
+  primary,
+})
+</script>
+
+<template>
+  <div :class="isDark ? 'dark' : 'light'">
+    <slot />
+  </div>
+</template>
+```
+
+```vue
+<!-- Кнопка где-то глубоко в дереве -->
+<script setup lang="ts">
+import { inject } from 'vue'
+import { ThemeContextKey } from './ThemeProvider.vue'
+
+const theme = inject(ThemeContextKey)
+// theme?.isDark — реактивно!
+// При смене темы компонент автоматически обновится
+</script>
+
+<template>
+  <button
+    :style="{ background: theme?.primary.value }"
+    @click="theme?.toggleTheme()"
+  >
+    {{ theme?.isDark.value ? '🌙 Тёмная' : '☀️ Светлая' }}
+  </button>
+</template>
+```
+
+---
+
+## readonly() для безопасности
+
+Хорошей практикой является **запрет мутаций** из дочерних компонентов. Дочерние должны только читать, а изменения — через методы от родителя:
+
+```vue
+<script setup lang="ts">
+import { provide, ref, readonly } from 'vue'
+
+const count = ref(0)
+
+provide('count', readonly(count))  // Дочерние могут только читать!
+provide('increment', () => count.value++)  // Мутация только через метод
+provide('decrement', () => count.value--)
+</script>
+```
+
+```vue
+<!-- Дочерний компонент -->
+<script setup lang="ts">
+import { inject } from 'vue'
+
+const count = inject<Readonly<Ref<number>>>('count')
+const increment = inject<() => void>('increment')
+const decrement = inject<() => void>('decrement')
+</script>
+
+<template>
+  <div>
+    <button @click="decrement">−</button>
+    {{ count }}
+    <button @click="increment">+</button>
+  </div>
+</template>
+```
+
+---
+
+## Реальный пример: Form контекст
+
+Паттерн provide/inject очень популярен для составных компонентов форм:
+
+```vue
+<!-- Form.vue -->
+<script setup lang="ts">
+import { provide, reactive, ref } from 'vue'
+import type { InjectionKey } from 'vue'
+
+interface FormField {
+  value: unknown
+  error: string | null
+  touched: boolean
+}
+
+interface FormContext {
+  registerField: (name: string) => void
+  getField: (name: string) => FormField | undefined
+  setError: (name: string, error: string | null) => void
+  submitting: Ref<boolean>
+}
+
+export const FormKey = Symbol() as InjectionKey<FormContext>
+
+const fields = reactive<Record<string, FormField>>({})
+const submitting = ref(false)
+
+provide(FormKey, {
+  registerField(name) {
+    if (!fields[name]) {
+      fields[name] = { value: '', error: null, touched: false }
+    }
+  },
+  getField: (name) => fields[name],
+  setError: (name, error) => {
+    if (fields[name]) fields[name].error = error
+  },
+  submitting,
+})
+
+async function handleSubmit() {
+  submitting.value = true
+  // Валидация...
+  submitting.value = false
+}
+</script>
+
+<template>
+  <form @submit.prevent="handleSubmit">
+    <slot />
+  </form>
+</template>
+```
+
+```vue
+<!-- FormInput.vue — использует контекст формы -->
+<script setup lang="ts">
+import { inject, onMounted } from 'vue'
+import { FormKey } from './Form.vue'
+
+const props = defineProps<{
+  name: string
+  label: string
+}>()
+
+const form = inject(FormKey)
+
+onMounted(() => {
+  form?.registerField(props.name)
+})
+
+const field = computed(() => form?.getField(props.name))
+</script>
+
+<template>
+  <div class="field">
+    <label>{{ label }}</label>
+    <input
+      :value="field?.value as string"
+      @input="/* обновить значение */"
+      :class="{ error: field?.error }"
+    />
+    <span v-if="field?.error" class="error">{{ field.error }}</span>
+  </div>
+</template>
+```
+
+---
+
+## Когда использовать provide/inject vs props vs Pinia
+
+```
+┌─────────────────┬──────────────────────────────────────────────────┐
+│   Ситуация      │   Решение                                        │
+├─────────────────┼──────────────────────────────────────────────────┤
+│ Данные между    │ Props — прямой и понятный способ                  │
+│ родитель-ребёнок│                                                  │
+├─────────────────┼──────────────────────────────────────────────────┤
+│ Глубокое дерево │ Provide/Inject — избегаем prop drilling           │
+│ компонентов     │                                                  │
+├─────────────────┼──────────────────────────────────────────────────┤
+│ Составные       │ Provide/Inject — Form+Input, Tabs+Tab,           │
+│ компоненты      │ Accordion+Item паттерны                          │
+├─────────────────┼──────────────────────────────────────────────────┤
+│ Глобальное      │ Pinia — управление состоянием,                   │
+│ состояние       │ девтулс, SSR поддержка                           │
+├─────────────────┼──────────────────────────────────────────────────┤
+│ Сервисы         │ app.provide() — ApiService, i18n, router         │
+│ (singleton)     │                                                  │
+└─────────────────┴──────────────────────────────────────────────────┘
+```
+
+---
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useContext, createContext, useCallback } from 'react';
+import React from 'react';
+
+const BG = '#0f172a';
+const GREEN = '#42b883';
+const DARK = '#35495e';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+
+// Симуляция Vue provide/inject через React Context
+
+interface ThemeCtx {
+  isDark: boolean;
+  primary: string;
+  toggleTheme: () => void;
+}
+
+interface UserCtx {
+  id: number;
+  name: string;
+  role: 'admin' | 'user' | 'guest';
+  avatar: string;
+}
+
+interface CounterCtx {
+  count: number;
+  increment: () => void;
+  decrement: () => void;
+}
+
+const ThemeContext = createContext<ThemeCtx>({ isDark: true, primary: GREEN, toggleTheme: () => {} });
+const UserContext = createContext<UserCtx>({ id: 1, name: 'Яша', role: 'admin', avatar: '🧑‍💻' });
+const CounterContext = createContext<CounterCtx>({ count: 0, increment: () => {}, decrement: () => {} });
+
+// ===== Уровень 1: ThemeProvider (симуляция provide) =====
+function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [isDark, setIsDark] = useState(true);
+  const primary = isDark ? GREEN : '#2196f3';
+  const toggleTheme = useCallback(() => setIsDark(d => !d), []);
+
+  return (
+    <ThemeContext.Provider value={{ isDark, primary, toggleTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+// ===== Уровень 2: Layout =====
+function Layout({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ border: \`1px dashed \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', marginBottom: '0.75rem' }}>
+      <div style={{ color: '#334155', fontSize: '0.7rem', marginBottom: '0.5rem' }}>{'<Layout> — Уровень 2'}</div>
+      {children}
+    </div>
+  );
+}
+
+// ===== Уровень 3: Sidebar =====
+function Sidebar({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ border: \`1px dashed \${BORDER}\`, borderRadius: '6px', padding: '0.6rem', marginBottom: '0.6rem' }}>
+      <div style={{ color: '#334155', fontSize: '0.7rem', marginBottom: '0.4rem' }}>{'<Sidebar> — Уровень 3'}</div>
+      {children}
+    </div>
+  );
+}
+
+// ===== Уровень 4: UserAvatar — inject без prop drilling! =====
+function UserAvatar() {
+  const user = useContext(UserContext);    // inject(UserKey)
+  const theme = useContext(ThemeContext); // inject(ThemeKey)
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: '0.5rem',
+      background: '#0a0f1e', padding: '0.6rem', borderRadius: '6px',
+    }}>
+      <span style={{ fontSize: '1.5rem' }}>{user.avatar}</span>
+      <div>
+        <div style={{ color: theme.primary, fontWeight: 700, fontSize: '0.85rem' }}>{user.name}</div>
+        <div style={{ color: '#475569', fontSize: '0.72rem' }}>{user.role}</div>
+      </div>
+      <div style={{ marginLeft: 'auto', fontSize: '0.68rem', color: '#334155', fontStyle: 'italic' }}>
+        inject() ← нет props!
+      </div>
+    </div>
+  );
+}
+
+// ===== ThemeToggle — inject глубоко =====
+function ThemeToggle() {
+  const theme = useContext(ThemeContext);
+  return (
+    <button onClick={theme.toggleTheme} style={{
+      padding: '0.4rem 0.8rem', borderRadius: '6px', border: \`1px solid \${BORDER}\`,
+      background: theme.isDark ? DARK : '#e2e8f0',
+      color: theme.isDark ? '#e2e8f0' : '#0f172a',
+      cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600,
+    }}>
+      {theme.isDark ? '🌙 Тёмная' : '☀️ Светлая'} тема
+    </button>
+  );
+}
+
+// ===== Counter с readonly =====
+function CounterDisplay() {
+  const ctx = useContext(CounterContext);
+  const theme = useContext(ThemeContext);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.5rem' }}>
+      <button onClick={ctx.decrement} style={{
+        width: '32px', height: '32px', borderRadius: '6px', border: 'none',
+        background: CARD, color: '#e2e8f0', cursor: 'pointer', fontSize: '1.1rem',
+      }}>−</button>
+      <span style={{ color: theme.primary, fontWeight: 700, fontSize: '1.4rem', minWidth: '2rem', textAlign: 'center' }}>
+        {ctx.count}
+      </span>
+      <button onClick={ctx.increment} style={{
+        width: '32px', height: '32px', borderRadius: '6px', border: 'none',
+        background: theme.primary, color: '#0f172a', cursor: 'pointer', fontSize: '1.1rem', fontWeight: 700,
+      }}>+</button>
+      <span style={{ color: '#334155', fontSize: '0.7rem' }}>inject(CounterKey)</span>
+    </div>
+  );
+}
+
+// ===== APP =====
+export default function App() {
+  const [count, setCount] = useState(0);
+  const [userName, setUserName] = useState('Яша');
+  const [userRole, setUserRole] = useState<'admin' | 'user' | 'guest'>('admin');
+
+  return (
+    <ThemeProvider>
+      <UserContext.Provider value={{ id: 1, name: userName, role: userRole, avatar: '🧑‍💻' }}>
+        <CounterContext.Provider value={{
+          count,
+          increment: () => setCount(c => c + 1),
+          decrement: () => setCount(c => Math.max(0, c - 1)),
+        }}>
+          <Inner
+            userName={userName} setUserName={setUserName}
+            userRole={userRole} setUserRole={setUserRole}
+          />
+        </CounterContext.Provider>
+      </UserContext.Provider>
+    </ThemeProvider>
+  );
+}
+
+function Inner({ userName, setUserName, userRole, setUserRole }: {
+  userName: string;
+  setUserName: (v: string) => void;
+  userRole: 'admin' | 'user' | 'guest';
+  setUserRole: (v: 'admin' | 'user' | 'guest') => void;
+}) {
+  const theme = useContext(ThemeContext);
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: GREEN, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🔌 Provide / Inject Playground</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+        Данные телепортируются через уровни без prop drilling!
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+        {/* Левая: визуализация дерева */}
+        <div>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem', marginBottom: '0.75rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.7rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+              Дерево компонентов
+            </div>
+            <div style={{ border: \`1px dashed \${GREEN}\`, borderRadius: '8px', padding: '0.75rem' }}>
+              <div style={{ color: GREEN, fontSize: '0.78rem', marginBottom: '0.5rem', fontWeight: 700 }}>
+                {'<App> — provide(UserKey, ThemeKey, CounterKey)'}
+              </div>
+              <Layout>
+                <Sidebar>
+                  <UserAvatar />
+                  <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <ThemeToggle />
+                  </div>
+                  <CounterDisplay />
+                </Sidebar>
+              </Layout>
+            </div>
+          </div>
+        </div>
+
+        {/* Правая: изменение provide данных */}
+        <div>
+          <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+            <div style={{ color: '#64748b', fontSize: '0.7rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+              Изменить данные (provide)
+            </div>
+
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ color: '#94a3b8', fontSize: '0.78rem', display: 'block', marginBottom: '0.3rem' }}>
+                Имя пользователя:
+              </label>
+              <input
+                value={userName}
+                onChange={e => setUserName(e.target.value)}
+                style={{
+                  width: '100%', padding: '0.5rem', borderRadius: '6px',
+                  border: \`1px solid \${BORDER}\`, background: '#0a0f1e', color: '#e2e8f0',
+                  fontSize: '0.85rem', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={{ color: '#94a3b8', fontSize: '0.78rem', display: 'block', marginBottom: '0.3rem' }}>
+                Роль:
+              </label>
+              <div style={{ display: 'flex', gap: '0.4rem' }}>
+                {(['admin', 'user', 'guest'] as const).map(r => (
+                  <button key={r} onClick={() => setUserRole(r)} style={{
+                    flex: 1, padding: '0.35rem', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                    background: userRole === r ? theme.primary : BORDER,
+                    color: userRole === r ? '#0f172a' : '#94a3b8',
+                    fontSize: '0.75rem', fontWeight: userRole === r ? 700 : 400,
+                  }}>
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.75rem' }}>
+              <div style={{ color: '#475569', marginBottom: '0.3rem' }}>// Текущий provide:</div>
+              <div><span style={{ color: '#7c3aed' }}>provide</span><span style={{ color: '#e2e8f0' }}>(UserKey, </span><span style={{ color: GREEN }}>{JSON.stringify({ name: userName, role: userRole })}</span><span style={{ color: '#e2e8f0' }}>)</span></div>
+              <div><span style={{ color: '#7c3aed' }}>provide</span><span style={{ color: '#e2e8f0' }}>(ThemeKey, </span><span style={{ color: GREEN }}>{JSON.stringify({ mode: theme.isDark ? 'dark' : 'light' })}</span><span style={{ color: '#e2e8f0' }}>)</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

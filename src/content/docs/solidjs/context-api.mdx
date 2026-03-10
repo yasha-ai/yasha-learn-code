@@ -1,0 +1,508 @@
+---
+title: "10. Context API"
+sidebar:
+  order: 10
+---
+import { Playground } from '@components/Playground'
+
+
+Context в Solid позволяет передавать данные вглубь дерева компонентов без «прокидывания пропсов». В отличие от React, контекст в Solid **реактивен по умолчанию** — достаточно положить в него сигнал.
+
+## createContext — создание контекста
+
+```tsx
+import { createContext, useContext } from 'solid-js';
+
+// Создаём контекст с типом и дефолтным значением
+const ThemeContext = createContext({
+  theme: () => 'light' as 'light' | 'dark',
+  toggle: () => {},
+});
+```
+
+Всегда указывай дефолтное значение — оно используется когда компонент находится вне Provider'а.
+
+## Provider — предоставление значения
+
+```tsx
+import { createSignal, createContext, useContext } from 'solid-js';
+import type { ParentComponent } from 'solid-js';
+
+// Шаблон: тип + контекст + провайдер + хук
+interface ThemeContextValue {
+  theme: Accessor<'light' | 'dark'>;
+  toggle: () => void;
+  isDark: Accessor<boolean>;
+}
+
+const ThemeContext = createContext<ThemeContextValue>();
+
+export const ThemeProvider: ParentComponent = (props) => {
+  const [theme, setTheme] = createSignal<'light' | 'dark'>('light');
+  const toggle = () => setTheme(t => t === 'light' ? 'dark' : 'light');
+  const isDark = createMemo(() => theme() === 'dark');
+
+  return (
+    <ThemeContext.Provider value={{ theme, toggle, isDark }}>
+      {props.children}
+    </ThemeContext.Provider>
+  );
+};
+
+// Кастомный хук для использования контекста
+export function useTheme() {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error('useTheme: ThemeProvider не найден в дереве');
+  return ctx;
+}
+```
+
+## Реактивность контекста через сигналы
+
+Главное отличие от React: в Solid не нужен `useReducer` или специальные паттерны. Просто положи сигнал в контекст:
+
+```tsx
+const CounterContext = createContext<{
+  count: Accessor<number>;
+  increment: () => void;
+  decrement: () => void;
+}>();
+
+function CounterProvider(props: { children: any; initial?: number }) {
+  const [count, setCount] = createSignal(props.initial ?? 0);
+
+  // props.initial реактивен — если родитель изменит его, контекст обновится
+  return (
+    <CounterContext.Provider value={{
+      count,
+      increment: () => setCount(c => c + 1),
+      decrement: () => setCount(c => c - 1),
+    }}>
+      {props.children}
+    </CounterContext.Provider>
+  );
+}
+```
+
+## Множественные контексты
+
+```tsx
+// Каждый контекст независим
+function App() {
+  return (
+    <ThemeProvider>
+      <AuthProvider>
+        <LocaleProvider locale="ru">
+          <Router>
+            <MainLayout />
+          </Router>
+        </LocaleProvider>
+      </AuthProvider>
+    </ThemeProvider>
+  );
+}
+
+// Использование в глубоко вложенных компонентах
+function DeepButton() {
+  const { isDark } = useTheme();
+  const { user } = useAuth();
+  const { t } = useLocale();
+
+  return (
+    <button class={isDark() ? 'btn-dark' : 'btn-light'}>
+      {t('greet', { name: user()?.name })}
+    </button>
+  );
+}
+```
+
+## Контекст vs пропсы
+
+```tsx
+// Прокидывание пропсов — подходит для 1-2 уровней
+function App() {
+  const [theme, setTheme] = createSignal('light');
+  return <Layout theme={theme} setTheme={setTheme} />;
+}
+function Layout(props: { theme: Accessor<string>; setTheme: Setter<string> }) {
+  return <Header theme={props.theme} setTheme={props.setTheme} />;
+}
+// ^ Каждый промежуточный компонент вынужден знать о theme
+
+// Context — для «глобальных» данных: тема, авторизация, локаль
+function App() {
+  return <ThemeProvider><Layout /></ThemeProvider>;
+}
+function Layout() {
+  return <Header />; // Не знает о теме
+}
+function Header() {
+  const { theme } = useTheme(); // Берёт напрямую из контекста
+  return <div class={theme()}>...</div>;
+}
+```
+
+## Паттерн: контекст с действиями
+
+```tsx
+interface AuthContextValue {
+  user: Accessor<User | null>;
+  isAuthenticated: Accessor<boolean>;
+  login: (credentials: Credentials) => Promise<void>;
+  logout: () => void;
+}
+
+const AuthContext = createContext<AuthContextValue>();
+
+function AuthProvider(props: { children: any }) {
+  const [user, setUser] = createSignal<User | null>(null);
+  const isAuthenticated = createMemo(() => user() !== null);
+
+  const login = async (credentials: Credentials) => {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(credentials),
+    });
+    const data = await response.json();
+    setUser(data.user);
+  };
+
+  const logout = () => {
+    setUser(null);
+    // Очистить localStorage, cookies и т.д.
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, isAuthenticated, login, logout }}>
+      {props.children}
+    </AuthContext.Provider>
+  );
+}
+```
+
+## Гнездование провайдеров одного типа
+
+```tsx
+// Провайдеры можно вкладывать — внутренний перекрывает внешний
+function App() {
+  return (
+    <ThemeProvider theme="light">
+      <div>Светлая тема</div>
+      <ThemeProvider theme="dark">
+        <div>Тёмная тема (перекрыта)</div>
+      </ThemeProvider>
+    </ThemeProvider>
+  );
+}
+```
+
+## Интерактивный пример
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, createContext, useContext, useMemo } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+
+// ── Theme Context ──────────────────────────────────────────
+interface ThemeCtx {
+  isDark: boolean;
+  theme: 'light' | 'dark';
+  toggle: () => void;
+  colors: { bg: string; card: string; text: string; border: string };
+}
+const ThemeContext = createContext<ThemeCtx>({
+  isDark: true, theme: 'dark', toggle: () => {},
+  colors: { bg: BG, card: CARD, text: TEXT, border: BORDER },
+});
+
+function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const isDark = theme === 'dark';
+  const colors = isDark
+    ? { bg: BG, card: CARD, text: TEXT, border: BORDER }
+    : { bg: '#f1f5f9', card: '#ffffff', text: '#1e293b', border: '#cbd5e1' };
+  return (
+    <ThemeContext.Provider value={{ isDark, theme, toggle: () => setTheme(t => t === 'dark' ? 'light' : 'dark'), colors }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+// ── Auth Context ───────────────────────────────────────────
+interface User { name: string; role: 'admin' | 'user' | 'guest'; avatar: string; }
+interface AuthCtx {
+  user: User | null;
+  isAuthenticated: boolean;
+  login: (name: string, role: User['role']) => void;
+  logout: () => void;
+}
+const AuthContext = createContext<AuthCtx>({
+  user: null, isAuthenticated: false, login: () => {}, logout: () => {},
+});
+
+function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const avatars = { admin: '👑', user: '👤', guest: '👻' };
+  return (
+    <AuthContext.Provider value={{
+      user, isAuthenticated: user !== null,
+      login: (name, role) => setUser({ name, role, avatar: avatars[role] }),
+      logout: () => setUser(null),
+    }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+// ── Notification Context ───────────────────────────────────
+interface Notification { id: number; text: string; type: 'info' | 'success' | 'error'; }
+interface NotifCtx { notify: (text: string, type?: Notification['type']) => void; }
+const NotifContext = createContext<NotifCtx>({ notify: () => {} });
+
+function NotifProvider({ children }: { children: React.ReactNode }) {
+  const [notifs, setNotifs] = useState<Notification[]>([]);
+  let idCounter = 0;
+  const notify = (text: string, type: Notification['type'] = 'info') => {
+    const id = ++idCounter;
+    setNotifs(n => [...n, { id, text, type }]);
+    setTimeout(() => setNotifs(n => n.filter(x => x.id !== id)), 3000);
+  };
+  const typeColors = { info: SOLID_LIGHT, success: GREEN, error: '#f87171' };
+  return (
+    <NotifContext.Provider value={{ notify }}>
+      {children}
+      <div style={{ position: 'fixed', top: 16, right: 16, display: 'flex', flexDirection: 'column', gap: 6, zIndex: 9999 }}>
+        {notifs.map(n => (
+          <div key={n.id} style={{
+            padding: '8px 14px', borderRadius: 8, fontSize: 13,
+            background: CARD, border: \`1px solid \${typeColors[n.type]}\`,
+            color: typeColors[n.type], boxShadow: \`0 4px 20px #00000066\`,
+            animation: 'none', maxWidth: 260,
+          }}>
+            {n.type === 'info' ? 'ℹ️' : n.type === 'success' ? '✅' : '❌'} {n.text}
+          </div>
+        ))}
+      </div>
+    </NotifContext.Provider>
+  );
+}
+
+// ── Components consuming context ───────────────────────────
+function Navbar() {
+  const { isDark, toggle, colors } = useContext(ThemeContext);
+  const { user, isAuthenticated, logout } = useContext(AuthContext);
+  const { notify } = useContext(NotifContext);
+
+  return (
+    <div style={{
+      padding: '10px 16px', borderRadius: 10, marginBottom: 12,
+      background: colors.card, border: \`1px solid \${colors.border}\`,
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    }}>
+      <span style={{ color: SOLID_BLUE, fontWeight: 700, fontSize: 15 }}>🚀 SolidApp</span>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button onClick={() => { toggle(); notify(\`Тема: \${isDark ? 'светлая' : 'тёмная'}\`); }} style={{
+          padding: '5px 12px', borderRadius: 7, border: \`1px solid \${colors.border}\`,
+          background: 'transparent', color: colors.text, cursor: 'pointer', fontSize: 13,
+        }}>
+          {isDark ? '☀️ Светлая' : '🌙 Тёмная'}
+        </button>
+        {isAuthenticated && (
+          <button onClick={() => { logout(); notify('Выход выполнен', 'info'); }} style={{
+            padding: '5px 12px', borderRadius: 7, border: \`1px solid \${BORDER}\`,
+            background: 'transparent', color: MUTED, cursor: 'pointer', fontSize: 13,
+          }}>Выйти</button>
+        )}
+        {user && (
+          <span style={{ fontSize: 16 }} title={user.name + ' (' + user.role + ')'}>{user.avatar}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function UserCard() {
+  const { colors } = useContext(ThemeContext);
+  const { user, isAuthenticated } = useContext(AuthContext);
+  const { notify } = useContext(NotifContext);
+
+  if (!isAuthenticated || !user) {
+    return (
+      <div style={{
+        padding: 16, borderRadius: 10, textAlign: 'center',
+        background: colors.card, border: \`1px solid \${colors.border}\`,
+        color: MUTED, fontSize: 14,
+      }}>
+        Не авторизован — войдите для доступа
+      </div>
+    );
+  }
+
+  const roleColors = { admin: ORANGE, user: SOLID_BLUE, guest: MUTED };
+
+  return (
+    <div style={{
+      padding: 16, borderRadius: 10,
+      background: colors.card, border: \`1px solid \${colors.border}\`,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+        <div style={{
+          width: 48, height: 48, borderRadius: '50%', fontSize: 24,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: roleColors[user.role] + '22', border: \`2px solid \${roleColors[user.role]}\`,
+        }}>{user.avatar}</div>
+        <div>
+          <div style={{ color: colors.text, fontWeight: 700, fontSize: 16 }}>{user.name}</div>
+          <div style={{
+            display: 'inline-block', padding: '2px 8px', borderRadius: 99, fontSize: 11,
+            background: roleColors[user.role] + '22', color: roleColors[user.role], fontWeight: 600,
+          }}>{user.role}</div>
+        </div>
+      </div>
+      {user.role === 'admin' && (
+        <button onClick={() => notify('Панель администратора открыта', 'success')} style={{
+          width: '100%', padding: '8px 0', borderRadius: 8, border: \`1px solid \${ORANGE}\`,
+          background: ORANGE + '11', color: ORANGE, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+        }}>
+          ⚙️ Панель администратора
+        </button>
+      )}
+    </div>
+  );
+}
+
+function LoginPanel() {
+  const { colors } = useContext(ThemeContext);
+  const { isAuthenticated, login } = useContext(AuthContext);
+  const { notify } = useContext(NotifContext);
+  const [name, setName] = useState('');
+
+  if (isAuthenticated) return null;
+
+  return (
+    <div style={{
+      padding: 16, borderRadius: 10, marginBottom: 12,
+      background: colors.card, border: \`1px solid \${colors.border}\`,
+    }}>
+      <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 10, fontSize: 13 }}>
+        Войти в систему
+      </div>
+      <input
+        value={name} onChange={e => setName(e.target.value)}
+        placeholder="Имя пользователя..."
+        style={{
+          width: '100%', padding: '7px 10px', borderRadius: 7, marginBottom: 8,
+          background: BG, border: \`1px solid \${BORDER}\`, color: TEXT, fontSize: 13,
+          boxSizing: 'border-box',
+        }}
+      />
+      <div style={{ display: 'flex', gap: 6 }}>
+        {(['admin', 'user', 'guest'] as const).map(role => (
+          <button key={role} onClick={() => {
+            if (!name.trim()) { notify('Введите имя', 'error'); return; }
+            login(name, role);
+            notify(\`Добро пожаловать, \${name}!\`, 'success');
+          }} style={{
+            flex: 1, padding: '7px 0', borderRadius: 7, cursor: 'pointer', fontSize: 12,
+            border: \`1px solid \${BORDER}\`, background: CARD, color: TEXT,
+            fontWeight: 600,
+          }}>
+            {role === 'admin' ? '👑' : role === 'user' ? '👤' : '👻'} {role}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ContextTree() {
+  const { colors } = useContext(ThemeContext);
+  const { isAuthenticated } = useContext(AuthContext);
+
+  const nodes = [
+    { label: 'ThemeProvider', color: SOLID_BLUE, depth: 0 },
+    { label: 'AuthProvider', color: GREEN, depth: 1 },
+    { label: 'NotifProvider', color: ORANGE, depth: 2 },
+    { label: 'Navbar', color: MUTED, depth: 3, consumers: ['Theme', 'Auth', 'Notif'] },
+    { label: 'LoginPanel', color: MUTED, depth: 3, consumers: ['Theme', 'Auth', 'Notif'] },
+    { label: 'UserCard', color: MUTED, depth: 3, consumers: ['Theme', 'Auth', 'Notif'] },
+  ];
+
+  return (
+    <div style={{
+      padding: 14, borderRadius: 10, marginTop: 12,
+      background: colors.card, border: \`1px solid \${colors.border}\`,
+    }}>
+      <div style={{ color: SOLID_LIGHT, fontWeight: 700, marginBottom: 10, fontSize: 13 }}>
+        Дерево контекстов
+      </div>
+      {nodes.map((n, i) => (
+        <div key={i} style={{
+          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4,
+          paddingLeft: n.depth * 16,
+        }}>
+          <span style={{ color: n.color, fontSize: 12 }}>
+            {n.depth === 0 ? '◉' : n.depth < 3 ? '└◈' : '└─'}
+          </span>
+          <span style={{ color: n.depth < 3 ? n.color : TEXT, fontSize: 12, fontFamily: 'monospace' }}>
+            &lt;{n.label}&gt;
+          </span>
+          {n.consumers && (
+            <span style={{ color: MUTED, fontSize: 11 }}>
+              uses: {n.consumers.map(c => (
+                <span key={c} style={{
+                  marginLeft: 3, padding: '1px 5px', borderRadius: 4,
+                  background: c === 'Theme' ? SOLID_BLUE + '22' : c === 'Auth' ? GREEN + '22' : ORANGE + '22',
+                  color: c === 'Theme' ? SOLID_LIGHT : c === 'Auth' ? GREEN : ORANGE,
+                  fontSize: 10,
+                }}>{c}</span>
+              ))}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <AuthProvider>
+        <NotifProvider>
+          <Inner />
+        </NotifProvider>
+      </AuthProvider>
+    </ThemeProvider>
+  );
+}
+
+function Inner() {
+  const { colors } = useContext(ThemeContext);
+  return (
+    <div style={{
+      background: colors.bg, minHeight: '100vh', padding: 16,
+      fontFamily: "'Inter', sans-serif", color: TEXT,
+      transition: 'background 0.3s',
+    }}>
+      <div style={{ maxWidth: 500, margin: '0 auto' }}>
+        <h2 style={{ color: SOLID_BLUE, margin: '0 0 14px', fontSize: 18, textAlign: 'center' }}>
+          Context API в Solid.js
+        </h2>
+        <Navbar />
+        <LoginPanel />
+        <UserCard />
+        <ContextTree />
+      </div>
+    </div>
+  );
+}
+` }}
+/>

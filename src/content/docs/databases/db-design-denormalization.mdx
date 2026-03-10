@@ -1,0 +1,101 @@
+---
+title: "23. DB Design: Денормализация"
+sidebar:
+  order: 23
+---
+import { Playground } from '@components/Playground'
+
+Намеренное добавление избыточности для повышения производительности.
+
+## Зачем денормализовать?
+
+✅ Преимущества:
+- Меньше JOIN'ов (быстрее SELECT)
+- Проще запросы
+- Лучше для read-heavy нагрузки
+
+❌ Недостатки:
+- Дублирование данных
+- Сложнее UPDATE (нужно обновлять во многих местах)
+- Риск inconsistency
+
+## Примеры денормализации
+
+### Кэширование агрегатов
+
+```sql
+-- Вместо COUNT(*) при каждом запросе
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50),
+    post_count INT DEFAULT 0,  -- денормализация!
+    follower_count INT DEFAULT 0
+);
+
+-- Триггер для обновления
+CREATE OR REPLACE FUNCTION update_post_count()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE users SET post_count = post_count + 1 WHERE id = NEW.user_id;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+### Дублирование для избежания JOIN
+
+```sql
+-- Order с денормализованным именем пользователя
+CREATE TABLE orders (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id),
+    user_name VARCHAR(100),  -- дубль! (на момент заказа)
+    total DECIMAL(10, 2)
+);
+```
+
+---
+
+**Следующий урок:** [EXPLAIN](/databases/query-optimization-explain/) →
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.js": `// JavaScript-эквивалент денормализации
+// Денормализация — осознанное дублирование для скорости чтения
+
+// Нормализованная структура (медленное чтение — нужен JOIN)
+const products = [{ id: 1, name: "Ноутбук", price: 89000 }];
+const reviews = [
+  { productId: 1, rating: 5, text: "Отлично!" },
+  { productId: 1, rating: 4, text: "Хорошо" },
+  { productId: 1, rating: 5, text: "Супер" },
+];
+
+// Каждый раз считаем средний рейтинг (медленно)
+console.time("Нормализовано");
+const avgRating = reviews
+  .filter(r => r.productId === 1)
+  .reduce((s, r) => s + r.rating, 0) / reviews.filter(r => r.productId === 1).length;
+console.timeEnd("Нормализовано");
+
+// Денормализованная структура (быстрое чтение)
+const productsDenorm = [{
+  id: 1,
+  name: "Ноутбук",
+  price: 89000,
+  avgRating: 4.67,      // предвычисленное поле
+  reviewCount: 3,        // предвычисленное поле
+  lastReview: "Супер"    // дублированные данные
+}];
+
+console.time("Денормализовано");
+console.log("Рейтинг:", productsDenorm[0].avgRating);
+console.timeEnd("Денормализовано");
+
+console.log("\\nТрейд-офф:");
+console.log("+ Быстрое чтение (нет JOIN)");
+console.log("- Сложнее обновлять (нужно синхронизировать)");
+`
+  }}
+/>

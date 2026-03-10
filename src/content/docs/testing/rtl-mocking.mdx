@@ -1,0 +1,266 @@
+---
+title: "17. Моки в RTL"
+sidebar:
+  order: 16
+---
+import { Playground } from '@components/Playground'
+
+
+![RTL Mocking](/lessons/rtl-mocking.png)
+
+## Мокирование API запросов
+
+```javascript
+// Мок fetch глобально
+global.fetch = jest.fn();
+
+beforeEach(() => {
+  (global.fetch as jest.Mock).mockClear();
+});
+
+// Конфигурировать в каждом тесте
+test('loads products', async () => {
+  (global.fetch as jest.Mock).mockResolvedValueOnce({
+    ok: true,
+    json: () => Promise.resolve([
+      { id: 1, name: 'Apple', price: 1.5 },
+    ]),
+  });
+
+  render(<ProductList />);
+
+  expect(await screen.findByText('Apple')).toBeInTheDocument();
+  expect(screen.getByText('$1.50')).toBeInTheDocument();
+});
+```
+
+## Мокирование модулей
+
+```javascript
+// Замокировать axios
+jest.mock('axios');
+import axios from 'axios';
+
+test('fetches user data', async () => {
+  (axios.get as jest.Mock).mockResolvedValue({
+    data: { id: 1, name: 'Alice' },
+  });
+
+  render(<UserProfile userId={1} />);
+
+  expect(await screen.findByText('Alice')).toBeInTheDocument();
+  expect(axios.get).toHaveBeenCalledWith('/api/users/1');
+});
+
+// Мок кастомного хука
+jest.mock('../hooks/useAuth', () => ({
+  useAuth: () => ({
+    user: { name: 'Alice', role: 'admin' },
+    isAuthenticated: true,
+    logout: jest.fn(),
+  }),
+}));
+
+test('shows admin menu for admin', () => {
+  render(<Navbar />);
+  expect(screen.getByRole('link', { name: /admin panel/i })).toBeInTheDocument();
+});
+```
+
+## Мокирование useNavigate (React Router)
+
+```javascript
+const mockNavigate = jest.fn();
+
+jest.mock('react-router-dom', () => ({
+  ...jest.requireActual('react-router-dom'),
+  useNavigate: () => mockNavigate,
+  useParams: () => ({ id: '42' }),
+}));
+
+test('redirects after login', async () => {
+  const user = userEvent.setup();
+  render(
+    <MemoryRouter>
+      <LoginForm />
+    </MemoryRouter>
+  );
+
+  await user.type(screen.getByLabelText(/email/i), 'alice@test.com');
+  await user.type(screen.getByLabelText(/password/i), 'password123');
+  await user.click(screen.getByRole('button', { name: /login/i }));
+
+  await waitFor(() => {
+    expect(mockNavigate).toHaveBeenCalledWith('/dashboard');
+  });
+});
+```
+
+## Мокирование localStorage
+
+```javascript
+// Мок localStorage
+const localStorageMock = {
+  getItem: jest.fn(),
+  setItem: jest.fn(),
+  removeItem: jest.fn(),
+  clear: jest.fn(),
+};
+Object.defineProperty(window, 'localStorage', { value: localStorageMock });
+
+test('saves theme to localStorage', async () => {
+  const user = userEvent.setup();
+  render(<ThemeSwitcher />);
+
+  await user.click(screen.getByRole('button', { name: /dark/i }));
+
+  expect(localStorageMock.setItem).toHaveBeenCalledWith('theme', 'dark');
+});
+
+test('loads saved theme', () => {
+  localStorageMock.getItem.mockReturnValue('dark');
+
+  render(<ThemeSwitcher />);
+
+  expect(screen.getByText(/current theme: dark/i)).toBeInTheDocument();
+});
+```
+
+## Мокирование window и browser APIs
+
+```javascript
+// Мок window.location
+delete window.location;
+window.location = { href: '', assign: jest.fn() };
+
+test('redirects to external URL', async () => {
+  const user = userEvent.setup();
+  render(<ExternalLink url="https://example.com" />);
+
+  await user.click(screen.getByRole('link'));
+
+  expect(window.location.assign).toHaveBeenCalledWith('https://example.com');
+});
+
+// Мок IntersectionObserver (для lazy loading)
+const mockIntersectionObserver = jest.fn().mockImplementation(() => ({
+  observe: jest.fn(),
+  unobserve: jest.fn(),
+  disconnect: jest.fn(),
+}));
+window.IntersectionObserver = mockIntersectionObserver;
+
+// Мок ResizeObserver
+window.ResizeObserver = jest.fn().mockImplementation(() => ({
+  observe: jest.fn(),
+  unobserve: jest.fn(),
+  disconnect: jest.fn(),
+}));
+```
+
+## MSW для мокирования API (рекомендуется)
+
+```bash
+npm install --save-dev msw
+```
+
+```javascript
+// handlers.js
+import { http, HttpResponse } from 'msw';
+
+export const handlers = [
+  http.get('/api/users', () => {
+    return HttpResponse.json([
+      { id: 1, name: 'Alice' },
+      { id: 2, name: 'Bob' },
+    ]);
+  }),
+
+  http.post('/api/users', async ({ request }) => {
+    const body = await request.json();
+    return HttpResponse.json({ id: 3, ...body }, { status: 201 });
+  }),
+];
+
+// setupServer.js (для Node.js тестов)
+import { setupServer } from 'msw/node';
+import { handlers } from './handlers';
+
+export const server = setupServer(...handlers);
+
+// jest.setup.js
+import { server } from './src/mocks/setupServer';
+
+beforeAll(() => server.listen());
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+// В тестах можно переопределять:
+test('handles server error', async () => {
+  server.use(
+    http.get('/api/users', () => {
+      return HttpResponse.json({ error: 'Server Error' }, { status: 500 });
+    })
+  );
+
+  render(<UserList />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('Server Error');
+});
+```
+
+## Практические задания
+
+1. Настрой MSW для мокирования API в тестах компонентов
+2. Замокируй `useAuth` хук и протестируй защищённые маршруты
+3. Протестируй компонент, читающий из localStorage
+
+## Итоги
+
+- Мокируй внешние зависимости (fetch, axios, Router)
+- MSW — лучший способ мокировать API (перехватывает на уровне сети)
+- jest.mock() для модулей, jest.spyOn() для методов объектов
+- localStorage, IntersectionObserver — мокируй в setupTests
+
+<Playground client:visible template="vanilla" files={{
+  '/index.js': `// Пример тестового кода (для запуска используйте Jest/Vitest)
+// Моки в React Testing Library
+
+console.log('=== Мокирование в RTL ===\n');
+
+console.log(\`// 1. Мок модуля
+jest.mock('./api', () => ({
+  fetchUsers: jest.fn(() => Promise.resolve([
+    { id: 1, name: 'Алексей' }
+  ])),
+}));
+
+// 2. Мок fetch
+beforeEach(() => {
+  global.fetch = jest.fn(() =>
+    Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ name: 'Алексей' }),
+    })
+  );
+});
+
+// 3. Мок useNavigate (React Router)
+const mockNavigate = jest.fn();
+jest.mock('react-router-dom', () => ({
+  ...jest.requireActual('react-router-dom'),
+  useNavigate: () => mockNavigate,
+}));
+
+// 4. Мок контекста
+test('с кастомным контекстом', () => {
+  render(
+    <ThemeContext.Provider value={{ theme: 'dark' }}>
+      <MyComponent />
+    </ThemeContext.Provider>
+  );
+  expect(screen.getByText('Dark mode')).toBeInTheDocument();
+});\`);
+
+console.log('\nСовет: мокайте на уровне модуля, не внутри компонента');
+`
+}} />

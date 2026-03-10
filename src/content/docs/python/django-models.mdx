@@ -1,0 +1,349 @@
+---
+title: "18. Django ORM и модели"
+sidebar:
+  order: 17
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/intro.png)
+
+## QuerySet — API для запросов
+
+Django ORM — один из лучших ORM в мире. Всё через QuerySet:
+
+```python
+from blog.models import Post, Category, User
+
+# Все объекты
+posts = Post.objects.all()
+
+# Фильтрация
+published = Post.objects.filter(status="published")
+drafts = Post.objects.exclude(status="published")
+
+# Получить один объект
+post = Post.objects.get(id=1)        # исключение если нет или несколько
+post = Post.objects.get(slug="hello-world")
+
+# Безопасное получение
+post = Post.objects.filter(id=1).first()  # None если нет
+post, created = Post.objects.get_or_create(
+    slug="hello-world",
+    defaults={"title": "Hello World", "author": user}
+)
+
+# Сортировка
+recent = Post.objects.order_by("-created_at")      # DESC
+alphabetical = Post.objects.order_by("title")
+
+# Пагинация
+page = Post.objects.all()[10:20]  # как slice списка
+
+# Подсчёт
+count = Post.objects.filter(status="published").count()
+
+# Существование
+exists = Post.objects.filter(author=user).exists()
+```
+
+## Фильтры ORM
+
+```python
+# Операторы поиска (field lookups)
+Post.objects.filter(title="Python Guide")         # точное совпадение
+Post.objects.filter(title__exact="Python Guide")  # то же самое
+Post.objects.filter(title__iexact="python guide") # регистронезависимо
+Post.objects.filter(title__contains="Python")     # LIKE '%Python%'
+Post.objects.filter(title__icontains="python")    # регистронезависимо
+Post.objects.filter(title__startswith="Python")
+Post.objects.filter(created_at__year=2024)
+Post.objects.filter(created_at__date="2024-01-15")
+Post.objects.filter(created_at__gte="2024-01-01")  # >=
+Post.objects.filter(created_at__lte="2024-12-31")  # <=
+Post.objects.filter(created_at__range=("2024-01-01", "2024-12-31"))
+Post.objects.filter(category__in=[1, 2, 3])        # IN (1, 2, 3)
+Post.objects.filter(category__isnull=False)        # IS NOT NULL
+Post.objects.filter(author__username="yasha")      # JOIN через ForeignKey!
+
+# Q объекты — OR условия
+from django.db.models import Q
+
+Post.objects.filter(
+    Q(status="published") | Q(author=request.user)
+)
+
+Post.objects.filter(
+    Q(title__icontains="python") & ~Q(status="archived")  # ~ = NOT
+)
+```
+
+## Aggregation и Annotation
+
+```python
+from django.db.models import Count, Sum, Avg, Max, Min, F, Value
+from django.db.models.functions import Lower, Coalesce
+
+# Aggregation — одно значение для всего QuerySet
+from django.db.models import Count, Avg
+
+Post.objects.aggregate(
+    total=Count("id"),
+    avg_views=Avg("views")
+)
+# {"total": 150, "avg_views": 42.5}
+
+# Annotation — добавить поле к каждому объекту
+Category.objects.annotate(
+    posts_count=Count("posts"),
+    published_count=Count("posts", filter=Q(posts__status="published"))
+)
+
+# Теперь у каждой категории есть posts_count
+for cat in categories:
+    print(cat.name, cat.posts_count)
+
+# Values и ValuesFlat
+Post.objects.values("title", "status")  # список словарей
+Post.objects.values_list("title", flat=True)  # список строк
+
+# F expression — сравнение полей
+from django.db.models import F
+
+# Посты, где обновление позже создания (всегда True, но как пример)
+Post.objects.filter(updated_at__gt=F("created_at"))
+
+# Обновить поле через F (атомарно!)
+Post.objects.filter(status="published").update(views=F("views") + 1)
+```
+
+## Связи и оптимизация
+
+```python
+# Проблема N+1 запросов
+posts = Post.objects.all()
+for post in posts:
+    print(post.author.name)  # N доп. запросов к БД!
+
+# Решение: select_related (JOIN для ForeignKey, OneToOne)
+posts = Post.objects.select_related("author", "category")
+for post in posts:
+    print(post.author.name)  # 0 доп. запросов!
+
+# prefetch_related (отдельный запрос для ManyToMany)
+posts = Post.objects.prefetch_related("tags", "comments")
+for post in posts:
+    print([tag.name for tag in post.tags.all()])  # уже в памяти
+
+# Комбинирование
+posts = Post.objects.select_related(
+    "author", "category"
+).prefetch_related(
+    "tags",
+    Prefetch("comments", queryset=Comment.objects.order_by("-created_at")[:5])
+)
+```
+
+## Транзакции
+
+```python
+from django.db import transaction
+
+# Декоратор
+@transaction.atomic
+def transfer_points(from_user, to_user, amount):
+    from_user.points -= amount
+    from_user.save()
+    to_user.points += amount
+    to_user.save()
+
+# Контекстный менеджер
+def create_post_with_tags(title, tags):
+    with transaction.atomic():
+        post = Post.objects.create(title=title)
+        for tag_name in tags:
+            tag, _ = Tag.objects.get_or_create(name=tag_name)
+            post.tags.add(tag)
+    return post
+
+# Savepoints
+with transaction.atomic():
+    post = Post.objects.create(title="Test")
+    sid = transaction.savepoint()
+    try:
+        # рискованная операция
+        do_something_risky(post)
+    except Exception:
+        transaction.savepoint_rollback(sid)  # откат к savepoint
+```
+
+## Кастомный Manager
+
+```python
+from django.db import models
+from django.utils import timezone
+
+class PostManager(models.Manager):
+    def published(self):
+        return self.filter(status="published")
+    
+    def by_author(self, user):
+        return self.filter(author=user)
+    
+    def recent(self, days=7):
+        cutoff = timezone.now() - timezone.timedelta(days=days)
+        return self.filter(created_at__gte=cutoff)
+    
+    def with_stats(self):
+        return self.annotate(
+            comments_count=models.Count("comments"),
+            likes_count=models.Count("likes")
+        )
+
+class Post(models.Model):
+    # ...
+    objects = PostManager()  # заменяем дефолтный manager
+
+# Использование
+Post.objects.published()
+Post.objects.published().by_author(request.user)
+Post.objects.recent(days=30).with_stats()
+```
+
+## Сигналы
+
+```python
+# blog/signals.py
+from django.db.models.signals import post_save, pre_delete
+from django.dispatch import receiver
+from .models import Post
+
+@receiver(post_save, sender=Post)
+def post_saved(sender, instance, created, **kwargs):
+    if created:
+        # Отправить уведомление подписчикам
+        notify_subscribers(instance)
+    
+    if instance.status == "published" and not instance.pk in published_cache:
+        # Очистить кэш
+        cache.delete(f"post_{instance.pk}")
+
+@receiver(pre_delete, sender=Post)
+def post_deleted(sender, instance, **kwargs):
+    # Удалить файлы
+    if instance.image:
+        instance.image.delete(save=False)
+
+# blog/apps.py
+class BlogConfig(AppConfig):
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "blog"
+    
+    def ready(self):
+        import blog.signals  # подключаем сигналы
+```
+
+## Migrations
+
+```python
+# Создать миграцию после изменения моделей
+# python manage.py makemigrations
+
+# Применить миграции
+# python manage.py migrate
+
+# Откат на шаг назад
+# python manage.py migrate blog 0003
+
+# Просмотр SQL
+# python manage.py sqlmigrate blog 0004
+
+# Кастомная миграция (data migration)
+from django.db import migrations
+
+def populate_slugs(apps, schema_editor):
+    Post = apps.get_model("blog", "Post")
+    for post in Post.objects.all():
+        from django.utils.text import slugify
+        post.slug = slugify(post.title)
+        post.save()
+
+class Migration(migrations.Migration):
+    dependencies = [("blog", "0003_post_slug")]
+    
+    operations = [
+        migrations.RunPython(populate_slugs, reverse_code=migrations.RunPython.noop),
+    ]
+```
+
+## Задание
+
+```python
+# Реализуй для блога:
+# 
+# 1. Кастомный Manager PostManager с методами:
+#    - popular() — сортировка по views DESC
+#    - by_category(category_slug)
+#    - search(query) — ищет в title и body
+#    - draft(user) — черновики конкретного пользователя
+#
+# 2. Метод get_related_posts(post) — находит похожие посты
+#    (по тегам или категории, исключая сам пост)
+#    Используй аннотацию для подсчёта совпавших тегов
+#
+# 3. Статистика за период
+#    Функция get_stats(start_date, end_date) -> dict:
+#    - posts_created, posts_published
+#    - top_categories (3 категории с наибольшим кол-вом постов)
+#    - active_authors (авторы создавшие хотя бы 1 пост)
+```
+
+В следующем уроке — SQLAlchemy!
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.js": `// JavaScript-эквивалент Django Models (ORM)
+
+class Model {
+  static _table = [];
+  static _nextId = 1;
+
+  static create(data) {
+    const obj = { id: this._nextId++, ...data };
+    this._table.push(obj);
+    return obj;
+  }
+  static all() { return [...this._table]; }
+  static filter(fn) { return this._table.filter(fn); }
+  static get(id) {
+    const obj = this._table.find(o => o.id === id);
+    if (!obj) throw new Error("DoesNotExist");
+    return obj;
+  }
+  static del(id) {
+    this._table = this._table.filter(o => o.id !== id);
+  }
+}
+
+// class Post(models.Model):
+class Post extends Model {
+  static _table = [];
+  static _nextId = 1;
+}
+
+// Post.objects.create(...)
+Post.create({ title: "Изучаем Django", published: true });
+Post.create({ title: "Черновик", published: false });
+Post.create({ title: "Советы по Python", published: true });
+
+// Post.objects.all()
+console.log("Все посты:", Post.all());
+
+// Post.objects.filter(published=True)
+console.log("Опубликованные:", Post.filter(p => p.published));
+
+// Post.objects.get(id=1)
+console.log("Пост #1:", Post.get(1));
+`
+  }}
+/>

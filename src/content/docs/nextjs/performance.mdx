@@ -1,0 +1,1087 @@
+---
+title: "23. Производительность"
+sidebar:
+  order: 24
+---
+import { Playground } from '@components/Playground'
+
+
+## ⚡ Оптимизация производительности Next.js
+
+Привет! Сегодня поговорим о **производительности** — теме, которая отличает хорошего разработчика от отличного. Можно написать красивый, рабочий код, но если он загружается 5 секунд — пользователи уйдут. По статистике Google, **каждая дополнительная секунда загрузки снижает конверсию на 7%**. Это деньги! 💸
+
+Представь: ты открываешь сайт, а он грузится как Windows XP... В 2024 году это неприемлемо. Наша задача — сделать сайт молниеносным. Поехали! 🚀
+
+---
+
+### 📊 Core Web Vitals: что за зверь?
+
+Google измеряет качество пользовательского опыта через три метрики — **Core Web Vitals**. Они напрямую влияют на SEO-ранжирование с 2021 года:
+
+**LCP — Largest Contentful Paint** 🖼️
+- Время до отрисовки самого крупного элемента на экране (обычно главное изображение или заголовок)
+- ✅ Хорошо: < 2.5 сек
+- ⚠️ Нужно улучшить: 2.5 — 4.0 сек
+- ❌ Плохо: > 4.0 сек
+
+**INP — Interaction to Next Paint** 👆
+- Время от взаимодействия пользователя до следующего кадра (заменил FID с 2024)
+- ✅ Хорошо: < 200 мс
+- ⚠️ Нужно улучшить: 200 — 500 мс
+- ❌ Плохо: > 500 мс
+
+**CLS — Cumulative Layout Shift** 📐
+- Суммарный сдвиг макета во время загрузки (когда элементы «прыгают»)
+- ✅ Хорошо: < 0.1
+- ⚠️ Нужно улучшить: 0.1 — 0.25
+- ❌ Плохо: > 0.25
+
+```
+До оптимизации:
+─────────────────────────────
+LCP:  4.2s  ❌  Изображение загружается долго
+INP:  380ms ⚠️  Тяжёлый JS блокирует поток
+CLS:  0.18  ⚠️  Изображения без размеров прыгают
+
+После оптимизации:
+─────────────────────────────
+LCP:  1.8s  ✅  next/image + preload
+INP:  95ms  ✅  Code splitting + defer
+CLS:  0.02  ✅  width/height у всех изображений
+```
+
+---
+
+### 🔍 Инструменты измерения
+
+Прежде чем оптимизировать — нужно измерить. Без замеров ты стреляешь вслепую!
+
+**1. Lighthouse в Chrome DevTools:**
+
+```bash
+# Или через CLI:
+npm install -g lighthouse
+lighthouse https://example.com --view
+```
+
+**2. PageSpeed Insights:**
+Заходишь на `pagespeed.web.dev`, вводишь URL — получаешь реальные данные с телефонов пользователей (CrUX данные).
+
+**3. Chrome DevTools → Performance:**
+- Запись реального взаимодействия
+- Flame chart: видишь что тормозит
+- Long Tasks (> 50мс) — враги INP
+
+**4. web-vitals пакет:**
+
+```typescript
+// app/layout.tsx или отдельный компонент
+import { useReportWebVitals } from 'next/web-vitals';
+
+export function WebVitals() {
+  useReportWebVitals((metric) => {
+    console.log(metric.name, metric.value);
+
+    // Отправляем в аналитику
+    if (typeof window !== 'undefined' && window.gtag) {
+      window.gtag('event', metric.name, {
+        value: Math.round(
+          metric.name === 'CLS' ? metric.value * 1000 : metric.value
+        ),
+        event_label: metric.id,
+        non_interaction: true,
+      });
+    }
+  });
+  return null;
+}
+
+// app/layout.tsx
+import { WebVitals } from './web-vitals';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="ru">
+      <body>
+        <WebVitals />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### 📦 Анализ бандла с @next/bundle-analyzer
+
+Первый шаг оптимизации — понять, что занимает место в бандле:
+
+```bash
+npm install --save-dev @next/bundle-analyzer
+```
+
+```typescript
+// next.config.ts
+import type { NextConfig } from 'next';
+import bundleAnalyzer from '@next/bundle-analyzer';
+
+const withBundleAnalyzer = bundleAnalyzer({
+  enabled: process.env.ANALYZE === 'true',
+});
+
+const nextConfig: NextConfig = {
+  // ... твои настройки
+};
+
+export default withBundleAnalyzer(nextConfig);
+```
+
+```json
+// package.json
+{
+  "scripts": {
+    "analyze": "ANALYZE=true npm run build"
+  }
+}
+```
+
+```bash
+npm run analyze
+# Откроет интерактивную карту бандла в браузере
+# Ищи большие блоки — это кандидаты на оптимизацию
+```
+
+Типичные находки при анализе:
+- `moment.js` — 230kb! Замени на `date-fns` (15kb нужных функций)
+- `lodash` — 70kb! Используй `lodash-es` или нативные методы
+- `faker` или `devtools` попали в прод-бандл
+
+---
+
+### 🔀 Dynamic Imports: code splitting
+
+Code splitting — это разбивка кода на части, которые загружаются только когда нужны. Как доставка еды: зачем везти всё меню, если клиент заказал один бургер?
+
+**`next/dynamic` для компонентов:**
+
+```typescript
+// app/dashboard/page.tsx
+import dynamic from 'next/dynamic';
+
+// Тяжёлый чарт грузится только на клиенте, когда нужен
+const HeavyChart = dynamic(
+  () => import('@/components/HeavyChart'),
+  {
+    loading: () => <div>Загрузка графика...</div>,
+    ssr: false, // Не рендерить на сервере (если компонент Browser-only)
+  }
+);
+
+// Редактор кода — очень тяжёлый, грузим по требованию
+const CodeEditor = dynamic(
+  () => import('@/components/CodeEditor'),
+  {
+    loading: () => <div className="skeleton h-64" />,
+    ssr: false,
+  }
+);
+
+// Модальное окно — грузим только после взаимодействия
+const ConfirmModal = dynamic(() => import('@/components/ConfirmModal'));
+
+export default function DashboardPage() {
+  const [showChart, setShowChart] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
+
+  return (
+    <div>
+      <button onClick={() => setShowChart(true)}>Показать статистику</button>
+      {showChart && <HeavyChart data={data} />}
+
+      <button onClick={() => setShowEditor(true)}>Открыть редактор</button>
+      {showEditor && <CodeEditor />}
+    </div>
+  );
+}
+```
+
+**Именованные экспорты:**
+
+```typescript
+// Если компонент — именованный экспорт (не default)
+const { NamedComponent } = dynamic(
+  () => import('@/components/Bundle').then(mod => mod),
+  { ssr: false }
+);
+
+// Или через деструктуризацию:
+const HeavyComponent = dynamic(
+  async () => {
+    const mod = await import('@/components/HeavyBundle');
+    return mod.HeavyComponent;
+  }
+);
+```
+
+---
+
+### ⚛️ React.lazy() + Suspense
+
+Нативный React способ (работает в Client Components):
+
+```typescript
+// components/LazySection.tsx
+'use client';
+
+import { lazy, Suspense, useState } from 'react';
+
+// lazy загружает компонент только при первом рендере
+const HeavyAnalytics = lazy(() => import('./HeavyAnalytics'));
+const VideoPlayer = lazy(() => import('./VideoPlayer'));
+
+function LoadingSkeleton({ height = 200 }: { height?: number }) {
+  return (
+    <div
+      style={{ height, background: '#1e293b', borderRadius: 8, animation: 'pulse 1.5s infinite' }}
+    />
+  );
+}
+
+export function LazySection() {
+  const [showAnalytics, setShowAnalytics] = useState(false);
+
+  return (
+    <div>
+      {/* Suspense показывает fallback пока компонент грузится */}
+      <Suspense fallback={<LoadingSkeleton height={300} />}>
+        <VideoPlayer src="/intro.mp4" />
+      </Suspense>
+
+      <button onClick={() => setShowAnalytics(true)}>
+        Показать аналитику
+      </button>
+
+      {showAnalytics && (
+        <Suspense fallback={<LoadingSkeleton height={400} />}>
+          <HeavyAnalytics />
+        </Suspense>
+      )}
+    </div>
+  );
+}
+```
+
+**Разница `next/dynamic` vs `React.lazy`:**
+
+```
+next/dynamic                │  React.lazy
+────────────────────────────┼──────────────────────────────
+Работает в Server Components│  Только в Client Components
+ssr: false опция            │  Всегда клиентский
+Встроенный loading пропс    │  Нужен Suspense снаружи
+Рекомендован в Next.js      │  Нативный React подход
+```
+
+---
+
+### 🔗 Prefetching ссылок
+
+Next.js автоматически prefetch'ит ссылки, когда они в viewport. Но можно управлять этим вручную:
+
+```typescript
+// components/NavBar.tsx
+import Link from 'next/link';
+
+export function NavBar() {
+  return (
+    <nav>
+      {/* По умолчанию: prefetch при попадании в viewport */}
+      <Link href="/about">О нас</Link>
+
+      {/* Отключить prefetch для редко посещаемых страниц */}
+      <Link href="/legal/privacy" prefetch={false}>
+        Политика конфиденциальности
+      </Link>
+
+      {/* Принудительный prefetch всегда */}
+      <Link href="/dashboard" prefetch={true}>
+        Дашборд
+      </Link>
+    </nav>
+  );
+}
+```
+
+**Программный prefetch с `useRouter`:**
+
+```typescript
+'use client';
+
+import { useRouter } from 'next/navigation';
+import { useEffect } from 'react';
+
+export function ProductCard({ id }: { id: string }) {
+  const router = useRouter();
+
+  // Prefetch при hover — пользователь наводит мышь → мы уже грузим страницу
+  function handleMouseEnter() {
+    router.prefetch(\`/products/\${id}\`);
+  }
+
+  return (
+    <div onMouseEnter={handleMouseEnter}>
+      {/* ... */}
+    </div>
+  );
+}
+```
+
+---
+
+### 🖼️ Оптимизация изображений с next/image
+
+Напоминание о главных принципах:
+
+```typescript
+import Image from 'next/image';
+
+// ✅ Всегда указывай width и height — предотвращает CLS
+<Image
+  src="/hero.jpg"
+  alt="Главный баннер"
+  width={1200}
+  height={600}
+  priority // LCP-изображение? Добавь priority!
+/>
+
+// ✅ fill для адаптивных контейнеров
+<div style={{ position: 'relative', aspectRatio: '16/9' }}>
+  <Image
+    src={product.image}
+    alt={product.name}
+    fill
+    sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+    style={{ objectFit: 'cover' }}
+  />
+</div>
+
+// ✅ Для изображений «ниже сгиба» — lazy (по умолчанию)
+<Image
+  src="/gallery/photo-10.jpg"
+  alt="Фото"
+  width={400}
+  height={300}
+  loading="lazy" // по умолчанию, можно не писать
+/>
+```
+
+**Что делает `next/image` автоматически:**
+- Конвертирует в WebP/AVIF (меньше размер)
+- Ресайзит под нужный viewport
+- Lazy loading out of the box
+- Prevents CLS (резервирует место)
+- Обслуживает через CDN (при Vercel)
+
+---
+
+### 🔤 Оптимизация шрифтов с next/font
+
+Шрифты — частая причина CLS и медленного LCP:
+
+```typescript
+// app/layout.tsx
+import { Inter, Roboto_Mono, Playfair_Display } from 'next/font/google';
+import localFont from 'next/font/local';
+
+// Google Font
+const inter = Inter({
+  subsets: ['latin', 'cyrillic'],
+  variable: '--font-inter',
+  display: 'swap', // Показывает fallback шрифт до загрузки
+  preload: true,
+});
+
+// Моноширинный для кода
+const robotoMono = Roboto_Mono({
+  subsets: ['latin'],
+  variable: '--font-mono',
+  display: 'swap',
+});
+
+// Локальный шрифт
+const customFont = localFont({
+  src: [
+    { path: '../public/fonts/custom-regular.woff2', weight: '400' },
+    { path: '../public/fonts/custom-bold.woff2', weight: '700' },
+  ],
+  variable: '--font-custom',
+  display: 'swap',
+});
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html
+      lang="ru"
+      className={\`\${inter.variable} \${robotoMono.variable} \${customFont.variable}\`}
+    >
+      <body className="font-sans">{children}</body>
+    </html>
+  );
+}
+```
+
+```css
+/* globals.css */
+:root {
+  --font-inter: 'Inter', sans-serif;
+  --font-mono: 'Roboto Mono', monospace;
+}
+
+body {
+  font-family: var(--font-inter);
+}
+
+code, pre {
+  font-family: var(--font-mono);
+}
+```
+
+**Почему next/font лучше ручного подключения:**
+- Шрифты хостятся локально (нет DNS lookup к Google)
+- Автоматический preload нужных начертаний
+- CSS `size-adjust` предотвращает CLS при смене шрифтов
+- Zero layout shift — гарантировано!
+
+---
+
+### 📜 Оптимизация скриптов с next/script
+
+Сторонние скрипты (аналитика, чат-боты, A/B тесты) — главные виновники медленного INP:
+
+```typescript
+// app/layout.tsx
+import Script from 'next/script';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="ru">
+      <body>
+        {children}
+
+        {/* beforeInteractive: загружается до гидрации (для критичных скриптов) */}
+        <Script
+          src="/critical-polyfill.js"
+          strategy="beforeInteractive"
+        />
+
+        {/* afterInteractive: после гидрации (Google Analytics, Яндекс.Метрика) */}
+        <Script
+          src="https://www.googletagmanager.com/gtag/js?id=GA_ID"
+          strategy="afterInteractive"
+        />
+        <Script id="google-analytics" strategy="afterInteractive">
+          {`
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+            gtag('config', 'GA_ID');
+          `}
+        </Script>
+
+        {/* lazyOnload: загружается в idle (чат-боты, соц. кнопки) */}
+        <Script
+          src="https://cdn.intercom.io/intercom.js"
+          strategy="lazyOnload"
+          onLoad={() => console.log('Intercom loaded')}
+          onError={() => console.error('Intercom failed')}
+        />
+      </body>
+    </html>
+  );
+}
+```
+
+**Стратегии загрузки:**
+
+| Стратегия | Когда грузится | Блокирует? | Используй для |
+|-----------|---------------|------------|---------------|
+| `beforeInteractive` | До гидрации | ⚠️ Да | Критичные полифилы |
+| `afterInteractive` | После гидрации | Нет | Аналитика, реклама |
+| `lazyOnload` | В idle time | Нет | Чаты, соц. виджеты |
+
+---
+
+### 🖥️ React Server Components: меньше JS = быстрее
+
+Server Components не попадают в JS-бандл браузера! Это огромная победа:
+
+```typescript
+// app/blog/[slug]/page.tsx
+// Весь этот код выполняется НА СЕРВЕРЕ и НЕ отправляется клиенту
+
+import { MDXRemote } from 'next-mdx-remote/rsc';
+import { SyntaxHighlighter } from '@/components/SyntaxHighlighter'; // тяжёлая библиотека
+import { prisma } from '@/lib/prisma'; // секретный ключ не утечёт в браузер
+
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+export default async function BlogPost({ params }: Props) {
+  const { slug } = await params;
+
+  // Запрос к БД прямо в компоненте — нет waterfall запросов!
+  const post = await prisma.post.findUnique({ where: { slug } });
+  if (!post) return <div>Пост не найден</div>;
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      {/* SyntaxHighlighter (200kb) НЕ попадёт в бандл браузера */}
+      <MDXRemote source={post.content} />
+    </article>
+  );
+}
+```
+
+**Правило минимальных Client Components:**
+
+```typescript
+// ✅ Правильно: только интерактивная часть — клиентская
+// app/blog/[slug]/page.tsx (Server Component)
+import { LikeButton } from '@/components/LikeButton'; // это 'use client'
+
+export default async function BlogPost({ params }: Props) {
+  const post = await getPost(params.slug);
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <p>{post.content}</p>
+      {/* Только кнопка лайка — клиентская, весь остальной текст — серверный */}
+      <LikeButton postId={post.id} initialLikes={post.likes} />
+    </article>
+  );
+}
+```
+
+---
+
+### 🌊 Streaming и Suspense
+
+Streaming позволяет отправлять HTML частями — пользователь видит контент быстрее, не дожидаясь всей страницы:
+
+```typescript
+// app/dashboard/page.tsx
+import { Suspense } from 'react';
+
+// Эти компоненты загружают данные параллельно и стримятся по готовности
+async function UserStats() {
+  const stats = await fetchUserStats(); // медленный запрос
+  return <StatsCard data={stats} />;
+}
+
+async function RecentOrders() {
+  const orders = await fetchOrders(); // ещё один медленный запрос
+  return <OrdersTable data={orders} />;
+}
+
+async function Notifications() {
+  const notifications = await fetchNotifications();
+  return <NotificationsList data={notifications} />;
+}
+
+export default function DashboardPage() {
+  return (
+    <div>
+      {/* Заголовок рендерится мгновенно */}
+      <h1>Дашборд</h1>
+
+      {/* Три секции загружаются параллельно, стримятся по готовности */}
+      <Suspense fallback={<Skeleton />}>
+        <UserStats />
+      </Suspense>
+
+      <Suspense fallback={<Skeleton />}>
+        <RecentOrders />
+      </Suspense>
+
+      <Suspense fallback={<Skeleton />}>
+        <Notifications />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+**Loading UI с loading.tsx:**
+
+```typescript
+// app/dashboard/loading.tsx
+export default function DashboardLoading() {
+  return (
+    <div>
+      <div className="skeleton h-8 w-48 mb-6" />
+      <div className="grid grid-cols-3 gap-4">
+        {[1, 2, 3].map(i => (
+          <div key={i} className="skeleton h-32 rounded-xl" />
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### 🌍 Edge Runtime
+
+Edge Runtime — выполняется на серверах ближе к пользователю (CDN edge nodes). Меньше задержка, молниеносный ответ:
+
+```typescript
+// app/api/geo/route.ts
+export const runtime = 'edge'; // 🔥 Включаем Edge Runtime
+
+import { NextRequest } from 'next/server';
+
+export async function GET(request: NextRequest) {
+  // Геолокация из заголовков (доступна на Vercel)
+  const country = request.geo?.country ?? 'RU';
+  const city = request.geo?.city ?? 'Moscow';
+
+  // Персонализированный ответ без холодного старта сервера
+  return Response.json({
+    message: \`Привет из \${city}, \${country}!\`,
+    latency: 'edge-fast',
+  });
+}
+```
+
+```typescript
+// middleware.ts — всегда выполняется на Edge
+import { NextRequest, NextResponse } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // Auth проверка на Edge — молниеносно
+  const token = request.cookies.get('auth-token')?.value;
+  if (pathname.startsWith('/dashboard') && !token) {
+    return NextResponse.redirect(new URL('/login', request.url));
+  }
+
+  // A/B тест на Edge
+  const variant = request.cookies.get('ab-variant')?.value ?? (Math.random() > 0.5 ? 'a' : 'b');
+  const response = NextResponse.next();
+  response.cookies.set('ab-variant', variant);
+  return response;
+}
+
+export const config = {
+  matcher: ['/dashboard/:path*', '/((?!api|_next/static|favicon.ico).*)'],
+};
+```
+
+**Ограничения Edge Runtime:**
+- Нет Node.js API (нет `fs`, `path`, и т.д.)
+- Нет некоторых npm пакетов
+- Нет WebSockets напрямую
+
+---
+
+### 📈 Мониторинг с Vercel Analytics
+
+```typescript
+// app/layout.tsx
+import { Analytics } from '@vercel/analytics/react';
+import { SpeedInsights } from '@vercel/speed-insights/next';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="ru">
+      <body>
+        {children}
+        {/* Реальные данные Core Web Vitals от реальных пользователей */}
+        <Analytics />
+        {/* LCP, FID, CLS, TTFB, FCP прямо в Vercel Dashboard */}
+        <SpeedInsights />
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### 📦 Кастомный мониторинг с web-vitals
+
+```typescript
+// lib/vitals.ts
+import { onCLS, onINP, onLCP, onFCP, onTTFB } from 'web-vitals';
+
+type MetricName = 'CLS' | 'INP' | 'LCP' | 'FCP' | 'TTFB';
+
+interface MetricRating {
+  good: number;
+  needsImprovement: number;
+}
+
+const thresholds: Record<MetricName, MetricRating> = {
+  CLS:  { good: 0.1,   needsImprovement: 0.25 },
+  INP:  { good: 200,   needsImprovement: 500 },
+  LCP:  { good: 2500,  needsImprovement: 4000 },
+  FCP:  { good: 1800,  needsImprovement: 3000 },
+  TTFB: { good: 800,   needsImprovement: 1800 },
+};
+
+function getRating(name: MetricName, value: number): 'good' | 'needs-improvement' | 'poor' {
+  const t = thresholds[name];
+  if (value <= t.good) return 'good';
+  if (value <= t.needsImprovement) return 'needs-improvement';
+  return 'poor';
+}
+
+export function reportWebVitals() {
+  function sendToAnalytics({ name, value, id }: { name: string; value: number; id: string }) {
+    const rating = getRating(name as MetricName, value);
+
+    // Логируем локально
+    console.log(\`[\${name}] \${value.toFixed(0)} — \${rating}\`);
+
+    // Отправляем в собственный API
+    fetch('/api/vitals', {
+      method: 'POST',
+      body: JSON.stringify({ name, value, rating, id, url: location.href }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  onCLS(sendToAnalytics);
+  onINP(sendToAnalytics);
+  onLCP(sendToAnalytics);
+  onFCP(sendToAnalytics);
+  onTTFB(sendToAnalytics);
+}
+```
+
+---
+
+### 🔧 Практический чеклист оптимизации
+
+```
+ИЗОБРАЖЕНИЯ
+□ next/image для всех изображений
+□ priority для LCP изображения (первый экран)
+□ Указаны width/height или fill+sizes
+□ Нет GIF — используй видео или Lottie
+
+ШРИФТЫ
+□ next/font/google вместо ручного подключения
+□ display: 'swap' для всех шрифтов
+□ Только нужные subsets
+
+СКРИПТЫ
+□ next/script для всех сторонних скриптов
+□ Стратегии: afterInteractive или lazyOnload
+□ Аналитика не блокирует рендер
+
+JAVASCRIPT
+□ next/dynamic для тяжёлых компонентов
+□ Server Components где возможно
+□ Нет moment.js — используй date-fns
+□ Tree-shaking работает (ESM imports)
+
+СЕТЬ
+□ Suspense + streaming для медленных данных
+□ Link prefetch для важных страниц
+□ HTTP/2 (Vercel включает автоматически)
+
+ИЗМЕРЕНИЯ
+□ Lighthouse > 90 для Performance
+□ CLS < 0.1
+□ LCP < 2.5s
+□ INP < 200ms
+```
+
+---
+
+### 🎯 Итог
+
+Производительность — это не разовая задача, а **постоянный процесс**:
+
+1. **Измеряй** — Lighthouse, PageSpeed, web-vitals
+2. **Анализируй** — bundle analyzer, Chrome DevTools
+3. **Оптимизируй** — lazy loading, code splitting, images
+4. **Мониторь** — Vercel Analytics, собственные метрики
+5. **Повторяй** — с каждым релизом
+
+Помни: **преждевременная оптимизация — корень всех зол** (Кнут). Сначала измерь, потом оптимизируй. Не оптимизируй то, что не тормозит! 🎯
+
+<Playground client:visible template="react" files={{ 'App.tsx': `
+import { useState, useEffect, useRef } from 'react';
+
+interface VitalMetric {
+  name: string;
+  label: string;
+  unit: string;
+  before: number;
+  after: number;
+  goodThreshold: number;
+  poorThreshold: number;
+  description: string;
+}
+
+const VITALS: VitalMetric[] = [
+  {
+    name: 'LCP',
+    label: 'Largest Contentful Paint',
+    unit: 'ms',
+    before: 4200,
+    after: 1750,
+    goodThreshold: 2500,
+    poorThreshold: 4000,
+    description: 'Время загрузки главного элемента',
+  },
+  {
+    name: 'INP',
+    label: 'Interaction to Next Paint',
+    unit: 'ms',
+    before: 420,
+    after: 88,
+    goodThreshold: 200,
+    poorThreshold: 500,
+    description: 'Отклик на взаимодействие пользователя',
+  },
+  {
+    name: 'CLS',
+    label: 'Cumulative Layout Shift',
+    unit: '',
+    before: 0.22,
+    after: 0.03,
+    goodThreshold: 0.1,
+    poorThreshold: 0.25,
+    description: 'Смещение элементов при загрузке',
+  },
+];
+
+const BUNDLE_BEFORE = 842;
+const BUNDLE_AFTER = 234;
+
+const OPTIMIZATIONS = [
+  { icon: '🖼️', label: 'next/image + priority для LCP', impact: 'LCP −57%' },
+  { icon: '📦', label: 'Code splitting с next/dynamic', impact: 'Bundle −72%' },
+  { icon: '🔤', label: 'next/font вместо Google Fonts', impact: 'CLS −86%' },
+  { icon: '📜', label: 'next/script lazyOnload для аналитики', impact: 'INP −79%' },
+  { icon: '⚛️', label: 'Server Components для статичных секций', impact: 'JS −45%' },
+];
+
+function getColor(value: number, good: number, poor: number) {
+  if (value <= good) return '#4ade80';
+  if (value <= poor) return '#fbbf24';
+  return '#f87171';
+}
+
+function getRating(value: number, good: number, poor: number) {
+  if (value <= good) return 'Хорошо';
+  if (value <= poor) return 'Нужно улучшить';
+  return 'Плохо';
+}
+
+function getRatingBg(value: number, good: number, poor: number) {
+  if (value <= good) return '#052e16';
+  if (value <= poor) return '#451a03';
+  return '#450a0a';
+}
+
+function formatValue(value: number, unit: string, name: string) {
+  if (name === 'CLS') return value.toFixed(2);
+  if (unit === 'ms' && value >= 1000) return \`\${(value / 1000).toFixed(1)}s\`;
+  return \`\${Math.round(value)}\${unit}\`;
+}
+
+function AnimatedBar({ value, max, color, animated }: { value: number; max: number; color: string; animated: boolean }) {
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    if (animated) {
+      const t = setTimeout(() => setWidth((value / max) * 100), 80);
+      return () => clearTimeout(t);
+    } else {
+      setWidth(0);
+    }
+  }, [value, max, animated]);
+
+  return (
+    <div style={{ background: '#0f172a', borderRadius: 99, height: 10, overflow: 'hidden' }}>
+      <div
+        style={{
+          height: '100%',
+          width: \`\${width}%\`,
+          background: color,
+          borderRadius: 99,
+          transition: 'width 0.7s cubic-bezier(0.22, 1, 0.36, 1)',
+        }}
+      />
+    </div>
+  );
+}
+
+export default function App() {
+  const [optimized, setOptimized] = useState(false);
+  const [animating, setAnimating] = useState(false);
+  const [barsReady, setBarsReady] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    setBarsReady(true);
+  }, []);
+
+  function simulate() {
+    if (animating) return;
+    setAnimating(true);
+    setBarsReady(false);
+    setTimeout(() => {
+      setOptimized(prev => !prev);
+      setBarsReady(true);
+      setAnimating(false);
+    }, 300);
+  }
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ maxWidth: 680, margin: '0 auto' }}>
+
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <div style={{ fontSize: 26, fontWeight: 900, color: '#f1f5f9', marginBottom: 4 }}>
+            ⚡ Core Web Vitals Dashboard
+          </div>
+          <div style={{ color: '#64748b', fontSize: 13 }}>
+            {optimized ? '✅ После оптимизации' : '❌ До оптимизации'}
+          </div>
+        </div>
+
+        {/* Simulate button */}
+        <button
+          onClick={simulate}
+          disabled={animating}
+          style={{
+            display: 'block', width: '100%', marginBottom: 20,
+            padding: '12px 0', borderRadius: 10, border: 'none', cursor: animating ? 'not-allowed' : 'pointer',
+            background: optimized ? '#172554' : '#166534',
+            color: optimized ? '#60a5fa' : '#4ade80',
+            fontWeight: 700, fontSize: 15, transition: 'background 0.3s',
+          }}
+        >
+          {animating ? '⏳ Оптимизируем...' : optimized ? '↩ Показать до оптимизации' : '🚀 Симулировать оптимизацию'}
+        </button>
+
+        {/* Vitals cards */}
+        <div style={{ display: 'grid', gap: 14, marginBottom: 20 }}>
+          {VITALS.map(v => {
+            const current = optimized ? v.after : v.before;
+            const color = getColor(current, v.goodThreshold, v.poorThreshold);
+            const rating = getRating(current, v.goodThreshold, v.poorThreshold);
+            const ratingBg = getRatingBg(current, v.goodThreshold, v.poorThreshold);
+            const maxBar = v.poorThreshold * 1.3;
+
+            return (
+              <div key={v.name} style={{ background: '#1e293b', borderRadius: 12, padding: 16, border: \`1px solid \${color}30\` }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                      <span style={{ color: '#f1f5f9', fontWeight: 900, fontSize: 16 }}>{v.name}</span>
+                      <span style={{ background: ratingBg, color: color, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 99 }}>
+                        {rating}
+                      </span>
+                    </div>
+                    <div style={{ color: '#64748b', fontSize: 11 }}>{v.description}</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ color: color, fontWeight: 900, fontSize: 22, fontFamily: 'monospace', transition: 'color 0.4s' }}>
+                      {formatValue(current, v.unit, v.name)}
+                    </div>
+                    {optimized && (
+                      <div style={{ color: '#4ade80', fontSize: 10, fontWeight: 700 }}>
+                        ↓ {Math.round((1 - v.after / v.before) * 100)}% быстрее
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <AnimatedBar value={current} max={maxBar} color={color} animated={barsReady} />
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
+                  <span style={{ color: '#4ade80', fontSize: 10 }}>✓ &lt;{formatValue(v.goodThreshold, v.unit, v.name)}</span>
+                  <span style={{ color: '#fbbf24', fontSize: 10 }}>⚠ &lt;{formatValue(v.poorThreshold, v.unit, v.name)}</span>
+                  <span style={{ color: '#f87171', fontSize: 10 }}>✗ &gt;{formatValue(v.poorThreshold, v.unit, v.name)}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Bundle comparison */}
+        <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 20 }}>
+          <div style={{ color: '#f1f5f9', fontWeight: 700, marginBottom: 14, fontSize: 14 }}>
+            📦 Размер JS-бандла
+          </div>
+          {[
+            { label: 'До', value: BUNDLE_BEFORE, color: '#f87171' },
+            { label: 'После', value: BUNDLE_AFTER, color: '#4ade80' },
+          ].map(b => (
+            <div key={b.label} style={{ marginBottom: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+                <span style={{ color: '#94a3b8', fontSize: 12 }}>{b.label}</span>
+                <span style={{ color: b.color, fontWeight: 700, fontSize: 13, fontFamily: 'monospace' }}>{b.value} KB</span>
+              </div>
+              <div style={{ background: '#0f172a', borderRadius: 99, height: 8, overflow: 'hidden' }}>
+                <div
+                  style={{
+                    height: '100%',
+                    width: barsReady ? \`\${(b.value / BUNDLE_BEFORE) * 100}%\` : '0%',
+                    background: b.color,
+                    borderRadius: 99,
+                    transition: 'width 0.8s cubic-bezier(0.22, 1, 0.36, 1)',
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+          <div style={{ color: '#4ade80', fontSize: 12, fontWeight: 700, marginTop: 8, textAlign: 'center' }}>
+            Экономия: {BUNDLE_BEFORE - BUNDLE_AFTER} KB (−{Math.round((1 - BUNDLE_AFTER / BUNDLE_BEFORE) * 100)}%)
+          </div>
+        </div>
+
+        {/* Optimizations list */}
+        <div style={{ background: '#1e293b', borderRadius: 12, padding: 16 }}>
+          <div style={{ color: '#f1f5f9', fontWeight: 700, marginBottom: 12, fontSize: 14 }}>
+            🛠️ Применённые оптимизации
+          </div>
+          {OPTIMIZATIONS.map((opt, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '8px 0',
+                borderBottom: i < OPTIMIZATIONS.length - 1 ? '1px solid #0f172a' : 'none',
+                opacity: optimized ? 1 : 0.35,
+                transition: 'opacity 0.4s',
+                transitionDelay: \`\${i * 60}ms\`,
+              }}
+            >
+              <span style={{ fontSize: 16 }}>{opt.icon}</span>
+              <span style={{ color: '#cbd5e1', fontSize: 12, flex: 1 }}>{opt.label}</span>
+              <span style={{ color: '#4ade80', fontSize: 11, fontWeight: 700, fontFamily: 'monospace', whiteSpace: 'nowrap' }}>
+                {opt.impact}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ textAlign: 'center', color: '#334155', fontSize: 11, marginTop: 14 }}>
+          Core Web Vitals Dashboard • Нажми «Симулировать оптимизацию» ⚡
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

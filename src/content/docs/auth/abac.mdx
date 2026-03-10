@@ -1,0 +1,420 @@
+---
+title: "11. ABAC: атрибутивная модель"
+sidebar:
+  order: 10
+---
+import { Playground } from '@components/Playground'
+
+## Что такое ABAC?
+
+**ABAC (Attribute-Based Access Control)** — управление доступом на основе атрибутов. Решение принимается на основе характеристик пользователя, ресурса, действия и окружения.
+
+```
+RBAC: Редактор может редактировать статьи
+ABAC: Редактор может редактировать СВОИ статьи, ЕСЛИ они не опубликованы И время 9-18
+```
+
+**ABAC гибче RBAC**:
+- RBAC: "Редакторы могут редактировать"
+- ABAC: "Редакторы могут редактировать только свои черновики в рабочее время"
+
+## Атрибуты в ABAC
+
+```
+Subject (Пользователь):
+  - role: "editor"
+  - department: "marketing"  
+  - clearanceLevel: 3
+
+Resource (Ресурс):
+  - type: "article"
+  - status: "draft"
+  - authorId: "user123"
+  - classification: "public"
+
+Action (Действие):
+  - type: "update"
+  - method: "PUT"
+
+Environment (Окружение):
+  - time: "14:30"
+  - ipAddress: "192.168.1.1"
+  - dayOfWeek: "Monday"
+```
+
+## Простая реализация
+
+```javascript
+// Политика как функция
+function canEditPost(user, post) {
+  // Автор может редактировать свои черновики
+  if (post.authorId === user.id && post.status === 'draft') {
+    return true;
+  }
+  
+  // Модератор может редактировать любые черновики
+  if (user.role === 'moderator' && post.status === 'draft') {
+    return true;
+  }
+  
+  // Админ может всё
+  if (user.role === 'admin') {
+    return true;
+  }
+  
+  return false;
+}
+
+// Использование в роуте
+app.put('/api/posts/:id', authMiddleware, async (req, res) => {
+  const post = await db.posts.findById(req.params.id);
+  
+  if (!canEditPost(req.user, post)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  
+  const updated = await db.posts.update(req.params.id, req.body);
+  res.json(updated);
+});
+```
+
+## Policy Engine
+
+Для сложных систем — движок политик:
+
+```javascript
+class PolicyEngine {
+  constructor() {
+    this.policies = new Map();
+  }
+  
+  // Регистрируем политику
+  define(resource, action, policy) {
+    const key = `${resource}:${action}`;
+    this.policies.set(key, policy);
+    return this;
+  }
+  
+  // Проверяем доступ
+  async can(user, action, resource, context = {}) {
+    const key = `${resource.type}:${action}`;
+    const policy = this.policies.get(key);
+    
+    if (!policy) {
+      return false; // по умолчанию — запрещено
+    }
+    
+    return policy({ user, resource, action, context });
+  }
+}
+
+const policyEngine = new PolicyEngine();
+
+// Определяем политики
+policyEngine
+  .define('post', 'read', ({ user, resource }) => {
+    // Опубликованные посты видят все
+    if (resource.status === 'published') return true;
+    // Черновики только автор или модератор+
+    if (resource.authorId === user.id) return true;
+    return ['moderator', 'admin'].includes(user.role);
+  })
+  
+  .define('post', 'create', ({ user }) => {
+    return ['editor', 'admin'].includes(user.role);
+  })
+  
+  .define('post', 'update', ({ user, resource }) => {
+    // Автор может редактировать свои черновики
+    if (resource.authorId === user.id && resource.status === 'draft') {
+      return true;
+    }
+    return user.role === 'admin';
+  })
+  
+  .define('post', 'delete', ({ user, resource }) => {
+    if (resource.authorId === user.id) return true;
+    return user.role === 'admin';
+  })
+  
+  .define('post', 'publish', ({ user }) => {
+    return ['moderator', 'admin'].includes(user.role);
+  })
+  
+  .define('user', 'manage', ({ user, resource }) => {
+    if (user.role !== 'admin') return false;
+    // Суперадмин не может удалить сам себя
+    if (resource.id === user.id && action === 'delete') return false;
+    return true;
+  });
+
+// Middleware
+function authorize(action, resourceLoader) {
+  return async (req, res, next) => {
+    const resource = await resourceLoader(req);
+    const allowed = await policyEngine.can(req.user, action, resource);
+    
+    if (!allowed) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    req.resource = resource;
+    next();
+  };
+}
+
+// Использование
+app.put('/api/posts/:id',
+  authMiddleware,
+  authorize('update', req => db.posts.findById(req.params.id)),
+  async (req, res) => {
+    const updated = await db.posts.update(req.params.id, req.body);
+    res.json(updated);
+  }
+);
+```
+
+## Контекстные условия (Environment)
+
+```javascript
+policyEngine.define('report', 'export', ({ user, context }) => {
+  // Только в рабочие часы
+  const hour = new Date().getHours();
+  if (hour < 9 || hour > 18) return false;
+  
+  // Только из офисной сети
+  const officeIPs = ['192.168.1.0/24', '10.0.0.0/8'];
+  if (!isInNetwork(context.ip, officeIPs)) return false;
+  
+  // Только с достаточным уровнем допуска
+  return user.clearanceLevel >= 3;
+});
+```
+
+## ABAC с CASL (популярная библиотека)
+
+**CASL** — изоморфная библиотека авторизации, работает в Node.js и браузере.
+
+```bash
+npm install @casl/ability
+```
+
+```javascript
+import { AbilityBuilder, createMongoAbility } from '@casl/ability';
+
+function defineAbilityFor(user) {
+  const { can, cannot, build } = new AbilityBuilder(createMongoAbility);
+  
+  if (user.role === 'admin') {
+    can('manage', 'all'); // всё что угодно
+  } else if (user.role === 'editor') {
+    can('read', 'Post');
+    can('create', 'Post');
+    can('update', 'Post', { authorId: user.id }); // только свои
+    can('delete', 'Post', { authorId: user.id, status: 'draft' }); // только черновики свои
+  } else {
+    can('read', 'Post', { status: 'published' }); // только опубликованные
+  }
+  
+  // Нельзя трогать системные ресурсы
+  cannot('delete', 'Post', { type: 'system' });
+  
+  return build();
+}
+
+// Использование
+const ability = defineAbilityFor(user);
+
+// Проверка
+if (ability.can('update', post)) {
+  // разрешено
+}
+
+if (ability.cannot('delete', { type: 'Post', ...post })) {
+  throw new ForbiddenError('Cannot delete this post');
+}
+```
+
+### CASL с Express
+
+```javascript
+import { ForbiddenError } from '@casl/ability';
+
+function authorize(action, subject) {
+  return (req, res, next) => {
+    try {
+      const ability = defineAbilityFor(req.user);
+      
+      ForbiddenError.from(ability).throwUnlessCan(action, subject);
+      next();
+    } catch (err) {
+      if (err.name === 'ForbiddenError') {
+        return res.status(403).json({ error: err.message });
+      }
+      next(err);
+    }
+  };
+}
+
+app.delete('/api/posts/:id',
+  authMiddleware,
+  async (req, res, next) => {
+    const post = await db.posts.findById(req.params.id);
+    req.post = post;
+    next();
+  },
+  (req, res, next) => {
+    try {
+      const ability = defineAbilityFor(req.user);
+      ForbiddenError.from(ability).throwUnlessCan('delete', req.post);
+      next();
+    } catch (err) {
+      res.status(403).json({ error: 'Access denied' });
+    }
+  },
+  async (req, res) => {
+    await db.posts.delete(req.params.id);
+    res.json({ success: true });
+  }
+);
+```
+
+### CASL в React (клиентская сторона)
+
+```typescript
+'use client';
+
+import { createContext, useContext } from 'react';
+import { createMongoAbility, defineAbilityFor } from '@/lib/ability';
+import { useSession } from 'next-auth/react';
+
+const AbilityContext = createContext(createMongoAbility([]));
+
+export function AbilityProvider({ children }) {
+  const { data: session } = useSession();
+  const ability = defineAbilityFor(session?.user);
+  
+  return (
+    <AbilityContext.Provider value={ability}>
+      {children}
+    </AbilityContext.Provider>
+  );
+}
+
+export const useAbility = () => useContext(AbilityContext);
+
+// Использование в компоненте
+function PostActions({ post }) {
+  const ability = useAbility();
+  
+  return (
+    <div>
+      {ability.can('update', post) && (
+        <EditButton />
+      )}
+      {ability.can('delete', post) && (
+        <DeleteButton />
+      )}
+      {ability.can('publish', post) && (
+        <PublishButton />
+      )}
+    </div>
+  );
+}
+```
+
+## RBAC vs ABAC: когда что
+
+| Критерий | RBAC | ABAC |
+|----------|------|------|
+| Сложность | Простой | Сложнее |
+| Гибкость | Ограниченная | Высокая |
+| Производительность | Выше | Ниже (вычисления) |
+| Аудит | Проще | Сложнее |
+| Применение | Большинство приложений | Сложные системы |
+
+**Используй RBAC** для большинства приложений.
+**Переходи на ABAC** когда нужна гранулярность: "пользователь может менять только свои данные в рабочие часы".
+
+## Практические задания
+
+1. Реализуй PolicyEngine для системы блога (read/create/update/delete posts)
+2. Добавь контекстное условие: редактирование только в рабочие часы
+3. Установи CASL и перепиши политики на него
+4. Добавь CASL в React для условного показа кнопок
+
+## Попробуй: ABAC проверка на основе атрибутов
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    '/App.js': `import { useState } from 'react';
+
+const posts = [
+  { id: 1, title: 'Мой черновик', authorId: 'user1', status: 'draft' },
+  { id: 2, title: 'Чужой черновик', authorId: 'user2', status: 'draft' },
+  { id: 3, title: 'Мой опубликованный', authorId: 'user1', status: 'published' },
+  { id: 4, title: 'Чужой опубликованный', authorId: 'user2', status: 'published' },
+];
+
+const users = [
+  { id: 'user1', name: 'Alice', role: 'editor' },
+  { id: 'user2', name: 'Bob', role: 'viewer' },
+  { id: 'admin', name: 'Admin', role: 'admin' },
+];
+
+function canEditPost(user, post) {
+  if (user.role === 'admin') return { allowed: true, reason: 'Админ может всё' };
+  if (post.authorId === user.id && post.status === 'draft')
+    return { allowed: true, reason: 'Автор + черновик' };
+  if (post.authorId !== user.id)
+    return { allowed: false, reason: 'Не автор поста' };
+  if (post.status === 'published')
+    return { allowed: false, reason: 'Опубликован — нельзя менять' };
+  return { allowed: false, reason: 'Нет доступа' };
+}
+
+export default function App() {
+  const [userId, setUserId] = useState('user1');
+  const user = users.find(u => u.id === userId);
+
+  return (
+    <div style={{ fontFamily: 'system-ui', padding: 20, background: '#1a1a2e', minHeight: '100vh', color: '#fff' }}>
+      <h2>ABAC: Кто может редактировать?</h2>
+      <p style={{ color: '#94a3b8', fontSize: 13 }}>Правило: автор может редактировать свои черновики. Админ — всё.</p>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+        {users.map(u => (
+          <button key={u.id} onClick={() => setUserId(u.id)} style={{
+            padding: '8px 14px', borderRadius: 6, border: 'none', cursor: 'pointer',
+            background: userId === u.id ? '#a855f7' : '#1e293b', color: '#fff', fontSize: 13,
+          }}>{u.name} ({u.role})</button>
+        ))}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {posts.map(p => {
+          const { allowed, reason } = canEditPost(user, p);
+          return (
+            <div key={p.id} style={{
+              padding: 12, borderRadius: 8,
+              background: allowed ? '#22c55e11' : '#ef444411',
+              border: '1px solid ' + (allowed ? '#22c55e44' : '#ef444444'),
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                <span style={{ fontWeight: 600 }}>{p.title}</span>
+                <span style={{ color: allowed ? '#22c55e' : '#ef4444', fontSize: 13, fontWeight: 600 }}>
+                  {allowed ? 'CAN EDIT' : 'DENIED'}
+                </span>
+              </div>
+              <div style={{ fontSize: 12, color: '#64748b' }}>
+                author: {p.authorId} | status: {p.status} | {reason}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,525 @@
+---
+title: "28. Кастомные примитивы"
+sidebar:
+  order: 28
+---
+import { Playground } from '@components/Playground'
+
+
+Одна из самых мощных концепций Solid.js — создание собственных **реактивных примитивов**. Примитив — это функция, которая инкапсулирует реактивную логику и может переиспользоваться в любом компоненте так же легко, как встроенные `createSignal` или `createEffect`.
+
+## Что такое кастомный примитив?
+
+Кастомный примитив — обычная функция (обычно с префиксом `create` или `make`), которая:
+
+- Использует встроенные примитивы внутри себя
+- Возвращает реактивные данные или методы управления
+- Работает **только внутри реактивного контекста** (компонент или другой примитив)
+
+```tsx
+// Простейший кастомный примитив
+function createCounter(initial = 0) {
+  const [count, setCount] = createSignal(initial);
+
+  return {
+    count,
+    increment: () => setCount(c => c + 1),
+    decrement: () => setCount(c => c - 1),
+    reset: () => setCount(initial),
+  };
+}
+
+// Использование в компоненте — как будто встроенный примитив
+function Counter() {
+  const { count, increment, decrement } = createCounter(10);
+  return <button onClick={increment}>{count()}</button>;
+}
+```
+
+## `make*` vs `create*` — соглашения именования
+
+Библиотека `@solid-primitives` ввела важное соглашение:
+
+- **`create*`** — создаёт реактивные данные, **должен вызываться в реактивном контексте** (компонент/эффект). Жизненный цикл управляется владельцем (`Owner`).
+- **`make*`** — создаёт что-то с **ручным управлением жизненным циклом**, можно вызвать вне контекста.
+
+```tsx
+// create — привязан к жизненному циклу компонента, очищается автоматически
+function createEventListener(
+  target: EventTarget,
+  event: string,
+  handler: EventListener
+) {
+  createEffect(() => {
+    target.addEventListener(event, handler);
+    onCleanup(() => target.removeEventListener(event, handler));
+  });
+}
+
+// make — ручное управление, возвращает dispose-функцию
+function makeEventListener(
+  target: EventTarget,
+  event: string,
+  handler: EventListener
+) {
+  target.addEventListener(event, handler);
+  return () => target.removeEventListener(event, handler); // вызывай сам!
+}
+```
+
+## `createLocalStorage` — персистентный сигнал
+
+Один из самых полезных примитивов — сигнал, синхронизированный с `localStorage`:
+
+```tsx
+function createLocalStorage<T>(key: string, initialValue: T) {
+  const stored = localStorage.getItem(key);
+  const initial = stored !== null ? JSON.parse(stored) : initialValue;
+
+  const [value, setValue] = createSignal<T>(initial);
+
+  // Каждый раз при изменении — сохраняем в localStorage
+  createEffect(() => {
+    localStorage.setItem(key, JSON.stringify(value()));
+  });
+
+  return [value, setValue] as const;
+}
+
+// Использование — как обычный createSignal, но персистентный!
+function Settings() {
+  const [theme, setTheme] = createLocalStorage('theme', 'dark');
+
+  return (
+    <select value={theme()} onChange={e => setTheme(e.target.value)}>
+      <option value="dark">Тёмная</option>
+      <option value="light">Светлая</option>
+    </select>
+  );
+}
+```
+
+## `createDebounce` — дебаунс-примитив
+
+Часто нужно реагировать на изменения сигнала не сразу, а с задержкой:
+
+```tsx
+function createDebounce<T>(source: Accessor<T>, delay: number): Accessor<T> {
+  const [debounced, setDebounced] = createSignal<T>(source());
+  let timer: ReturnType<typeof setTimeout>;
+
+  createEffect(() => {
+    const value = source(); // создаём подписку
+    clearTimeout(timer);
+    timer = setTimeout(() => setDebounced(() => value), delay);
+    onCleanup(() => clearTimeout(timer));
+  });
+
+  return debounced;
+}
+
+function Search() {
+  const [query, setQuery] = createSignal('');
+  const debouncedQuery = createDebounce(query, 300);
+
+  // Срабатывает только через 300мс после последнего ввода
+  createEffect(() => {
+    if (debouncedQuery()) fetchResults(debouncedQuery());
+  });
+
+  return <input onInput={e => setQuery(e.target.value)} />;
+}
+```
+
+## `createMediaQuery` — реактивный медиа-запрос
+
+```tsx
+function createMediaQuery(query: string): Accessor<boolean> {
+  const mql = window.matchMedia(query);
+  const [matches, setMatches] = createSignal(mql.matches);
+
+  const handler = (e: MediaQueryListEvent) => setMatches(e.matches);
+  mql.addEventListener('change', handler);
+  onCleanup(() => mql.removeEventListener('change', handler));
+
+  return matches;
+}
+
+function ResponsiveLayout() {
+  const isMobile = createMediaQuery('(max-width: 768px)');
+  const prefersReducedMotion = createMediaQuery('(prefers-reduced-motion: reduce)');
+
+  return (
+    <div>
+      <Show when={isMobile()} fallback={<DesktopNav />}>
+        <MobileNav />
+      </Show>
+    </div>
+  );
+}
+```
+
+## `@solid-primitives` — официальная библиотека
+
+`@solid-primitives` — коллекция из 100+ готовых примитивов. Каждый пакет устанавливается отдельно:
+
+```bash
+npm install @solid-primitives/timer
+npm install @solid-primitives/storage
+npm install @solid-primitives/media
+npm install @solid-primitives/event-listener
+npm install @solid-primitives/intersection-observer
+npm install @solid-primitives/fetch
+npm install @solid-primitives/keyboard
+```
+
+### Обзор популярных пакетов
+
+| Пакет | Ключевые примитивы |
+|---|---|
+| `@solid-primitives/timer` | `createTimer`, `makeTimer`, `createInterval` |
+| `@solid-primitives/storage` | `createLocalStorage`, `createSessionStorage`, `makePersisted` |
+| `@solid-primitives/media` | `createMediaQuery`, `createBreakpoints` |
+| `@solid-primitives/fetch` | `createFetch` с кешированием и повторами |
+| `@solid-primitives/keyboard` | `createKeyHold`, `useKeyDownList` |
+| `@solid-primitives/scroll` | `createScrollPosition`, `useWindowScrollPosition` |
+| `@solid-primitives/intersection-observer` | `createIntersectionObserver`, `createViewportObserver` |
+| `@solid-primitives/gesture` | `createGesture`, свайпы, зум |
+
+### Пример: `createTimer`
+
+```tsx
+import { createTimer } from '@solid-primitives/timer';
+
+function Stopwatch() {
+  const [running, setRunning] = createSignal(false);
+  const [elapsed, setElapsed] = createSignal(0);
+
+  // delay может быть сигналом! false = пауза
+  createTimer(
+    () => setElapsed(e => e + 100),
+    () => running() ? 100 : false,
+    setInterval
+  );
+
+  return (
+    <div>
+      <span>{(elapsed() / 1000).toFixed(1)}с</span>
+      <button onClick={() => setRunning(r => !r)}>
+        {running() ? 'Пауза' : 'Старт'}
+      </button>
+    </div>
+  );
+}
+```
+
+## Композиция примитивов
+
+Настоящая сила — в том, что примитивы можно **компоновать**:
+
+```tsx
+// Примитив высшего уровня, использующий другие примитивы
+function createPersistentDebounced<T>(
+  key: string,
+  initial: T,
+  delay = 500
+) {
+  const [value, setValue] = createLocalStorage(key, initial);
+  const debounced = createDebounce(value, delay);
+  const isDesktop = createMediaQuery('(min-width: 1024px)');
+
+  return {
+    value,
+    debounced,
+    isDesktop,
+    setValue,
+  };
+}
+```
+
+## Типизация примитивов
+
+Хорошо типизированный примитив на порядок улучшает DX. Используй `Accessor`, `Setter` и дженерики:
+
+```tsx
+import type { Accessor, Setter } from 'solid-js';
+
+// Tuple как у createSignal — удобно деструктурировать
+function createToggle(
+  initial = false
+): [get: Accessor<boolean>, actions: {
+  toggle: () => void;
+  setTrue: () => void;
+  setFalse: () => void;
+  set: Setter<boolean>;
+}] {
+  const [value, set] = createSignal(initial);
+
+  return [value, {
+    toggle: () => set(v => !v),
+    setTrue: () => set(true),
+    setFalse: () => set(false),
+    set,
+  }];
+}
+
+// Использование
+const [isOpen, { toggle, setFalse }] = createToggle();
+```
+
+## Распространённые ошибки
+
+```tsx
+// ❌ Вызов createSignal вне реактивного контекста
+const counter = createCounter(); // Error: Calling signal outside owner
+
+// ✅ Внутри компонента
+function App() {
+  const counter = createCounter(); // OK
+}
+
+// ❌ Утечка памяти — нет onCleanup!
+function createBadListener(el: Element, event: string, fn: EventListener) {
+  createEffect(() => {
+    el.addEventListener(event, fn);
+    // Забыли onCleanup — слушатель не удаляется при размонтировании!
+  });
+}
+
+// ✅ Правильно — всегда убираем за собой
+function createGoodListener(el: Element, event: string, fn: EventListener) {
+  createEffect(() => {
+    el.addEventListener(event, fn);
+    onCleanup(() => el.removeEventListener(event, fn));
+  });
+}
+```
+
+## Интерактивный пример
+
+Три кастомных примитива в действии — `useLocalStorage`, `useDebounce`, `useMediaQuery`:
+
+<Playground client:visible
+  template="react"
+  files={{
+    'App.tsx': `import { useState, useEffect, useRef, useCallback } from 'react';
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const YELLOW = '#fbbf24';
+
+// ─── Primitive 1: useLocalStorage ────────────────────────────────────────────
+function useLocalStorage<T>(key: string, initial: T): [T, (v: T | ((p: T) => T)) => void] {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const s = localStorage.getItem(key);
+      return s !== null ? JSON.parse(s) : initial;
+    } catch { return initial; }
+  });
+  const setAndPersist = useCallback((v: T | ((p: T) => T)) => {
+    setValue(prev => {
+      const next = typeof v === 'function' ? (v as (p: T) => T)(prev) : v;
+      try { localStorage.setItem(key, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [key]);
+  return [value, setAndPersist];
+}
+
+// ─── Primitive 2: useDebounce ─────────────────────────────────────────────────
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState<T>(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
+// ─── Primitive 3: useMediaQuery ───────────────────────────────────────────────
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const h = (e: MediaQueryListEvent) => setMatches(e.matches);
+    mql.addEventListener('change', h);
+    return () => mql.removeEventListener('change', h);
+  }, [query]);
+  return matches;
+}
+
+// ─── Tab button ───────────────────────────────────────────────────────────────
+function Tab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: '8px 14px', borderRadius: '8px', border: '1px solid',
+        borderColor: active ? SOLID_BLUE : BORDER,
+        background: active ? SOLID_BLUE + '33' : 'transparent',
+        color: active ? TEXT : MUTED, cursor: 'pointer', fontSize: '12px',
+        fontWeight: active ? 600 : 400, transition: 'all .2s',
+      }}
+    >{label}</button>
+  );
+}
+
+// ─── Demo 1: LocalStorage ──────────────────────────────────────────────────────
+function LocalStorageDemo() {
+  const [name, setName] = useLocalStorage('prim_name', '');
+  const [theme, setTheme] = useLocalStorage('prim_theme', 'dark');
+  const [count, setCount] = useLocalStorage('prim_count', 0);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <p style={{ margin: 0, color: MUTED, fontSize: '13px', lineHeight: 1.6 }}>
+        Данные сохраняются в <code style={{ color: GREEN }}>localStorage</code> и переживают перезагрузку страницы.
+      </p>
+      <label style={{ display: 'flex', flexDirection: 'column', gap: '5px', fontSize: '12px', color: MUTED }}>
+        Имя пользователя
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="Введите имя…"
+          style={{ padding: '8px 12px', background: BG, border: '1px solid ' + BORDER, borderRadius: '6px', color: TEXT, fontSize: '13px', outline: 'none' }} />
+      </label>
+      <label style={{ display: 'flex', flexDirection: 'column', gap: '5px', fontSize: '12px', color: MUTED }}>
+        Тема
+        <select value={theme} onChange={e => setTheme(e.target.value)}
+          style={{ padding: '8px 12px', background: BG, border: '1px solid ' + BORDER, borderRadius: '6px', color: TEXT, fontSize: '13px', outline: 'none' }}>
+          <option value="dark">Тёмная</option>
+          <option value="light">Светлая</option>
+          <option value="system">Системная</option>
+        </select>
+      </label>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <button onClick={() => setCount(c => c - 1)}
+          style={{ width: 34, height: 34, borderRadius: '7px', border: '1px solid ' + BORDER, background: BG, color: TEXT, fontSize: '18px', cursor: 'pointer' }}>−</button>
+        <span style={{ fontSize: '22px', fontWeight: 700, minWidth: 36, textAlign: 'center', color: TEXT }}>{count}</span>
+        <button onClick={() => setCount(c => c + 1)}
+          style={{ width: 34, height: 34, borderRadius: '7px', border: '1px solid ' + BORDER, background: BG, color: TEXT, fontSize: '18px', cursor: 'pointer' }}>+</button>
+        <span style={{ color: MUTED, fontSize: '12px' }}>персистентный счётчик</span>
+      </div>
+      <div style={{ padding: '10px 12px', background: BG, borderRadius: '8px', fontFamily: 'monospace', fontSize: '11px', color: GREEN, wordBreak: 'break-all' }}>
+        {'{ name: "' + name + '", theme: "' + theme + '", count: ' + count + ' }'}
+      </div>
+    </div>
+  );
+}
+
+// ─── Demo 2: Debounce ─────────────────────────────────────────────────────────
+function DebounceDemo() {
+  const [input, setInput] = useState('');
+  const [calls, setCalls] = useState<string[]>([]);
+  const debounced = useDebounce(input, 500);
+  const prev = useRef('');
+  useEffect(() => {
+    if (debounced !== prev.current && debounced) {
+      prev.current = debounced;
+      setCalls(c => ['\u2714 API запрос: "' + debounced + '"', ...c].slice(0, 6));
+    }
+  }, [debounced]);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <p style={{ margin: 0, color: MUTED, fontSize: '13px', lineHeight: 1.6 }}>
+        Печатайте быстро — API запрос срабатывает только через <strong style={{ color: ORANGE }}>500мс</strong> после остановки.
+      </p>
+      <input value={input} onChange={e => setInput(e.target.value)} placeholder="Поиск…"
+        style={{ padding: '9px 13px', background: BG, border: '1px solid ' + BORDER, borderRadius: '8px', color: TEXT, fontSize: '13px', outline: 'none', width: '100%', boxSizing: 'border-box' }} />
+      <div style={{ display: 'flex', gap: '12px' }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: '11px', color: MUTED, marginBottom: '4px' }}>Текущее значение</div>
+          <div style={{ padding: '7px 10px', background: BG, borderRadius: '6px', fontSize: '13px', minHeight: 32, color: TEXT }}>{input || '—'}</div>
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: '11px', color: MUTED, marginBottom: '4px' }}>Дебаунс (500мс)</div>
+          <div style={{ padding: '7px 10px', background: BG, borderRadius: '6px', fontSize: '13px', minHeight: 32, color: GREEN }}>{debounced || '—'}</div>
+        </div>
+      </div>
+      <div>
+        <div style={{ fontSize: '11px', color: MUTED, marginBottom: '6px' }}>История API вызовов:</div>
+        {calls.length === 0
+          ? <div style={{ color: MUTED, fontSize: '12px' }}>Начните вводить…</div>
+          : calls.map((c, i) => (
+            <div key={i} style={{ padding: '5px 10px', background: BG, borderRadius: '5px', marginBottom: 3, fontSize: '12px', color: i === 0 ? GREEN : MUTED + 'aa' }}>
+              {c}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Demo 3: MediaQuery ───────────────────────────────────────────────────────
+function MediaQueryDemo() {
+  const isNarrow = useMediaQuery('(max-width: 480px)');
+  const prefersLight = useMediaQuery('(prefers-color-scheme: light)');
+  const prefersMotion = useMediaQuery('(prefers-reduced-motion: no-preference)');
+  const queries = [
+    { label: 'max-width: 480px', value: isNarrow, trueLabel: 'Мобильный', falseLabel: 'Широкий' },
+    { label: 'prefers-color-scheme: light', value: prefersLight, trueLabel: 'Светлая тема', falseLabel: 'Тёмная тема' },
+    { label: 'prefers-reduced-motion', value: !prefersMotion, trueLabel: 'Без анимаций', falseLabel: 'Анимации ок' },
+  ];
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <p style={{ margin: 0, color: MUTED, fontSize: '13px', lineHeight: 1.6 }}>
+        Реактивные медиа-запросы. Попробуйте изменить ширину окна или системные настройки.
+      </p>
+      {queries.map(q => (
+        <div key={q.label} style={{ padding: '12px 14px', background: BG, borderRadius: '8px', border: '1px solid ' + BORDER }}>
+          <div style={{ fontSize: '11px', color: MUTED, marginBottom: '6px', fontFamily: 'monospace' }}>({q.label})</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: q.value ? GREEN : BORDER, flexShrink: 0 }} />
+            <span style={{ fontSize: '14px', fontWeight: 600, color: q.value ? GREEN : MUTED }}>
+              {q.value ? q.trueLabel : q.falseLabel}
+            </span>
+            <span style={{ fontSize: '11px', color: MUTED, marginLeft: 'auto', background: CARD, padding: '2px 8px', borderRadius: '4px' }}>
+              {q.value ? 'true' : 'false'}
+            </span>
+          </div>
+        </div>
+      ))}
+      <div style={{ padding: '12px', background: BG, borderRadius: '8px', fontSize: '12px', color: MUTED, lineHeight: 1.6 }}>
+        <span style={{ color: SOLID_BLUE, fontWeight: 600 }}>💡 Совет: </span>
+        В Solid.js примитив <code style={{ color: GREEN }}>createMediaQuery</code> из <code>@solid-primitives/media</code> работает точно так же — просто вызови его в компоненте и получи реактивное булево значение.
+      </div>
+    </div>
+  );
+}
+
+// ─── Root App ─────────────────────────────────────────────────────────────────
+type TabId = 'storage' | 'debounce' | 'media';
+
+export default function App() {
+  const [tab, setTab] = useState<TabId>('storage');
+  const tabs: { id: TabId; label: string; color: string }[] = [
+    { id: 'storage', label: 'createLocalStorage', color: GREEN },
+    { id: 'debounce', label: 'createDebounce', color: ORANGE },
+    { id: 'media', label: 'createMediaQuery', color: SOLID_BLUE },
+  ];
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 680, margin: '0 auto' }}>
+        <h1 style={{ margin: '0 0 4px', fontSize: '20px' }}>Custom Primitives</h1>
+        <p style={{ margin: '0 0 20px', color: MUTED, fontSize: '13px' }}>Симуляция трёх кастомных примитивов Solid.js</p>
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', flexWrap: 'wrap' }}>
+          {tabs.map(t => <Tab key={t.id} label={t.label} active={tab === t.id} onClick={() => setTab(t.id)} />)}
+        </div>
+        <div style={{ background: CARD, borderRadius: '12px', padding: '20px', border: '1px solid ' + BORDER }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: tabs.find(t => t.id === tab)?.color || GREEN }} />
+            <span style={{ fontSize: '14px', fontWeight: 600 }}>{tabs.find(t => t.id === tab)?.label}</span>
+          </div>
+          {tab === 'storage' && <LocalStorageDemo />}
+          {tab === 'debounce' && <DebounceDemo />}
+          {tab === 'media' && <MediaQueryDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

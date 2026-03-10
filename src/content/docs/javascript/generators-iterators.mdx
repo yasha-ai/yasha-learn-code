@@ -1,0 +1,297 @@
+---
+title: "84. Генераторы и итераторы"
+sidebar:
+  order: 86
+---
+import { Playground } from '@components/Playground'
+
+
+Генераторы — функции, которые могут приостанавливать своё выполнение и возобновлять его позже. Вместе с протоколом итерации они позволяют создавать ленивые последовательности и управлять потоком выполнения нестандартными способами.
+
+## Протокол итерации
+
+JavaScript использует два протокола для итерации:
+
+**Итерируемый (Iterable)** — объект с методом `[Symbol.iterator]()`, который возвращает **итератор**.
+
+**Итератор (Iterator)** — объект с методом `next()`, возвращающим `{ value, done }`.
+
+```javascript
+// Ручная реализация итератора
+function createCounter(start, end) {
+  let current = start
+  return {
+    // Сам является итерируемым (возвращает себя)
+    [Symbol.iterator]() { return this },
+    next() {
+      return current <= end
+        ? { value: current++, done: false }
+        : { value: undefined, done: true }
+    }
+  }
+}
+
+const counter = createCounter(1, 3)
+console.log(counter.next()) // { value: 1, done: false }
+console.log(counter.next()) // { value: 2, done: false }
+console.log(counter.next()) // { value: 3, done: false }
+console.log(counter.next()) // { value: undefined, done: true }
+
+for (const n of createCounter(1, 5)) {
+  console.log(n) // 1 2 3 4 5
+}
+```
+
+## Генераторы: function*
+
+Генератор — специальная функция с `*`. Оператор `yield` приостанавливает выполнение:
+
+```javascript
+function* simpleGenerator() {
+  console.log('Шаг 1')
+  yield 10
+  console.log('Шаг 2')
+  yield 20
+  console.log('Шаг 3')
+  return 30
+}
+
+const gen = simpleGenerator()
+
+console.log(gen.next()) // Шаг 1 → { value: 10, done: false }
+console.log(gen.next()) // Шаг 2 → { value: 20, done: false }
+console.log(gen.next()) // Шаг 3 → { value: 30, done: true }
+console.log(gen.next()) // { value: undefined, done: true }
+```
+
+Генераторы автоматически реализуют оба протокола — их можно использовать в `for...of`:
+
+```javascript
+function* range(from, to, step = 1) {
+  for (let i = from; i <= to; i += step) {
+    yield i
+  }
+}
+
+console.log([...range(1, 10, 2)]) // [1, 3, 5, 7, 9]
+console.log([...range(0, 100, 25)]) // [0, 25, 50, 75, 100]
+```
+
+## yield* — делегирование
+
+`yield*` передаёт управление другому итерируемому объекту:
+
+```javascript
+function* numbers() { yield 1; yield 2 }
+function* letters() { yield 'a'; yield 'b' }
+
+function* combined() {
+  yield* numbers()   // делегирует генератор numbers
+  yield* letters()   // делегирует генератор letters
+  yield* [3, 4]      // делегирует массив
+}
+
+console.log([...combined()]) // [1, 2, 'a', 'b', 3, 4]
+```
+
+## Передача данных в генератор через next()
+
+`gen.next(value)` передаёт значение внутрь генератора — оно становится результатом `yield`:
+
+```javascript
+function* calculator() {
+  let result = 0
+  while (true) {
+    const input = yield result  // получаем входные данные
+    if (input === null) break
+    result += input
+  }
+  return result
+}
+
+const calc = calculator()
+calc.next()         // запуск генератора
+calc.next(10)       // передаём 10
+calc.next(20)       // передаём 20
+calc.next(5)        // передаём 5
+const { value } = calc.next(null) // завершаем
+console.log(value) // 35
+```
+
+## Бесконечные генераторы
+
+Генераторы идеальны для бесконечных последовательностей — они ленивые и не вычисляют всё заранее:
+
+```javascript
+function* fibonacci() {
+  let [a, b] = [0, 1]
+  while (true) {
+    yield a;
+    [a, b] = [b, a + b]
+  }
+}
+
+function take(gen, n) {
+  const result = []
+  for (const val of gen) {
+    result.push(val)
+    if (result.length >= n) break
+  }
+  return result
+}
+
+console.log(take(fibonacci(), 10))
+// [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
+
+// Бесконечный счётчик
+function* naturals(start = 1) {
+  while (true) yield start++
+}
+
+const first5Odds = [...take(naturals(), 100)].filter(n => n % 2 !== 0).slice(0, 5)
+console.log(first5Odds) // [1, 3, 5, 7, 9]
+```
+
+## gen.throw() и gen.return()
+
+```javascript
+function* safeGen() {
+  try {
+    yield 1
+    yield 2
+    yield 3
+  } catch (err) {
+    console.log('Поймана ошибка:', err.message)
+    yield 'после ошибки'
+  }
+}
+
+const g = safeGen()
+console.log(g.next())           // { value: 1, done: false }
+console.log(g.throw(new Error('упс!')))
+// Поймана ошибка: упс!
+// { value: 'после ошибки', done: false }
+
+// gen.return() завершает генератор досрочно
+const g2 = safeGen()
+g2.next()
+console.log(g2.return('стоп')) // { value: 'стоп', done: true }
+```
+
+## Практический паттерн: пагинация
+
+```javascript
+async function* paginatedFetch(url) {
+  let page = 1
+  while (true) {
+    const response = await fetch(`${url}?page=${page}`)
+    const data = await response.json()
+    if (data.items.length === 0) break
+    yield* data.items
+    page++
+  }
+}
+
+// Использование
+for await (const item of paginatedFetch('/api/users')) {
+  console.log(item)
+  // Данные загружаются по мере необходимости
+}
+```
+
+## Задания для практики
+
+1. Реализуйте генератор `permutations(arr)` для всех перестановок массива.
+2. Создайте генератор `flatten(arr)` для рекурсивного развёртывания вложенных массивов.
+3. Напишите генератор `zip(...iterables)` — аналог Python `zip()`.
+4. Реализуйте конечный автомат (state machine) через генератор.
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 20px; margin: 0; }
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; margin: 4px; font-size: 14px; }
+    button:hover { background: #74c7ec; }
+    button:disabled { background: #45475a; color: #6c7086; cursor: not-allowed; }
+    h3 { color: #89b4fa; margin: 16px 0 8px; }
+    .box { background: #313244; border-radius: 8px; padding: 16px; margin: 10px 0; }
+    .output { background: #181825; border-radius: 6px; padding: 12px; font-family: monospace; font-size: 13px; min-height: 100px; color: #a6e3a1; white-space: pre; }
+    .step { color: #cba6f7; } .done { color: #f38ba8; }
+    select { background: #313244; color: #cdd6f4; border: 1px solid #45475a; padding: 6px 10px; border-radius: 4px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h3>⚙️ Generators & Iterators</h3>
+  <div class="box">
+    <label style="font-size:13px;color:#a6adc8">Генератор: </label>
+    <select id="genType" onchange="reset()">
+      <option value="fib">Fibonacci</option>
+      <option value="range">range(1, 10)</option>
+      <option value="infinite">Бесконечный счётчик</option>
+    </select>
+    <br><br>
+    <button id="nextBtn" onclick="step()">▶ next()</button>
+    <button onclick="reset()">↺ Сбросить</button>
+    <button onclick="runAll()">⏭ Все значения</button>
+  </div>
+  <div class="output" id="out">// Нажмите next() для получения следующего значения</div>
+  <script>
+    function* fibonacci() {
+      let [a, b] = [0, 1];
+      while (true) { yield a; [a, b] = [b, a + b]; }
+    }
+    function* range(start, end, step = 1) {
+      for (let i = start; i <= end; i += step) yield i;
+    }
+    function* counter() {
+      let i = 1;
+      while (true) yield i++;
+    }
+    let gen, steps, log;
+    window.reset = function() {
+      const t = document.getElementById('genType').value;
+      gen = t === 'fib' ? fibonacci() : t === 'range' ? range(1, 10) : counter();
+      steps = 0; log = [];
+      document.getElementById('nextBtn').disabled = false;
+      document.getElementById('out').textContent = '// Генератор сброшен. Нажмите next()';
+    }
+    window.step = function() {
+      const { value, done } = gen.next();
+      steps++;
+      if (done) {
+        log.push(\`  [шаг \${steps}] done: true (генератор завершён)\`);
+        document.getElementById('nextBtn').disabled = true;
+      } else {
+        log.push(\`  [шаг \${steps}] { value: \${value}, done: false }\`);
+      }
+      document.getElementById('out').textContent = \`gen.next() вызван \${steps} раз:\n\n\${log.join('\\n')}\`;
+    }
+    window.runAll = function() {
+      const t = document.getElementById('genType').value;
+      if (t === 'infinite') {
+        const g = counter(); const vals = [];
+        for (let i = 0; i < 10; i++) vals.push(g.next().value);
+        document.getElementById('out').textContent = \`// Бесконечный генератор — берём первые 10:\n[...take(10)] → [\${vals.join(', ')}]\`;
+        return;
+      }
+      const g = t === 'fib' ? fibonacci() : range(1, 10);
+      const limit = t === 'fib' ? 10 : 100;
+      const vals = []; let r;
+      let i = 0;
+      do { r = g.next(); if (!r.done) vals.push(r.value); i++; } while (!r.done && i < limit);
+      document.getElementById('out').textContent = \`// Все значения генератора \${t}:\n[\${vals.join(', ')}]\`;
+      reset();
+    }
+    reset();
+  </script>
+</body>
+</html>`,
+  }}
+/>

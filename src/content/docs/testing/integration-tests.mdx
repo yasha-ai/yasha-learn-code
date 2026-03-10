@@ -1,0 +1,308 @@
+---
+title: "23. Integration тесты"
+sidebar:
+  order: 22
+---
+import { Playground } from '@components/Playground'
+
+
+![Integration Tests](/lessons/integration-tests.png)
+
+## Что такое Integration тесты?
+
+Integration тесты проверяют **взаимодействие** между несколькими модулями, компонентами или сервисами — в отличие от unit тестов, которые проверяют всё изолированно.
+
+```
+Unit Test:      [Module A] ← тестируем изолированно
+Integration:    [Module A] → [Module B] → [Database]
+                                ↑ тестируем всю цепочку
+```
+
+## Тестирование Express/Fastify API
+
+```bash
+npm install --save-dev supertest
+```
+
+```typescript
+// app.ts
+import express from 'express';
+import { pool } from './db';
+
+const app = express();
+app.use(express.json());
+
+app.get('/api/users', async (req, res) => {
+  const { rows } = await pool.query('SELECT id, name, email FROM users ORDER BY name');
+  res.json(rows);
+});
+
+app.post('/api/users', async (req, res) => {
+  const { name, email } = req.body;
+  if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
+
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO users (name, email) VALUES ($1, $2) RETURNING *',
+      [name, email]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Email already exists' });
+    }
+    throw err;
+  }
+});
+
+export default app;
+```
+
+```typescript
+// app.test.ts
+import request from 'supertest';
+import app from './app';
+import { pool } from './db';
+
+describe('Users API', () => {
+  beforeEach(async () => {
+    await pool.query('DELETE FROM users');
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  describe('GET /api/users', () => {
+    test('returns empty array when no users', async () => {
+      const res = await request(app).get('/api/users').expect(200);
+      expect(res.body).toEqual([]);
+    });
+
+    test('returns all users sorted by name', async () => {
+      await pool.query("INSERT INTO users (name, email) VALUES ('Bob', 'bob@test.com')");
+      await pool.query("INSERT INTO users (name, email) VALUES ('Alice', 'alice@test.com')");
+
+      const res = await request(app).get('/api/users').expect(200);
+
+      expect(res.body).toHaveLength(2);
+      expect(res.body[0].name).toBe('Alice');
+      expect(res.body[1].name).toBe('Bob');
+    });
+  });
+
+  describe('POST /api/users', () => {
+    test('creates user with valid data', async () => {
+      const res = await request(app)
+        .post('/api/users')
+        .send({ name: 'Alice', email: 'alice@test.com' })
+        .expect(201);
+
+      expect(res.body).toMatchObject({
+        id: expect.any(Number),
+        name: 'Alice',
+        email: 'alice@test.com',
+      });
+
+      // Проверяем в БД
+      const { rows } = await pool.query('SELECT * FROM users');
+      expect(rows).toHaveLength(1);
+    });
+
+    test('returns 400 for missing fields', async () => {
+      await request(app)
+        .post('/api/users')
+        .send({ name: 'Alice' }) // нет email
+        .expect(400);
+    });
+
+    test('returns 409 for duplicate email', async () => {
+      await request(app).post('/api/users').send({ name: 'Alice', email: 'a@test.com' });
+
+      const res = await request(app)
+        .post('/api/users')
+        .send({ name: 'Bob', email: 'a@test.com' })
+        .expect(409);
+
+      expect(res.body.error).toBe('Email already exists');
+    });
+  });
+});
+```
+
+## Тест-база данных
+
+```typescript
+// db.ts
+import { Pool } from 'pg';
+
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || 'postgres://localhost/myapp_test',
+});
+```
+
+```javascript
+// jest.config.js
+module.exports = {
+  globalSetup: './tests/global-setup.ts',
+  globalTeardown: './tests/global-teardown.ts',
+};
+
+// tests/global-setup.ts
+export default async function() {
+  // Создать тестовую БД или миграции
+  const pool = new Pool({ connectionString: 'postgres://localhost/myapp_test' });
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      email VARCHAR(255) UNIQUE NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await pool.end();
+}
+```
+
+## Docker Compose для тестов
+
+```yaml
+# docker-compose.test.yml
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: myapp_test
+      POSTGRES_PASSWORD: test
+    ports: ["5433:5432"]
+    tmpfs: /var/lib/postgresql/data  # RAM — быстрее!
+```
+
+```bash
+docker compose -f docker-compose.test.yml up -d
+DATABASE_URL=postgres://postgres:test@localhost:5433/myapp_test npm test
+docker compose -f docker-compose.test.yml down
+```
+
+## Тестирование с Prisma
+
+```typescript
+// prisma/test-setup.ts
+import { PrismaClient } from '@prisma/client';
+import { execSync } from 'child_process';
+
+const prisma = new PrismaClient();
+
+beforeAll(async () => {
+  // Применить миграции к тестовой БД
+  execSync('npx prisma migrate deploy', {
+    env: { ...process.env, DATABASE_URL: process.env.TEST_DATABASE_URL },
+  });
+});
+
+beforeEach(async () => {
+  // Очистить все таблицы
+  const tables = await prisma.$queryRaw`
+    SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+  `;
+  for (const { tablename } of tables) {
+    await prisma.$executeRawUnsafe(`TRUNCATE "${tablename}" CASCADE`);
+  }
+});
+
+afterAll(async () => {
+  await prisma.$disconnect();
+});
+```
+
+## Тестирование межсервисной интеграции
+
+```typescript
+// Тест: OrderService + PaymentService + EmailService
+describe('Order Flow', () => {
+  test('completes order with payment and notification', async () => {
+    // Arrange
+    const user = await createTestUser();
+    const product = await createTestProduct({ price: 100, stock: 5 });
+
+    // Act
+    const order = await orderService.createOrder({
+      userId: user.id,
+      items: [{ productId: product.id, qty: 2 }],
+    });
+
+    // Assert — заказ создан
+    expect(order.status).toBe('completed');
+    expect(order.total).toBe(200);
+
+    // Assert — сток уменьшился
+    const updatedProduct = await productService.getById(product.id);
+    expect(updatedProduct.stock).toBe(3);
+
+    // Assert — платёж проведён
+    const payment = await paymentService.getByOrderId(order.id);
+    expect(payment.status).toBe('captured');
+    expect(payment.amount).toBe(200);
+  });
+});
+```
+
+## Практические задания
+
+1. Напиши integration тест для REST API с тестовой БД (PostgreSQL в Docker)
+2. Протестируй сценарий: регистрация → логин → получение профиля
+3. Настрой Docker Compose для автоматического поднятия тест-окружения
+
+## Итоги
+
+- Integration тесты проверяют реальное взаимодействие модулей
+- supertest — стандарт для тестирования HTTP API
+- Тестовая БД в Docker (tmpfs) — быстро и изолированно
+- beforeEach → очистка данных между тестами
+
+<Playground client:visible template="vanilla" files={{
+  '/index.js': `// Пример тестового кода (для запуска используйте Jest/Vitest)
+// Integration тесты: проверяем взаимодействие модулей
+
+function test(name, fn) {
+  try { fn(); console.log('✅ ' + name); }
+  catch (e) { console.log('❌ ' + name + ': ' + e.message); }
+}
+function expect(v) {
+  return {
+    toBe(e) { if (v !== e) throw new Error(v + ' !== ' + e); },
+    toEqual(e) { if (JSON.stringify(v) !== JSON.stringify(e)) throw new Error('not equal'); },
+  };
+}
+
+// Модуль 1: Корзина
+class Cart {
+  constructor() { this.items = []; }
+  add(product, qty = 1) { this.items.push({ ...product, qty }); }
+  get total() { return this.items.reduce((s, i) => s + i.price * i.qty, 0); }
+  clear() { this.items = []; }
+}
+
+// Модуль 2: Промокоды
+class PromoService {
+  apply(cart, code) {
+    if (code === 'SALE10') return cart.total * 0.9;
+    if (code === 'SALE50' && cart.total >= 5000) return cart.total * 0.5;
+    return cart.total;
+  }
+}
+
+// Integration тест: Cart + PromoService
+console.log('=== Integration: Cart + PromoService ===\n');
+const cart = new Cart();
+const promo = new PromoService();
+
+cart.add({ name: 'Книга', price: 1500 }, 2);
+cart.add({ name: 'Курс', price: 3000 }, 1);
+
+test('корзина считает total', () => expect(cart.total).toBe(6000));
+test('SALE10 даёт 10% скидку', () => expect(promo.apply(cart, 'SALE10')).toBe(5400));
+test('SALE50 работает при total >= 5000', () => expect(promo.apply(cart, 'SALE50')).toBe(3000));
+test('неизвестный код — без скидки', () => expect(promo.apply(cart, 'INVALID')).toBe(6000));
+`
+}} />

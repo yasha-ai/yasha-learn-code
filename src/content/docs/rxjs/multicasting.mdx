@@ -1,0 +1,413 @@
+---
+title: "11. Multicasting: share, publish"
+sidebar:
+  order: 12
+---
+import { Playground } from '@components/Playground'
+
+
+## 12. Multicasting: share, shareReplay, publish 📡
+
+Привет! Яша на связи. Сегодня разбираем одну из самых «взрывоопасных» тем в RxJS — **multicasting**. Именно здесь скрывается классическая ошибка с дублирующимися HTTP-запросами.
+
+### Cold vs Hot Observable — глубокое погружение
+
+**Cold Observable** — как видеозапись на DVD. Каждый подписчик получает свою копию воспроизведения с самого начала.
+
+**Hot Observable** — как прямой эфир на телевидении. Все подписчики получают одни и те же данные в реальном времени. Если опоздал — пропустил.
+
+```typescript
+import { Observable, Subject, interval } from 'rxjs';
+import { take } from 'rxjs/operators';
+
+// ❄️ COLD: каждая подписка запускает новый producer
+const cold$ = new Observable<number>(observer => {
+  console.log('🆕 Новый producer запущен!'); // вызывается для КАЖДОГО подписчика
+  let i = 0;
+  const id = setInterval(() => observer.next(i++), 1000);
+  return () => clearInterval(id);
+});
+
+cold$.subscribe(v => console.log('Подписчик A:', v));
+// 🆕 Новый producer запущен!
+setTimeout(() => {
+  cold$.subscribe(v => console.log('Подписчик B:', v));
+  // 🆕 Новый producer запущен! (ВТОРОЙ независимый!)
+}, 2000);
+
+// 🔥 HOT: один producer, все подписчики слушают его
+const subject = new Subject<number>();
+const hot$ = subject.asObservable();
+
+hot$.subscribe(v => console.log('Подписчик A:', v));
+setTimeout(() => {
+  hot$.subscribe(v => console.log('Подписчик B:', v));
+  // Подписчик B пропустил первые события
+}, 2000);
+
+// Один источник для всех
+subject.next(1); // только A: 1
+subject.next(2); // только A: 2
+subject.next(3); // A: 3, B: 3 (B подписался)
+```
+
+---
+
+### Проблема дублирования HTTP-запросов
+
+Это самая распространённая боль с Cold Observables:
+
+```typescript
+import { from } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+// ❌ Плохо: два запроса к API
+const users$ = from(fetch('/api/users').then(r => r.json()));
+
+// Два компонента — два запроса!
+users$.subscribe(users => renderList(users));
+users$.subscribe(users => renderCount(users));
+```
+
+Решение — **превратить холодный Observable в горячий**.
+
+---
+
+### share() — самый простой multicast
+
+`share()` — это сокращение для `pipe(multicast(() => new Subject()), refCount())`. Он делит одну подписку на источник между всеми подписчиками.
+
+```typescript
+import { interval } from 'rxjs';
+import { share, take, tap } from 'rxjs/operators';
+
+const source$ = interval(1000).pipe(
+  tap(v => console.log(`[source] производим ${v}`)), // выполняется ОДИН раз
+  take(5),
+  share() // делимся потоком
+);
+
+// Оба подписчика получают ОДИНАКОВЫЕ данные от ОДНОГО источника
+source$.subscribe(v => console.log('A:', v));
+source$.subscribe(v => console.log('B:', v));
+// [source] производим 0
+// A: 0
+// B: 0
+// [source] производим 1
+// A: 1
+// B: 1
+```
+
+**Важно:** если все подписчики отписались, `share()` завершает внутреннюю подписку. При новой подписке — всё начинается заново.
+
+```typescript
+// share() с конфигурацией (RxJS 7.4+)
+const shared$ = source$.pipe(
+  share({
+    connector: () => new ReplaySubject(1), // запоминает последнее значение
+    resetOnRefCountZero: true,  // сбросить при нулевых подписчиках
+    resetOnComplete: false,
+    resetOnError: true,
+  })
+);
+```
+
+---
+
+### shareReplay() — кэш для опоздавших
+
+`shareReplay(bufferSize)` запоминает последние N значений и немедленно отдаёт их новым подписчикам.
+
+```typescript
+import { shareReplay } from 'rxjs/operators';
+
+// ✅ Хорошо: HTTP запрос выполнится ОДИН раз, результат кэшируется
+const users$ = from(fetch('/api/users').then(r => r.json())).pipe(
+  shareReplay(1) // кэшируем последний ответ
+);
+
+users$.subscribe(users => renderList(users));    // запрос уходит
+users$.subscribe(users => renderCount(users));   // получает кэш, нет нового запроса
+
+// Даже после завершения первого потока
+setTimeout(() => {
+  users$.subscribe(users => console.log('Поздний подписчик:', users)); // тоже кэш!
+}, 5000);
+```
+
+> ⚠️ **Осторожно с `shareReplay`!** По умолчанию `refCount: false` — подписка на источник **не закрывается** даже если все подписчики ушли. Используйте `shareReplay({ bufferSize: 1, refCount: true })` для предотвращения утечек памяти.
+
+```typescript
+// Безопасный вариант
+const safe$ = source$.pipe(
+  shareReplay({ bufferSize: 1, refCount: true })
+);
+```
+
+---
+
+### publish() + refCount() — ручной multicast
+
+`publish()` создаёт ConnectableObservable. Подписки накапливаются, но источник не запускается до вызова `.connect()`.
+
+```typescript
+import { interval } from 'rxjs';
+import { publish, refCount, take } from 'rxjs/operators';
+
+const published$ = interval(1000).pipe(
+  take(5),
+  publish() // возвращает ConnectableObservable
+);
+
+// Подписываемся — но источник ещё НЕ запущен
+published$.subscribe(v => console.log('A:', v));
+published$.subscribe(v => console.log('B:', v));
+
+// Запускаем вручную
+published$.connect(); // только теперь interval начинает работать
+```
+
+`refCount()` автоматизирует `connect()/unsubscribe()`: запускает при первом подписчике, останавливает при последнем.
+
+```typescript
+const autoConnect$ = interval(1000).pipe(
+  publish(),
+  refCount() // = share() по поведению
+);
+```
+
+---
+
+### multicast() — для продвинутых сценариев
+
+`multicast` принимает Subject или фабрику Subject, даёт максимальный контроль:
+
+```typescript
+import { multicast } from 'rxjs/operators';
+import { ReplaySubject } from 'rxjs';
+
+// Используем ReplaySubject — новые подписчики получат историю
+const multicasted$ = source$.pipe(
+  multicast(() => new ReplaySubject<number>(3)), // буфер 3 значения
+);
+
+// Нужно вручную connect/refCount
+const connected$ = multicasted$.pipe(refCount());
+```
+
+---
+
+### Таблица сравнения
+
+| Оператор | Тип Subject | refCount | Буфер | Типичное применение |
+|---|---|---|---|---|
+| `share()` | Subject | Да | 0 | Общие потоки событий |
+| `shareReplay(n)` | ReplaySubject(n) | Опц. | n | HTTP кэш, конфигурация |
+| `publish()` | Subject | Нет | 0 | Ручное управление запуском |
+| `publish().refCount()` | Subject | Да | 0 | ≈ share() |
+| `publishReplay(n).refCount()` | ReplaySubject(n) | Да | n | Кэш с авто-очисткой |
+
+---
+
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useEffect, useRef } from 'react';
+import { interval, Observable } from 'rxjs';
+import { tap, take, share, shareReplay, map } from 'rxjs/operators';
+
+interface Execution {
+  id: number;
+  subscriber: 'A' | 'B';
+  value: number;
+  mode: 'cold' | 'shared';
+}
+
+// Счётчик выполнений producer — показывает, сколько раз запускался источник
+let producerCalls = 0;
+
+function createSource(mode: 'cold' | 'shared') {
+  producerCalls = 0;
+  const raw$ = new Observable<number>(obs => {
+    const myId = ++producerCalls; // уникальный ID этого producer
+    let i = 0;
+    const id = setInterval(() => {
+      if (i < 5) obs.next(i++);
+      else { obs.complete(); clearInterval(id); }
+    }, 600);
+    return () => clearInterval(id);
+  }).pipe(
+    map(v => v) // просто пропускаем
+  );
+
+  return mode === 'shared' ? raw$.pipe(share()) : raw$;
+}
+
+export default function App() {
+  const [mode, setMode] = useState<'cold' | 'shared'>('cold');
+  const [executions, setExecutions] = useState<Execution[]>([]);
+  const [producerCount, setProducerCount] = useState(0);
+  const [running, setRunning] = useState(false);
+  const execIdRef = useRef(0);
+
+  const runDemo = () => {
+    if (running) return;
+    setRunning(true);
+    setExecutions([]);
+    setProducerCount(0);
+    producerCalls = 0;
+
+    const source$ = createSource(mode);
+
+    const addExec = (subscriber: 'A' | 'B', value: number) => {
+      setProducerCount(producerCalls);
+      setExecutions(prev => [...prev, {
+        id: execIdRef.current++,
+        subscriber,
+        value,
+        mode,
+      }]);
+    };
+
+    // Подписчик A — подписывается сразу
+    const subA = source$.subscribe({
+      next: v => addExec('A', v),
+    });
+
+    // Подписчик B — подписывается через 1 секунду
+    const timer = setTimeout(() => {
+      const subB = source$.subscribe({
+        next: v => addExec('B', v),
+        complete: () => setRunning(false),
+      });
+    }, 800);
+
+    return () => { subA.unsubscribe(); clearTimeout(timer); };
+  };
+
+  const colA = '#60a5fa';
+  const colB = '#f472b6';
+
+  return (
+    <div style={{
+      background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace',
+      minHeight: '100vh', padding: '24px',
+    }}>
+      <h2 style={{ color: '#818cf8', margin: '0 0 8px' }}>
+        📡 Cold vs Shared Observable
+      </h2>
+      <p style={{ color: '#94a3b8', margin: '0 0 20px', fontSize: '13px' }}>
+        Посмотри, сколько раз запускается producer при двух подписчиках.
+      </p>
+
+      {/* Переключатель режима */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+        {(['cold', 'shared'] as const).map(m => (
+          <button
+            key={m}
+            onClick={() => { setMode(m); setExecutions([]); setProducerCount(0); }}
+            style={{
+              padding: '8px 18px', borderRadius: '8px', border: 'none',
+              cursor: 'pointer', fontSize: '13px', fontWeight: 'bold',
+              background: mode === m ? '#6366f1' : '#1e293b',
+              color: mode === m ? 'white' : '#64748b',
+            }}
+          >
+            {m === 'cold' ? '❄️ Cold (без share)' : '🔥 Hot (share())'}
+          </button>
+        ))}
+        <button
+          onClick={runDemo}
+          disabled={running}
+          style={{
+            marginLeft: 'auto', padding: '8px 18px', borderRadius: '8px',
+            border: 'none', cursor: running ? 'not-allowed' : 'pointer',
+            background: running ? '#334155' : '#10b981', color: 'white',
+            fontSize: '13px', fontWeight: 'bold',
+          }}
+        >
+          {running ? '⏳ Запущено...' : '▶ Запустить'}
+        </button>
+      </div>
+
+      {/* Индикатор запусков producer */}
+      <div style={{
+        background: '#1e293b', borderRadius: '10px', padding: '14px 18px',
+        marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '16px',
+      }}>
+        <div>
+          <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '4px' }}>
+            Producer запущен
+          </div>
+          <div style={{
+            fontSize: '32px', fontWeight: 'bold',
+            color: producerCount > 1 ? '#f87171' : '#4ade80',
+          }}>
+            {producerCount}x
+          </div>
+        </div>
+        <div style={{ flex: 1, fontSize: '12px', color: '#94a3b8' }}>
+          {mode === 'cold'
+            ? '❌ Каждый подписчик запускает свой producer — дублирующаяся работа!'
+            : '✅ Один producer для всех подписчиков — эффективно!'}
+        </div>
+      </div>
+
+      {/* Легенда */}
+      <div style={{ display: 'flex', gap: '16px', marginBottom: '12px' }}>
+        {(['A', 'B'] as const).map((s, i) => (
+          <div key={s} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px' }}>
+            <div style={{ width: 12, height: 12, borderRadius: '50%', background: s === 'A' ? colA : colB }} />
+            <span style={{ color: '#94a3b8' }}>
+              Подписчик {s} {i === 1 ? '(+800мс задержка)' : '(сразу)'}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Лента событий */}
+      <div style={{
+        background: '#1e293b', borderRadius: '12px', padding: '16px',
+        minHeight: '200px', maxHeight: '320px', overflowY: 'auto',
+      }}>
+        {executions.length === 0 ? (
+          <p style={{ color: '#475569', textAlign: 'center', marginTop: '50px' }}>
+            Нажми «Запустить» 👆
+          </p>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            {executions.map(e => (
+              <div key={e.id} style={{
+                padding: '6px 12px', borderRadius: '20px', fontSize: '12px',
+                background: e.subscriber === 'A' ? 'rgba(96,165,250,0.15)' : 'rgba(244,114,182,0.15)',
+                border: \`1px solid \${e.subscriber === 'A' ? colA : colB}\`,
+                color: e.subscriber === 'A' ? colA : colB,
+              }}>
+                {e.subscriber}: {e.value}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{
+        marginTop: '14px', padding: '12px', background: '#1e293b',
+        borderRadius: '8px', fontSize: '11px', color: '#64748b',
+      }}>
+        <span style={{ color: '#94a3b8' }}>Код: </span>
+        <code style={{ color: '#a78bfa' }}>
+          {mode === 'cold'
+            ? 'interval(600).pipe(take(5))'
+            : 'interval(600).pipe(take(5), share())'}
+        </code>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

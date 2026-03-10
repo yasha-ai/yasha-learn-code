@@ -1,0 +1,331 @@
+---
+title: "17. Тестирование"
+sidebar:
+  order: 17
+---
+import { Playground } from '@components/Playground'
+
+
+Тестирование кода, работающего с базой данных, требует особого подхода. Prisma предоставляет несколько стратегий: мокирование клиента, использование тестовой базы данных и изоляция тестов через транзакции.
+
+## Стратегии тестирования
+
+**1. Unit-тесты с мок-клиентом** — самый быстрый подход. Используется библиотека `jest-mock-extended` для создания полностью типизированного мок-объекта.
+
+**2. Integration-тесты с тестовой БД** — используется отдельная база данных, которая очищается перед каждым тестом.
+
+**3. Изоляция через транзакции** — каждый тест запускается в транзакции, которая откатывается в конце.
+
+## Мок Prisma Client с jest-mock-extended
+
+```typescript
+import { PrismaClient } from '@prisma/client'
+import { mockDeep, DeepMockProxy } from 'jest-mock-extended'
+
+export type Context = {
+  prisma: PrismaClient
+}
+
+export type MockContext = {
+  prisma: DeepMockProxy<PrismaClient>
+}
+
+export const createMockContext = (): MockContext => ({
+  prisma: mockDeep<PrismaClient>(),
+})
+```
+
+## Пример unit-теста
+
+```typescript
+import { createMockContext, MockContext, Context } from './context'
+
+describe('UserService', () => {
+  let mockCtx: MockContext
+  let ctx: Context
+
+  beforeEach(() => {
+    mockCtx = createMockContext()
+    ctx = mockCtx as unknown as Context
+  })
+
+  it('должен создать пользователя', async () => {
+    const mockUser = { id: 1, email: 'ivan@example.com', name: 'Иван' }
+    mockCtx.prisma.user.create.mockResolvedValue(mockUser)
+
+    const result = await createUser(ctx, 'ivan@example.com', 'Иван')
+
+    expect(result).toEqual(mockUser)
+    expect(mockCtx.prisma.user.create).toHaveBeenCalledWith({
+      data: { email: 'ivan@example.com', name: 'Иван' },
+    })
+  })
+})
+```
+
+## Integration-тесты
+
+```typescript
+// Использовать отдельный DATABASE_URL для тестов
+const prisma = new PrismaClient({
+  datasources: { db: { url: process.env.TEST_DATABASE_URL } },
+})
+
+afterEach(async () => {
+  // Очистить таблицы в правильном порядке
+  await prisma.post.deleteMany()
+  await prisma.user.deleteMany()
+})
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const mockDb = {
+  users: [
+    { id: 1, email: 'ivan@example.com', name: 'Иван Петров', role: 'ADMIN' },
+    { id: 2, email: 'anna@example.com', name: 'Анна Смирнова', role: 'USER' },
+  ],
+  posts: [
+    { id: 1, title: 'Первый пост', authorId: 1, published: true },
+    { id: 2, title: 'Второй пост', authorId: 1, published: false },
+    { id: 3, title: 'Пост Анны', authorId: 2, published: true },
+  ],
+}
+
+const testSuites = [
+  {
+    name: 'UserService',
+    icon: '👤',
+    color: '#3182ce',
+    tests: [
+      {
+        name: 'findById — возвращает пользователя',
+        code: \`// Мок
+mockCtx.prisma.user.findUnique
+  .mockResolvedValue({ id: 1, email: 'ivan@...', name: 'Иван' })
+
+// Функция
+async function findUser(ctx, id) {
+  return ctx.prisma.user.findUnique({ where: { id } })
+}
+
+// Проверка
+const user = await findUser(ctx, 1)
+expect(user.id).toBe(1)
+expect(user.name).toBe('Иван')\`,
+        run: () => {
+          const user = mockDb.users.find(u => u.id === 1)
+          return { passed: true, result: user, message: 'Ожидаем user.id === 1 ✓' }
+        },
+      },
+      {
+        name: 'findById — возвращает null для несуществующего',
+        code: \`mockCtx.prisma.user.findUnique
+  .mockResolvedValue(null)
+
+const user = await findUser(ctx, 999)
+expect(user).toBeNull()\`,
+        run: () => {
+          const user = mockDb.users.find(u => u.id === 999) || null
+          return { passed: true, result: user, message: 'Ожидаем null для id=999 ✓' }
+        },
+      },
+      {
+        name: 'createUser — сохраняет нового пользователя',
+        code: \`const newUser = {
+  id: 3, email: 'petr@example.com', name: 'Пётр'
+}
+mockCtx.prisma.user.create
+  .mockResolvedValue(newUser)
+
+const result = await createUser(ctx, {
+  email: 'petr@example.com', name: 'Пётр'
+})
+expect(result.email).toBe('petr@example.com')
+expect(mockCtx.prisma.user.create)
+  .toHaveBeenCalledWith({
+    data: { email: 'petr@example.com', name: 'Пётр' }
+  })\`,
+        run: () => {
+          const newUser = { id: 3, email: 'petr@example.com', name: 'Пётр', role: 'USER' }
+          return { passed: true, result: newUser, message: 'user.create вызван с верными аргументами ✓' }
+        },
+      },
+    ],
+  },
+  {
+    name: 'PostService',
+    icon: '📝',
+    color: '#38a169',
+    tests: [
+      {
+        name: 'getPublishedPosts — только опубликованные',
+        code: \`const publishedPosts = [
+  { id: 1, title: 'Пост 1', published: true },
+  { id: 3, title: 'Пост 3', published: true },
+]
+mockCtx.prisma.post.findMany
+  .mockResolvedValue(publishedPosts)
+
+const posts = await getPublishedPosts(ctx)
+expect(posts).toHaveLength(2)
+expect(posts.every(p => p.published)).toBe(true)\`,
+        run: () => {
+          const published = mockDb.posts.filter(p => p.published)
+          return { passed: true, result: published, message: 'Найдено ' + published.length + ' опубликованных постов ✓' }
+        },
+      },
+      {
+        name: 'deletePost — только автор может удалить',
+        code: \`// Попытка удаления чужого поста
+async function deletePost(ctx, postId, userId) {
+  const post = await ctx.prisma.post.findUnique({
+    where: { id: postId }
+  })
+  if (post.authorId !== userId) {
+    throw new Error('Нет прав')
+  }
+  return ctx.prisma.post.delete({ where: { id: postId } })
+}
+
+await expect(deletePost(ctx, 1, 2))
+  .rejects.toThrow('Нет прав')\`,
+        run: () => {
+          const post = mockDb.posts.find(p => p.id === 1)
+          const error = post.authorId !== 2 ? 'Нет прав' : null
+          return { passed: !!error, result: null, message: 'Брошено исключение: "' + error + '" ✓' }
+        },
+      },
+      {
+        name: 'countPosts — корректный подсчёт',
+        code: \`mockCtx.prisma.post.count
+  .mockResolvedValue(3)
+
+const count = await prisma.post.count()
+expect(count).toBe(3)\`,
+        run: () => {
+          return { passed: true, result: mockDb.posts.length, message: 'post.count() === ' + mockDb.posts.length + ' ✓' }
+        },
+      },
+    ],
+  },
+]
+
+export default function App() {
+  const [suite, setSuite] = useState(0)
+  const [selectedTest, setSelectedTest] = useState(0)
+  const [testResults, setTestResults] = useState({})
+
+  const currentSuite = testSuites[suite]
+  const currentTest = currentSuite.tests[selectedTest]
+
+  const runTest = (suiteIdx, testIdx) => {
+    const key = suiteIdx + '-' + testIdx
+    const result = testSuites[suiteIdx].tests[testIdx].run()
+    setTestResults(r => ({ ...r, [key]: result }))
+  }
+
+  const runAll = () => {
+    testSuites.forEach((s, si) => {
+      s.tests.forEach((_, ti) => {
+        setTimeout(() => runTest(si, ti), (si * s.tests.length + ti) * 200)
+      })
+    })
+  }
+
+  const totalTests = testSuites.reduce((s, ts) => s + ts.tests.length, 0)
+  const passedTests = Object.values(testResults).filter(r => r.passed).length
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '28px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 22 }}>
+          <div>
+            <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 4px 0' }}>
+              Mock Prisma Client — Тесты
+            </h2>
+            <p style={{ color: '#94a3b8', margin: 0, fontSize: 13 }}>Юнит-тестирование с мок-объектом PrismaClient</p>
+          </div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            {Object.keys(testResults).length > 0 && (
+              <span style={{ color: passedTests === Object.keys(testResults).length ? '#86efac' : '#fbbf24', fontSize: 13, fontWeight: 700 }}>
+                {passedTests}/{Object.keys(testResults).length} passed
+              </span>
+            )}
+            <button onClick={runAll}
+              style={{ background: PRISMA, color: '#fff', border: 'none', borderRadius: 10, padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 700 }}>
+              ▶ Run All
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          {testSuites.map((s, i) => (
+            <button key={i} onClick={() => { setSuite(i); setSelectedTest(0) }}
+              style={{ background: suite === i ? s.color : CARD, color: suite === i ? '#fff' : '#94a3b8', border: '1px solid ' + (suite === i ? s.color : '#334155'), borderRadius: 8, padding: '7px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {s.icon} {s.name}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 14 }}>
+          <div>
+            {currentSuite.tests.map((test, i) => {
+              const key = suite + '-' + i
+              const result = testResults[key]
+              return (
+                <div key={i} onClick={() => setSelectedTest(i)}
+                  style={{ background: selectedTest === i ? CARD : 'transparent', border: '1px solid ' + (selectedTest === i ? currentSuite.color + '60' : 'transparent'), borderRadius: 10, padding: '10px 12px', cursor: 'pointer', marginBottom: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                  <div style={{ color: selectedTest === i ? TEXT : '#94a3b8', fontSize: 12, lineHeight: 1.4, flex: 1 }}>
+                    {test.name}
+                  </div>
+                  <div style={{ flexShrink: 0 }}>
+                    {result ? (
+                      <span style={{ color: result.passed ? '#86efac' : '#fc8181', fontSize: 12 }}>
+                        {result.passed ? '✓' : '✗'}
+                      </span>
+                    ) : (
+                      <span style={{ color: '#334155', fontSize: 12 }}>○</span>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div>
+            <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 16, border: '1px solid #1e3a5f', marginBottom: 12 }}>
+              <div style={{ color: '#475569', fontSize: 11, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Тест: {currentTest.name}</div>
+              <pre style={{ margin: 0, color: TEXT, fontSize: 11, lineHeight: 1.7, fontFamily: 'monospace', overflowX: 'auto' }}>
+                {currentTest.code}
+              </pre>
+            </div>
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => runTest(suite, selectedTest)}
+                style={{ background: currentSuite.color, color: '#fff', border: 'none', borderRadius: 10, padding: '8px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 700 }}>
+                ▶ Run
+              </button>
+              {testResults[suite + '-' + selectedTest] && (
+                <div style={{ flex: 1, background: testResults[suite + '-' + selectedTest].passed ? '#14532d' : '#7f1d1d', borderRadius: 10, padding: '8px 14px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ color: testResults[suite + '-' + selectedTest].passed ? '#86efac' : '#fc8181', fontSize: 14 }}>
+                    {testResults[suite + '-' + selectedTest].passed ? '✓' : '✗'}
+                  </span>
+                  <span style={{ color: testResults[suite + '-' + selectedTest].passed ? '#a7f3d0' : '#fca5a5', fontSize: 12 }}>
+                    {testResults[suite + '-' + selectedTest].message}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

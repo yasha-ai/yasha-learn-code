@@ -1,0 +1,480 @@
+---
+title: "61. MobX: Computed и Reactions"
+sidebar:
+  order: 61
+---
+import { Playground } from '@components/Playground'
+
+
+## MobX: Computed и Reactions — Магия реактивности ⚡
+
+Если Observable — это данные, то **Computed** и **Reactions** — это то, как MobX автоматически реагирует на их изменения. Это как нейронная сеть: поменялся один нейрон — автоматически обновились все связанные! 🧠
+
+---
+
+### 1. `computed()` — Производные значения 🧮
+
+**Computed value** — это значение, которое **выводится** из других observable. Как формула в Excel: `=A1+B1`. Меняется A1 — автоматически пересчитывается C1.
+
+```typescript
+import { makeAutoObservable, computed } from 'mobx';
+
+class CartStore {
+  items: { name: string; price: number; qty: number }[] = [];
+  taxRate = 0.2; // 20% НДС
+
+  constructor() {
+    makeAutoObservable(this);
+  }
+
+  // computed: пересчитывается только когда items или taxRate изменятся
+  get subtotal() {
+    return this.items.reduce((sum, item) => sum + item.price * item.qty, 0);
+  }
+
+  get tax() {
+    return this.subtotal * this.taxRate; // зависит от subtotal (другой computed!)
+  }
+
+  get total() {
+    return this.subtotal + this.tax; // зависит от subtotal и tax
+  }
+
+  get itemCount() {
+    return this.items.reduce((sum, item) => sum + item.qty, 0);
+  }
+}
+```
+
+**Ключевые свойства computed:**
+- 🚀 **Кэширование**: результат кэшируется, повторный вызов не пересчитывает
+- 🎯 **Ленивость**: пересчитывается только когда кто-то читает значение
+- 🔄 **Цепочки**: computed может зависеть от другого computed
+
+---
+
+### 2. Computed vs Обычный метод 🆚
+
+```typescript
+class Store {
+  items = [1, 2, 3, 4, 5];
+
+  // ❌ Метод: вычисляется КАЖДЫЙ РАЗ при вызове
+  getSumMethod() {
+    console.log('Метод вызван!');
+    return this.items.reduce((a, b) => a + b, 0);
+  }
+
+  // ✅ Computed: кэшируется, пересчитывается ТОЛЬКО при изменении items
+  get sumComputed() {
+    console.log('Computed пересчитан!');
+    return this.items.reduce((a, b) => a + b, 0);
+  }
+}
+
+const store = new Store();
+
+// Метод вычисляется каждый раз
+store.getSumMethod(); // → "Метод вызван!" + 15
+store.getSumMethod(); // → "Метод вызван!" + 15 (снова!)
+store.getSumMethod(); // → "Метод вызван!" + 15 (и снова!)
+
+// Computed кэшируется
+store.sumComputed; // → "Computed пересчитан!" + 15
+store.sumComputed; // → 15 (из кэша, без вычислений!)
+store.sumComputed; // → 15 (из кэша!)
+```
+
+---
+
+### 3. `autorun()` — Автоматический запуск 🤖
+
+`autorun` — это реакция, которая:
+1. **Запускается сразу** при создании
+2. **Повторно запускается** каждый раз, когда изменяются её observable-зависимости
+
+```typescript
+import { observable, autorun } from 'mobx';
+
+const store = observable({ count: 0, name: 'Яша' });
+
+// Сразу выводит: "Яша: 0"
+// Потом запускается при каждом изменении count или name
+const stop = autorun(() => {
+  console.log(`${store.name}: ${store.count}`);
+});
+
+store.count = 1;  // → "Яша: 1"
+store.count = 2;  // → "Яша: 2"
+store.name = 'Петя'; // → "Петя: 2"
+
+// Остановить реакцию (очистить)
+stop();
+store.count = 3;  // тишина — autorun уже не работает
+```
+
+**Частые применения autorun:**
+- Логирование изменений стейта
+- Сохранение в localStorage при каждом изменении
+- Синхронизация URL с состоянием
+- Дебаг-инструменты
+
+```typescript
+// Автосохранение в localStorage
+autorun(() => {
+  localStorage.setItem('cart', JSON.stringify(cartStore.items));
+});
+
+// Синхронизация URL
+autorun(() => {
+  window.history.pushState({}, '', `?page=${routerStore.currentPage}`);
+});
+```
+
+---
+
+### 4. `reaction()` — Умная реакция 🎯
+
+`reaction` мощнее autorun: ты сам указываешь **что отслеживать** и **что делать при изменении**.
+
+```typescript
+import { reaction } from 'mobx';
+
+reaction(
+  () => store.count,           // 1) функция-наблюдатель: ЧТО отслеживать
+  (newValue, prevValue) => {   // 2) эффект: ЧТО делать при изменении
+    console.log(`Было: ${prevValue}, Стало: ${newValue}`);
+  }
+);
+
+// Отличия от autorun:
+// 1. НЕ запускается сразу (только при первом изменении)
+// 2. Получает предыдущее И новое значение
+// 3. Зависимость определяется первой функцией, эффект — второй
+```
+
+**Практический пример — отправка на сервер только при изменении:**
+
+```typescript
+reaction(
+  () => userStore.profile, // отслеживаем профиль
+  async (profile) => {
+    // Отправляем на сервер только при реальном изменении
+    await api.updateProfile(profile);
+    console.log('Профиль сохранён!');
+  },
+  { delay: 1000 } // debounce: ждём 1 секунду после последнего изменения
+);
+```
+
+---
+
+### 5. `when()` — Одноразовая реакция ⏰
+
+`when` ждёт пока условие станет `true` и выполняет действие **один раз**:
+
+```typescript
+import { when } from 'mobx';
+
+// Вариант 1: с колбэком
+when(
+  () => userStore.isLoggedIn,         // условие
+  () => console.log('Пользователь вошёл!') // действие (один раз!)
+);
+
+// Вариант 2: как промис (await!)
+async function waitForUser() {
+  await when(() => userStore.isLoggedIn);
+  console.log('Теперь можем грузить данные');
+  await dataStore.loadUserData();
+}
+
+// Пример: показать уведомление когда корзина заполнится
+when(
+  () => cartStore.itemCount >= 5,
+  () => notificationStore.show('У вас 5+ товаров в корзине! 🛒')
+);
+```
+
+---
+
+### 6. Сравнение реакций 📊
+
+| | `autorun` | `reaction` | `when` |
+| :--- | :---: | :---: | :---: |
+| **Запуск при создании** | ✅ Да | ❌ Нет | ❌ Нет |
+| **Получает старое значение** | ❌ | ✅ | ❌ |
+| **Количество запусков** | ∞ | ∞ | 1 |
+| **Условие остановки** | Вручную | Вручную | Автоматически |
+| **Когда использовать** | Логи, синхронизация | API-запросы, аналитика | Инициализация |
+
+---
+
+### 7. Очистка реакций — важно! 🧹
+
+**Всегда сохраняй функцию очистки**, чтобы избежать утечек памяти:
+
+```typescript
+class ComponentStore {
+  private disposers: (() => void)[] = [];
+
+  constructor() {
+    // Сохраняем disposer
+    this.disposers.push(
+      autorun(() => {
+        document.title = `${appStore.notifications.length} уведомлений`;
+      })
+    );
+
+    this.disposers.push(
+      reaction(
+        () => authStore.isLoggedIn,
+        (isLoggedIn) => isLoggedIn ? this.onLogin() : this.onLogout()
+      )
+    );
+  }
+
+  // Вызывать при размонтировании компонента
+  dispose() {
+    this.disposers.forEach(d => d());
+  }
+}
+```
+
+---
+
+### Практика 🎮
+
+<Playground client:visible template="react" files={{
+  "/App.tsx": `import { makeAutoObservable, autorun, reaction, when } from 'mobx';
+import { observer, useLocalObservable } from 'mobx-react-lite';
+import { useEffect, useState } from 'react';
+
+class TemperatureStore {
+  celsius = 20;
+  logs: string[] = [];
+  alerts: string[] = [];
+  autoSaveEnabled = true;
+
+  constructor() {
+    makeAutoObservable(this);
+  }
+
+  get fahrenheit() {
+    return (this.celsius * 9) / 5 + 32;
+  }
+
+  get kelvin() {
+    return this.celsius + 273.15;
+  }
+
+  get status() {
+    if (this.celsius < 0) return { label: '🧊 Мороз', color: '#38bdf8' };
+    if (this.celsius < 15) return { label: '🌬️ Прохладно', color: '#7dd3fc' };
+    if (this.celsius < 25) return { label: '😊 Комфортно', color: '#34d399' };
+    if (this.celsius < 35) return { label: '☀️ Тепло', color: '#f59e0b' };
+    return { label: '🔥 Жара', color: '#ef4444' };
+  }
+
+  setCelsius(value: number) {
+    this.celsius = Math.max(-50, Math.min(60, value));
+  }
+
+  addLog(msg: string) {
+    this.logs.unshift(\`[\${new Date().toLocaleTimeString()}] \${msg}\`);
+    if (this.logs.length > 8) this.logs.pop();
+  }
+
+  addAlert(msg: string) {
+    this.alerts.unshift(msg);
+    if (this.alerts.length > 4) this.alerts.pop();
+  }
+
+  toggleAutoSave() {
+    this.autoSaveEnabled = !this.autoSaveEnabled;
+  }
+}
+
+const store = new TemperatureStore();
+
+// autorun: запускается сразу и при каждом изменении
+autorun(() => {
+  store.addLog(\`Температура: \${store.celsius}°C = \${store.fahrenheit.toFixed(1)}°F\`);
+});
+
+// reaction: только при пересечении 0 и 35 градусов
+reaction(
+  () => Math.floor(store.celsius / 10),
+  (zone, prevZone) => {
+    const zones: Record<number, string> = {
+      '-5': '🧊 Экстремальный мороз!',
+      '-4': '❄️ Сильный мороз!',
+      '-3': '🌨️ Мороз',
+      '-2': '⛄ Холодно',
+      '-1': '🌬️ Прохладно',
+      '0': '😊 Нейтральная зона',
+      '1': '🌤️ Тепло',
+      '2': '☀️ Жарко',
+      '3': '🔥 Очень жарко!',
+      '4': '🌡️ Экстремальная жара!',
+      '5': '💀 Опасная жара!',
+    };
+    const label = zones[String(zone)] || \`Зона \${zone}\`;
+    store.addAlert(\`reaction: переход → \${label}\`);
+  }
+);
+
+// when: сработает один раз когда достигнем 37°C
+when(
+  () => store.celsius >= 37,
+  () => store.addAlert('🏥 when(): достигли температуры тела (37°C)!')
+);
+
+export default observer(function App() {
+  const s = store;
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      background: '#0f172a',
+      padding: '24px 16px',
+      fontFamily: 'system-ui, sans-serif',
+      color: '#e2e8f0',
+    }}>
+      <div style={{ maxWidth: 560, margin: '0 auto' }}>
+        <h1 style={{ color: '#7c3aed', marginBottom: 4, fontSize: 22 }}>
+          ⚡ Computed & Reactions
+        </h1>
+        <p style={{ color: '#64748b', fontSize: 13, marginBottom: 20 }}>
+          autorun, reaction, when — в действии
+        </p>
+
+        {/* Temperature Display */}
+        <div style={{
+          background: '#1e293b',
+          borderRadius: 14,
+          padding: 20,
+          marginBottom: 16,
+          textAlign: 'center',
+          border: \`2px solid \${s.status.color}44\`,
+        }}>
+          <div style={{ fontSize: 48, fontWeight: 800, color: s.status.color, lineHeight: 1 }}>
+            {s.celsius}°C
+          </div>
+          <div style={{ color: s.status.color, fontSize: 18, margin: '8px 0' }}>
+            {s.status.label}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 20, marginTop: 12 }}>
+            <div style={{ color: '#64748b', fontSize: 13 }}>
+              <span style={{ color: '#38bdf8' }}>{s.fahrenheit.toFixed(1)}°F</span>
+            </div>
+            <div style={{ color: '#64748b', fontSize: 13 }}>
+              <span style={{ color: '#a78bfa' }}>{s.kelvin.toFixed(2)} K</span>
+            </div>
+          </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: '#475569' }}>
+            ↑ computed значения — пересчитываются автоматически
+          </div>
+        </div>
+
+        {/* Slider */}
+        <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+          <div style={{ color: '#94a3b8', fontSize: 13, marginBottom: 12 }}>
+            Регулируй температуру (-50°C до +60°C):
+          </div>
+          <input
+            type="range"
+            min={-50}
+            max={60}
+            value={s.celsius}
+            onChange={e => s.setCelsius(Number(e.target.value))}
+            style={{ width: '100%', accentColor: '#7c3aed', cursor: 'pointer' }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: '#475569', fontSize: 12, marginTop: 4 }}>
+            <span>-50°C 🧊</span>
+            <span>0°C</span>
+            <span>+60°C 🔥</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+            {[[-20, '❄️'], [0, '🌡️'], [20, '😊'], [37, '🏥'], [50, '🔥']].map(([temp, emoji]) => (
+              <button
+                key={temp}
+                onClick={() => s.setCelsius(temp as number)}
+                style={{
+                  background: s.celsius === temp ? '#7c3aed' : '#0f172a',
+                  color: s.celsius === temp ? '#fff' : '#94a3b8',
+                  border: '1px solid #334155',
+                  borderRadius: 6,
+                  padding: '4px 10px',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                }}
+              >{emoji} {temp}°</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          {/* autorun logs */}
+          <div style={{ background: '#1e293b', borderRadius: 12, padding: 14 }}>
+            <div style={{ color: '#38bdf8', fontSize: 12, fontWeight: 600, marginBottom: 10 }}>
+              🤖 autorun() логи
+            </div>
+            {s.logs.map((log, i) => (
+              <div key={i} style={{
+                color: i === 0 ? '#e2e8f0' : '#475569',
+                fontSize: 11,
+                marginBottom: 5,
+                lineHeight: 1.4,
+              }}>{log}</div>
+            ))}
+            {s.logs.length === 0 && <div style={{ color: '#334155', fontSize: 11 }}>Пусто...</div>}
+          </div>
+
+          {/* reaction & when alerts */}
+          <div style={{ background: '#1e293b', borderRadius: 12, padding: 14 }}>
+            <div style={{ color: '#a78bfa', fontSize: 12, fontWeight: 600, marginBottom: 10 }}>
+              🎯 reaction() + when() события
+            </div>
+            {s.alerts.map((alert, i) => (
+              <div key={i} style={{
+                color: i === 0 ? '#e2e8f0' : '#475569',
+                fontSize: 11,
+                marginBottom: 5,
+                lineHeight: 1.4,
+                padding: '4px 8px',
+                background: i === 0 ? '#2d1f6e' : 'transparent',
+                borderRadius: 4,
+              }}>{alert}</div>
+            ))}
+            {s.alerts.length === 0 && (
+              <div style={{ color: '#334155', fontSize: 11 }}>
+                Сдвинь ползунок на 10°+ чтобы увидеть reaction...
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div style={{
+          marginTop: 16,
+          padding: 14,
+          background: '#1e293b',
+          borderRadius: 10,
+          border: '1px solid #7c3aed33',
+        }}>
+          <div style={{ color: '#7c3aed', fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
+            💡 Как это работает
+          </div>
+          <div style={{ color: '#64748b', fontSize: 12, lineHeight: 1.7 }}>
+            📊 <b style={{ color: '#38bdf8' }}>computed</b>: fahrenheit, kelvin, status — кэшируются, пересчёт только при изменении celsius<br/>
+            🤖 <b style={{ color: '#38bdf8' }}>autorun</b>: запустился сразу, логирует каждое изменение температуры<br/>
+            🎯 <b style={{ color: '#a78bfa' }}>reaction</b>: срабатывает при смене "зоны" (каждые 10°C)<br/>
+            ⏰ <b style={{ color: '#f59e0b' }}>when</b>: сработает ровно один раз при достижении 37°C
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+`
+}} />

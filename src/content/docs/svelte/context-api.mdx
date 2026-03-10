@@ -1,0 +1,665 @@
+---
+title: "15. Context API"
+sidebar:
+  order: 15
+---
+import { Playground } from '@components/Playground'
+
+
+## 🌳 Context API в Svelte
+
+Context — это способ передавать данные вниз по дереву компонентов **без пропс-дриллинга**. Представь: есть данные пользователя, нужные в кнопке в глубине компонентного дерева. Прокидывать через 5 уровней пропсов? Или один раз `setContext` в корне? 🎯
+
+---
+
+## Проблема без Context
+
+```
+App
+└── Layout
+    └── Dashboard
+        └── Sidebar
+            └── UserMenu
+                └── Avatar  ← нужны данные пользователя!
+
+Без context: user → Layout → Dashboard → Sidebar → UserMenu → Avatar
+                   ↑ Props drilling — неудобно и хрупко!
+
+С context: setContext в App → getContext в Avatar напрямую
+```
+
+---
+
+## setContext и getContext
+
+```svelte
+<!-- ParentComponent.svelte -->
+<script lang="ts">
+  import { setContext } from 'svelte'
+
+  const user = {
+    name: 'Яша',
+    role: 'admin',
+    avatar: '/avatar.jpg',
+  }
+
+  // Устанавливаем контекст — будет доступен всем потомкам!
+  setContext('user', user)
+  setContext('theme', 'dark')
+
+  // Ключ может быть любым: строка, Symbol, объект
+  const CONFIG_KEY = Symbol('config')
+  setContext(CONFIG_KEY, { apiUrl: '/api/v1' })
+</script>
+
+<slot />
+```
+
+```svelte
+<!-- DeepChild.svelte — в глубине дерева -->
+<script lang="ts">
+  import { getContext } from 'svelte'
+
+  // Получаем контекст по ключу
+  const user = getContext<{ name: string; role: string }>('user')
+  const theme = getContext<'light' | 'dark'>('theme')
+
+  // Если ключ не найден — возвращает undefined
+  // (не выбрасывает ошибку!)
+</script>
+
+<div class="profile">
+  <img src="/avatar.jpg" alt={user.name} />
+  <span>{user.name} ({user.role})</span>
+</div>
+```
+
+---
+
+## hasContext и getAllContexts
+
+```svelte
+<script lang="ts">
+  import { hasContext, getAllContexts } from 'svelte'
+
+  // Проверить наличие контекста
+  if (hasContext('user')) {
+    const user = getContext('user')
+    // безопасно!
+  }
+
+  // Получить все контексты (для отладки)
+  const allContexts = getAllContexts()
+  console.log('Все контексты:', allContexts)
+  // Map { 'user' => {...}, 'theme' => 'dark', ... }
+</script>
+```
+
+---
+
+## Context vs Stores: ключевые отличия
+
+```
+┌──────────────────────┬──────────────────────┬──────────────────────┐
+│                      │ Context              │ Stores               │
+├──────────────────────┼──────────────────────┼──────────────────────┤
+│ Область видимости    │ Компонентное дерево  │ Всё приложение       │
+│ Реактивность         │ ❌ Нет               │ ✅ Да                │
+│ SSR                  │ ✅ Безопасен         │ ⚠️ Нужен осторожный │
+│ Количество экземпл.  │ ✅ Несколько         │ Обычно один          │
+│ Тестирование         │ Нужна обёртка        │ Легко мокать         │
+└──────────────────────┴──────────────────────┴──────────────────────┘
+```
+
+```
+Используй Context когда:
+✅ Данные нужны только в поддереве (не всему приложению)
+✅ Несколько экземпляров компонента с разными данными
+✅ SSR — каждый запрос должен иметь свой контекст
+✅ Compound components (Accordion + AccordionItem)
+
+Используй Stores когда:
+✅ Глобальное состояние (авторизация, корзина)
+✅ Нужна реактивность
+✅ Нужно изменять состояние из разных мест
+```
+
+---
+
+## Context + Stores = 🔥
+
+Лучший паттерн: хранить **store в контексте**. Это даёт и реактивность, и изоляцию!
+
+```svelte
+<!-- ThemeProvider.svelte -->
+<script lang="ts">
+  import { setContext } from 'svelte'
+  import { writable } from 'svelte/store'
+  import type { Writable } from 'svelte/store'
+
+  type Theme = 'light' | 'dark' | 'system'
+
+  // Создаём store и помещаем в контекст
+  const theme: Writable<Theme> = writable('dark')
+
+  setContext('theme', {
+    theme,
+    toggleTheme: () => {
+      theme.update(t => t === 'dark' ? 'light' : 'dark')
+    },
+    setTheme: (t: Theme) => theme.set(t),
+  })
+</script>
+
+<slot />
+```
+
+```svelte
+<!-- Любой потомок может читать И изменять тему! -->
+<script lang="ts">
+  import { getContext } from 'svelte'
+  import type { Writable } from 'svelte/store'
+
+  const { theme, toggleTheme } = getContext<{
+    theme: Writable<'light' | 'dark'>
+    toggleTheme: () => void
+  }>('theme')
+
+  // $theme — реактивно! Обновляется автоматически
+</script>
+
+<button on:click={toggleTheme}>
+  Тема: {$theme === 'dark' ? '🌙' : '☀️'}
+</button>
+```
+
+---
+
+## TypeScript: Типизация контекста с Symbol 🔐
+
+```typescript
+// context/types.ts — централизованные ключи и типы
+
+import type { Writable } from 'svelte/store'
+
+// Используем Symbol как ключ — уникально и типобезопасно
+export const THEME_KEY = Symbol('theme')
+export const AUTH_KEY  = Symbol('auth')
+export const ROUTER_KEY = Symbol('router')
+
+// Интерфейсы для каждого контекста
+export interface ThemeContext {
+  theme: Writable<'light' | 'dark'>
+  toggleTheme: () => void
+}
+
+export interface AuthContext {
+  user: Writable<User | null>
+  login: (email: string, password: string) => Promise<void>
+  logout: () => Promise<void>
+  isLoading: Writable<boolean>
+}
+
+export interface RouterContext {
+  currentPath: Writable<string>
+  navigate: (path: string) => void
+  params: Writable<Record<string, string>>
+}
+
+// Хелперы для типобезопасного get/setContext
+import { getContext, setContext } from 'svelte'
+
+export function setThemeContext(ctx: ThemeContext) {
+  setContext(THEME_KEY, ctx)
+}
+
+export function getThemeContext(): ThemeContext {
+  return getContext(THEME_KEY)
+}
+
+export function setAuthContext(ctx: AuthContext) {
+  setContext(AUTH_KEY, ctx)
+}
+
+export function getAuthContext(): AuthContext {
+  return getContext(AUTH_KEY)
+}
+```
+
+```svelte
+<!-- Использование типизированного контекста -->
+<script lang="ts">
+  import { setAuthContext, getAuthContext } from './context/types'
+  import { writable } from 'svelte/store'
+
+  // В провайдере
+  const user = writable<User | null>(null)
+  const isLoading = writable(false)
+
+  setAuthContext({
+    user,
+    isLoading,
+    async login(email, password) {
+      isLoading.set(true)
+      try {
+        const userData = await api.login(email, password)
+        user.set(userData)
+      } finally {
+        isLoading.set(false)
+      }
+    },
+    async logout() {
+      await api.logout()
+      user.set(null)
+    }
+  })
+</script>
+```
+
+---
+
+## Context в SvelteKit
+
+В SvelteKit контекст особенно важен для SSR, т.к. каждый запрос — новый экземпляр:
+
+```svelte
+<!-- +layout.svelte -->
+<script lang="ts">
+  import { setContext } from 'svelte'
+  import { writable } from 'svelte/store'
+
+  export let data  // Данные от load()
+
+  // Создаём stores из данных layout
+  // Каждый запрос получает СВОИ stores!
+  const user = writable(data.user)
+  const session = writable(data.session)
+
+  setContext('user', user)
+  setContext('session', session)
+
+  // Обновляем при навигации
+  $: user.set(data.user)
+  $: session.set(data.session)
+</script>
+
+<slot />
+```
+
+```typescript
+// +layout.server.ts
+import type { LayoutServerLoad } from './$types'
+
+export const load: LayoutServerLoad = async ({ locals }) => {
+  return {
+    user: locals.user ?? null,
+    session: locals.session ?? null,
+  }
+}
+```
+
+---
+
+## Паттерн: Theme Context
+
+```svelte
+<!-- ThemeProvider.svelte — полная реализация -->
+<script lang="ts">
+  import { setContext, onMount } from 'svelte'
+  import { writable, derived } from 'svelte/store'
+
+  type ThemeMode = 'light' | 'dark' | 'system'
+
+  const mode = writable<ThemeMode>('system')
+  const systemDark = writable(false)
+
+  const isDark = derived(
+    [mode, systemDark],
+    ([$mode, $systemDark]) => {
+      if ($mode === 'system') return $systemDark
+      return $mode === 'dark'
+    }
+  )
+
+  // Применяем тему к document
+  isDark.subscribe($isDark => {
+    document.documentElement.classList.toggle('dark', $isDark)
+  })
+
+  onMount(() => {
+    // Определяем системную тему
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    systemDark.set(mq.matches)
+    mq.addEventListener('change', e => systemDark.set(e.matches))
+
+    // Читаем сохранённую тему
+    const saved = localStorage.getItem('theme') as ThemeMode | null
+    if (saved) mode.set(saved)
+
+    return () => mq.removeEventListener('change', () => {})
+  })
+
+  setContext('theme', {
+    mode,
+    isDark,
+    setMode: (m: ThemeMode) => {
+      mode.set(m)
+      localStorage.setItem('theme', m)
+    },
+  })
+</script>
+
+<slot />
+```
+
+---
+
+## Паттерн: Auth Context
+
+```svelte
+<!-- AuthProvider.svelte -->
+<script lang="ts">
+  import { setContext } from 'svelte'
+  import { writable, derived } from 'svelte/store'
+
+  interface User {
+    id: string
+    name: string
+    email: string
+    role: 'user' | 'admin'
+  }
+
+  const user = writable<User | null>(null)
+  const loading = writable(true)
+
+  const isAuthenticated = derived(user, $user => $user !== null)
+  const isAdmin = derived(user, $user => $user?.role === 'admin')
+
+  // Инициализация — проверяем сессию
+  async function init() {
+    try {
+      const response = await fetch('/api/auth/me')
+      if (response.ok) {
+        const userData = await response.json()
+        user.set(userData)
+      }
+    } catch {
+      user.set(null)
+    } finally {
+      loading.set(false)
+    }
+  }
+
+  init()
+
+  setContext('auth', {
+    user,
+    loading,
+    isAuthenticated,
+    isAdmin,
+
+    async login(email: string, password: string) {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+      const userData = await res.json()
+      user.set(userData)
+    },
+
+    async logout() {
+      await fetch('/api/auth/logout', { method: 'POST' })
+      user.set(null)
+    },
+  })
+</script>
+
+<slot />
+```
+
+```svelte
+<!-- Кнопка выхода в глубине дерева -->
+<script>
+  import { getContext } from 'svelte'
+
+  const { user, logout, isAdmin } = getContext('auth')
+</script>
+
+{#if $user}
+  <div class="user-info">
+    <span>Привет, {$user.name}!</span>
+    {#if $isAdmin}
+      <span class="badge">Admin</span>
+    {/if}
+    <button on:click={logout}>Выйти</button>
+  </div>
+{/if}
+```
+
+---
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useContext, createContext, useCallback, useMemo } from 'react';
+
+const BG = '#0f172a';
+const SVELTE = '#ff3e00';
+const YELLOW = '#ffba00';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+
+// ---- Симуляция Svelte Context ----
+
+type Theme = 'dark' | 'light';
+interface ThemeCtx { theme: Theme; toggle: () => void; }
+const ThemeContext = createContext<ThemeCtx>({ theme: 'dark', toggle: () => {} });
+
+type UserRole = 'user' | 'moderator' | 'admin';
+interface User { name: string; role: UserRole; email: string; }
+interface AuthCtx { user: User | null; login: (u: User) => void; logout: () => void; }
+const AuthContext = createContext<AuthCtx>({ user: null, login: () => {}, logout: () => {} });
+
+function AppProviders({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<Theme>('dark');
+  const [user, setUser] = useState<User | null>(null);
+  const themeCtx = useMemo<ThemeCtx>(() => ({ theme, toggle: () => setTheme(t => t === 'dark' ? 'light' : 'dark') }), [theme]);
+  const authCtx = useMemo<AuthCtx>(() => ({ user, login: setUser, logout: () => setUser(null) }), [user]);
+  return (
+    <ThemeContext.Provider value={themeCtx}>
+      <AuthContext.Provider value={authCtx}>
+        {children}
+      </AuthContext.Provider>
+    </ThemeContext.Provider>
+  );
+}
+
+// Глубоко вложенный компонент — без пропсов!
+function DeepButton() {
+  const { user, logout, login } = useContext(AuthContext);
+  const { theme, toggle } = useContext(ThemeContext);
+  const users: User[] = [
+    {name: 'Яша', role: 'admin', email: 'yasha@example.com'},
+    {name: 'Петя', role: 'moderator', email: 'petya@example.com'},
+    {name: 'Маша', role: 'user', email: 'masha@example.com'},
+  ];
+  return (
+    <div style={{background: '#0a0f1e', padding: '1rem', borderRadius: '8px', border: '1px solid ' + BORDER}}>
+      <div style={{color: MUTED, fontSize: '0.7rem', marginBottom: '0.75rem'}}>DeepButton — 3 уровня в глубину</div>
+      {user ? (
+        <div style={{display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap'}}>
+          <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
+            <div style={{width: '32px', height: '32px', borderRadius: '50%', background: user.role === 'admin' ? SVELTE : user.role === 'moderator' ? YELLOW : '#60a5fa', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 900, color: '#0f172a', fontSize: '0.85rem'}}>{user.name[0]}</div>
+            <div>
+              <div style={{fontWeight: 700, color: TEXT, fontSize: '0.85rem'}}>{user.name}</div>
+              <div style={{color: MUTED, fontSize: '0.7rem'}}>{user.email}</div>
+            </div>
+          </div>
+          <span style={{
+            padding: '0.15rem 0.5rem', borderRadius: '4px', fontSize: '0.65rem', fontWeight: 700,
+            background: user.role === 'admin' ? SVELTE : user.role === 'moderator' ? YELLOW : '#60a5fa',
+            color: '#0f172a',
+          }}>{user.role.toUpperCase()}</span>
+          <button onClick={logout} style={{marginLeft: 'auto', padding: '0.35rem 0.75rem', borderRadius: '5px', border: 'none', background: '#ef4444', color: '#fff', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 700}}>Выйти</button>
+        </div>
+      ) : (
+        <div style={{display: 'flex', gap: '0.4rem', flexWrap: 'wrap'}}>
+          {users.map(u => (
+            <button key={u.name} onClick={() => login(u)} style={{
+              padding: '0.35rem 0.75rem', borderRadius: '5px', border: 'none',
+              background: u.role === 'admin' ? SVELTE : u.role === 'moderator' ? YELLOW : '#60a5fa',
+              color: '#0f172a', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 700,
+            }}>Войти как {u.name}</button>
+          ))}
+        </div>
+      )}
+      <div style={{marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem'}}>
+        <button onClick={toggle} style={{padding: '0.35rem 0.75rem', borderRadius: '5px', border: '1px solid ' + BORDER, background: CARD, color: TEXT, cursor: 'pointer', fontSize: '0.78rem'}}>
+          {theme === 'dark' ? '☀️ Светлая' : '🌙 Тёмная'} тема
+        </button>
+        <span style={{color: MUTED, fontSize: '0.7rem'}}>theme: <span style={{color: YELLOW}}>{theme}</span></span>
+      </div>
+    </div>
+  );
+}
+
+function MiddleLayer() {
+  return (
+    <div style={{background: CARD, padding: '1rem', borderRadius: '8px', border: '1px dashed ' + BORDER}}>
+      <div style={{color: MUTED, fontSize: '0.7rem', marginBottom: '0.75rem'}}>MiddleLayer — нет пропсов, только рендерит потомка</div>
+      <DeepButton />
+    </div>
+  );
+}
+
+type Demo = 'tree' | 'vs' | 'pattern';
+
+export default function App() {
+  const [demo, setDemo] = useState<Demo>('tree');
+
+  const tabs: {key: Demo; icon: string; label: string}[] = [
+    {key: 'tree',    icon: '🌳', label: 'Context Tree'},
+    {key: 'vs',      icon: '⚖️', label: 'Context vs Stores'},
+    {key: 'pattern', icon: '🔧', label: 'Паттерны'},
+  ];
+
+  return (
+    <AppProviders>
+      <div style={{background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: TEXT}}>
+        <h2 style={{color: SVELTE, marginBottom: '0.25rem', fontSize: '1.2rem'}}>🌳 Context API</h2>
+        <p style={{color: MUTED, fontSize: '0.78rem', marginBottom: '1.25rem'}}>
+          setContext + getContext — данные через дерево компонентов без props
+        </p>
+
+        <div style={{display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '1.25rem'}}>
+          {tabs.map(t => (
+            <button key={t.key} onClick={() => setDemo(t.key)} style={{
+              padding: '0.4rem 0.8rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+              background: demo === t.key ? SVELTE : CARD,
+              color: demo === t.key ? '#0f172a' : '#94a3b8',
+              fontWeight: demo === t.key ? 700 : 400, fontSize: '0.82rem',
+            }}>
+              {t.icon} {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{background: CARD, border: '1px solid ' + BORDER, borderRadius: '10px', padding: '1.25rem'}}>
+          {demo === 'tree' && (
+            <div>
+              <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '1rem'}}>
+                {'// setContext("auth") в App → getContext("auth") в DeepButton'}
+              </div>
+              <div style={{background: '#0a0f1e', padding: '1rem', borderRadius: '8px', border: '1px solid ' + BORDER, marginBottom: '1rem'}}>
+                <div style={{color: SVELTE, fontWeight: 700, marginBottom: '0.75rem', fontSize: '0.85rem'}}>App (setContext)</div>
+                <MiddleLayer />
+              </div>
+              <div style={{background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.75rem'}}>
+                <div style={{color: '#60a5fa'}}>{'// App.svelte'}</div>
+                <div style={{color: TEXT}}>{'setContext("auth", { user, login, logout })'}</div>
+                <div style={{color: TEXT}}>{'setContext("theme", { theme, toggle })'}</div>
+                <div style={{color: '#64748b', marginTop: '0.5rem'}}>{'// DeepButton.svelte (3 уровня глубже!)'}</div>
+                <div style={{color: TEXT}}>{'const { user, login, logout } = getContext("auth")'}</div>
+                <div style={{color: TEXT}}>{'const { theme, toggle } = getContext("theme")'}</div>
+                <div style={{color: '#34d399', marginTop: '0.3rem'}}>{'// Никаких props!!! ↑'}</div>
+              </div>
+            </div>
+          )}
+
+          {demo === 'vs' && (
+            <div>
+              <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem'}}>
+                {[
+                  {title: '🌳 Context', color: SVELTE, points: [
+                    ['Область', 'Только поддерево'],
+                    ['Реактивность', '❌ Нет (нужен store)'],
+                    ['SSR', '✅ Безопасен'],
+                    ['Экземпляры', 'Несколько (изолированы)'],
+                    ['Использование', 'Compound components'],
+                    ['Пример', 'ThemeProvider, AuthProvider'],
+                  ]},
+                  {title: '🏪 Stores', color: YELLOW, points: [
+                    ['Область', 'Всё приложение'],
+                    ['Реактивность', '✅ Да (writable)'],
+                    ['SSR', '⚠️ Осторожно'],
+                    ['Экземпляры', 'Обычно один'],
+                    ['Использование', 'Глобальное состояние'],
+                    ['Пример', 'cartStore, userStore'],
+                  ]},
+                ].map(section => (
+                  <div key={section.title} style={{background: '#0a0f1e', borderRadius: '8px', padding: '0.75rem', border: '1px solid ' + section.color + '44'}}>
+                    <div style={{color: section.color, fontWeight: 700, marginBottom: '0.5rem', fontSize: '0.85rem'}}>{section.title}</div>
+                    {section.points.map(([k, v]) => (
+                      <div key={k} style={{marginBottom: '0.25rem', fontSize: '0.75rem'}}>
+                        <span style={{color: MUTED}}>{k}: </span>
+                        <span style={{color: TEXT}}>{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <div style={{marginTop: '0.75rem', background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.75rem', color: YELLOW}}>
+                💡 Best practice: Store в контексте = реактивность + изоляция!
+              </div>
+            </div>
+          )}
+
+          {demo === 'pattern' && (
+            <div>
+              <div style={{color: MUTED, fontSize: '0.75rem', marginBottom: '0.75rem'}}>
+                {'// Паттерн: Store в контексте — лучшее из двух миров'}
+              </div>
+              {[
+                {name: 'ThemeProvider', key: 'theme', store: 'writable<"dark"|"light">', methods: ['toggle()', 'setTheme(t)'], desc: 'Тема приложения'},
+                {name: 'AuthProvider', key: 'auth', store: 'writable<User|null>', methods: ['login()', 'logout()'], desc: 'Авторизация пользователя'},
+                {name: 'RouterContext', key: 'router', store: 'writable<string>', methods: ['navigate(path)', 'back()'], desc: 'SvelteKit роутер'},
+              ].map(p => (
+                <div key={p.name} style={{background: '#0a0f1e', borderRadius: '8px', padding: '0.75rem', border: '1px solid ' + BORDER, marginBottom: '0.5rem'}}>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem'}}>
+                    <span style={{color: SVELTE, fontWeight: 700, fontSize: '0.85rem'}}>{p.name}</span>
+                    <span style={{color: MUTED, fontSize: '0.7rem'}}>key: "{p.key}"</span>
+                  </div>
+                  <div style={{color: MUTED, fontSize: '0.7rem', marginBottom: '0.4rem'}}>{p.desc}</div>
+                  <div style={{display: 'flex', gap: '0.4rem', flexWrap: 'wrap'}}>
+                    <span style={{color: YELLOW, fontSize: '0.7rem', background: YELLOW + '11', padding: '0.1rem 0.4rem', borderRadius: '3px'}}>store: {p.store}</span>
+                    {p.methods.map(m => (
+                      <span key={m} style={{color: '#60a5fa', fontSize: '0.7rem', background: '#60a5fa11', padding: '0.1rem 0.4rem', borderRadius: '3px'}}>{m}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div style={{background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.75rem', marginTop: '0.5rem'}}>
+                <div style={{color: '#7c3aed'}}>{'// TypeScript: типобезопасный контекст'}</div>
+                <div style={{color: TEXT}}>{'export const AUTH_KEY = Symbol("auth")'}</div>
+                <div style={{color: TEXT}}>{'export function getAuthContext() {'}</div>
+                <div style={{color: TEXT, paddingLeft: '1rem'}}>{'return getContext<AuthContext>(AUTH_KEY)'}</div>
+                <div style={{color: TEXT}}>{'}'}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </AppProviders>
+  );
+}
+` }} />

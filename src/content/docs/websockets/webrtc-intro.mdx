@@ -1,0 +1,392 @@
+---
+title: "11. WebRTC: основы"
+sidebar:
+  order: 11
+---
+
+import { Playground } from "@components/Playground"
+
+**WebRTC** (Web Real-Time Communication) — технология для прямой peer-to-peer связи между браузерами: видео, аудио, данные — без сервера-посредника.
+
+## Как работает WebRTC
+
+```
+Обычная архитектура:
+Клиент A → Сервер → Клиент B
+
+WebRTC (после установки):
+Клиент A ←————→ Клиент B (прямое соединение!)
+    ↕                 ↕
+   Сервер (только для signaling)
+```
+
+## Три компонента WebRTC
+
+### 1. Signaling Server (ваш сервер)
+Помогает двум клиентам найти друг друга и обменяться конфигурацией. После этого — не нужен:
+
+```javascript
+// Signaling через Socket.io
+io.on('connection', (socket) => {
+  // Передать offer от A к B
+  socket.on('offer', ({ to, offer }) => {
+    io.to(to).emit('offer', { from: socket.id, offer });
+  });
+
+  // Передать answer от B к A
+  socket.on('answer', ({ to, answer }) => {
+    io.to(to).emit('answer', { from: socket.id, answer });
+  });
+
+  // ICE кандидаты (информация о маршруте)
+  socket.on('ice-candidate', ({ to, candidate }) => {
+    io.to(to).emit('ice-candidate', { from: socket.id, candidate });
+  });
+});
+```
+
+### 2. STUN/TURN серверы
+Помогают клиентам за NAT найти свой публичный IP:
+
+```javascript
+const ICE_SERVERS = {
+  iceServers: [
+    // STUN — бесплатный Google
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    
+    // TURN — нужен если прямое P2P невозможно (за строгим NAT)
+    {
+      urls: 'turn:turn.example.com:3478',
+      username: 'user',
+      credential: 'password',
+    },
+  ],
+};
+```
+
+### 3. RTCPeerConnection
+Основной API браузера для WebRTC:
+
+```javascript
+const pc = new RTCPeerConnection(ICE_SERVERS);
+```
+
+## SDP Offer/Answer — установка соединения
+
+```
+Клиент A (инициатор)          Клиент B (получатель)
+        │                              │
+        │ createOffer()                │
+        │ setLocalDescription(offer)   │
+        │──── offer → Signaling ──────→│
+        │                   setRemoteDescription(offer)
+        │                   createAnswer()
+        │                   setLocalDescription(answer)
+        │←─── answer ← Signaling ─────│
+        │ setRemoteDescription(answer) │
+        │                              │
+        │←── ICE candidates ──────────→│ (несколько раундов)
+        │                              │
+        │←═══ P2P соединение ════════→│ 🎉
+```
+
+## Полный пример: видеозвонок
+
+### Клиент-инициатор
+
+```javascript
+class VideoCall {
+  constructor(signalingSocket) {
+    this.socket = signalingSocket;
+    this.pc = new RTCPeerConnection(ICE_SERVERS);
+    this.localStream = null;
+    this.remoteStream = new MediaStream();
+    
+    this._setupPeerConnection();
+    this._setupSignaling();
+  }
+
+  _setupPeerConnection() {
+    // Отправлять ICE кандидатов через signaling
+    this.pc.onicecandidate = ({ candidate }) => {
+      if (candidate) {
+        this.socket.emit('ice-candidate', { 
+          to: this.peerId, 
+          candidate 
+        });
+      }
+    };
+
+    // Получить remote медиа треки
+    this.pc.ontrack = ({ streams }) => {
+      streams[0].getTracks().forEach((track) => {
+        this.remoteStream.addTrack(track);
+      });
+      document.getElementById('remote-video').srcObject = this.remoteStream;
+    };
+
+    // Следить за состоянием ICE
+    this.pc.oniceconnectionstatechange = () => {
+      console.log('ICE state:', this.pc.iceConnectionState);
+    };
+  }
+
+  _setupSignaling() {
+    this.socket.on('answer', async ({ from, answer }) => {
+      await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
+    });
+
+    this.socket.on('ice-candidate', async ({ candidate }) => {
+      try {
+        await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.error('ICE error:', err);
+      }
+    });
+
+    this.socket.on('offer', async ({ from, offer }) => {
+      this.peerId = from;
+      await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+      
+      // Добавить локальный стрим (если ещё не добавлен)
+      if (this.localStream) {
+        this.localStream.getTracks().forEach((track) => {
+          this.pc.addTrack(track, this.localStream);
+        });
+      }
+      
+      const answer = await this.pc.createAnswer();
+      await this.pc.setLocalDescription(answer);
+      this.socket.emit('answer', { to: from, answer });
+    });
+  }
+
+  // Начать звонок
+  async call(peerId) {
+    this.peerId = peerId;
+    
+    // Получить доступ к камере и микрофону
+    this.localStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720 },
+      audio: true,
+    });
+    
+    document.getElementById('local-video').srcObject = this.localStream;
+    
+    // Добавить треки в соединение
+    this.localStream.getTracks().forEach((track) => {
+      this.pc.addTrack(track, this.localStream);
+    });
+    
+    // Создать и отправить offer
+    const offer = await this.pc.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true,
+    });
+    await this.pc.setLocalDescription(offer);
+    this.socket.emit('offer', { to: peerId, offer });
+  }
+
+  // Завершить звонок
+  hangup() {
+    this.localStream?.getTracks().forEach((t) => t.stop());
+    this.pc.close();
+    this.socket.emit('hangup', { to: this.peerId });
+  }
+
+  // Выключить/включить микрофон
+  toggleMic() {
+    const audioTrack = this.localStream?.getAudioTracks()[0];
+    if (audioTrack) audioTrack.enabled = !audioTrack.enabled;
+  }
+
+  // Выключить/включить камеру
+  toggleCamera() {
+    const videoTrack = this.localStream?.getVideoTracks()[0];
+    if (videoTrack) videoTrack.enabled = !videoTrack.enabled;
+  }
+}
+```
+
+## RTCDataChannel — P2P данные
+
+WebRTC можно использовать не только для медиа, но и для произвольных данных:
+
+```javascript
+// Отправитель создаёт DataChannel
+const channel = pc.createDataChannel('chat', {
+  ordered: true,        // Гарантированный порядок
+  maxRetransmits: 3,    // Максимум повторных отправок
+});
+
+channel.onopen = () => {
+  channel.send('Привет!');
+  channel.send(JSON.stringify({ type: 'file-info', name: 'photo.jpg', size: 1024000 }));
+  
+  // Отправить бинарный файл
+  channel.binaryType = 'arraybuffer';
+  channel.send(fileArrayBuffer);
+};
+
+channel.onmessage = (event) => {
+  if (typeof event.data === 'string') {
+    console.log('Текст:', event.data);
+  } else {
+    console.log('Бинарные данные:', event.data.byteLength, 'байт');
+  }
+};
+
+// Получатель принимает DataChannel
+pc.ondatachannel = (event) => {
+  const channel = event.channel;
+  channel.onmessage = (e) => console.log('Получено:', e.data);
+};
+```
+
+## Screen sharing — демонстрация экрана
+
+```javascript
+// Получить поток экрана
+async function startScreenShare() {
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      cursor: 'always',    // Показывать курсор
+      displaySurface: 'monitor', // 'monitor', 'window', 'browser'
+    },
+    audio: false,
+  });
+
+  // Заменить видеотрек в существующем соединении
+  const videoTrack = stream.getVideoTracks()[0];
+  const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
+  await sender?.replaceTrack(videoTrack);
+
+  // Когда пользователь остановил шаринг
+  videoTrack.onended = () => {
+    stopScreenShare();
+  };
+}
+```
+
+## Отладка WebRTC
+
+```javascript
+// chrome://webrtc-internals — встроенный отладчик Chrome
+
+// Статистика соединения
+const stats = await pc.getStats();
+stats.forEach((stat) => {
+  if (stat.type === 'inbound-rtp' && stat.mediaType === 'video') {
+    console.log('Видео RTP:');
+    console.log('  Пакетов получено:', stat.packetsReceived);
+    console.log('  Потерь:', stat.packetsLost);
+    console.log('  Jitter:', stat.jitter);
+    console.log('  Байт:', stat.bytesReceived);
+  }
+  
+  if (stat.type === 'candidate-pair' && stat.state === 'succeeded') {
+    console.log('Маршрут:', stat.localCandidateId, '→', stat.remoteCandidateId);
+  }
+});
+```
+
+## Задания
+
+1. Создай простой видеочат: два браузера на одной машине через WebRTC
+2. Реализуй P2P передачу файла через DataChannel (без сервера!)
+3. Добавь кнопку демонстрации экрана в видеочат
+4. Используй `getStats()` для показа качества соединения (потери пакетов, bitrate)
+
+## Итог
+
+WebRTC = P2P видео/аудио/данные через браузер. Нужен signaling-сервер для установки соединения, затем связь идёт напрямую. Идеален для видеозвонков и P2P передачи данных. В следующем уроке — безопасность real-time систем.
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+export default function App() {
+  const [step, setStep] = useState(0);
+  const [connected, setConnected] = useState(false);
+  const [dataLog, setDataLog] = useState([]);
+
+  const steps = [
+    { label: "1. Signaling: обмен SDP через сервер", icon: "📡", detail: "Peer A создаёт offer → сигнальный сервер → Peer B создаёт answer" },
+    { label: "2. ICE: поиск маршрута", icon: "🔍", detail: "STUN сервер определяет публичный IP. Кандидаты обмениваются через signaling." },
+    { label: "3. DTLS Handshake: шифрование", icon: "🔒", detail: "Peers устанавливают защищённое соединение напрямую." },
+    { label: "4. P2P соединение установлено!", icon: "✅", detail: "Данные идут напрямую между браузерами, без сервера." },
+  ];
+
+  const next = () => {
+    if (step < 3) {
+      setStep(s => s + 1);
+    } else {
+      setConnected(true);
+    }
+  };
+
+  const sendData = () => {
+    const msgs = ["Привет!", "Файл: photo.jpg (2.3MB)", "Координаты: 55.75, 37.62", "Пинг: 12ms"];
+    setDataLog(prev => [...prev.slice(-4), {
+      text: msgs[Math.floor(Math.random() * msgs.length)],
+      dir: Math.random() > 0.5 ? "A→B" : "B→A",
+      time: new Date().toLocaleTimeString()
+    }]);
+  };
+
+  const reset = () => { setStep(0); setConnected(false); setDataLog([]); };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>WebRTC: P2P соединение</h3>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ textAlign: "center", padding: 10, background: "#1e293b", borderRadius: 8, width: 80 }}>
+          <div style={{ fontSize: 20 }}>🖥️</div><div style={{ color: "#3b82f6", fontSize: 12 }}>Peer A</div>
+        </div>
+        <div style={{ flex: 1, height: 2, background: connected ? "#10b981" : "#334155", margin: "0 8px", position: "relative" }}>
+          {connected && <span style={{ position: "absolute", top: -10, left: "50%", transform: "translateX(-50%)", color: "#10b981", fontSize: 11 }}>P2P</span>}
+        </div>
+        <div style={{ textAlign: "center", padding: 10, background: "#1e293b", borderRadius: 8, width: 80 }}>
+          <div style={{ fontSize: 20 }}>🖥️</div><div style={{ color: "#a78bfa", fontSize: 12 }}>Peer B</div>
+        </div>
+      </div>
+      {!connected ? (
+        <div>
+          {steps.slice(0, step + 1).map((s, i) => (
+            <div key={i} style={{ padding: "6px 10px", background: "#0f172a", borderRadius: 4, marginBottom: 4, fontSize: 12 }}>
+              <span>{s.icon} </span><b style={{ color: "#e2e8f0" }}>{s.label}</b>
+              <div style={{ color: "#94a3b8", marginTop: 2 }}>{s.detail}</div>
+            </div>
+          ))}
+          <button onClick={next} style={{ marginTop: 8, padding: "6px 14px", background: "#3b82f6", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>
+            {step < 3 ? "Далее →" : "Установить P2P"}
+          </button>
+        </div>
+      ) : (
+        <div>
+          <div style={{ color: "#10b981", fontSize: 13, marginBottom: 8 }}>✓ Peer-to-peer соединение активно</div>
+          <button onClick={sendData} style={{ padding: "5px 12px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12, marginBottom: 8 }}>
+            Отправить данные
+          </button>
+          <button onClick={reset} style={{ padding: "5px 12px", background: "#334155", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12, marginLeft: 8 }}>
+            Сброс
+          </button>
+          <div style={{ background: "#0f172a", padding: 8, borderRadius: 4 }}>
+            {dataLog.map((d, i) => (
+              <div key={i} style={{ fontSize: 11, color: d.dir === "A→B" ? "#3b82f6" : "#a78bfa" }}>
+                {d.time} [{d.dir}] {d.text}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

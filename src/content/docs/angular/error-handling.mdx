@@ -1,0 +1,644 @@
+---
+title: "34. Обработка ошибок"
+sidebar:
+  order: 36
+---
+import { Playground } from '@components/Playground'
+
+
+## 🚨 Обработка ошибок в Angular
+
+Ошибки — это неизбежная часть любого приложения. Angular даёт тебе несколько уровней защиты: глобальный `ErrorHandler`, HTTP-перехватчики, зонально-осведомлённая обработка и паттерны для Sentry. Разберём каждый уровень 🛡️
+
+---
+
+## Глобальный ErrorHandler
+
+По умолчанию Angular использует встроенный `ErrorHandler`, который просто логирует ошибку в консоль. Чтобы перехватывать ВСЕ необработанные ошибки, переопредели его:
+
+```typescript
+// core/global-error-handler.ts
+import { ErrorHandler, Injectable, NgZone } from '@angular/core';
+import { Router } from '@angular/router';
+
+@Injectable()
+export class GlobalErrorHandler implements ErrorHandler {
+  constructor(
+    private router: Router,
+    private ngZone: NgZone
+  ) {}
+
+  handleError(error: unknown): void {
+    const err = error as Error;
+
+    console.error('💥 Глобальная ошибка:', err);
+
+    // Важно: навигация должна выполняться внутри NgZone
+    this.ngZone.run(() => {
+      if (err?.message?.includes('ChunkLoadError')) {
+        // Lazy-loaded модуль не загрузился — обновляем страницу
+        window.location.reload();
+        return;
+      }
+
+      // Перенаправляем на страницу ошибки
+      this.router.navigate(['/error'], {
+        queryParams: { message: err?.message || 'Неизвестная ошибка' }
+      });
+    });
+  }
+}
+```
+
+Регистрация в `app.config.ts` (Standalone):
+
+```typescript
+// app.config.ts
+import { ApplicationConfig } from '@angular/core';
+import { provideRouter } from '@angular/router';
+import { ErrorHandler } from '@angular/core';
+import { GlobalErrorHandler } from './core/global-error-handler';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideRouter(routes),
+    { provide: ErrorHandler, useClass: GlobalErrorHandler }
+  ]
+};
+```
+
+Или в `AppModule`:
+
+```typescript
+@NgModule({
+  providers: [
+    { provide: ErrorHandler, useClass: GlobalErrorHandler }
+  ]
+})
+export class AppModule {}
+```
+
+---
+
+## HTTP Error Interceptor
+
+Перехватчик HTTP-запросов — лучшее место для централизованной обработки HTTP-ошибок:
+
+```typescript
+// core/interceptors/http-error.interceptor.ts
+import {
+  HttpInterceptorFn,
+  HttpRequest,
+  HttpHandlerFn,
+  HttpErrorResponse
+} from '@angular/common/http';
+import { inject } from '@angular/core';
+import { catchError, throwError } from 'rxjs';
+import { Router } from '@angular/router';
+import { NotificationService } from '../services/notification.service';
+
+export const httpErrorInterceptor: HttpInterceptorFn = (
+  req: HttpRequest<unknown>,
+  next: HttpHandlerFn
+) => {
+  const router = inject(Router);
+  const notify = inject(NotificationService);
+
+  return next(req).pipe(
+    catchError((error: HttpErrorResponse) => {
+      let message = 'Что-то пошло не так 😬';
+
+      switch (error.status) {
+        case 0:
+          message = 'Нет соединения с сервером. Проверь интернет 🌐';
+          break;
+        case 400:
+          message = error.error?.message || 'Неверный запрос';
+          break;
+        case 401:
+          message = 'Необходима авторизация';
+          router.navigate(['/login']);
+          break;
+        case 403:
+          message = 'Доступ запрещён 🚫';
+          router.navigate(['/forbidden']);
+          break;
+        case 404:
+          message = 'Ресурс не найден 🔍';
+          break;
+        case 422:
+          // Ошибки валидации — берём из тела ответа
+          message = extractValidationErrors(error.error);
+          break;
+        case 429:
+          message = 'Слишком много запросов. Подожди немного ⏳';
+          break;
+        case 500:
+        case 503:
+          message = 'Ошибка сервера. Мы уже работаем над этим 🔧';
+          break;
+      }
+
+      notify.showError(message);
+
+      // Пробрасываем ошибку дальше для обработки в компоненте
+      return throwError(() => new Error(message));
+    })
+  );
+};
+
+function extractValidationErrors(errorBody: any): string {
+  if (!errorBody?.errors) return 'Ошибка валидации';
+  return Object.values(errorBody.errors).flat().join(', ');
+}
+```
+
+Регистрация перехватчика:
+
+```typescript
+// app.config.ts
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
+import { httpErrorInterceptor } from './core/interceptors/http-error.interceptor';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideHttpClient(withInterceptors([httpErrorInterceptor]))
+  ]
+};
+```
+
+---
+
+## Zone-aware обработка ошибок
+
+Angular работает внутри Zone.js — патча, который отслеживает асинхронные операции. Ошибки в `setTimeout`, `Promise` и event listeners перехватываются автоматически. Но есть нюанс:
+
+```typescript
+// Ошибка ВНУТРИ зоны — попадёт в GlobalErrorHandler ✅
+setTimeout(() => {
+  throw new Error('Ошибка в таймере');
+}, 1000);
+
+// Ошибка СНАРУЖИ зоны — НЕ попадёт в GlobalErrorHandler ❌
+this.ngZone.runOutsideAngular(() => {
+  setTimeout(() => {
+    throw new Error('Эта ошибка потеряется');
+  }, 1000);
+});
+
+// Правильно — перехватывай вручную:
+this.ngZone.runOutsideAngular(() => {
+  setTimeout(() => {
+    try {
+      riskyOperation();
+    } catch (error) {
+      this.ngZone.run(() => {
+        this.errorHandler.handleError(error);
+      });
+    }
+  }, 1000);
+});
+```
+
+---
+
+## try/catch в async/await и Observable
+
+В сервисах с `async/await`:
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  async loadUser(id: string): Promise<User> {
+    try {
+      const response = await fetch(`/api/users/${id}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      return await response.json();
+    } catch (error) {
+      // Логируем и пробрасываем с контекстом
+      console.error(`Не удалось загрузить пользователя ${id}:`, error);
+      throw error; // GlobalErrorHandler поймает
+    }
+  }
+}
+```
+
+В компонентах с Observable:
+
+```typescript
+@Component({
+  template: `
+    @if (loading()) {
+      <app-spinner />
+    } @else if (error()) {
+      <app-error-message [message]="error()!" />
+    } @else {
+      <app-user-card [user]="user()!" />
+    }
+  `
+})
+export class UserProfileComponent {
+  private userService = inject(UserService);
+
+  user = signal<User | null>(null);
+  error = signal<string | null>(null);
+  loading = signal(false);
+
+  ngOnInit() {
+    this.loading.set(true);
+
+    this.userService.getUser('123').pipe(
+      catchError(err => {
+        this.error.set(err.message);
+        return EMPTY; // Прекращаем поток без ошибки
+      }),
+      finalize(() => this.loading.set(false))
+    ).subscribe(user => this.user.set(user));
+  }
+}
+```
+
+---
+
+## async pipe и обработка ошибок
+
+`async` pipe не обрабатывает ошибки сам — они пробрасываются наверх. Используй `catchError` в потоке:
+
+```typescript
+@Component({
+  template: `
+    @if (users$ | async; as users) {
+      @for (user of users; track user.id) {
+        <app-user-card [user]="user" />
+      }
+    }
+  `
+})
+export class UsersListComponent {
+  private userService = inject(UserService);
+
+  // Оборачиваем в catchError — ошибка не сломает поток
+  users$ = this.userService.getUsers().pipe(
+    catchError(error => {
+      console.error('Ошибка загрузки:', error);
+      return of([]); // Возвращаем пустой массив
+    })
+  );
+}
+```
+
+---
+
+## Страница ошибки
+
+```typescript
+// pages/error/error-page.component.ts
+@Component({
+  selector: 'app-error-page',
+  template: `
+    <div class="error-container">
+      <div class="error-icon">💥</div>
+      <h1>Что-то пошло не так</h1>
+      <p class="error-message">{{ errorMessage() }}</p>
+      <div class="error-actions">
+        <button (click)="goHome()">На главную</button>
+        <button (click)="retry()">Попробовать снова</button>
+      </div>
+    </div>
+  `
+})
+export class ErrorPageComponent {
+  private router = inject(Router);
+  private route = inject(ActivatedRoute);
+
+  errorMessage = signal('Неизвестная ошибка');
+
+  ngOnInit() {
+    this.route.queryParams.subscribe(params => {
+      if (params['message']) {
+        this.errorMessage.set(params['message']);
+      }
+    });
+  }
+
+  goHome() {
+    this.router.navigate(['/']);
+  }
+
+  retry() {
+    window.history.back();
+  }
+}
+```
+
+---
+
+## Интеграция с Sentry
+
+Sentry — популярный инструмент для мониторинга ошибок в production:
+
+```typescript
+// core/sentry-error-handler.ts
+import { ErrorHandler, Injectable } from '@angular/core';
+import * as Sentry from '@sentry/angular';
+
+@Injectable()
+export class SentryErrorHandler implements ErrorHandler {
+  handleError(error: unknown): void {
+    const err = error as Error;
+
+    // Не логируем 4xx ошибки — они ожидаемы
+    if (isHttpError(err) && (err as any).status < 500) {
+      console.warn('Client error:', err);
+      return;
+    }
+
+    // Отправляем в Sentry с контекстом
+    Sentry.withScope(scope => {
+      scope.setTag('source', 'angular-error-handler');
+      scope.setExtra('timestamp', new Date().toISOString());
+      Sentry.captureException(err);
+    });
+
+    console.error(err);
+  }
+}
+
+function isHttpError(err: Error): boolean {
+  return 'status' in err && 'url' in err;
+}
+```
+
+Инициализация Sentry в `main.ts`:
+
+```typescript
+// main.ts
+import * as Sentry from '@sentry/angular';
+
+Sentry.init({
+  dsn: 'https://your-dsn@sentry.io/project-id',
+  environment: 'production',
+  tracesSampleRate: 0.1, // 10% транзакций для performance monitoring
+  integrations: [
+    Sentry.browserTracingIntegration(),
+    Sentry.replayIntegration({ maskAllText: true })
+  ]
+});
+
+bootstrapApplication(AppComponent, appConfig);
+```
+
+---
+
+## Retry стратегия для HTTP
+
+```typescript
+// Автоматическая повторная попытка с экспоненциальной задержкой
+import { retryWhen, delay, scan, tap } from 'rxjs/operators';
+
+export function retryWithBackoff(maxRetries = 3, delayMs = 1000) {
+  return retryWhen(errors =>
+    errors.pipe(
+      scan((retryCount, error) => {
+        if (retryCount >= maxRetries) throw error;
+        return retryCount + 1;
+      }, 0),
+      tap(count => console.log(`Попытка ${count}...`)),
+      delay(delayMs * Math.pow(2, 0)) // 1s, 2s, 4s
+    )
+  );
+}
+
+// Использование
+this.http.get('/api/data').pipe(
+  retryWithBackoff(3, 1000),
+  catchError(err => {
+    notify.showError('Не удалось загрузить данные после 3 попыток');
+    return EMPTY;
+  })
+);
+```
+
+---
+
+## Лучшие практики 📋
+
+| Слой | Инструмент | Когда использовать |
+|------|------------|-------------------|
+| Глобальный | `ErrorHandler` | Необработанные ошибки JS |
+| HTTP | `HttpInterceptor` | Все HTTP-запросы |
+| Компонент | `catchError` + signal | Локальная обработка состояния |
+| Template | `async pipe` + `catchError` | Потоки в шаблоне |
+| Production | Sentry | Мониторинг в продакшене |
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useState } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+
+type ErrorType = 'http' | 'js' | 'chunk' | null;
+
+interface LogEntry {
+  id: number;
+  type: 'error' | 'warn' | 'info';
+  message: string;
+  handler: string;
+}
+
+let logId = 0;
+
+export default function App() {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [activeError, setActiveError] = useState<ErrorType>(null);
+  const [httpStatus, setHttpStatus] = useState(500);
+
+  const addLog = (type: LogEntry['type'], message: string, handler: string) => {
+    setLogs(prev => [...prev, { id: ++logId, type, message, handler }]);
+  };
+
+  const clearLogs = () => setLogs([]);
+
+  const throwJsError = () => {
+    setActiveError('js');
+    addLog('error', 'TypeError: Cannot read properties of null', 'GlobalErrorHandler');
+    addLog('info', '→ Redirecting to /error page', 'GlobalErrorHandler');
+  };
+
+  const throwHttpError = () => {
+    setActiveError('http');
+    const messages: Record<number, string> = {
+      401: '→ Redirecting to /login',
+      403: '→ Redirecting to /forbidden',
+      404: 'Resource not found',
+      500: '→ Showing server error notification',
+    };
+    addLog('error', \`HttpErrorResponse: status \${httpStatus}\`, 'HttpErrorInterceptor');
+    addLog('warn', messages[httpStatus] || 'Unknown HTTP error', 'HttpErrorInterceptor');
+  };
+
+  const throwChunkError = () => {
+    setActiveError('chunk');
+    addLog('error', 'ChunkLoadError: Loading chunk 42 failed', 'GlobalErrorHandler');
+    addLog('info', '→ Page will reload (new deployment detected)', 'GlobalErrorHandler');
+  };
+
+  const simulateSentry = () => {
+    if (logs.length > 0) {
+      addLog('info', '📡 Error captured and sent to Sentry', 'SentryErrorHandler');
+      addLog('info', \`Event ID: \${Math.random().toString(36).substring(2, 10)}\`, 'Sentry');
+    }
+  };
+
+  const logColors: Record<LogEntry['type'], string> = {
+    error: RED,
+    warn: WARN,
+    info: SUCCESS,
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, marginBottom: '0.25rem', fontSize: '1.2rem' }}>
+        🚨 Angular Error Handler Simulator
+      </h2>
+      <p style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '1.5rem' }}>
+        Симуляция глобальной обработки ошибок
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        {/* Controls */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#94a3b8', fontSize: '0.75rem', marginBottom: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Triggers
+          </div>
+
+          <button onClick={throwJsError} style={btnStyle(RED)}>
+            💥 JS Error (TypeError)
+          </button>
+
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', margin: '0.5rem 0' }}>
+            <select
+              value={httpStatus}
+              onChange={e => setHttpStatus(Number(e.target.value))}
+              style={{ background: '#0f172a', color: '#e2e8f0', border: \`1px solid \${BORDER}\`, borderRadius: '4px', padding: '0.3rem', fontSize: '0.8rem' }}
+            >
+              {[400, 401, 403, 404, 422, 429, 500, 503].map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+            <button onClick={throwHttpError} style={{ ...btnStyle('#3b82f6'), flex: 1 }}>
+              🌐 HTTP Error
+            </button>
+          </div>
+
+          <button onClick={throwChunkError} style={btnStyle(WARN, '#0f172a')}>
+            📦 ChunkLoadError
+          </button>
+
+          <button onClick={simulateSentry} style={btnStyle('#8b5cf6')}>
+            📡 Send to Sentry
+          </button>
+
+          <button onClick={clearLogs} style={{ ...btnStyle(BORDER), marginTop: '0.5rem', color: '#94a3b8' }}>
+            🗑️ Clear
+          </button>
+        </div>
+
+        {/* Error page preview */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ color: '#94a3b8', fontSize: '0.75rem', marginBottom: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Error Page Preview
+          </div>
+          {activeError ? (
+            <div style={{ textAlign: 'center', padding: '1rem' }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '0.5rem' }}>
+                {activeError === 'http' ? '🌐' : activeError === 'chunk' ? '📦' : '💥'}
+              </div>
+              <div style={{ color: RED, fontWeight: 700, marginBottom: '0.25rem', fontSize: '0.95rem' }}>
+                {activeError === 'http' ? \`HTTP \${httpStatus} Error\` :
+                 activeError === 'chunk' ? 'Chunk Load Failed' : 'Something Went Wrong'}
+              </div>
+              <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginBottom: '1rem' }}>
+                {activeError === 'http' && httpStatus === 401 ? 'Redirected to /login' :
+                 activeError === 'http' && httpStatus === 403 ? 'Redirected to /forbidden' :
+                 activeError === 'chunk' ? 'Reloading page...' :
+                 'Redirected to /error'}
+              </div>
+              <button onClick={() => setActiveError(null)} style={btnStyle('#334155', '#e2e8f0')}>
+                ← Back
+              </button>
+            </div>
+          ) : (
+            <div style={{ color: '#475569', fontSize: '0.85rem', textAlign: 'center', paddingTop: '2rem' }}>
+              Trigger an error to preview the error page
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Handler pipeline */}
+      <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
+        <div style={{ color: '#94a3b8', fontSize: '0.75rem', marginBottom: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          Handler Pipeline
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+          {['App', 'Zone.js', 'HttpInterceptor', 'GlobalErrorHandler', 'SentryErrorHandler', 'UI Notification'].map((h, i) => (
+            <div key={h} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <div style={{
+                background: logs.some(l => l.handler === h) ? RED : '#1e293b',
+                border: \`1px solid \${logs.some(l => l.handler === h) ? RED : BORDER}\`,
+                borderRadius: '4px',
+                padding: '0.25rem 0.5rem',
+                fontSize: '0.72rem',
+                color: logs.some(l => l.handler === h) ? '#fff' : '#94a3b8',
+                transition: 'all 0.3s',
+              }}>{h}</div>
+              {i < 5 && <span style={{ color: BORDER }}>→</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Logs */}
+      <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem', minHeight: '120px', maxHeight: '180px', overflowY: 'auto' }}>
+        <div style={{ color: '#94a3b8', fontSize: '0.75rem', marginBottom: '0.5rem' }}>Console Output</div>
+        {logs.length === 0 ? (
+          <div style={{ color: '#334155', fontSize: '0.8rem' }}>// Trigger an error above...</div>
+        ) : (
+          logs.map(log => (
+            <div key={log.id} style={{ fontSize: '0.78rem', marginBottom: '0.2rem', color: logColors[log.type] }}>
+              <span style={{ color: '#475569' }}>[{log.handler}]</span> {log.message}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function btnStyle(bg: string, color = '#fff') {
+  return {
+    display: 'block',
+    width: '100%',
+    padding: '0.45rem 0.75rem',
+    background: bg,
+    color,
+    border: 'none',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    fontSize: '0.82rem',
+    fontWeight: 600,
+    marginBottom: '0.4rem',
+    textAlign: 'left' as const,
+  };
+}
+` }} />

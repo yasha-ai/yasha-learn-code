@@ -1,0 +1,371 @@
+---
+title: "17. Django: основы"
+sidebar:
+  order: 16
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/intro.png)
+
+## Django vs FastAPI
+
+| | Django | FastAPI |
+|--|--------|---------|
+| Подход | "Batteries included" | Минималистичный |
+| ORM | Встроенный | SQLAlchemy/другие |
+| Admin | Из коробки | Нет |
+| Шаблоны | Встроенные | Нет (только API) |
+| Async | Частичный | Нативный |
+| Лучше для | Полный сайт + API | Только API |
+| Популярность | Instagram, Pinterest, Disqus | Растёт быстро |
+
+**Выбирай Django когда**: нужна admin-панель, полный сайт с шаблонами, встроенная аутентификация.
+**Выбирай FastAPI когда**: только API, нужна максимальная скорость, нативный async.
+
+## Установка и первый проект
+
+```bash
+pip install django djangorestframework
+
+# Создать проект
+django-admin startproject mysite .
+
+# Создать приложение
+python manage.py startapp blog
+
+# Запустить миграции
+python manage.py migrate
+
+# Создать суперпользователя (для admin)
+python manage.py createsuperuser
+
+# Запустить сервер
+python manage.py runserver
+```
+
+### Структура проекта
+
+```
+mysite/
+├── manage.py              # управляющий скрипт
+├── mysite/                # настройки проекта
+│   ├── settings.py        # конфигурация
+│   ├── urls.py            # главный роутер
+│   └── wsgi.py            # WSGI/ASGI сервер
+└── blog/                  # приложение
+    ├── migrations/        # миграции БД
+    ├── admin.py           # регистрация в admin
+    ├── apps.py            # конфигурация приложения
+    ├── models.py          # модели (таблицы БД)
+    ├── serializers.py     # DRF сериализаторы
+    ├── urls.py            # маршруты приложения
+    └── views.py           # обработчики запросов
+```
+
+## settings.py
+
+```python
+# mysite/settings.py
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key")
+
+DEBUG = os.environ.get("DEBUG", "True") == "True"
+
+ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+
+INSTALLED_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    # Сторонние
+    "rest_framework",
+    # Наши приложения
+    "blog",
+]
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+        # Для PostgreSQL:
+        # "ENGINE": "django.db.backends.postgresql",
+        # "NAME": os.environ.get("DB_NAME"),
+        # "USER": os.environ.get("DB_USER"),
+        # "PASSWORD": os.environ.get("DB_PASSWORD"),
+        # "HOST": os.environ.get("DB_HOST", "localhost"),
+        # "PORT": os.environ.get("DB_PORT", "5432"),
+    }
+}
+
+# Django REST Framework
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+    ],
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 10,
+}
+```
+
+## Модели
+
+```python
+# blog/models.py
+from django.db import models
+from django.contrib.auth.models import User
+
+class Category(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    slug = models.SlugField(max_length=100, unique=True)
+    description = models.TextField(blank=True)
+    
+    class Meta:
+        verbose_name = "Категория"
+        verbose_name_plural = "Категории"
+        ordering = ["name"]
+    
+    def __str__(self):
+        return self.name
+
+class Post(models.Model):
+    STATUS_DRAFT = "draft"
+    STATUS_PUBLISHED = "published"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Черновик"),
+        (STATUS_PUBLISHED, "Опубликован"),
+    ]
+    
+    title = models.CharField("Заголовок", max_length=200)
+    slug = models.SlugField(max_length=200, unique=True)
+    body = models.TextField("Содержание")
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name="posts")
+    category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, related_name="posts")
+    tags = models.ManyToManyField("Tag", blank=True, related_name="posts")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ["-created_at"]
+    
+    def __str__(self):
+        return self.title
+    
+    @property
+    def is_published(self):
+        return self.status == self.STATUS_PUBLISHED
+
+class Tag(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+    
+    def __str__(self):
+        return self.name
+
+# Создаём миграцию и применяем:
+# python manage.py makemigrations
+# python manage.py migrate
+```
+
+## Admin Panel
+
+```python
+# blog/admin.py
+from django.contrib import admin
+from .models import Post, Category, Tag
+
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    list_display = ["title", "author", "status", "created_at"]
+    list_filter = ["status", "category", "author"]
+    search_fields = ["title", "body"]
+    prepopulated_fields = {"slug": ("title",)}  # автозаполнение slug
+    date_hierarchy = "created_at"
+    raw_id_fields = ["author"]
+    
+    # Кастомные действия
+    actions = ["make_published"]
+    
+    def make_published(self, request, queryset):
+        count = queryset.update(status="published")
+        self.message_user(request, f"Опубликовано {count} постов")
+    make_published.short_description = "Опубликовать выбранные"
+
+admin.site.register(Category)
+admin.site.register(Tag)
+
+# Открой: http://localhost:8000/admin
+# Там уже всё работает — CRUD для всех моделей!
+```
+
+## Views с Django REST Framework
+
+```python
+# blog/serializers.py
+from rest_framework import serializers
+from .models import Post, Category, Tag
+
+class CategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Category
+        fields = ["id", "name", "slug", "description"]
+
+class PostListSerializer(serializers.ModelSerializer):
+    author_name = serializers.CharField(source="author.get_full_name")
+    category = CategorySerializer()
+    
+    class Meta:
+        model = Post
+        fields = ["id", "title", "slug", "status", "author_name", "category", "created_at"]
+
+class PostDetailSerializer(serializers.ModelSerializer):
+    author_name = serializers.CharField(source="author.username", read_only=True)
+    
+    class Meta:
+        model = Post
+        fields = "__all__"
+        read_only_fields = ["author", "created_at", "updated_at"]
+
+# blog/views.py
+from rest_framework import viewsets, permissions, filters
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from django_filters.rest_framework import DjangoFilterBackend
+from .models import Post, Category
+from .serializers import PostListSerializer, PostDetailSerializer, CategorySerializer
+
+class PostViewSet(viewsets.ModelViewSet):
+    queryset = Post.objects.select_related("author", "category").prefetch_related("tags")
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ["status", "category", "author"]
+    search_fields = ["title", "body"]
+    ordering_fields = ["created_at", "title"]
+    
+    def get_serializer_class(self):
+        if self.action == "list":
+            return PostListSerializer
+        return PostDetailSerializer
+    
+    def get_permissions(self):
+        if self.action in ["list", "retrieve"]:
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
+    
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+    
+    @action(detail=True, methods=["post"])
+    def publish(self, request, pk=None):
+        post = self.get_object()
+        post.status = "published"
+        post.save()
+        return Response({"status": "published"})
+
+# blog/urls.py
+from rest_framework.routers import DefaultRouter
+from .views import PostViewSet
+
+router = DefaultRouter()
+router.register("posts", PostViewSet)
+
+urlpatterns = router.urls
+# GET    /posts/         → list
+# POST   /posts/         → create
+# GET    /posts/{id}/    → retrieve
+# PUT    /posts/{id}/    → update
+# PATCH  /posts/{id}/    → partial_update
+# DELETE /posts/{id}/    → destroy
+# POST   /posts/{id}/publish/ → publish (custom action)
+```
+
+## URLs
+
+```python
+# mysite/urls.py
+from django.contrib import admin
+from django.urls import path, include
+
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("api/v1/", include("blog.urls")),
+    path("api/v1/auth/", include("rest_framework.urls")),
+]
+```
+
+## Задание
+
+```python
+# Создай Django приложение "tasks" — менеджер задач:
+# 
+# Модели:
+# - Project: name, description, owner, members (M2M), created_at
+# - Task: title, description, project, assignee, priority (1-5),
+#         status (todo/in_progress/done), due_date, created_at
+# - Comment: task, author, text, created_at
+#
+# API (DRF ViewSets):
+# - /projects/ — CRUD (создатель или участник)
+# - /projects/{id}/tasks/ — вложенные задачи
+# - /tasks/{id}/comments/ — комментарии к задаче
+#
+# Admin:
+# - Красивые list_display для всех моделей
+# - Фильтры и поиск
+# - Кастомное действие "Назначить на меня"
+```
+
+В следующем уроке — Django ORM и модели!
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.js": `// JavaScript-эквивалент Django (Express + шаблоны)
+
+// Django: urls.py -> Express: router
+const routes = {
+  "/": () => renderTemplate("home", { title: "Главная" }),
+  "/about": () => renderTemplate("about", { title: "О нас" }),
+  "/users": () => renderTemplate("users", { users: getUsers() }),
+};
+
+// Django: views.py
+function getUsers() {
+  return [
+    { id: 1, name: "Алиса", role: "admin" },
+    { id: 2, name: "Борис", role: "user" },
+  ];
+}
+
+// Django: templates -> шаблонизация
+function renderTemplate(name, context) {
+  const templates = {
+    home: (c) => "<h1>" + c.title + "</h1><p>Добро пожаловать!</p>",
+    about: (c) => "<h1>" + c.title + "</h1><p>О нашем сайте</p>",
+    users: (c) => "<h1>Users</h1><ul>" +
+      c.users.map(u => "<li>" + u.name + " (" + u.role + ")</li>").join("") +
+      "</ul>",
+  };
+  return templates[name](context);
+}
+
+Object.entries(routes).forEach(([path, handler]) => {
+  console.log("GET " + path + ":");
+  console.log(handler());
+  console.log("");
+});
+`
+  }}
+/>

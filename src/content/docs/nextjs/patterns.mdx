@@ -1,0 +1,1461 @@
+---
+title: "27. Паттерны проектирования"
+sidebar:
+  order: 28
+---
+import { Playground } from '@components/Playground'
+
+
+## 🎯 Next.js Design Patterns — рецепты для сложных задач
+
+Паттерны — это **проверенные решения для повторяющихся проблем**. Кто-то уже столкнулся с задачей «как грамотно абстрагировать данные» или «как делать A/B тесты без деплоя» — и придумал элегантное решение. Мы просто берём эти решения и применяем! 🧩
+
+---
+
+## ❓ Зачем паттерны?
+
+Аналогия: строители не изобретают колесо каждый раз. Есть шаблоны конструкций — свод, арка, балка. Так же и в программировании: есть проверенные архитектурные решения.
+
+**Без паттернов:**
+- Бизнес-логика смешана с UI
+- Сложно тестировать
+- Изменение одного ломает другое
+- Код понятен только автору
+
+**С паттернами:**
+- Чистое разделение ответственности
+- Легко тестировать каждый слой отдельно
+- Новый разработчик понимает структуру за 5 минут
+- Рефакторинг не страшен
+
+---
+
+## 🗄️ Repository Pattern с Server Components
+
+Паттерн Repository — **абстракция над источником данных**. Компоненты не знают, откуда приходят данные (база данных, API, файл, кэш) — они просто вызывают методы репозитория.
+
+```typescript
+// lib/repositories/post.repository.ts
+
+export interface Post {
+  id: string;
+  title: string;
+  slug: string;
+  content: string;
+  publishedAt: Date;
+  author: { name: string; avatar: string };
+}
+
+// Интерфейс репозитория — контракт
+export interface IPostRepository {
+  findAll(): Promise<Post[]>;
+  findBySlug(slug: string): Promise<Post | null>;
+  findByAuthor(authorId: string): Promise<Post[]>;
+  create(data: Omit<Post, 'id'>): Promise<Post>;
+  update(id: string, data: Partial<Post>): Promise<Post>;
+  delete(id: string): Promise<void>;
+}
+```
+
+```typescript
+// lib/repositories/post.prisma.repository.ts — реализация через Prisma
+import { prisma } from '@/lib/prisma';
+import type { IPostRepository, Post } from './post.repository';
+
+export class PostPrismaRepository implements IPostRepository {
+  async findAll(): Promise<Post[]> {
+    return prisma.post.findMany({
+      include: { author: { select: { name: true, avatar: true } } },
+      orderBy: { publishedAt: 'desc' },
+    });
+  }
+
+  async findBySlug(slug: string): Promise<Post | null> {
+    return prisma.post.findUnique({
+      where: { slug },
+      include: { author: { select: { name: true, avatar: true } } },
+    });
+  }
+
+  async findByAuthor(authorId: string): Promise<Post[]> {
+    return prisma.post.findMany({
+      where: { authorId },
+      include: { author: { select: { name: true, avatar: true } } },
+    });
+  }
+
+  async create(data: Omit<Post, 'id'>): Promise<Post> {
+    return prisma.post.create({ data });
+  }
+
+  async update(id: string, data: Partial<Post>): Promise<Post> {
+    return prisma.post.update({ where: { id }, data });
+  }
+
+  async delete(id: string): Promise<void> {
+    await prisma.post.delete({ where: { id } });
+  }
+}
+```
+
+```typescript
+// lib/repositories/post.mock.repository.ts — для тестов
+import type { IPostRepository, Post } from './post.repository';
+
+export class PostMockRepository implements IPostRepository {
+  private posts: Post[] = [];
+
+  async findAll() { return this.posts; }
+  async findBySlug(slug: string) { return this.posts.find(p => p.slug === slug) ?? null; }
+  async findByAuthor(authorId: string) { return this.posts.filter(p => p.author.name === authorId); }
+  async create(data: Omit<Post, 'id'>) {
+    const post = { ...data, id: Math.random().toString(36).slice(2) };
+    this.posts.push(post);
+    return post;
+  }
+  async update(id: string, data: Partial<Post>) {
+    const i = this.posts.findIndex(p => p.id === id);
+    if (i === -1) throw new Error('Not found');
+    this.posts[i] = { ...this.posts[i]!, ...data };
+    return this.posts[i]!;
+  }
+  async delete(id: string) {
+    this.posts = this.posts.filter(p => p.id !== id);
+  }
+}
+```
+
+```typescript
+// lib/repositories/index.ts — dependency injection
+import { PostPrismaRepository } from './post.prisma.repository';
+
+// В production — Prisma. В тестах — подменяем на Mock
+export const postRepository = new PostPrismaRepository();
+```
+
+```typescript
+// app/blog/page.tsx — Server Component использует репозиторий
+import { postRepository } from '@/lib/repositories';
+
+export default async function BlogPage() {
+  const posts = await postRepository.findAll(); // Не знает о Prisma!
+  return (
+    <ul>
+      {posts.map(post => (
+        <li key={post.id}>{post.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+> 💡 Главное преимущество: смени базу данных с Prisma на Drizzle — поменяй одну строку в `index.ts`. Компоненты не трогаешь!
+
+---
+
+## 🔌 BFF (Backend for Frontend)
+
+BFF — это **промежуточный слой между фронтендом и бэкендом**, оптимизированный под конкретный UI. Next.js — идеальный BFF!
+
+**Проблема без BFF:**
+```
+Frontend → UserService (10 полей)
+          → PostService (15 полей)
+          → CommentService (8 полей)
+          = Собирай данные в 3 запроса, получай лишние поля
+```
+
+**С BFF (Next.js Route Handlers):**
+```
+Frontend → Next.js BFF → UserService
+                        → PostService
+                        → CommentService
+           Один запрос, только нужные поля!
+```
+
+```typescript
+// app/api/dashboard/route.ts — BFF агрегирует данные
+import { NextResponse } from 'next/server';
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const userId = searchParams.get('userId');
+
+  // Параллельно запрашиваем несколько сервисов
+  const [user, posts, stats] = await Promise.all([
+    fetch(`${process.env.USER_SERVICE_URL}/users/${userId}`).then(r => r.json()),
+    fetch(`${process.env.POST_SERVICE_URL}/posts?author=${userId}`).then(r => r.json()),
+    fetch(`${process.env.ANALYTICS_URL}/stats/${userId}`).then(r => r.json()),
+  ]);
+
+  // Возвращаем ТОЛЬКО то, что нужно UI
+  return NextResponse.json({
+    name: user.displayName,
+    avatar: user.profilePicture,
+    postCount: posts.length,
+    latestPost: posts[0]?.title ?? null,
+    totalViews: stats.pageViews,
+  });
+}
+```
+
+```typescript
+// Клиент — один запрос вместо трёх!
+const { data: dashboard } = useSWR('/api/dashboard?userId=123');
+```
+
+---
+
+## 🚩 Feature Flags — включение функций без деплоя
+
+Feature Flags позволяют включать/выключать функции в production **без деплоя**. Незаменимо для:
+- Постепенного ролаута (сначала 10% пользователей)
+- A/B тестирования
+- Экстренного отключения сломанной фичи
+
+```typescript
+// lib/flags.ts — центральный реестр флагов
+export type Flag =
+  | 'new-checkout'
+  | 'ai-search'
+  | 'dark-mode-v2'
+  | 'react-19-features';
+
+export interface FlagConfig {
+  enabled: boolean;
+  rolloutPercentage?: number; // 0-100
+  allowedUserIds?: string[];
+}
+
+export const FLAGS: Record<Flag, FlagConfig> = {
+  'new-checkout': { enabled: true, rolloutPercentage: 25 },
+  'ai-search': { enabled: false },
+  'dark-mode-v2': { enabled: true },
+  'react-19-features': { enabled: true, allowedUserIds: ['user_1', 'user_2'] },
+};
+
+export function isEnabled(flag: Flag, userId?: string): boolean {
+  const config = FLAGS[flag];
+  if (!config.enabled) return false;
+
+  if (config.allowedUserIds && userId) {
+    return config.allowedUserIds.includes(userId);
+  }
+
+  if (config.rolloutPercentage !== undefined) {
+    // Детерминированный rollout по userId
+    const hash = userId
+      ? parseInt(userId.split('').reduce((acc, c) => acc + c.charCodeAt(0).toString(), '')) % 100
+      : Math.random() * 100;
+    return hash < config.rolloutPercentage;
+  }
+
+  return true;
+}
+```
+
+```typescript
+// app/checkout/page.tsx — использование флага
+import { isEnabled } from '@/lib/flags';
+import { auth } from '@/lib/auth';
+
+export default async function CheckoutPage() {
+  const session = await auth();
+  const useNewCheckout = isEnabled('new-checkout', session?.user?.id);
+
+  if (useNewCheckout) {
+    const { NewCheckout } = await import('./new-checkout');
+    return <NewCheckout />;
+  }
+
+  return <OldCheckout />;
+}
+```
+
+---
+
+## 🍪 Feature Flags с cookies и middleware
+
+Для клиентской стороны — feature flags через cookies:
+
+```typescript
+// middleware.ts — устанавливаем флаги для пользователя
+import { NextRequest, NextResponse } from 'next/server';
+
+export function middleware(request: NextRequest) {
+  const response = NextResponse.next();
+
+  // Установить cookie с флагами для нового пользователя
+  if (!request.cookies.has('feature-flags')) {
+    const flags = {
+      'new-ui': Math.random() < 0.5, // 50% пользователей
+      'beta-features': false,
+    };
+    response.cookies.set('feature-flags', JSON.stringify(flags), {
+      httpOnly: false, // Доступен клиенту
+      maxAge: 60 * 60 * 24 * 30, // 30 дней
+    });
+  }
+
+  return response;
+}
+
+export const config = { matcher: ['/((?!api|_next).*)'] };
+```
+
+```typescript
+// hooks/useFeatureFlag.ts — хук для клиента
+'use client';
+
+import { useMemo } from 'react';
+
+export function useFeatureFlag(flag: string): boolean {
+  return useMemo(() => {
+    if (typeof document === 'undefined') return false;
+    const cookie = document.cookie
+      .split('; ')
+      .find(row => row.startsWith('feature-flags='));
+    if (!cookie) return false;
+    try {
+      const flags = JSON.parse(decodeURIComponent(cookie.split('=')[1] ?? ''));
+      return Boolean(flags[flag]);
+    } catch {
+      return false;
+    }
+  }, [flag]);
+}
+```
+
+```tsx
+// Использование в компоненте
+'use client';
+
+export function Header() {
+  const hasNewUI = useFeatureFlag('new-ui');
+
+  return hasNewUI ? <NewHeader /> : <OldHeader />;
+}
+```
+
+---
+
+## 🧪 A/B тестирование через middleware
+
+```typescript
+// middleware.ts — A/B тест через cookie
+import { NextRequest, NextResponse } from 'next/server';
+
+const AB_BUCKET_COOKIE = 'ab-bucket';
+
+export function middleware(request: NextRequest) {
+  // Только для главной страницы
+  if (request.nextUrl.pathname !== '/') {
+    return NextResponse.next();
+  }
+
+  let bucket = request.cookies.get(AB_BUCKET_COOKIE)?.value as 'a' | 'b' | undefined;
+
+  if (!bucket) {
+    bucket = Math.random() < 0.5 ? 'a' : 'b';
+  }
+
+  // Перенаправляем на нужный вариант
+  const url = request.nextUrl.clone();
+  url.pathname = bucket === 'b' ? '/landing-b' : '/landing-a';
+
+  const response = NextResponse.rewrite(url);
+  response.cookies.set(AB_BUCKET_COOKIE, bucket, {
+    maxAge: 60 * 60 * 24 * 7, // 7 дней
+    httpOnly: true,
+  });
+
+  return response;
+}
+```
+
+```typescript
+// app/landing-a/page.tsx — вариант A
+export default function LandingA() {
+  // Отправляем аналитику
+  useEffect(() => {
+    analytics.track('landing_view', { variant: 'a' });
+  }, []);
+  return <h1>Присоединяйся к нам!</h1>;
+}
+```
+
+---
+
+## ⚡ Optimistic UI с useOptimistic (React 19)
+
+Optimistic UI — обновляем интерфейс **сразу**, не дожидаясь ответа сервера. Если сервер вернул ошибку — откатываем.
+
+```typescript
+// app/posts/[id]/actions.ts
+'use server';
+
+import { revalidatePath } from 'next/cache';
+
+export async function toggleLike(postId: string, liked: boolean) {
+  // Имитация задержки сети
+  await new Promise(resolve => setTimeout(resolve, 1000));
+
+  // Здесь — сохранение в базу данных
+  // await db.likes.upsert({ where: { postId }, data: { liked } });
+
+  revalidatePath(`/posts/${postId}`);
+  return { success: true, newCount: liked ? 42 : 40 };
+}
+```
+
+```tsx
+// app/posts/[id]/like-button.tsx
+'use client';
+
+import { useOptimistic, useTransition } from 'react';
+import { toggleLike } from './actions';
+
+interface LikeButtonProps {
+  postId: string;
+  initialLiked: boolean;
+  initialCount: number;
+}
+
+export function LikeButton({ postId, initialLiked, initialCount }: LikeButtonProps) {
+  const [isPending, startTransition] = useTransition();
+  const [optimisticState, setOptimisticState] = useOptimistic(
+    { liked: initialLiked, count: initialCount },
+    (current, newLiked: boolean) => ({
+      liked: newLiked,
+      count: newLiked ? current.count + 1 : current.count - 1,
+    })
+  );
+
+  const handleClick = () => {
+    startTransition(async () => {
+      const newLiked = !optimisticState.liked;
+      setOptimisticState(newLiked); // Сразу обновляем UI!
+      await toggleLike(postId, newLiked); // Ждём сервер
+    });
+  };
+
+  return (
+    <button
+      onClick={handleClick}
+      disabled={isPending}
+      className={`flex items-center gap-2 px-4 py-2 rounded-full transition-all
+        ${optimisticState.liked
+          ? 'bg-red-100 text-red-600 border-red-300'
+          : 'bg-gray-100 text-gray-600 border-gray-300'
+        } border`}
+    >
+      <span className={`text-xl ${isPending ? 'animate-pulse' : ''}`}>
+        {optimisticState.liked ? '❤️' : '🤍'}
+      </span>
+      <span className="font-medium">{optimisticState.count}</span>
+    </button>
+  );
+}
+```
+
+> 💡 Пользователь видит мгновенный отклик. Если сервер вернул ошибку — React автоматически откатит состояние к `initialLiked`.
+
+---
+
+## 🛡️ Error Boundaries в App Router
+
+В App Router ошибки обрабатываются через `error.tsx` файлы:
+
+```tsx
+// app/error.tsx — глобальный Error Boundary
+'use client';
+
+import { useEffect } from 'react';
+
+interface ErrorProps {
+  error: Error & { digest?: string };
+  reset: () => void;
+}
+
+export default function GlobalError({ error, reset }: ErrorProps) {
+  useEffect(() => {
+    // Отправляем в Sentry или другой сервис
+    console.error('Global error:', error);
+  }, [error]);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-red-50">
+      <div className="text-center p-8">
+        <div className="text-6xl mb-4">💥</div>
+        <h2 className="text-2xl font-bold text-red-700 mb-2">Что-то пошло не так!</h2>
+        <p className="text-red-600 mb-6">{error.message}</p>
+        {error.digest && (
+          <p className="text-xs text-gray-400 mb-4">ID: {error.digest}</p>
+        )}
+        <button
+          onClick={reset}
+          className="bg-red-600 text-white px-6 py-2 rounded-lg hover:bg-red-700"
+        >
+          Попробовать снова
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+```tsx
+// app/dashboard/error.tsx — Error Boundary для конкретного сегмента
+'use client';
+
+export default function DashboardError({
+  error,
+  reset,
+}: {
+  error: Error;
+  reset: () => void;
+}) {
+  return (
+    <div className="p-8 border border-red-200 rounded-xl bg-red-50">
+      <h3 className="text-red-700 font-semibold">Ошибка в дашборде</h3>
+      <p className="text-red-600 text-sm mt-1">{error.message}</p>
+      <button onClick={reset} className="mt-4 text-sm text-red-700 underline">
+        Перезагрузить
+      </button>
+    </div>
+  );
+}
+```
+
+Структура error.tsx файлов:
+```
+app/
+  error.tsx         ← ловит ошибки всего приложения
+  layout.tsx
+  dashboard/
+    error.tsx       ← ловит только ошибки /dashboard
+    page.tsx
+    analytics/
+      error.tsx     ← ловит только ошибки /dashboard/analytics
+```
+
+---
+
+## 💀 Loading Skeletons — skeleton screens
+
+Скелеты лучше спиннеров: пользователь видит структуру страницы и понимает, что загружается.
+
+```tsx
+// components/skeletons/post-card-skeleton.tsx
+export function PostCardSkeleton() {
+  return (
+    <div className="animate-pulse rounded-xl border border-gray-200 p-6">
+      {/* Аватар + имя автора */}
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-10 h-10 bg-gray-200 rounded-full" />
+        <div>
+          <div className="h-3 bg-gray-200 rounded w-24 mb-2" />
+          <div className="h-2 bg-gray-100 rounded w-16" />
+        </div>
+      </div>
+      {/* Заголовок */}
+      <div className="h-5 bg-gray-200 rounded w-3/4 mb-2" />
+      <div className="h-5 bg-gray-200 rounded w-1/2 mb-4" />
+      {/* Текст */}
+      <div className="space-y-2">
+        <div className="h-3 bg-gray-100 rounded w-full" />
+        <div className="h-3 bg-gray-100 rounded w-5/6" />
+        <div className="h-3 bg-gray-100 rounded w-4/6" />
+      </div>
+      {/* Footer */}
+      <div className="flex gap-4 mt-4">
+        <div className="h-4 bg-gray-200 rounded w-12" />
+        <div className="h-4 bg-gray-200 rounded w-16" />
+      </div>
+    </div>
+  );
+}
+```
+
+```tsx
+// app/blog/loading.tsx — автоматически показывается при загрузке
+import { PostCardSkeleton } from '@/components/skeletons';
+
+export default function BlogLoading() {
+  return (
+    <div className="container mx-auto p-8">
+      <div className="h-8 bg-gray-200 rounded w-48 mb-8 animate-pulse" />
+      <div className="grid grid-cols-2 gap-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <PostCardSkeleton key={i} />
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+```tsx
+// Использование Suspense + skeleton в компоненте
+import { Suspense } from 'react';
+
+export default function BlogPage() {
+  return (
+    <Suspense fallback={<BlogLoading />}>
+      <PostList />  {/* Async Server Component */}
+    </Suspense>
+  );
+}
+```
+
+---
+
+## 🧩 Compound Components паттерн
+
+Compound Components — компоненты, которые работают **вместе как единое целое**, но настраиваются раздельно:
+
+```tsx
+// components/tabs/index.tsx
+import { createContext, useContext, useState } from 'react';
+
+interface TabsContextType {
+  activeTab: string;
+  setActiveTab: (tab: string) => void;
+}
+
+const TabsContext = createContext<TabsContextType | null>(null);
+
+function useTabs() {
+  const ctx = useContext(TabsContext);
+  if (!ctx) throw new Error('Tabs.* must be used inside <Tabs>');
+  return ctx;
+}
+
+// Корневой компонент — владеет состоянием
+function Tabs({ children, defaultTab }: { children: React.ReactNode; defaultTab: string }) {
+  const [activeTab, setActiveTab] = useState(defaultTab);
+  return (
+    <TabsContext.Provider value={{ activeTab, setActiveTab }}>
+      <div className="w-full">{children}</div>
+    </TabsContext.Provider>
+  );
+}
+
+// Список вкладок
+function TabList({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex border-b border-gray-200 gap-1">{children}</div>
+  );
+}
+
+// Отдельная вкладка
+function Tab({ value, children }: { value: string; children: React.ReactNode }) {
+  const { activeTab, setActiveTab } = useTabs();
+  const isActive = activeTab === value;
+  return (
+    <button
+      onClick={() => setActiveTab(value)}
+      className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors
+        ${isActive
+          ? 'border-blue-500 text-blue-600'
+          : 'border-transparent text-gray-500 hover:text-gray-700'
+        }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Содержимое вкладки
+function TabPanel({ value, children }: { value: string; children: React.ReactNode }) {
+  const { activeTab } = useTabs();
+  if (activeTab !== value) return null;
+  return <div className="py-4">{children}</div>;
+}
+
+// Экспорт как namespace
+Tabs.List = TabList;
+Tabs.Tab = Tab;
+Tabs.Panel = TabPanel;
+export { Tabs };
+```
+
+```tsx
+// Использование — очень читаемо!
+<Tabs defaultTab="overview">
+  <Tabs.List>
+    <Tabs.Tab value="overview">Обзор</Tabs.Tab>
+    <Tabs.Tab value="analytics">Аналитика</Tabs.Tab>
+    <Tabs.Tab value="settings">Настройки</Tabs.Tab>
+  </Tabs.List>
+  <Tabs.Panel value="overview"><OverviewPanel /></Tabs.Panel>
+  <Tabs.Panel value="analytics"><AnalyticsPanel /></Tabs.Panel>
+  <Tabs.Panel value="settings"><SettingsPanel /></Tabs.Panel>
+</Tabs>
+```
+
+---
+
+## 📦 Container / Presenter паттерн
+
+Разделяем **логику** (Container) от **отображения** (Presenter):
+
+```tsx
+// components/user-profile/user-profile.presenter.tsx — только UI
+export interface UserProfileData {
+  name: string;
+  email: string;
+  avatar: string;
+  postCount: number;
+  followerCount: number;
+}
+
+interface UserProfilePresenterProps {
+  data: UserProfileData;
+  onFollow: () => void;
+  isFollowing: boolean;
+  isLoading: boolean;
+}
+
+export function UserProfilePresenter({
+  data, onFollow, isFollowing, isLoading,
+}: UserProfilePresenterProps) {
+  return (
+    <div className="flex items-start gap-6 p-6 bg-white rounded-xl shadow-sm">
+      <img src={data.avatar} alt={data.name} className="w-20 h-20 rounded-full object-cover" />
+      <div className="flex-1">
+        <h2 className="text-xl font-bold">{data.name}</h2>
+        <p className="text-gray-500">{data.email}</p>
+        <div className="flex gap-6 mt-3 text-sm text-gray-600">
+          <span><b>{data.postCount}</b> постов</span>
+          <span><b>{data.followerCount}</b> подписчиков</span>
+        </div>
+      </div>
+      <button
+        onClick={onFollow}
+        disabled={isLoading}
+        className={`px-6 py-2 rounded-lg font-medium transition-colors
+          ${isFollowing ? 'bg-gray-100 text-gray-700' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+      >
+        {isLoading ? '...' : isFollowing ? 'Отписаться' : 'Подписаться'}
+      </button>
+    </div>
+  );
+}
+```
+
+```tsx
+// components/user-profile/user-profile.container.tsx — логика
+'use client';
+
+import { useState, useEffect } from 'react';
+import { UserProfilePresenter, type UserProfileData } from './user-profile.presenter';
+
+export function UserProfileContainer({ userId }: { userId: string }) {
+  const [data, setData] = useState<UserProfileData | null>(null);
+  const [isFollowing, setIsFollowing] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/users/${userId}`).then(r => r.json()).then(setData);
+  }, [userId]);
+
+  const handleFollow = async () => {
+    setIsLoading(true);
+    await fetch(`/api/users/${userId}/follow`, { method: 'POST' });
+    setIsFollowing(f => !f);
+    setIsLoading(false);
+  };
+
+  if (!data) return <Skeleton />;
+  return (
+    <UserProfilePresenter
+      data={data}
+      onFollow={handleFollow}
+      isFollowing={isFollowing}
+      isLoading={isLoading}
+    />
+  );
+}
+```
+
+---
+
+## 📡 Data Fetching паттерны
+
+### Параллельное получение данных (лучший вариант)
+
+```typescript
+// app/dashboard/page.tsx — всё параллельно!
+async function fetchUser(id: string) {
+  return fetch(`/api/users/${id}`).then(r => r.json());
+}
+
+async function fetchPosts(userId: string) {
+  return fetch(`/api/posts?author=${userId}`).then(r => r.json());
+}
+
+async function fetchStats(userId: string) {
+  return fetch(`/api/stats/${userId}`).then(r => r.json());
+}
+
+export default async function DashboardPage({ params }: { params: { id: string } }) {
+  // Все запросы стартуют одновременно
+  const [user, posts, stats] = await Promise.all([
+    fetchUser(params.id),
+    fetchPosts(params.id),
+    fetchStats(params.id),
+  ]);
+
+  return <Dashboard user={user} posts={posts} stats={stats} />;
+}
+```
+
+### Последовательное (когда нужны данные из первого запроса)
+
+```typescript
+// Правильно: последовательно, когда есть зависимость
+export default async function PostWithComments({ params }: { params: { slug: string } }) {
+  const post = await getPost(params.slug); // Сначала пост
+  const comments = await getComments(post.id); // Потом комментарии (нужен post.id)
+
+  return <PostView post={post} comments={comments} />;
+}
+```
+
+### Preload паттерн — избегаем Request Waterfalls
+
+```typescript
+// utils/preload.ts — запускаем запрос заранее
+import { cache } from 'react';
+
+export const getUser = cache(async (id: string) => {
+  return fetch(`/api/users/${id}`).then(r => r.json());
+});
+
+// Preload — запускает запрос, но не ждёт результата
+export function preloadUser(id: string) {
+  void getUser(id); // fire and forget
+}
+```
+
+```tsx
+// app/users/[id]/page.tsx — запускаем запрос как можно раньше
+import { preloadUser, getUser } from '@/utils/preload';
+
+export default async function UserPage({ params }: { params: { id: string } }) {
+  preloadUser(params.id); // Стартуем запрос немедленно!
+
+  // Делаем другую работу...
+  const layout = await getLayout();
+
+  // К этому моменту данные уже могут быть в кэше
+  const user = await getUser(params.id);
+
+  return <UserProfile user={user} layout={layout} />;
+}
+```
+
+---
+
+## 🛤️ Parallel Routes для дашбордов
+
+Parallel Routes позволяют показывать несколько страниц **одновременно** в одном layout:
+
+```
+app/dashboard/
+  layout.tsx          ← принимает @team и @analytics
+  page.tsx
+  @team/
+    page.tsx          ← /dashboard показывает это...
+  @analytics/
+    page.tsx          ← ...и это — одновременно!
+```
+
+```tsx
+// app/dashboard/layout.tsx
+export default function DashboardLayout({
+  children,
+  team,
+  analytics,
+}: {
+  children: React.ReactNode;
+  team: React.ReactNode;
+  analytics: React.ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      <div>{team}</div>
+      <div>{analytics}</div>
+    </div>
+  );
+}
+```
+
+---
+
+## 🎪 Intercepting Routes для модальных окон
+
+Intercepting Routes — открываем страницу как модальное окно, но при прямом переходе — полная страница:
+
+```
+app/
+  photos/
+    [id]/
+      page.tsx         ← /photos/1 — полная страница
+  @modal/
+    (.)photos/
+      [id]/
+        page.tsx       ← при клике — показывает как модальное окно
+```
+
+```tsx
+// app/@modal/(.)photos/[id]/page.tsx
+import { Modal } from '@/components/modal';
+import { getPhoto } from '@/lib/photos';
+
+export default async function PhotoModal({ params }: { params: { id: string } }) {
+  const photo = await getPhoto(params.id);
+
+  return (
+    <Modal>
+      <img src={photo.url} alt={photo.title} className="max-w-2xl" />
+      <h2>{photo.title}</h2>
+    </Modal>
+  );
+}
+```
+
+```tsx
+// components/modal.tsx
+'use client';
+
+import { useRouter } from 'next/navigation';
+
+export function Modal({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      onClick={() => router.back()}
+    >
+      <div
+        className="bg-white rounded-xl p-6 max-w-2xl"
+        onClick={e => e.stopPropagation()}
+      >
+        {children}
+        <button onClick={() => router.back()} className="mt-4 text-sm text-gray-500">
+          Закрыть
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 🔄 Cache Invalidation паттерны
+
+```typescript
+// app/posts/actions.ts
+'use server';
+
+import { revalidatePath, revalidateTag } from 'next/cache';
+
+// Инвалидируем конкретный путь
+export async function updatePost(id: string, data: Partial<Post>) {
+  await db.posts.update({ where: { id }, data });
+  revalidatePath('/blog');           // Инвалидирует /blog
+  revalidatePath(`/blog/${id}`);     // Инвалидирует /blog/конкретный-пост
+}
+
+// Инвалидируем по тегу — гибче
+export async function publishPost(id: string) {
+  await db.posts.update({ where: { id }, data: { published: true } });
+  revalidateTag('posts');           // Все запросы с тегом 'posts'
+  revalidateTag(`post-${id}`);      // Только этот пост
+}
+```
+
+```typescript
+// Теггирование запросов
+async function getPosts() {
+  return fetch('/api/posts', {
+    next: { tags: ['posts'] }    // Помечаем тегом
+  }).then(r => r.json());
+}
+
+async function getPost(id: string) {
+  return fetch(`/api/posts/${id}`, {
+    next: { tags: ['posts', `post-${id}`] }
+  }).then(r => r.json());
+}
+```
+
+---
+
+## ⏰ Stale-while-revalidate паттерн
+
+SWR — показываем старые данные сразу, обновляем в фоне:
+
+```typescript
+// Серверная сторона — ISR (Incremental Static Regeneration)
+async function getProducts() {
+  return fetch('https://api.example.com/products', {
+    next: {
+      revalidate: 60,      // Обновлять каждые 60 секунд
+      tags: ['products'],  // Можно инвалидировать вручную
+    },
+  }).then(r => r.json());
+}
+
+// При первом запросе — генерируем страницу
+// При повторных — отдаём кэш
+// После 60 секунд — следующий запрос регенерирует в фоне
+```
+
+```typescript
+// Клиентская сторона — SWR библиотека (useSWR)
+import useSWR from 'swr';
+
+const fetcher = (url: string) => fetch(url).then(r => r.json());
+
+export function ProductList() {
+  const { data, error, isValidating } = useSWR('/api/products', fetcher, {
+    revalidateOnFocus: true,      // Обновлять при фокусе окна
+    revalidateOnReconnect: true,  // Обновлять при восстановлении сети
+    refreshInterval: 30000,       // Автообновление каждые 30 сек
+  });
+
+  // data — моментально из кэша
+  // isValidating — идёт фоновое обновление
+  return (
+    <div>
+      {isValidating && <span className="text-xs text-gray-400">Обновляется...</span>}
+      {data?.map(product => <ProductCard key={product.id} product={product} />)}
+    </div>
+  );
+}
+```
+
+---
+
+## 🎓 Итоги
+
+| Паттерн | Решает |
+|---------|--------|
+| Repository | Абстракция над данными |
+| BFF | Оптимизация API для UI |
+| Feature Flags | Деплой без страха |
+| Optimistic UI | Мгновенный отклик |
+| Error Boundaries | Graceful degradation |
+| Compound Components | Переиспользуемые UI-системы |
+| Container/Presenter | Разделение логики и UI |
+| Parallel Routes | Независимые разделы страницы |
+| Intercepting Routes | Модальные окна «из коробки» |
+| SWR | Всегда свежие данные |
+
+Всё вместе — это **современная Next.js архитектура** 🏆. Посмотри на демо ниже 👇
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useOptimistic, useTransition } from 'react';
+
+type Tab = 'optimistic' | 'skeleton' | 'flags' | 'error';
+
+// ─── Optimistic UI demo ───────────────────────────────────────────────────────
+function OptimisticDemo() {
+  const [isPending, startTransition] = useTransition();
+  const [serverLikes, setServerLikes] = useState(41);
+  const [serverLiked, setServerLiked] = useState(false);
+
+  const [optimisticState, setOptimistic] = useOptimistic(
+    { liked: serverLiked, count: serverLikes },
+    (cur: { liked: boolean; count: number }, newLiked: boolean) => ({
+      liked: newLiked,
+      count: newLiked ? cur.count + 1 : cur.count - 1,
+    })
+  );
+
+  const handleLike = () => {
+    startTransition(async () => {
+      const newLiked = !optimisticState.liked;
+      setOptimistic(newLiked);
+      await new Promise(r => setTimeout(r, 1200));
+      setServerLiked(newLiked);
+      setServerLikes(prev => newLiked ? prev + 1 : prev - 1);
+    });
+  };
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h3 style={{ color: '#f1f5f9', marginBottom: 8, fontSize: 15 }}>
+        ⚡ Optimistic UI с useOptimistic
+      </h3>
+      <p style={{ color: '#64748b', fontSize: 12, marginBottom: 20 }}>
+        Нажми лайк — UI обновляется мгновенно, сервер «отвечает» через 1.2с
+      </p>
+      <div style={{
+        background: '#1e293b', borderRadius: 12, padding: 20,
+        border: '1px solid #334155', maxWidth: 340,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
+          <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#4ade8033', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
+            👤
+          </div>
+          <div>
+            <div style={{ color: '#f1f5f9', fontSize: 13, fontWeight: 600 }}>Яша</div>
+            <div style={{ color: '#64748b', fontSize: 11 }}>2 минуты назад</div>
+          </div>
+        </div>
+        <p style={{ color: '#cbd5e1', fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>
+          Turborepo — это просто магия! Кэш сработал на всех задачах, сборка заняла 0.3ms вместо 23s 🤯
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <button
+            onClick={handleLike}
+            disabled={isPending}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '8px 16px', borderRadius: 999,
+              background: optimisticState.liked ? '#fda4af22' : '#1e293b',
+              border: '1px solid ' + (optimisticState.liked ? '#f43f5e' : '#334155'),
+              color: optimisticState.liked ? '#f43f5e' : '#94a3b8',
+              cursor: isPending ? 'not-allowed' : 'pointer',
+              fontSize: 14, transition: 'all 0.15s',
+              opacity: isPending ? 0.7 : 1,
+            }}
+          >
+            <span style={{ fontSize: 18, transition: 'transform 0.15s', transform: optimisticState.liked ? 'scale(1.3)' : 'scale(1)' }}>
+              {optimisticState.liked ? '❤️' : '🤍'}
+            </span>
+            <span style={{ fontWeight: 600 }}>{optimisticState.count}</span>
+          </button>
+          {isPending && (
+            <span style={{ color: '#fbbf24', fontSize: 11, animation: 'pulse 1s infinite' }}>
+              ⏳ Сохраняю...
+            </span>
+          )}
+          {!isPending && (
+            <span style={{ color: '#334155', fontSize: 11 }}>
+              Сервер: {serverLikes} {serverLiked ? '❤️' : '🤍'}
+            </span>
+          )}
+        </div>
+      </div>
+      <div style={{
+        marginTop: 16, padding: '10px 14px', background: '#0f172a',
+        borderRadius: 8, border: '1px solid #1e293b', fontSize: 11,
+      }}>
+        <div style={{ color: '#4ade80', marginBottom: 4 }}>// Как это работает:</div>
+        <div style={{ color: '#94a3b8' }}>setOptimistic(true)  → UI обновился сразу ✓</div>
+        <div style={{ color: '#94a3b8' }}>await serverCall()   → ждём... ({isPending ? '⏳' : '✓'})</div>
+        <div style={{ color: '#94a3b8' }}>setServerLiked(true) → реальное состояние синхронизировано</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Skeleton demo ────────────────────────────────────────────────────────────
+function SkeletonDemo() {
+  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const simulate = () => {
+    setLoaded(false);
+    setLoading(true);
+    setTimeout(() => { setLoaded(true); setLoading(false); }, 1800);
+  };
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h3 style={{ color: '#f1f5f9', marginBottom: 8, fontSize: 15 }}>💀 Loading Skeletons</h3>
+      <p style={{ color: '#64748b', fontSize: 12, marginBottom: 16 }}>
+        Skeleton screens — пользователь видит структуру, а не пустоту
+      </p>
+      <button
+        onClick={simulate}
+        disabled={loading}
+        style={{
+          background: '#171717', color: '#4ade80', border: '1px solid #4ade80',
+          borderRadius: 8, padding: '8px 20px', cursor: 'pointer',
+          fontSize: 12, marginBottom: 16, opacity: loading ? 0.5 : 1,
+        }}
+      >
+        {loading ? '⏳ Загружаю...' : '▶ Симулировать загрузку (1.8s)'}
+      </button>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        {[0, 1].map(i => (
+          <div key={i} style={{
+            background: '#1e293b', borderRadius: 12, padding: 16,
+            border: '1px solid #334155',
+          }}>
+            {(loading || !loaded) ? (
+              <>
+                <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+                  <div style={{
+                    width: 36, height: 36, borderRadius: '50%',
+                    background: 'linear-gradient(90deg, #334155 25%, #1e293b 50%, #334155 75%)',
+                    backgroundSize: '200% 100%',
+                    animation: loading ? 'shimmer 1.4s infinite' : 'none',
+                    flexShrink: 0,
+                  }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ height: 10, background: 'linear-gradient(90deg, #334155 25%, #1e293b 50%, #334155 75%)', backgroundSize: '200% 100%', borderRadius: 4, marginBottom: 6, animation: loading ? 'shimmer 1.4s infinite' : 'none', width: '70%' }} />
+                    <div style={{ height: 8, background: 'linear-gradient(90deg, #334155 25%, #1e293b 50%, #334155 75%)', backgroundSize: '200% 100%', borderRadius: 4, animation: loading ? 'shimmer 1.4s infinite' : 'none', width: '45%' }} />
+                  </div>
+                </div>
+                {[100, 85, 65].map((w, j) => (
+                  <div key={j} style={{ height: 8, background: 'linear-gradient(90deg, #334155 25%, #1e293b 50%, #334155 75%)', backgroundSize: '200% 100%', borderRadius: 4, marginBottom: 6, animation: loading ? 'shimmer 1.4s infinite' : 'none', width: w + '%' }} />
+                ))}
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: '50%', background: i === 0 ? '#4ade8033' : '#60a5fa33', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, flexShrink: 0 }}>
+                    {i === 0 ? '🧑' : '👩'}
+                  </div>
+                  <div>
+                    <div style={{ color: '#f1f5f9', fontSize: 12, fontWeight: 600 }}>{i === 0 ? 'Яша Иванов' : 'Аня Петрова'}</div>
+                    <div style={{ color: '#64748b', fontSize: 10 }}>5 минут назад</div>
+                  </div>
+                </div>
+                <p style={{ color: '#94a3b8', fontSize: 12, lineHeight: 1.5 }}>
+                  {i === 0 ? 'Паттерны в Next.js — это мощно! Особенно Compound Components 🧩' : 'Optimistic UI сделал наш продукт таким отзывчивым! ⚡'}
+                </p>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      <style>{'@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }'}</style>
+    </div>
+  );
+}
+
+// ─── Feature Flag demo ────────────────────────────────────────────────────────
+function FlagsDemo() {
+  const [flags, setFlags] = useState({ 'new-ui': false, 'ai-search': false, 'beta': false });
+  const toggle = (f: keyof typeof flags) => setFlags(prev => ({ ...prev, [f]: !prev[f] }));
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h3 style={{ color: '#f1f5f9', marginBottom: 8, fontSize: 15 }}>🚩 Feature Flags</h3>
+      <p style={{ color: '#64748b', fontSize: 12, marginBottom: 20 }}>
+        Включай/выключай функции без деплоя
+      </p>
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 20 }}>
+        {(Object.keys(flags) as Array<keyof typeof flags>).map(flag => (
+          <div key={flag} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              onClick={() => toggle(flag)}
+              style={{
+                width: 44, height: 24, borderRadius: 999, border: 'none', cursor: 'pointer',
+                background: flags[flag] ? '#4ade80' : '#334155',
+                position: 'relative', transition: 'background 0.2s', padding: 0,
+              }}
+            >
+              <div style={{
+                width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                position: 'absolute', top: 3, transition: 'left 0.2s',
+                left: flags[flag] ? 23 : 3,
+              }} />
+            </button>
+            <span style={{ color: '#94a3b8', fontSize: 12, fontFamily: 'monospace' }}>{flag}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ background: '#1e293b', borderRadius: 12, border: '1px solid #334155', overflow: 'hidden' }}>
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid #334155', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ width: 12, height: 12, borderRadius: '50%', background: '#4ade80' }} />
+          <div style={{ width: 12, height: 12, borderRadius: '50%', background: '#fbbf24' }} />
+          <div style={{ width: 12, height: 12, borderRadius: '50%', background: '#f87171' }} />
+          <span style={{ color: '#475569', fontSize: 11, marginLeft: 8 }}>myapp.com</span>
+        </div>
+        <div style={{ padding: 20 }}>
+          {flags['new-ui'] ? (
+            <div style={{
+              background: 'linear-gradient(135deg, #171717, #1a1a2e)',
+              borderRadius: 10, padding: 16, border: '1px solid #4ade8033',
+            }}>
+              <div style={{ color: '#4ade80', fontSize: 12, fontWeight: 700, marginBottom: 8 }}>✨ НОВЫЙ ИНТЕРФЕЙС</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {['Главная', 'Курсы', 'Профиль'].map(item => (
+                  <div key={item} style={{ background: '#4ade8022', color: '#4ade80', padding: '6px 14px', borderRadius: 8, fontSize: 12 }}>{item}</div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{ background: '#0f172a', borderRadius: 10, padding: 16 }}>
+              <div style={{ color: '#64748b', fontSize: 12, marginBottom: 8 }}>СТАРЫЙ ИНТЕРФЕЙС</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {['Главная', 'Курсы', 'Профиль'].map(item => (
+                  <div key={item} style={{ background: '#1e293b', color: '#94a3b8', padding: '6px 14px', borderRadius: 4, fontSize: 12 }}>{item}</div>
+                ))}
+              </div>
+            </div>
+          )}
+          {flags['ai-search'] && (
+            <div style={{ marginTop: 12, background: '#1a0033', border: '1px solid #a78bfa33', borderRadius: 10, padding: 12 }}>
+              <div style={{ color: '#a78bfa', fontSize: 12 }}>🤖 AI Search активен</div>
+              <input style={{ width: '100%', marginTop: 8, background: '#0f172a', border: '1px solid #a78bfa44', borderRadius: 8, padding: '8px 12px', color: '#f1f5f9', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} placeholder="Спроси что угодно..." />
+            </div>
+          )}
+          {flags['beta'] && (
+            <div style={{ marginTop: 12, background: '#1a1a0a', border: '1px solid #fbbf2433', borderRadius: 10, padding: 12 }}>
+              <div style={{ color: '#fbbf24', fontSize: 12 }}>⚗️ БЕТА функции доступны</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Error Boundary demo ──────────────────────────────────────────────────────
+function ErrorDemo() {
+  const [crashed, setCrashed] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const crash = () => {
+    setLoading(true);
+    setTimeout(() => { setLoading(false); setCrashed(true); }, 800);
+  };
+
+  const reset = () => setCrashed(false);
+
+  return (
+    <div style={{ padding: 24 }}>
+      <h3 style={{ color: '#f1f5f9', marginBottom: 8, fontSize: 15 }}>🛡️ Error Boundaries</h3>
+      <p style={{ color: '#64748b', fontSize: 12, marginBottom: 20 }}>
+        Ловим ошибки и показываем понятный UI вместо белого экрана
+      </p>
+      {crashed ? (
+        <div style={{
+          background: '#1a0505', border: '1px solid #f87171', borderRadius: 12, padding: 24,
+          textAlign: 'center',
+        }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>💥</div>
+          <div style={{ color: '#f87171', fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
+            Что-то пошло не так!
+          </div>
+          <div style={{
+            background: '#0f172a', borderRadius: 8, padding: 12, marginBottom: 16,
+            fontFamily: 'monospace', fontSize: 11, color: '#fca5a5', textAlign: 'left',
+          }}>
+            TypeError: Cannot read properties of undefined{'\n'}
+            at UserProfile.render (UserProfile.tsx:42){'\n'}
+            at renderWithHooks (react-dom.development.js:14985)
+          </div>
+          <div style={{ color: '#64748b', fontSize: 11, marginBottom: 16 }}>
+            digest: a3f8c2d1
+          </div>
+          <button
+            onClick={reset}
+            style={{
+              background: '#171717', color: '#4ade80', border: '1px solid #4ade80',
+              borderRadius: 8, padding: '10px 24px', cursor: 'pointer', fontSize: 13,
+            }}
+          >
+            🔄 Попробовать снова
+          </button>
+        </div>
+      ) : (
+        <div style={{ background: '#1e293b', borderRadius: 12, border: '1px solid #334155', padding: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+            <div style={{ width: 48, height: 48, borderRadius: '50%', background: '#4ade8033', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>👤</div>
+            <div>
+              <div style={{ color: '#f1f5f9', fontWeight: 600 }}>Профиль пользователя</div>
+              <div style={{ color: '#4ade80', fontSize: 12 }}>✓ Компонент работает нормально</div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 16, marginBottom: 20 }}>
+            {[['42', 'Поста'], ['1.2k', 'Подп.'], ['98%', 'Рейтинг']].map(([val, label]) => (
+              <div key={label} style={{ textAlign: 'center' }}>
+                <div style={{ color: '#f1f5f9', fontSize: 18, fontWeight: 700 }}>{val}</div>
+                <div style={{ color: '#64748b', fontSize: 11 }}>{label}</div>
+              </div>
+            ))}
+          </div>
+          <button
+            onClick={crash}
+            disabled={loading}
+            style={{
+              background: '#1a0505', color: '#f87171', border: '1px solid #f8717144',
+              borderRadius: 8, padding: '8px 20px', cursor: 'pointer', fontSize: 12,
+              opacity: loading ? 0.6 : 1,
+            }}
+          >
+            {loading ? '⏳ Ломаю...' : '💥 Симулировать ошибку'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+const TABS: { id: Tab; label: string; emoji: string }[] = [
+  { id: 'optimistic', label: 'Optimistic UI', emoji: '⚡' },
+  { id: 'skeleton', label: 'Skeletons', emoji: '💀' },
+  { id: 'flags', label: 'Feature Flags', emoji: '🚩' },
+  { id: 'error', label: 'Error Boundary', emoji: '🛡️' },
+];
+
+export default function PatternsShowcase() {
+  const [activeTab, setActiveTab] = useState<Tab>('optimistic');
+
+  return (
+    <div style={{ background: '#0f172a', minHeight: '100vh', fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ maxWidth: 600, margin: '0 auto', paddingBottom: 32 }}>
+        <div style={{ padding: '20px 24px 0', borderBottom: '1px solid #1e293b' }}>
+          <h2 style={{ color: '#f1f5f9', margin: '0 0 4px', fontSize: 17 }}>
+            🎯 Next.js Patterns Showcase
+          </h2>
+          <p style={{ color: '#475569', fontSize: 12, margin: '0 0 16px' }}>
+            Интерактивные демо основных паттернов
+          </p>
+          <div style={{ display: 'flex', gap: 2 }}>
+            {TABS.map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                style={{
+                  padding: '8px 14px', borderRadius: '8px 8px 0 0',
+                  border: '1px solid ' + (activeTab === tab.id ? '#334155' : 'transparent'),
+                  borderBottom: activeTab === tab.id ? '1px solid #0f172a' : '1px solid transparent',
+                  background: activeTab === tab.id ? '#0f172a' : 'transparent',
+                  color: activeTab === tab.id ? '#4ade80' : '#64748b',
+                  cursor: 'pointer', fontSize: 12, fontWeight: activeTab === tab.id ? 600 : 400,
+                  marginBottom: -1, transition: 'all 0.15s',
+                }}
+              >
+                {tab.emoji} {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ background: '#0f172a', minHeight: 400, border: '1px solid #1e293b', borderTop: 'none', borderRadius: '0 0 12px 12px' }}>
+          {activeTab === 'optimistic' && <OptimisticDemo />}
+          {activeTab === 'skeleton' && <SkeletonDemo />}
+          {activeTab === 'flags' && <FlagsDemo />}
+          {activeTab === 'error' && <ErrorDemo />}
+        </div>
+
+        <div style={{
+          marginTop: 12, padding: '10px 16px', background: '#111827',
+          borderRadius: 8, border: '1px solid #1e293b',
+          display: 'flex', gap: 16, flexWrap: 'wrap',
+        }}>
+          {TABS.map(tab => (
+            <span key={tab.id} style={{ color: activeTab === tab.id ? '#4ade80' : '#334155', fontSize: 11, cursor: 'pointer' }} onClick={() => setActiveTab(tab.id)}>
+              {tab.emoji} {tab.label}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

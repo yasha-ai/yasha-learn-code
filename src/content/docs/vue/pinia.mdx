@@ -1,0 +1,648 @@
+---
+title: "15. Pinia: управление состоянием"
+sidebar:
+  order: 16
+---
+import { Playground } from '@components/Playground'
+
+
+## 🍍 Pinia — управление состоянием
+
+Pinia — официальный state manager для Vue 3. Это как Vuex, но в 10 раз проще, с отличным TypeScript и потрясающими devtools. Автор Vue — Эван Ю — официально рекомендует Pinia вместо Vuex для новых проектов 🚀
+
+---
+
+## Установка
+
+```bash
+npm install pinia
+```
+
+```typescript
+// main.ts
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import App from './App.vue'
+
+const pinia = createPinia()
+
+createApp(App)
+  .use(pinia)
+  .mount('#app')
+```
+
+---
+
+## defineStore — создание стора
+
+Pinia предлагает **два синтаксиса**: Options Store (как Vuex/Options API) и Setup Store (как Composition API). Оба полноценные, выбирай по вкусу!
+
+### Options Store — знакомый синтаксис
+
+```typescript
+// stores/counter.ts
+import { defineStore } from 'pinia'
+
+export const useCounterStore = defineStore('counter', {
+  // state — реактивные данные (как data() в компоненте)
+  state: () => ({
+    count: 0,
+    name: 'Яша',
+  }),
+
+  // getters — вычисляемые свойства (как computed)
+  getters: {
+    doubleCount: (state) => state.count * 2,
+
+    // Getter использующий другой getter
+    doubleCountPlusTen(): number {
+      return this.doubleCount + 10
+    },
+
+    // Getter с аргументом (возвращает функцию)
+    countPlusFive: (state) => (multiplier: number) => {
+      return state.count * multiplier
+    },
+  },
+
+  // actions — методы (как methods, могут быть async)
+  actions: {
+    increment() {
+      this.count++
+    },
+
+    decrement() {
+      this.count = Math.max(0, this.count - 1)
+    },
+
+    async fetchCount() {
+      const response = await fetch('/api/count')
+      const data = await response.json()
+      this.count = data.count  // Прямая мутация в action!
+    },
+  },
+})
+```
+
+### Setup Store — Composition API стиль
+
+```typescript
+// stores/counter.ts
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+
+export const useCounterStore = defineStore('counter', () => {
+  // state → ref/reactive
+  const count = ref(0)
+  const name = ref('Яша')
+
+  // getters → computed
+  const doubleCount = computed(() => count.value * 2)
+  const isNegative = computed(() => count.value < 0)
+
+  // actions → functions
+  function increment() {
+    count.value++
+  }
+
+  function decrement() {
+    count.value--
+  }
+
+  async function fetchCount() {
+    const response = await fetch('/api/count')
+    const data = await response.json()
+    count.value = data.count
+  }
+
+  // Обязательно возвращаем всё!
+  return {
+    count,
+    name,
+    doubleCount,
+    isNegative,
+    increment,
+    decrement,
+    fetchCount,
+  }
+})
+```
+
+---
+
+## Использование в компонентах
+
+```vue
+<script setup lang="ts">
+import { storeToRefs } from 'pinia'
+import { useCounterStore } from '@/stores/counter'
+
+const store = useCounterStore()
+
+// ❌ НЕЛЬЗЯ деструктурировать напрямую — потеряешь реактивность!
+const { count, name } = store  // count и name НЕ реактивны!
+
+// ✅ Используй storeToRefs для реактивных свойств
+const { count, name, doubleCount } = storeToRefs(store)
+
+// Методы и actions можно деструктурировать напрямую (они функции)
+const { increment, decrement, fetchCount } = store
+</script>
+
+<template>
+  <div>
+    <p>{{ count }} (двойной: {{ doubleCount }})</p>
+    <button @click="increment">+</button>
+    <button @click="decrement">-</button>
+
+    <!-- Можно вызывать и через store -->
+    <button @click="store.increment()">+</button>
+  </div>
+</template>
+```
+
+---
+
+## $patch — групповое обновление состояния
+
+```vue
+<script setup lang="ts">
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
+
+// Обновление одного свойства
+userStore.name = 'Катя'  // Прямая мутация — работает!
+
+// $patch — несколько свойств сразу
+userStore.$patch({
+  name: 'Катя',
+  age: 25,
+  email: 'katya@example.com',
+})
+
+// $patch с функцией — для сложных мутаций
+userStore.$patch((state) => {
+  state.items.push({ id: 4, name: 'Новый' })
+  state.hasChanges = true
+  // Всё это — одна транзакция в devtools!
+})
+</script>
+```
+
+---
+
+## $reset — сброс состояния
+
+```vue
+<script setup lang="ts">
+import { useFormStore } from '@/stores/form'
+
+const formStore = useFormStore()
+
+// Сброс к начальным значениям
+function handleCancel() {
+  formStore.$reset()
+}
+</script>
+```
+
+> ⚠️ `$reset()` работает только для **Options Store**. В Setup Store нужно реализовать вручную или использовать плагин.
+
+---
+
+## $subscribe — подписка на изменения
+
+```vue
+<script setup lang="ts">
+import { onUnmounted } from 'vue'
+import { useCartStore } from '@/stores/cart'
+
+const cartStore = useCartStore()
+
+// Подписываемся на все изменения стора
+const unsubscribe = cartStore.$subscribe((mutation, state) => {
+  // mutation.type: 'direct' | 'patch object' | 'patch function'
+  console.log('Тип мутации:', mutation.type)
+  console.log('Новое состояние:', state)
+
+  // Автосохранение в localStorage!
+  localStorage.setItem('cart', JSON.stringify(state))
+})
+
+// Отписываемся при уничтожении компонента
+onUnmounted(unsubscribe)
+</script>
+```
+
+---
+
+## $onAction — подписка на actions
+
+```typescript
+// Логирование всех actions
+store.$onAction(({
+  name,           // Имя action
+  store,          // Экземпляр стора
+  args,           // Аргументы action
+  after,          // Хук после успешного выполнения
+  onError,        // Хук при ошибке
+}) => {
+  const start = Date.now()
+  console.log(\`Action "\${name}" начат с аргументами:\`, args)
+
+  after((result) => {
+    console.log(\`Action "\${name}" завершён за \${Date.now() - start}мс\`)
+    console.log('Результат:', result)
+  })
+
+  onError((error) => {
+    console.error(\`Action "\${name}" упал с ошибкой:\`, error)
+  })
+})
+```
+
+---
+
+## Сложный пример: Store для аутентификации
+
+```typescript
+// stores/auth.ts
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+
+interface User {
+  id: number
+  name: string
+  email: string
+  role: 'admin' | 'user'
+  avatar: string
+}
+
+export const useAuthStore = defineStore('auth', () => {
+  const user = ref<User | null>(null)
+  const token = ref<string | null>(localStorage.getItem('token'))
+  const loading = ref(false)
+  const error = ref<string | null>(null)
+
+  const isLoggedIn = computed(() => !!user.value && !!token.value)
+  const isAdmin = computed(() => user.value?.role === 'admin')
+  const displayName = computed(() => user.value?.name ?? 'Гость')
+
+  async function login(email: string, password: string) {
+    loading.value = true
+    error.value = null
+
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+
+      if (!response.ok) {
+        throw new Error('Неверный email или пароль')
+      }
+
+      const data = await response.json()
+      token.value = data.token
+      user.value = data.user
+
+      // Сохраняем токен
+      localStorage.setItem('token', data.token)
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Ошибка входа'
+      throw e  // Пробрасываем для обработки в компоненте
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function logout() {
+    user.value = null
+    token.value = null
+    localStorage.removeItem('token')
+  }
+
+  async function fetchMe() {
+    if (!token.value) return
+
+    try {
+      const response = await fetch('/api/me', {
+        headers: { Authorization: \`Bearer \${token.value}\` }
+      })
+      user.value = await response.json()
+    } catch {
+      await logout()
+    }
+  }
+
+  return {
+    user, token, loading, error,
+    isLoggedIn, isAdmin, displayName,
+    login, logout, fetchMe,
+  }
+})
+```
+
+---
+
+## Pinia vs Vuex — сравнение
+
+```
+┌─────────────────┬──────────────────┬──────────────────┐
+│                 │      Vuex 4      │     Pinia        │
+├─────────────────┼──────────────────┼──────────────────┤
+│ Синтаксис       │ Сложный          │ Простой          │
+│ TypeScript      │ 😢 Плохо         │ ✅ Отлично       │
+│ Mutations       │ Обязательны      │ ❌ Не нужны      │
+│ Модули          │ Сложные          │ Просто сторы     │
+│ Devtools        │ ✅               │ ✅ Лучше         │
+│ Размер          │ ~10kb            │ ~2kb             │
+│ SSR             │ ✅               │ ✅               │
+│ Composables     │ ❌               │ ✅ Setup Store   │
+└─────────────────┴──────────────────┴──────────────────┘
+```
+
+---
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useCallback, useMemo } from 'react';
+
+const BG = '#0f172a';
+const GREEN = '#42b883';
+const DARK = '#35495e';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const YELLOW = '#f59e0b';
+
+// Симуляция Pinia Store
+interface CartItem {
+  id: number;
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+interface UserState {
+  name: string;
+  email: string;
+  isLoggedIn: boolean;
+  role: 'user' | 'admin';
+}
+
+interface CartState {
+  items: CartItem[];
+  coupon: string | null;
+}
+
+type MutationType = 'direct' | 'patch object' | 'patch function' | 'action';
+
+interface MutationLog {
+  store: string;
+  type: MutationType;
+  desc: string;
+  time: string;
+}
+
+const PRODUCTS: Omit<CartItem, 'quantity'>[] = [
+  { id: 1, name: '🎁 Vue 3 Pro Course', price: 2990 },
+  { id: 2, name: '🍍 Pinia Starter Pack', price: 990 },
+  { id: 3, name: '🗺️ Router Advanced', price: 1490 },
+];
+
+type ActiveStore = 'counter' | 'cart' | 'user';
+
+export default function App() {
+  // Counter store
+  const [count, setCount] = useState(0);
+  // Cart store
+  const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [coupon, setCoupon] = useState<string | null>(null);
+  // User store
+  const [user, setUser] = useState<UserState>({ name: 'Яша', email: 'yasha@vue.dev', isLoggedIn: false, role: 'user' });
+
+  const [activeStore, setActiveStore] = useState<ActiveStore>('counter');
+  const [logs, setLogs] = useState<MutationLog[]>([]);
+
+  const addLog = useCallback((store: string, type: MutationType, desc: string) => {
+    const time = new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setLogs(prev => [{ store, type, desc, time }, ...prev.slice(0, 9)]);
+  }, []);
+
+  // Cart getters (computed)
+  const totalItems = useMemo(() => cartItems.reduce((s, i) => s + i.quantity, 0), [cartItems]);
+  const subtotal = useMemo(() => cartItems.reduce((s, i) => s + i.price * i.quantity, 0), [cartItems]);
+  const discount = coupon === 'PINIA20' ? 0.2 : 0;
+  const total = Math.round(subtotal * (1 - discount));
+
+  const addToCart = (product: Omit<CartItem, 'quantity'>) => {
+    setCartItems(prev => {
+      const existing = prev.find(i => i.id === product.id);
+      const next = existing
+        ? prev.map(i => i.id === product.id ? { ...i, quantity: i.quantity + 1 } : i)
+        : [...prev, { ...product, quantity: 1 }];
+      addLog('cartStore', 'action', \`addToCart("\${product.name}")\`);
+      return next;
+    });
+  };
+
+  const removeFromCart = (id: number) => {
+    setCartItems(prev => {
+      addLog('cartStore', 'action', \`removeItem(\${id})\`);
+      return prev.filter(i => i.id !== id);
+    });
+  };
+
+  const applyCoupon = (code: string) => {
+    setCoupon(code === 'PINIA20' ? code : null);
+    addLog('cartStore', 'patch object', \`$patch({ coupon: '\${code}' })\`);
+  };
+
+  const storesList: { key: ActiveStore; label: string; badge?: number | string }[] = [
+    { key: 'counter', label: '🔢 counterStore' },
+    { key: 'cart', label: '🛒 cartStore', badge: totalItems || undefined },
+    { key: 'user', label: '👤 userStore', badge: user.isLoggedIn ? '✓' : undefined },
+  ];
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: GREEN, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🍍 Pinia Playground</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>defineStore · state · getters · actions · $patch</p>
+
+      {/* Store tabs */}
+      <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '1rem' }}>
+        {storesList.map(s => (
+          <button key={s.key} onClick={() => setActiveStore(s.key)} style={{
+            padding: '0.4rem 0.8rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+            background: activeStore === s.key ? GREEN : CARD,
+            color: activeStore === s.key ? '#0f172a' : '#94a3b8',
+            fontWeight: activeStore === s.key ? 700 : 400, fontSize: '0.78rem',
+            position: 'relative',
+          }}>
+            {s.label}
+            {s.badge !== undefined && (
+              <span style={{ marginLeft: '0.4rem', background: YELLOW, color: '#0f172a', borderRadius: '4px', padding: '0 0.3rem', fontSize: '0.68rem', fontWeight: 700 }}>
+                {s.badge}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+        {/* Store content */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          {/* Counter Store */}
+          {activeStore === 'counter' && (
+            <div>
+              <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem' }}>
+                {'// useCounterStore — Setup Store'}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', justifyContent: 'center', marginBottom: '1rem' }}>
+                <button onClick={() => { setCount(c => c - 1); addLog('counterStore', 'action', 'decrement()'); }} style={{
+                  width: '40px', height: '40px', borderRadius: '8px', border: 'none',
+                  background: DARK, color: '#fff', cursor: 'pointer', fontSize: '1.2rem',
+                }}>−</button>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ color: GREEN, fontSize: '2.5rem', fontWeight: 900, lineHeight: 1 }}>{count}</div>
+                  <div style={{ color: '#475569', fontSize: '0.72rem' }}>count</div>
+                </div>
+                <button onClick={() => { setCount(c => c + 1); addLog('counterStore', 'action', 'increment()'); }} style={{
+                  width: '40px', height: '40px', borderRadius: '8px', border: 'none',
+                  background: GREEN, color: '#0f172a', cursor: 'pointer', fontSize: '1.2rem', fontWeight: 700,
+                }}>+</button>
+              </div>
+              <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.78rem' }}>
+                <div><span style={{ color: '#64748b' }}>state: </span><span style={{ color: GREEN }}>count = {count}</span></div>
+                <div><span style={{ color: '#64748b' }}>getter: </span><span style={{ color: '#a78bfa' }}>doubleCount = {count * 2}</span></div>
+                <div><span style={{ color: '#64748b' }}>getter: </span><span style={{ color: '#a78bfa' }}>isNegative = {String(count < 0)}</span></div>
+              </div>
+              <button onClick={() => { setCount(0); addLog('counterStore', 'direct', '\$reset()'); }} style={{
+                marginTop: '0.75rem', width: '100%', padding: '0.4rem', borderRadius: '6px',
+                border: 'none', background: BORDER, color: '#94a3b8', cursor: 'pointer', fontSize: '0.78rem',
+              }}>
+                🔄 \$reset()
+              </button>
+            </div>
+          )}
+
+          {/* Cart Store */}
+          {activeStore === 'cart' && (
+            <div>
+              <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem' }}>
+                {'// useCartStore — Options Store'}
+              </div>
+              <div style={{ marginBottom: '0.75rem' }}>
+                {PRODUCTS.map(p => {
+                  const inCart = cartItems.find(i => i.id === p.id);
+                  return (
+                    <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.4rem 0', borderBottom: \`1px solid \${BORDER}\` }}>
+                      <div>
+                        <span style={{ fontSize: '0.82rem' }}>{p.name}</span>
+                        <span style={{ color: '#64748b', fontSize: '0.72rem', marginLeft: '0.4rem' }}>{p.price}₽</span>
+                      </div>
+                      <button onClick={() => addToCart(p)} style={{
+                        padding: '0.25rem 0.6rem', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                        background: inCart ? GREEN : BORDER, color: inCart ? '#0f172a' : '#94a3b8',
+                        fontSize: '0.75rem', fontWeight: inCart ? 700 : 400,
+                      }}>
+                        {inCart ? \`+\${inCart.quantity}\` : '+ Add'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.75rem' }}>
+                <input placeholder="Купон: PINIA20" onBlur={e => applyCoupon(e.target.value)} style={{
+                  flex: 1, padding: '0.4rem', borderRadius: '4px', border: \`1px solid \${BORDER}\`,
+                  background: '#0a0f1e', color: coupon ? GREEN : '#94a3b8', fontSize: '0.78rem',
+                }} />
+              </div>
+              <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.78rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#64748b' }}>totalItems (getter):</span>
+                  <span style={{ color: GREEN }}>{totalItems}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#64748b' }}>subtotal:</span>
+                  <span style={{ color: '#e2e8f0' }}>{subtotal}₽</span>
+                </div>
+                {discount > 0 && <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#64748b' }}>скидка (PINIA20):</span>
+                  <span style={{ color: YELLOW }}>-{Math.round(subtotal * discount)}₽</span>
+                </div>}
+                <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: \`1px solid \${BORDER}\`, paddingTop: '0.4rem', marginTop: '0.4rem' }}>
+                  <span style={{ color: GREEN, fontWeight: 700 }}>ИТОГО:</span>
+                  <span style={{ color: GREEN, fontWeight: 700 }}>{total}₽</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* User Store */}
+          {activeStore === 'user' && (
+            <div>
+              <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '0.75rem' }}>
+                {'// useAuthStore — Setup Store'}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                <div>
+                  <label style={{ color: '#94a3b8', fontSize: '0.75rem', display: 'block', marginBottom: '0.25rem' }}>Имя:</label>
+                  <input value={user.name} onChange={e => { setUser(u => ({ ...u, name: e.target.value })); addLog('userStore', 'direct', \`name = "\${e.target.value}"\`); }} style={{
+                    width: '100%', padding: '0.4rem', borderRadius: '4px', border: \`1px solid \${BORDER}\`,
+                    background: '#0a0f1e', color: '#e2e8f0', fontSize: '0.82rem', boxSizing: 'border-box',
+                  }} />
+                </div>
+                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                  {(['user', 'admin'] as const).map(r => (
+                    <button key={r} onClick={() => { setUser(u => ({ ...u, role: r })); addLog('userStore', 'patch object', \`\$patch({ role: '\${r}' })\`); }} style={{
+                      flex: 1, padding: '0.35rem', borderRadius: '4px', border: 'none', cursor: 'pointer',
+                      background: user.role === r ? YELLOW : BORDER, color: user.role === r ? '#0f172a' : '#94a3b8',
+                      fontSize: '0.75rem', fontWeight: user.role === r ? 700 : 400,
+                    }}>{r}</button>
+                  ))}
+                </div>
+                <button onClick={() => {
+                  const next = !user.isLoggedIn;
+                  setUser(u => ({ ...u, isLoggedIn: next }));
+                  addLog('userStore', 'action', next ? 'login()' : 'logout()');
+                }} style={{
+                  padding: '0.45rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                  background: user.isLoggedIn ? '#ef4444' : GREEN,
+                  color: user.isLoggedIn ? '#fff' : '#0f172a', fontWeight: 700, fontSize: '0.82rem',
+                }}>
+                  {user.isLoggedIn ? '🚪 logout()' : '🔐 login()'}
+                </button>
+              </div>
+              <div style={{ background: '#0a0f1e', padding: '0.75rem', borderRadius: '6px', fontSize: '0.78rem' }}>
+                <div><span style={{ color: '#64748b' }}>isLoggedIn: </span><span style={{ color: user.isLoggedIn ? GREEN : '#ef4444' }}>{String(user.isLoggedIn)}</span></div>
+                <div><span style={{ color: '#64748b' }}>isAdmin: </span><span style={{ color: user.role === 'admin' ? YELLOW : '#475569' }}>{String(user.role === 'admin')}</span></div>
+                <div><span style={{ color: '#64748b' }}>displayName: </span><span style={{ color: GREEN }}>"{user.isLoggedIn ? user.name : 'Гость'}"</span></div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Devtools simulation / Log */}
+        <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem' }}>
+          <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+            Pinia Devtools — Mutation Log
+          </div>
+          {logs.length === 0 ? (
+            <div style={{ color: '#334155', fontSize: '0.78rem' }}>// Взаимодействуй со сторами...</div>
+          ) : logs.map((l, i) => (
+            <div key={i} style={{ marginBottom: '0.5rem', padding: '0.5rem', borderRadius: '6px', background: i === 0 ? 'rgba(66,184,131,0.07)' : 'transparent', border: \`1px solid \${i === 0 ? 'rgba(66,184,131,0.3)' : BORDER}\` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.2rem' }}>
+                <span style={{ color: GREEN, fontSize: '0.72rem', fontWeight: 700 }}>{l.store}</span>
+                <span style={{ color: '#334155', fontSize: '0.68rem' }}>{l.time}</span>
+              </div>
+              <div style={{ color: YELLOW, fontSize: '0.7rem', marginBottom: '0.1rem' }}>{l.type}</div>
+              <div style={{ color: i === 0 ? '#e2e8f0' : '#475569', fontSize: '0.75rem' }}>{l.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

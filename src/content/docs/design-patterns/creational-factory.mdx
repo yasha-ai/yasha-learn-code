@@ -1,0 +1,285 @@
+---
+title: "8. Factory Method"
+sidebar:
+  order: 8
+---
+import { Playground } from '@components/Playground'
+
+## Design Patterns. Урок: Factory Method (Фабричный метод)
+
+**Factory Method** — порождающий паттерн, определяющий интерфейс для создания объекта, но оставляющий подклассам решение о том, какой класс инстанцировать.
+
+Говоря проще: вместо `new ConcreteClass()` вызываешь `factory.create()` — и не думаешь о деталях создания.
+
+---
+
+### Проблема: жёсткое создание объектов
+
+```typescript
+// ❌ Клиентский код знает о всех конкретных типах
+function createPaymentProcessor(type: string): any {
+  if (type === 'stripe') {
+    return new StripeProcessor(process.env.STRIPE_KEY!);
+  } else if (type === 'paypal') {
+    return new PayPalProcessor(process.env.PAYPAL_CLIENT_ID!, process.env.PAYPAL_SECRET!);
+  } else if (type === 'crypto') {
+    return new CryptoProcessor(process.env.CRYPTO_WALLET!);
+  }
+  throw new Error(`Unknown payment type: ${type}`);
+}
+```
+
+Добавление нового типа — правка этой функции. Тестирование — сложно из-за зависимостей.
+
+---
+
+### Factory Method Pattern
+
+```typescript
+// Абстракция продукта
+interface PaymentProcessor {
+  charge(amount: number, currency: string): Promise<PaymentResult>;
+  refund(transactionId: string, amount: number): Promise<RefundResult>;
+}
+
+// Конкретные продукты
+class StripeProcessor implements PaymentProcessor {
+  constructor(private apiKey: string) {}
+
+  async charge(amount: number, currency: string): Promise<PaymentResult> {
+    // Stripe-специфичная логика
+    return { success: true, transactionId: `str_${Date.now()}` };
+  }
+
+  async refund(transactionId: string, amount: number): Promise<RefundResult> {
+    return { success: true };
+  }
+}
+
+class PayPalProcessor implements PaymentProcessor {
+  constructor(private clientId: string, private secret: string) {}
+
+  async charge(amount: number, currency: string): Promise<PaymentResult> {
+    // PayPal-специфичная логика
+    return { success: true, transactionId: `pp_${Date.now()}` };
+  }
+
+  async refund(transactionId: string, amount: number): Promise<RefundResult> {
+    return { success: true };
+  }
+}
+
+// Абстрактная фабрика
+abstract class PaymentProcessorFactory {
+  // Factory Method — переопределяется подклассами
+  abstract createProcessor(): PaymentProcessor;
+
+  // Шаблонный метод использует factory method
+  async processPayment(amount: number, currency: string): Promise<PaymentResult> {
+    const processor = this.createProcessor(); // Создаётся нужный тип
+    const result = await processor.charge(amount, currency);
+    await this.logTransaction(result);
+    return result;
+  }
+
+  private async logTransaction(result: PaymentResult): Promise<void> {
+    console.log(`Transaction: ${result.transactionId}`);
+  }
+}
+
+// Конкретные фабрики
+class StripeProcessorFactory extends PaymentProcessorFactory {
+  createProcessor(): PaymentProcessor {
+    return new StripeProcessor(process.env.STRIPE_KEY!);
+  }
+}
+
+class PayPalProcessorFactory extends PaymentProcessorFactory {
+  createProcessor(): PaymentProcessor {
+    return new PayPalProcessor(
+      process.env.PAYPAL_CLIENT_ID!,
+      process.env.PAYPAL_SECRET!,
+    );
+  }
+}
+
+// Использование
+const factory = new StripeProcessorFactory();
+const result = await factory.processPayment(100, 'USD');
+```
+
+---
+
+### Simple Factory (не GoF, но популярен)
+
+Простая фабрика — статический метод или функция, инкапсулирующая создание:
+
+```typescript
+// Простая фабрика — не паттерн GoF, но широко используется
+class NotificationFactory {
+  static create(type: 'email' | 'sms' | 'push', config: NotificationConfig): Notification {
+    switch (type) {
+      case 'email':
+        return new EmailNotification(config.email!, config.smtpServer!);
+      case 'sms':
+        return new SmsNotification(config.phone!, config.twilioKey!);
+      case 'push':
+        return new PushNotification(config.deviceToken!, config.firebaseKey!);
+      default:
+        throw new Error(`Unknown notification type: ${type}`);
+    }
+  }
+}
+
+// Использование
+const notification = NotificationFactory.create('email', {
+  email: 'user@example.com',
+  smtpServer: 'smtp.gmail.com',
+});
+```
+
+---
+
+### Abstract Factory
+
+Abstract Factory — расширение, создающее семейства связанных объектов:
+
+```typescript
+// Семейство UI компонентов (Light / Dark theme)
+interface Button { render(): string; }
+interface Input { render(): string; }
+interface Modal { render(): string; }
+
+// Абстрактная фабрика
+interface UIComponentFactory {
+  createButton(): Button;
+  createInput(): Input;
+  createModal(): Modal;
+}
+
+// Конкретная фабрика для светлой темы
+class LightThemeFactory implements UIComponentFactory {
+  createButton(): Button { return new LightButton(); }
+  createInput(): Input { return new LightInput(); }
+  createModal(): Modal { return new LightModal(); }
+}
+
+// Конкретная фабрика для тёмной темы
+class DarkThemeFactory implements UIComponentFactory {
+  createButton(): Button { return new DarkButton(); }
+  createInput(): Input { return new DarkInput(); }
+  createModal(): Modal { return new DarkModal(); }
+}
+
+// Клиент работает только с абстракцией
+class App {
+  constructor(private uiFactory: UIComponentFactory) {}
+
+  render(): string {
+    const btn = this.uiFactory.createButton();
+    const input = this.uiFactory.createInput();
+    return `${btn.render()} ${input.render()}`;
+  }
+}
+
+// Переключение темы без изменения App
+const lightApp = new App(new LightThemeFactory());
+const darkApp = new App(new DarkThemeFactory());
+```
+
+---
+
+### Фабрика в React
+
+```typescript
+// Фабрика для создания компонентов форм
+type FieldType = 'text' | 'email' | 'password' | 'select' | 'textarea';
+
+function createFormField(type: FieldType, props: FieldProps): ReactElement {
+  const fieldComponents = {
+    text: TextField,
+    email: EmailField,
+    password: PasswordField,
+    select: SelectField,
+    textarea: TextareaField,
+  };
+
+  const Component = fieldComponents[type];
+  return <Component {...props} />;
+}
+
+// Использование
+const fields: Array<{ type: FieldType; name: string; label: string }> = [
+  { type: 'text', name: 'username', label: 'Username' },
+  { type: 'email', name: 'email', label: 'Email' },
+  { type: 'password', name: 'password', label: 'Password' },
+];
+
+function RegistrationForm() {
+  return (
+    <form>
+      {fields.map(field => createFormField(field.type, field))}
+    </form>
+  );
+}
+```
+
+---
+
+### Практические задания
+
+1. Создай `LoggerFactory` с реализациями `ConsoleLogger`, `FileLogger`, `RemoteLogger`. Фабрика определяет тип по env переменной `LOG_TARGET`.
+
+2. Реализуй Abstract Factory для создания адаптеров баз данных: `DatabaseAdapterFactory` → `PostgresAdapter` и `SQLiteAdapter`.
+
+3. Напиши тест для `PaymentProcessorFactory` используя мок-фабрику.
+
+4. Чем Factory Method отличается от Simple Factory? Когда использовать каждый?
+
+5. Найди использование паттерна Factory в исходниках React или Next.js.
+
+---
+
+### Playground: Factory в действии
+
+<Playground client:visible template="vanilla" files={{ '/index.js': `// Factory: создание объектов без привязки к конкретным классам
+
+class EmailNotification {
+  constructor(to) { this.to = to; this.type = "email"; }
+  send(msg) { console.log("[Email -> " + this.to + "]", msg); }
+}
+
+class SmsNotification {
+  constructor(phone) { this.phone = phone; this.type = "sms"; }
+  send(msg) { console.log("[SMS -> " + this.phone + "]", msg); }
+}
+
+class PushNotification {
+  constructor(deviceId) { this.deviceId = deviceId; this.type = "push"; }
+  send(msg) { console.log("[Push -> " + this.deviceId + "]", msg); }
+}
+
+// Factory — инкапсулирует создание
+class NotificationFactory {
+  static create(type, target) {
+    switch (type) {
+      case "email": return new EmailNotification(target);
+      case "sms":   return new SmsNotification(target);
+      case "push":  return new PushNotification(target);
+      default: throw new Error("Unknown type: " + type);
+    }
+  }
+}
+
+// Клиентский код не знает о конкретных классах
+const configs = [
+  { type: "email", target: "user@test.com" },
+  { type: "sms",   target: "+79991234567" },
+  { type: "push",  target: "device-abc-123" },
+];
+
+configs.forEach(({ type, target }) => {
+  const notification = NotificationFactory.create(type, target);
+  notification.send("Your order is ready!");
+});
+` }} />

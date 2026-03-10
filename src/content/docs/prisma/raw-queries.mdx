@@ -1,0 +1,210 @@
+---
+title: "13. Сырые SQL-запросы"
+sidebar:
+  order: 13
+---
+import { Playground } from '@components/Playground'
+
+
+Несмотря на богатый API Prisma Client, иногда необходимо выполнить сложный SQL-запрос напрямую. Для этого Prisma предоставляет методы `$queryRaw` и `$executeRaw`.
+
+## $queryRaw — запросы с результатом
+
+```typescript
+import { Prisma } from '@prisma/client'
+
+// Используйте тегированный шаблон Prisma.sql для безопасных запросов
+const users = await prisma.$queryRaw(
+  Prisma.sql`SELECT * FROM "users" WHERE age > ${minAge}`
+)
+```
+
+Функция возвращает массив объектов. Обратите внимание: типы не выводятся автоматически, поэтому нужно явно указать тип результата:
+
+```typescript
+const users = await prisma.$queryRaw<User[]>(
+  Prisma.sql`SELECT * FROM "users" WHERE role = ${role}`
+)
+```
+
+## $executeRaw — команды без результата
+
+```typescript
+const affectedRows = await prisma.$executeRaw(
+  Prisma.sql`UPDATE "users" SET "lastLoginAt" = NOW() WHERE "id" = ${userId}`
+)
+console.log(`Обновлено записей: ${affectedRows}`)
+```
+
+## Почему Prisma.sql, а не строки?
+
+Никогда не используйте интерполяцию строк для SQL-запросов — это уязвимость к SQL-инъекциям:
+
+```typescript
+// ❌ ОПАСНО — SQL-инъекция!
+const users = await prisma.$queryRawUnsafe(
+  `SELECT * FROM users WHERE name = '${userInput}'`
+)
+
+// ✅ БЕЗОПАСНО — параметризованный запрос
+const users = await prisma.$queryRaw(
+  Prisma.sql`SELECT * FROM users WHERE name = ${userInput}`
+)
+```
+
+## Когда использовать сырые запросы?
+
+- Сложные JOIN-запросы с несколькими уровнями вложенности
+- Полнотекстовый поиск с особыми операторами
+- Специфические функции конкретной СУБД
+- Оптимизация производительности в критических местах
+- Оконные функции (WINDOW FUNCTIONS)
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react'
+
+const BG = '#0f172a'
+const PRISMA = '#5a67d8'
+const CARD = '#1e293b'
+const TEXT = '#e2e8f0'
+
+const presetQueries = [
+  {
+    name: 'Найти активных пользователей',
+    sql: 'SELECT id, name, email, age FROM users WHERE is_active = true ORDER BY name LIMIT 5',
+    prismaCode: 'const users = await prisma.$queryRaw(\\n  Prisma.sql\`SELECT id, name, email, age\\n    FROM users\\n    WHERE is_active = true\\n    ORDER BY name\\n    LIMIT 5\`\\n)',
+    results: [
+      { id: 1, name: 'Алексей Иванов', email: 'alex@example.com', age: 28 },
+      { id: 6, name: 'Анна Смирнова', email: 'anna@example.com', age: 23 },
+      { id: 3, name: 'Дмитрий Козлов', email: 'dmitry@example.com', age: 35 },
+    ],
+  },
+  {
+    name: 'Количество постов по авторам',
+    sql: 'SELECT u.name, COUNT(p.id) as post_count, AVG(p.views) as avg_views FROM users u LEFT JOIN posts p ON p.author_id = u.id GROUP BY u.id, u.name ORDER BY post_count DESC',
+    prismaCode: 'const stats = await prisma.$queryRaw<PostStats[]>(\\n  Prisma.sql\`SELECT u.name,\\n    COUNT(p.id) as post_count,\\n    AVG(p.views) as avg_views\\n    FROM users u\\n    LEFT JOIN posts p ON p.author_id = u.id\\n    GROUP BY u.id, u.name\\n    ORDER BY post_count DESC\`\\n)',
+    results: [
+      { name: 'Анна Смирнова', post_count: 12, avg_views: 2340 },
+      { name: 'Иван Петров', post_count: 8, avg_views: 1890 },
+      { name: 'Пётр Николаев', post_count: 3, avg_views: 750 },
+    ],
+  },
+  {
+    name: 'Полнотекстовый поиск (PostgreSQL)',
+    sql: "SELECT id, title, ts_rank(search_vector, query) as rank FROM posts, plainto_tsquery('russian', 'prisma типобезопасность') query WHERE search_vector @@ query ORDER BY rank DESC",
+    prismaCode: 'const posts = await prisma.$queryRaw(\\n  Prisma.sql\`SELECT id, title,\\n    ts_rank(search_vector, query) as rank\\n    FROM posts,\\n    plainto_tsquery(\\'russian\\', \${searchQuery}) query\\n    WHERE search_vector @@ query\\n    ORDER BY rank DESC\`\\n)',
+    results: [
+      { id: 3, title: 'Prisma ORM — полное руководство', rank: 0.95 },
+      { id: 7, title: 'Типобезопасность с Prisma', rank: 0.87 },
+      { id: 12, title: 'ORM сравнение 2024', rank: 0.42 },
+    ],
+  },
+  {
+    name: 'Оконная функция',
+    sql: 'SELECT name, department, salary, RANK() OVER (PARTITION BY department ORDER BY salary DESC) as dept_rank FROM employees',
+    prismaCode: 'const ranked = await prisma.$queryRaw<RankedEmployee[]>(\\n  Prisma.sql\`SELECT name, department,\\n    salary,\\n    RANK() OVER (\\n      PARTITION BY department\\n      ORDER BY salary DESC\\n    ) as dept_rank\\n    FROM employees\`\\n)',
+    results: [
+      { name: 'Иван Петров', department: 'Engineering', salary: 150000, dept_rank: 1 },
+      { name: 'Анна Смирнова', department: 'Engineering', salary: 130000, dept_rank: 2 },
+      { name: 'Пётр Козлов', department: 'Marketing', salary: 90000, dept_rank: 1 },
+    ],
+  },
+]
+
+export default function App() {
+  const [selected, setSelected] = useState(0)
+  const [customSql, setCustomSql] = useState('')
+  const [mode, setMode] = useState('preset')
+
+  const query = presetQueries[selected]
+
+  const colorsForHeader = ['#7dd3fc', '#86efac', '#fbbf24', '#f9a8d4', '#c4b5fd']
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '28px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <h2 style={{ color: PRISMA, fontSize: 24, fontWeight: 800, margin: '0 0 4px 0' }}>
+          SQL Query Runner
+        </h2>
+        <p style={{ color: '#94a3b8', margin: '0 0 22px 0', fontSize: 13 }}>
+          Демонстрация $queryRaw и Prisma.sql тегированных шаблонов
+        </p>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+          {presetQueries.map((q, i) => (
+            <button key={i} onClick={() => setSelected(i)}
+              style={{ background: selected === i ? PRISMA : CARD, color: selected === i ? '#fff' : '#94a3b8', border: '1px solid ' + (selected === i ? PRISMA : '#334155'), borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>
+              {q.name}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 16 }}>
+          <div>
+            <div style={{ color: '#475569', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Raw SQL</div>
+            <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 16, border: '1px solid #1e3a5f', minHeight: 120 }}>
+              <pre style={{ margin: 0, color: '#94a3b8', fontSize: 12, lineHeight: 1.7, fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+                {query.sql.split(' ').map((word, i) => {
+                  const keywords = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT', 'GROUP', 'BY', 'ORDER', 'LIMIT', 'AS', 'ON', 'RANK', 'OVER', 'PARTITION', 'AVG', 'COUNT', 'DISTINCT', 'AND', 'OR']
+                  return (
+                    <span key={i} style={{ color: keywords.includes(word) ? '#7dd3fc' : word.startsWith("'") ? '#86efac' : '#94a3b8' }}>
+                      {word}{' '}
+                    </span>
+                  )
+                })}
+              </pre>
+            </div>
+          </div>
+          <div>
+            <div style={{ color: '#475569', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Prisma.$queryRaw</div>
+            <div style={{ background: '#0a0f1e', borderRadius: 12, padding: 16, border: '1px solid ' + PRISMA + '40', minHeight: 120 }}>
+              <pre style={{ margin: 0, color: TEXT, fontSize: 11, lineHeight: 1.7, fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+                {query.prismaCode}
+              </pre>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <span style={{ color: '#475569', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>Результат</span>
+            <span style={{ background: '#14532d', color: '#86efac', fontSize: 11, padding: '2px 8px', borderRadius: 6, fontWeight: 600 }}>
+              ✓ {query.results.length} строк
+            </span>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {Object.keys(query.results[0]).map((col, i) => (
+                    <th key={col} style={{ color: colorsForHeader[i % colorsForHeader.length], padding: '6px 12px', textAlign: 'left', borderBottom: '1px solid #334155', fontFamily: 'monospace', fontWeight: 700 }}>
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {query.results.map((row, i) => (
+                  <tr key={i} style={{ background: i % 2 === 0 ? '#0a0f1e' : 'transparent' }}>
+                    {Object.values(row).map((val, j) => (
+                      <td key={j} style={{ color: typeof val === 'number' ? '#fbbf24' : TEXT, padding: '7px 12px', borderBottom: '1px solid #1e293b', fontFamily: 'monospace' }}>
+                        {String(val)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 14, background: '#7f1d1d20', borderRadius: 10, padding: 14, border: '1px solid #7f1d1d' }}>
+          <span style={{ color: '#fc8181', fontSize: 13, fontWeight: 700 }}>⚠️ Безопасность:</span>
+          <span style={{ color: '#fca5a5', fontSize: 12, marginLeft: 8 }}>
+            Всегда используйте Prisma.sql тегированный шаблон для параметров. Никогда не подставляйте пользовательский ввод через конкатенацию строк!
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+` }} />

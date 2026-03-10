@@ -1,0 +1,699 @@
+---
+title: "59. GraphQL с Angular"
+sidebar:
+  order: 62
+---
+import { Playground } from '@components/Playground'
+
+
+## 62. GraphQL с Angular 🔮
+
+Привет! Яша здесь. REST API — хорошо, но GraphQL даёт тебе **точно те данные, что нужны**, не больше и не меньше. Apollo Angular — лучший способ интегрировать GraphQL в Angular. Разберём всё от запросов до оптимистичных обновлений 🚀
+
+---
+
+### Установка Apollo Angular
+
+```bash
+ng add apollo-angular
+# - Установит apollo-angular, @apollo/client, graphql
+# - Добавит GraphQLModule в AppModule
+# - Попросит URL GraphQL сервера
+```
+
+```typescript
+// graphql.module.ts — ручная настройка
+import { NgModule } from '@angular/core';
+import { ApolloModule, APOLLO_OPTIONS } from 'apollo-angular';
+import { ApolloClientOptions, InMemoryCache, ApolloLink } from '@apollo/client/core';
+import { HttpLink } from 'apollo-angular/http';
+import { onError } from '@apollo/client/link/error';
+
+export function createApollo(httpLink: HttpLink): ApolloClientOptions<any> {
+  const http = httpLink.create({ uri: 'https://api.example.com/graphql' });
+
+  // Error link — глобальная обработка ошибок
+  const errorLink = onError(({ graphQLErrors, networkError, operation }) => {
+    if (graphQLErrors) {
+      graphQLErrors.forEach(({ message, locations, path }) => {
+        console.error(`GraphQL Error: ${message}`, { locations, path });
+      });
+    }
+    if (networkError) {
+      console.error('Network error:', networkError);
+    }
+  });
+
+  // Auth link — добавляем JWT токен
+  const authLink = new ApolloLink((operation, forward) => {
+    const token = localStorage.getItem('token');
+    operation.setContext({
+      headers: { Authorization: token ? \`Bearer \${token}\` : '' }
+    });
+    return forward(operation);
+  });
+
+  return {
+    link: ApolloLink.from([errorLink, authLink, http]),
+    cache: new InMemoryCache({
+      typePolicies: {
+        User: { keyFields: ['id'] },     // ← кэш нормализация по id
+        Product: { keyFields: ['id'] },
+      }
+    }),
+    defaultOptions: {
+      watchQuery: { fetchPolicy: 'cache-and-network' }, // сначала кэш, потом сеть
+      query: { fetchPolicy: 'network-only' },
+    },
+  };
+}
+
+@NgModule({
+  imports: [ApolloModule],
+  providers: [{
+    provide: APOLLO_OPTIONS,
+    useFactory: createApollo,
+    deps: [HttpLink],
+  }],
+})
+export class GraphQLModule {}
+```
+
+---
+
+### Queries: watchQuery и query
+
+```typescript
+import { gql } from '@apollo/client/core';
+import { Apollo } from 'apollo-angular';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+// Типизация
+export const GET_USERS = gql`
+  query GetUsers($page: Int, $limit: Int) {
+    users(page: $page, limit: $limit) {
+      id
+      name
+      email
+      role
+      createdAt
+    }
+  }
+`;
+
+export const GET_USER = gql`
+  query GetUser($id: ID!) {
+    user(id: $id) {
+      id
+      name
+      email
+      role
+      posts {
+        id
+        title
+        createdAt
+      }
+    }
+  }
+`;
+
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  constructor(private apollo: Apollo) {}
+
+  // watchQuery — возвращает Observable, обновляется при изменении кэша
+  getUsers(page = 1, limit = 10): Observable<User[]> {
+    return this.apollo.watchQuery<{ users: User[] }>({
+      query: GET_USERS,
+      variables: { page, limit },
+    }).valueChanges.pipe(
+      map(result => result.data.users)
+    );
+  }
+
+  // query — одноразовый запрос
+  getUserById(id: string): Observable<User> {
+    return this.apollo.query<{ user: User }>({
+      query: GET_USER,
+      variables: { id },
+    }).pipe(
+      map(result => result.data.user)
+    );
+  }
+}
+```
+
+---
+
+### Mutations: изменение данных
+
+```typescript
+const CREATE_USER = gql`
+  mutation CreateUser($input: CreateUserInput!) {
+    createUser(input: $input) {
+      id
+      name
+      email
+      role
+    }
+  }
+`;
+
+const UPDATE_USER = gql`
+  mutation UpdateUser($id: ID!, $input: UpdateUserInput!) {
+    updateUser(id: $id, input: $input) {
+      id
+      name
+      email
+    }
+  }
+`;
+
+const DELETE_USER = gql`
+  mutation DeleteUser($id: ID!) {
+    deleteUser(id: $id) {
+      success
+      message
+    }
+  }
+`;
+
+@Injectable({ providedIn: 'root' })
+export class UserMutationService {
+  constructor(private apollo: Apollo) {}
+
+  createUser(input: CreateUserInput): Observable<User> {
+    return this.apollo.mutate<{ createUser: User }>({
+      mutation: CREATE_USER,
+      variables: { input },
+      // Обновление кэша после мутации
+      update: (cache, { data }) => {
+        const existing = cache.readQuery<{ users: User[] }>({ query: GET_USERS });
+        if (existing && data?.createUser) {
+          cache.writeQuery({
+            query: GET_USERS,
+            data: { users: [...existing.users, data.createUser] },
+          });
+        }
+      },
+    }).pipe(
+      map(result => result.data!.createUser)
+    );
+  }
+
+  deleteUser(id: string): Observable<boolean> {
+    return this.apollo.mutate<{ deleteUser: { success: boolean } }>({
+      mutation: DELETE_USER,
+      variables: { id },
+      // evict удаляет объект из кэша
+      update: (cache) => {
+        cache.evict({ id: cache.identify({ __typename: 'User', id }) });
+        cache.gc(); // garbage collect
+      },
+    }).pipe(
+      map(result => result.data!.deleteUser.success)
+    );
+  }
+}
+```
+
+---
+
+### Оптимистичные обновления
+
+```typescript
+updateUserName(id: string, name: string): Observable<User> {
+  return this.apollo.mutate<{ updateUser: User }>({
+    mutation: UPDATE_USER,
+    variables: { id, input: { name } },
+
+    // Показываем результат НЕМЕДЛЕННО, не дожидаясь ответа сервера
+    optimisticResponse: {
+      __typename: 'Mutation',
+      updateUser: {
+        __typename: 'User',
+        id,
+        name,
+        email: '', // заглушка — обновится когда придёт реальный ответ
+      },
+    },
+  }).pipe(
+    map(result => result.data!.updateUser)
+  );
+}
+```
+
+---
+
+### Subscriptions: реальное время
+
+```typescript
+const USER_UPDATED_SUBSCRIPTION = gql`
+  subscription OnUserUpdated {
+    userUpdated {
+      id
+      name
+      email
+      updatedAt
+    }
+  }
+`;
+
+// Настройка WebSocket link
+import { split } from '@apollo/client/core';
+import { GraphQLWsLink } from '@apollo/client/link/subscriptions';
+import { createClient } from 'graphql-ws';
+import { getMainDefinition } from '@apollo/client/utilities';
+
+const wsLink = new GraphQLWsLink(createClient({
+  url: 'wss://api.example.com/graphql',
+  connectionParams: {
+    authToken: localStorage.getItem('token'),
+  },
+}));
+
+// HTTP для queries/mutations, WS для subscriptions
+const splitLink = split(
+  ({ query }) => {
+    const definition = getMainDefinition(query);
+    return definition.kind === 'OperationDefinition'
+      && definition.operation === 'subscription';
+  },
+  wsLink,  // ← subscriptions
+  httpLink, // ← queries & mutations
+);
+
+// Использование
+@Component({...})
+export class UsersComponent implements OnInit, OnDestroy {
+  users$ = this.userService.getUsers();
+
+  constructor(private apollo: Apollo) {}
+
+  ngOnInit(): void {
+    // Подписка обновляет кэш — компонент автоматически перерисуется!
+    this.apollo.subscribe<{ userUpdated: User }>({
+      query: USER_UPDATED_SUBSCRIPTION,
+    }).subscribe(({ data }) => {
+      // Apollo автоматически обновит кэш через keyFields: ['id']
+      console.log('Пользователь обновлён:', data?.userUpdated);
+    });
+  }
+}
+```
+
+---
+
+### Code Generation с graphql-codegen
+
+```bash
+npm install --save-dev @graphql-codegen/cli @graphql-codegen/typescript @graphql-codegen/typescript-operations @graphql-codegen/typescript-apollo-angular
+```
+
+```yaml
+# codegen.yml
+schema: https://api.example.com/graphql
+documents: 'src/**/*.graphql'
+generates:
+  src/app/graphql/generated.ts:
+    plugins:
+      - typescript
+      - typescript-operations
+      - typescript-apollo-angular
+    config:
+      addExplicitOverride: true
+      apolloAngularVersion: 3
+```
+
+```graphql
+# src/app/users/users.graphql
+query GetUsers($page: Int, $limit: Int) {
+  users(page: $page, limit: $limit) {
+    id
+    name
+    email
+    role
+  }
+}
+
+mutation CreateUser($input: CreateUserInput!) {
+  createUser(input: $input) {
+    id
+    name
+    email
+  }
+}
+```
+
+```bash
+# Генерация типов и сервисов
+npm run codegen
+
+# Результат — типизированные Angular сервисы!
+# GetUsersGQL — query сервис
+# CreateUserGQL — mutation сервис
+```
+
+```typescript
+// Использование сгенерированных сервисов
+import { GetUsersGQL, CreateUserGQL, GetUsersQuery } from './graphql/generated';
+
+@Component({...})
+export class UsersComponent {
+  users$ = this.getUsersGQL.watch({ page: 1, limit: 10 })
+    .valueChanges.pipe(
+      map(result => result.data.users)
+    );
+
+  constructor(
+    private getUsersGQL: GetUsersGQL,
+    private createUserGQL: CreateUserGQL,
+  ) {}
+
+  createUser(name: string, email: string): void {
+    this.createUserGQL.mutate({ input: { name, email } })
+      .subscribe(result => console.log('Создан:', result.data?.createUser));
+  }
+}
+```
+
+---
+
+### Нормализация кэша и Fragment
+
+```typescript
+// Fragments — переиспользуемые части запросов
+const USER_FRAGMENT = gql`
+  fragment UserFields on User {
+    id
+    name
+    email
+    role
+    avatar
+  }
+`;
+
+const GET_USERS_WITH_FRAGMENT = gql`
+  ${USER_FRAGMENT}
+  query GetUsersDetailed {
+    users {
+      ...UserFields
+      posts { id title }
+    }
+  }
+`;
+
+// Чтение/запись отдельных объектов в кэш
+cache.writeFragment({
+  id: cache.identify({ __typename: 'User', id: '1' }),
+  fragment: USER_FRAGMENT,
+  data: {
+    id: '1',
+    name: 'Обновлённое имя',
+    email: 'new@email.com',
+    role: 'admin',
+    avatar: null,
+  },
+});
+```
+
+---
+
+## Playground 🎮
+
+Симулятор GraphQL запросов и мутаций:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const SCHEMA = \`type Query {
+  users(page: Int, limit: Int): [User!]!
+  user(id: ID!): User
+}
+
+type Mutation {
+  createUser(input: CreateUserInput!): User!
+  updateUser(id: ID!, input: UpdateUserInput!): User!
+  deleteUser(id: ID!): DeleteResult!
+}
+
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  role: String!
+}
+
+type DeleteResult {
+  success: Boolean!
+}\`;
+
+const INITIAL_USERS = [
+  { id: '1', name: 'Яша Петров', email: 'yasha@dev.com', role: 'admin', __typename: 'User' },
+  { id: '2', name: 'Маша Иванова', email: 'masha@dev.com', role: 'developer', __typename: 'User' },
+  { id: '3', name: 'Коля Сидоров', email: 'kolya@dev.com', role: 'designer', __typename: 'User' },
+];
+
+let nextId = 4;
+
+const QUERIES = {
+  getUsers: {
+    label: 'GetUsers Query',
+    color: '#60a5fa',
+    query: \`query GetUsers($page: Int, $limit: Int) {
+  users(page: $page, limit: $limit) {
+    id
+    name
+    email
+    role
+  }
+}\`,
+  },
+  createUser: {
+    label: 'CreateUser Mutation',
+    color: '#4ade80',
+    query: \`mutation CreateUser($input: CreateUserInput!) {
+  createUser(input: $input) {
+    id
+    name
+    email
+    role
+  }
+}\`,
+  },
+  deleteUser: {
+    label: 'DeleteUser Mutation',
+    color: '#f87171',
+    query: \`mutation DeleteUser($id: ID!) {
+  deleteUser(id: $id) {
+    success
+    message
+  }
+}\`,
+  },
+};
+
+function Log({ logs }) {
+  return (
+    <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+      {logs.slice().reverse().map((log, i) => (
+        <div key={i} style={{
+          padding: '6px 10px', marginBottom: '4px', borderRadius: '6px',
+          background: '#0f172a', fontSize: '12px', fontFamily: 'monospace',
+          borderLeft: \`3px solid \${log.color}\`,
+        }}>
+          <span style={{ color: '#64748b' }}>{log.time} </span>
+          <span style={{ color: log.color }}>{log.type}: </span>
+          <span style={{ color: '#f1f5f9' }}>{log.message}</span>
+          {log.duration && <span style={{ color: '#94a3b8' }}> ({log.duration}ms)</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function App() {
+  const [users, setUsers] = useState(INITIAL_USERS);
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [activeQuery, setActiveQuery] = useState('getUsers');
+  const [newName, setNewName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [cacheHit, setCacheHit] = useState(false);
+  const [queryCache, setQueryCache] = useState({});
+
+  const addLog = useCallback((type, message, color, duration) => {
+    setLogs(prev => [...prev, {
+      time: new Date().toLocaleTimeString(),
+      type, message, color, duration,
+    }]);
+  }, []);
+
+  const executeQuery = useCallback(() => {
+    const cacheKey = 'GetUsers:page=1:limit=10';
+    const isQuery = activeQuery === 'getUsers';
+    const isCached = isQuery && !!queryCache[cacheKey];
+
+    setLoading(true);
+    const delay = isCached ? 10 : 300 + Math.random() * 200;
+
+    setTimeout(() => {
+      if (activeQuery === 'getUsers') {
+        setCacheHit(isCached);
+        if (!isCached) {
+          setQueryCache(prev => ({ ...prev, [cacheKey]: users }));
+        }
+        addLog('Query', 'GetUsers', '#60a5fa', Math.round(delay));
+        addLog(isCached ? '✅ CACHE' : '🌐 NETWORK', \`\${users.length} пользователей\`, isCached ? '#4ade80' : '#94a3b8', Math.round(delay));
+      } else if (activeQuery === 'createUser') {
+        if (!newName || !newEmail) {
+          addLog('❌ Error', 'Заполните имя и email', '#f87171');
+          setLoading(false);
+          return;
+        }
+        const newUser = { id: String(nextId++), name: newName, email: newEmail, role: 'developer', __typename: 'User' };
+        setUsers(prev => [...prev, newUser]);
+        setQueryCache({}); // Инвалидируем кэш
+        addLog('Mutation', 'CreateUser', '#4ade80', Math.round(delay));
+        addLog('🔄 Cache', 'Инвалидирован после мутации', '#fbbf24');
+        setNewName('');
+        setNewEmail('');
+      } else if (activeQuery === 'deleteUser') {
+        if (users.length === 0) { setLoading(false); return; }
+        const toDelete = users[users.length - 1];
+        setUsers(prev => prev.slice(0, -1));
+        setQueryCache({});
+        addLog('Mutation', \`DeleteUser(id: \${toDelete.id})\`, '#f87171', Math.round(delay));
+        addLog('🗑️ Cache', \`evict User:\${toDelete.id}\`, '#94a3b8');
+      }
+      setLoading(false);
+    }, delay);
+  }, [activeQuery, users, newName, newEmail, queryCache, addLog]);
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>🔮 Apollo Angular Simulator</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>GraphQL Queries, Mutations & Cache</div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+          {/* Operation selector */}
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+            <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>ОПЕРАЦИЯ</div>
+            {Object.entries(QUERIES).map(([key, q]) => (
+              <button key={key} onClick={() => setActiveQuery(key)} style={{
+                display: 'block', width: '100%', padding: '8px 12px', borderRadius: '8px',
+                border: 'none', cursor: 'pointer', marginBottom: '6px', textAlign: 'left',
+                background: activeQuery === key ? q.color + '20' : '#0f172a',
+                color: activeQuery === key ? q.color : '#64748b',
+                fontWeight: activeQuery === key ? 'bold' : 'normal', fontSize: '13px',
+                borderLeft: activeQuery === key ? \`3px solid \${q.color}\` : '3px solid transparent',
+              }}>{q.label}</button>
+            ))}
+
+            {activeQuery === 'createUser' && (
+              <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Имя" style={{
+                  padding: '8px', borderRadius: '6px', background: '#0f172a',
+                  border: '1px solid #334155', color: 'white', fontSize: '13px',
+                }} />
+                <input value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="Email" style={{
+                  padding: '8px', borderRadius: '6px', background: '#0f172a',
+                  border: '1px solid #334155', color: 'white', fontSize: '13px',
+                }} />
+              </div>
+            )}
+
+            <button onClick={executeQuery} disabled={loading} style={{
+              width: '100%', marginTop: '12px', padding: '10px', borderRadius: '8px',
+              border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
+              background: loading ? '#334155' : ANGULAR_RED,
+              color: 'white', fontWeight: 'bold', fontSize: '13px',
+            }}>
+              {loading ? '⏳ Выполняется...' : '▶ Выполнить'}
+            </button>
+          </div>
+
+          {/* Query code */}
+          <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+            <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>
+              GQL ЗАПРОС {cacheHit && activeQuery === 'getUsers' && <span style={{ color: '#4ade80' }}>⚡ FROM CACHE</span>}
+            </div>
+            <pre style={{
+              margin: 0, fontSize: '11px', color: '#a78bfa',
+              fontFamily: 'monospace', lineHeight: 1.6, overflowX: 'auto',
+            }}>
+              {QUERIES[activeQuery].query}
+            </pre>
+          </div>
+        </div>
+
+        {/* Cache state */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px' }}>
+          <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>
+            InMemoryCache ({Object.keys(queryCache).length > 0 ? '✅ заполнен' : '⬜ пустой'})
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {users.map(u => (
+              <div key={u.id} style={{
+                background: '#0f172a', borderRadius: '6px', padding: '6px 10px',
+                fontSize: '11px', color: '#94a3b8', fontFamily: 'monospace',
+                border: '1px solid #334155',
+              }}>
+                User:{u.id} ({u.name.split(' ')[0]})
+              </div>
+            ))}
+            {users.length === 0 && <span style={{ color: '#64748b', fontSize: '12px' }}>Кэш пуст</span>}
+          </div>
+        </div>
+
+        {/* Users list */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px' }}>
+          <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>
+            ДАННЫЕ ({users.length} пользователей)
+          </div>
+          {users.map(u => (
+            <div key={u.id} style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '8px 0', borderBottom: '1px solid #334155',
+            }}>
+              <div>
+                <span style={{ color: '#f1f5f9', fontWeight: 'bold', fontSize: '14px', marginRight: '8px' }}>{u.name}</span>
+                <span style={{ color: '#64748b', fontSize: '12px' }}>{u.email}</span>
+              </div>
+              <span style={{ color: '#a78bfa', fontSize: '12px', background: '#1d1040', padding: '2px 8px', borderRadius: '12px' }}>{u.role}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Logs */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+            <div style={{ color: '#94a3b8', fontSize: '12px', fontWeight: 'bold' }}>APOLLO CLIENT LOG</div>
+            <button onClick={() => setLogs([])} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '12px' }}>Очистить</button>
+          </div>
+          {logs.length === 0
+            ? <div style={{ color: '#475569', fontSize: '12px', textAlign: 'center', padding: '20px' }}>Выполните операцию чтобы увидеть лог</div>
+            : <Log logs={logs} />
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

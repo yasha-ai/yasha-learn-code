@@ -1,0 +1,274 @@
+---
+title: "86. WeakRef и FinalizationRegistry"
+sidebar:
+  order: 88
+---
+import { Playground } from '@components/Playground'
+
+
+`WeakRef` и `FinalizationRegistry` — инструменты для работы с памятью в JavaScript. Они позволяют держать «слабую» ссылку на объект (не мешая сборщику мусора его удалить) и выполнять код при удалении объекта.
+
+> ⚠️ **Осторожно:** Используйте эти API только когда реально необходимо управлять памятью. Сборщик мусора непредсказуем — не полагайтесь на точное время удаления объектов.
+
+## WeakRef — слабая ссылка
+
+Обычная ссылка предотвращает сборку мусора. `WeakRef` — нет:
+
+```javascript
+let target = { name: 'Тяжёлый объект', data: new Array(1000000) }
+
+const weakRef = new WeakRef(target)
+
+// Получить объект через WeakRef
+console.log(weakRef.deref()) // { name: 'Тяжёлый объект', ... }
+console.log(weakRef.deref()?.name) // 'Тяжёлый объект'
+
+// Удаляем сильную ссылку
+target = null
+
+// Теперь объект может быть собран GC
+// weakRef.deref() вернёт undefined после сборки
+setTimeout(() => {
+  const obj = weakRef.deref()
+  if (obj) {
+    console.log('Объект ещё жив:', obj.name)
+  } else {
+    console.log('Объект был удалён сборщиком мусора')
+  }
+}, 1000)
+```
+
+## Кэш с WeakRef
+
+Классический случай применения — кэш, который не утечёт памятью:
+
+```javascript
+class WeakCache {
+  #cache = new Map()
+
+  set(key, value) {
+    this.#cache.set(key, new WeakRef(value))
+  }
+
+  get(key) {
+    const ref = this.#cache.get(key)
+    if (!ref) return undefined
+
+    const value = ref.deref()
+    if (value === undefined) {
+      // Объект собран GC — чистим кэш
+      this.#cache.delete(key)
+      return undefined
+    }
+    return value
+  }
+
+  has(key) {
+    return this.get(key) !== undefined
+  }
+}
+
+const cache = new WeakCache()
+
+let bigData = { id: 1, data: new Array(100000).fill('x') }
+cache.set('bigData', bigData)
+
+console.log(cache.get('bigData')?.id) // 1
+
+bigData = null // позволяем GC удалить объект
+// После GC: cache.get('bigData') === undefined
+```
+
+## FinalizationRegistry — колбэк при удалении
+
+`FinalizationRegistry` вызывает колбэк когда объект удалён сборщиком мусора:
+
+```javascript
+const registry = new FinalizationRegistry((heldValue) => {
+  console.log(`Объект удалён! Метка: ${heldValue}`)
+})
+
+let obj1 = { name: 'Объект А' }
+let obj2 = { name: 'Объект Б' }
+
+// Регистрируем объекты с метками (heldValue)
+registry.register(obj1, 'А')
+registry.register(obj2, 'Б')
+
+// Удаляем ссылки
+obj1 = null // когда GC удалит → 'Объект удалён! Метка: А'
+obj2 = null // когда GC удалит → 'Объект удалён! Метка: Б'
+```
+
+## Комбинация WeakRef + FinalizationRegistry
+
+Реальный паттерн — кэш с автоочисткой при сборке мусора:
+
+```javascript
+class ManagedCache {
+  #cache = new Map()
+  #registry = new FinalizationRegistry((key) => {
+    // Вызывается когда значение удалено GC
+    this.#cache.delete(key)
+    console.log(`Кэш очищен для ключа: ${key}`)
+  })
+
+  set(key, value) {
+    this.#registry.register(value, key)
+    this.#cache.set(key, new WeakRef(value))
+  }
+
+  get(key) {
+    return this.#cache.get(key)?.deref()
+  }
+
+  get size() {
+    return this.#cache.size
+  }
+}
+
+const cache = new ManagedCache()
+
+// Тяжёлые объекты
+cache.set('user:1', { id: 1, data: 'много данных' })
+cache.set('user:2', { id: 2, data: 'ещё данных' })
+
+console.log(cache.get('user:1')?.id) // 1
+console.log('Размер кэша:', cache.size) // 2
+```
+
+## Отмена регистрации
+
+```javascript
+const registry = new FinalizationRegistry((label) => {
+  console.log('Удалён:', label)
+})
+
+let obj = { data: 'важные данные' }
+
+// Сохраняем токен для отмены
+const token = {}
+registry.register(obj, 'мой-объект', token)
+
+// Можно отменить регистрацию (колбэк не вызовется)
+registry.unregister(token)
+
+obj = null // колбэк не вызовется
+```
+
+## Когда использовать
+
+**✅ Подходит для:**
+- Кэши с тяжёлыми объектами (изображения, большие данные)
+- Отладочные инструменты для отслеживания утечек памяти
+- Освобождение нативных ресурсов (файловые дескрипторы, соединения)
+
+**❌ Не использовать для:**
+- Критически важной логики (GC непредсказуем)
+- Замены обычного управления ресурсами
+- Синхронной очистки (колбэк асинхронный и может не вызваться)
+
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 16px; margin: 0; }
+    button { background: #89b4fa; color: #1e1e2e; border: none; padding: 7px 12px; border-radius: 6px; cursor: pointer; margin: 3px; font-size: 12px; font-weight: 600; }
+    button:hover { background: #74c7ec; }
+    button.red { background: #f38ba8; } button.red:hover { background: #eba0ac; }
+    .box { background: #313244; border-radius: 8px; padding: 14px; margin: 8px 0; }
+    .out { background: #181825; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 12px; min-height: 100px; color: #a6e3a1; white-space: pre-wrap; }
+    h3 { color: #cba6f7; margin: 0 0 10px; font-size: 14px; }
+    .status { font-size: 12px; padding: 4px 8px; border-radius: 4px; display: inline-block; margin-top: 6px; }
+    .alive { background: #40a02b; color: #fff; }
+    .dead { background: #d20f39; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h3>WeakRef — слабая ссылка</h3>
+    <button onclick="createObj()">Создать объект</button>
+    <button onclick="createRef()">WeakRef(obj)</button>
+    <button onclick="deref()">weakRef.deref()</button>
+    <button class="red" onclick="nullify()">obj = null (удалить ссылку)</button>
+    <button onclick="showRegistry()">FinalizationRegistry</button>
+    <div id="status"></div>
+  </div>
+  <div class="out" id="out">Нажмите "Создать объект"...</div>
+  <script>
+    var out = document.getElementById('out');
+    var statusEl = document.getElementById('status');
+    var obj = null;
+    var weakRef = null;
+    var isNullified = false;
+    var logs = [];
+
+    function setStatus(alive) {
+      statusEl.innerHTML = '<span class="status ' + (alive ? 'alive' : 'dead') + '">' + (alive ? '● Объект жив' : '○ Ссылка обнулена (GC может удалить)') + '</span>';
+    }
+    function render() { out.textContent = logs.join('\\n'); }
+
+    window.createObj = function() {
+      obj = { id: 1, name: 'Тяжёлый объект', data: new Array(100).fill(42) };
+      isNullified = false; weakRef = null; logs = [];
+      logs.push('obj = { id: 1, name: "Тяжёлый объект", data: [...100 эл.] }');
+      logs.push('Сильная ссылка установлена — GC не удалит объект');
+      setStatus(true); render();
+    }
+    window.createRef = function() {
+      if (!obj) { logs.push('Сначала создайте объект!'); render(); return; }
+      weakRef = new WeakRef(obj);
+      logs.push('weakRef = new WeakRef(obj)');
+      logs.push('WeakRef НЕ мешает сборщику мусора удалить obj');
+      render();
+    }
+    window.deref = function() {
+      if (!weakRef) { logs.push('Сначала создайте WeakRef!'); render(); return; }
+      var val = weakRef.deref();
+      if (isNullified) {
+        logs.push('weakRef.deref() = ' + val + ' (симуляция: ссылка обнулена)');
+        logs.push('  -> Объект может быть уже удалён GC');
+      } else {
+        logs.push('weakRef.deref() = { id: ' + val.id + ', name: "' + val.name + '", ... }');
+        logs.push('  -> Объект ещё жив!');
+      }
+      render();
+    }
+    window.nullify = function() {
+      if (!obj) { logs.push('Объект не создан'); render(); return; }
+      obj = null; isNullified = true;
+      logs.push('obj = null  // убираем сильную ссылку');
+      logs.push('Теперь только WeakRef ссылается на объект');
+      logs.push('Сборщик мусора МОЖЕТ удалить объект в любой момент');
+      logs.push('(в реальности GC непредсказуем — проверь через deref())');
+      setStatus(false); render();
+    }
+    window.showRegistry = function() {
+      logs = ['// FinalizationRegistry — колбэк при удалении объекта:'];
+      logs.push('');
+      logs.push('const registry = new FinalizationRegistry((label) => {');
+      logs.push('  console.log("Удалён:", label)');
+      logs.push('})');
+      logs.push('');
+      logs.push('let target = { data: "важные данные" }');
+      logs.push('registry.register(target, "my-object")');
+      logs.push('');
+      logs.push('target = null  // когда GC удалит:');
+      logs.push('// -> "Удалён: my-object"');
+      logs.push('');
+      logs.push('⚠ GC непредсказуем — не полагайтесь на точное время!');
+      render();
+    }
+    createObj();
+  </script>
+</body>
+</html>`,
+  }}
+/>

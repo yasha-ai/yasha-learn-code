@@ -1,0 +1,349 @@
+---
+title: "14. Оптимизация и lazy-loading"
+sidebar:
+  order: 14
+---
+import { Playground } from '@components/Playground'
+
+
+Одна из главных суперсил Qwik — автоматическая оптимизация бандла и ленивая загрузка. Понимание того, как работает оптимизатор Qwik, помогает писать максимально быстрые приложения.
+
+## Символ $ — основа оптимизации
+
+Каждый раз, когда вы добавляете `$` к функции в Qwik, оптимизатор **автоматически**:
+1. Выносит функцию в отдельный файл-чанк
+2. Создаёт QRL (URL-ссылку) на этот чанк
+3. Загружает чанк только при необходимости
+
+```typescript
+// Что вы пишете:
+export const Counter = component$(() => {
+  const count = useSignal(0);
+  
+  return (
+    <button onClick$={() => count.value++}>
+      {count.value}
+    </button>
+  );
+});
+
+// Что создаёт оптимизатор (концептуально):
+
+// chunk-counter.js — компонент
+export const Counter = component$(qrl('./chunk-counter_onClick.js', 'Counter_onClick'));
+
+// chunk-counter_onClick.js — обработчик (отдельный файл!)
+export const Counter_onClick = () => { count.value++; };
+```
+
+## Как работает $
+
+```
+Символ $    →    Qwik Optimizer    →    Отдельный чанк
+──────────────────────────────────────────────────────
+component$()  →  chunk-comp.js      →  Загружается при рендере
+onClick$()    →  chunk-handler.js   →  Загружается при клике
+useTask$()    →  chunk-effect.js    →  Загружается при изменении
+onInput$()    →  chunk-input.js     →  Загружается при вводе
+```
+
+## Правила использования $
+
+### 1. Функции должны быть захватываемыми
+
+```typescript
+// ✅ Правильно — функция захватывает только сериализуемые данные
+const name = useSignal('Qwik');
+const onClick = $(() => {
+  console.log(name.value);  // Signal — сериализуемый
+});
+
+// ❌ Неправильно — Promise не сериализуем
+const promise = fetch('/api');
+const onClick = $(() => {
+  promise.then(r => r.json());  // Ошибка оптимизатора!
+});
+
+// ✅ Правильно — создаём Promise внутри $
+const onClick = $(() => {
+  fetch('/api').then(r => r.json());  // OK!
+});
+```
+
+### 2. Импорты в $ должны быть статическими
+
+```typescript
+// ✅ Правильно
+import { someUtil } from './utils';
+
+const handler = $(() => {
+  someUtil();  // Статический импорт — OK
+});
+
+// ❌ Избегайте динамических импортов внутри $
+const handler = $(() => {
+  import('./heavy-lib').then(lib => lib.doSomething());  // Проблема
+});
+```
+
+## Prefetching стратегии
+
+Qwik поддерживает prefetching — предварительную загрузку чанков:
+
+```typescript
+// vite.config.ts или qwik-city конфигурация
+export default defineConfig({
+  plugins: [
+    qwikCity(),
+    qwikVite({
+      client: {
+        // Стратегия prefetch
+        prefetchStrategy: {
+          implementation: {
+            linkInsert: 'html-append',  // Вставить <link rel="prefetch">
+            linkRel: 'prefetch',        // Тип prefetch
+          }
+        }
+      }
+    })
+  ]
+});
+```
+
+## Bundle Splitting анализ
+
+```bash
+# Анализ бандла после сборки
+npm run build
+
+# Размеры бандлов в dist/build/
+dist/
+  build/
+    q-manifest.json     # Манифест всех чанков
+    q-abc123.js        # Компонент (0.5 КБ)
+    q-def456.js        # Обработчик onClick (0.2 КБ)
+    q-ghi789.js        # Эффект (0.3 КБ)
+```
+
+## Service Worker и Prefetch
+
+Qwik использует Service Worker для кеширования и prefetch:
+
+```typescript
+// src/routes/service-worker.ts
+import { setupServiceWorker } from '@builder.io/qwik-city/service-worker';
+
+setupServiceWorker();
+
+// Qwik автоматически предзагружает вероятные следующие взаимодействия
+// на основе паттернов использования
+```
+
+## Оптимизация с noSerialize
+
+Для браузерных объектов, которые не нужно сериализовать:
+
+```typescript
+import { noSerialize, useStore } from '@builder.io/qwik';
+
+const store = useStore({
+  // Регулярные данные сериализуются
+  items: [] as string[],
+  count: 0,
+  
+  // noSerialize — только клиентский объект
+  audioContext: noSerialize<AudioContext | undefined>(undefined),
+});
+```
+
+## Playground: Визуализатор бандлов
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useMemo } from 'react';
+
+const BG = '#0f172a';
+const QWIK = '#ac7ef4';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#22c55e';
+const RED = '#ef4444';
+const ORANGE = '#f97316';
+const BLUE = '#38bdf8';
+
+type ChunkType = 'component' | 'handler' | 'effect' | 'loader' | 'style';
+
+type Chunk = {
+  id: string;
+  name: string;
+  type: ChunkType;
+  size: number; // КБ
+  loadedAt: 'startup' | 'render' | 'interaction' | 'effect';
+  loaded: boolean;
+};
+
+const chunkTypeColors: Record<ChunkType, string> = {
+  component: QWIK,
+  handler: GREEN,
+  effect: ORANGE,
+  loader: BLUE,
+  style: '#f43f5e',
+};
+
+const chunkTypeLabels: Record<ChunkType, string> = {
+  component: 'Компонент',
+  handler: 'Обработчик',
+  effect: 'Эффект',
+  loader: 'Загрузчик',
+  style: 'Стиль',
+};
+
+const loadTimeLabels: Record<string, string> = {
+  startup: 'При запуске',
+  render: 'При рендере',
+  interaction: 'При взаимодействии',
+  effect: 'При эффекте',
+};
+
+const initialChunks: Chunk[] = [
+  { id: 'q-runtime', name: 'Qwik Runtime', type: 'component', size: 1.2, loadedAt: 'startup', loaded: false },
+  { id: 'q-header', name: 'Header компонент', type: 'component', size: 2.1, loadedAt: 'render', loaded: false },
+  { id: 'q-nav', name: 'Navigation', type: 'component', size: 1.8, loadedAt: 'render', loaded: false },
+  { id: 'q-hero', name: 'Hero секция', type: 'component', size: 3.2, loadedAt: 'render', loaded: false },
+  { id: 'q-btn-click', name: 'Button.onClick$', type: 'handler', size: 0.3, loadedAt: 'interaction', loaded: false },
+  { id: 'q-form-submit', name: 'Form.onSubmit$', type: 'handler', size: 0.8, loadedAt: 'interaction', loaded: false },
+  { id: 'q-nav-hover', name: 'Nav.onMouseOver$', type: 'handler', size: 0.2, loadedAt: 'interaction', loaded: false },
+  { id: 'q-scroll', name: 'Scroll.onScroll$', type: 'handler', size: 0.4, loadedAt: 'interaction', loaded: false },
+  { id: 'q-useTask', name: 'useTask$ эффект', type: 'effect', size: 0.6, loadedAt: 'effect', loaded: false },
+  { id: 'q-useVisible', name: 'useVisibleTask$', type: 'effect', size: 0.9, loadedAt: 'effect', loaded: false },
+  { id: 'q-loader', name: 'routeLoader$', type: 'loader', size: 1.5, loadedAt: 'render', loaded: false },
+  { id: 'q-action', name: 'routeAction$', type: 'loader', size: 1.2, loadedAt: 'interaction', loaded: false },
+];
+
+const reactBundle = { name: 'React Bundle (всё сразу)', size: 287, color: RED };
+
+export default function App() {
+  const [chunks, setChunks] = useState(initialChunks);
+  const [simPhase, setSimPhase] = useState<'idle' | 'startup' | 'render' | 'interaction' | 'effect' | 'done'>('idle');
+  const [filter, setFilter] = useState<ChunkType | 'all'>('all');
+
+  const loadedChunks = chunks.filter(c => c.loaded);
+  const totalLoaded = loadedChunks.reduce((acc, c) => acc + c.size, 0);
+
+  const setLoaded = (ids: string[]) => {
+    setChunks(prev => prev.map(c => ids.includes(c.id) ? { ...c, loaded: true } : c));
+  };
+
+  const simulate = async () => {
+    setChunks(initialChunks.map(c => ({ ...c, loaded: false })));
+    setSimPhase('startup');
+    await new Promise(r => setTimeout(r, 500));
+    setLoaded(['q-runtime']);
+
+    setSimPhase('render');
+    await new Promise(r => setTimeout(r, 700));
+    setLoaded(['q-header', 'q-nav', 'q-hero', 'q-loader']);
+
+    setSimPhase('interaction');
+    await new Promise(r => setTimeout(r, 900));
+    setLoaded(['q-btn-click', 'q-form-submit', 'q-nav-hover', 'q-scroll', 'q-action']);
+
+    setSimPhase('effect');
+    await new Promise(r => setTimeout(r, 600));
+    setLoaded(['q-useTask', 'q-useVisible']);
+
+    setSimPhase('done');
+  };
+
+  const filteredChunks = filter === 'all' ? chunks : chunks.filter(c => c.type === filter);
+
+  const phaseColors: Record<string, string> = {
+    idle: MUTED, startup: BLUE, render: QWIK, interaction: GREEN, effect: ORANGE, done: GREEN,
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: 20, fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
+        <h1 style={{ color: QWIK, margin: '0 0 4px' }}>📦 Bundle Splitting Qwik</h1>
+        <p style={{ color: MUTED, margin: '0 0 20px', fontSize: 13 }}>Визуализация ленивой загрузки чанков</p>
+
+        {/* Сравнение с React */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 20, border: '1px solid #334155' }}>
+          <h3 style={{ color: TEXT, margin: '0 0 16px', fontSize: 15 }}>Сравнение начальной загрузки</h3>
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span style={{ color: RED, fontSize: 13 }}>⚛️ React (весь бандл)</span>
+              <span style={{ color: RED, fontFamily: 'monospace', fontWeight: 700 }}>{reactBundle.size} КБ</span>
+            </div>
+            <div style={{ background: '#1e293b', borderRadius: 4, height: 12 }}>
+              <div style={{ width: '100%', background: RED, height: '100%', borderRadius: 4 }} />
+            </div>
+          </div>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span style={{ color: QWIK, fontSize: 13 }}>⚡ Qwik (начальный)</span>
+              <span style={{ color: QWIK, fontFamily: 'monospace', fontWeight: 700 }}>~1.2 КБ</span>
+            </div>
+            <div style={{ background: '#1e293b', borderRadius: 4, height: 12 }}>
+              <div style={{ width: \`\${(1.2 / reactBundle.size) * 100}%\`, background: QWIK, height: '100%', borderRadius: 4, minWidth: 4 }} />
+            </div>
+          </div>
+          <div style={{ color: MUTED, fontSize: 12, marginTop: 10, textAlign: 'center' }}>
+            Qwik загружает в <span style={{ color: GREEN, fontWeight: 700 }}>{Math.round(reactBundle.size / 1.2)}x</span> меньше JavaScript при старте
+          </div>
+        </div>
+
+        {/* Controls */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button onClick={simulate} disabled={['startup', 'render', 'interaction', 'effect'].includes(simPhase)} style={{
+            background: QWIK, color: '#0f172a', border: 'none', borderRadius: 8,
+            padding: '8px 20px', cursor: 'pointer', fontWeight: 700, fontSize: 14,
+          }}>
+            ▶ Симулировать загрузку
+          </button>
+          <div style={{ color: phaseColors[simPhase], fontSize: 13, fontWeight: 600 }}>
+            {simPhase !== 'idle' && \`Фаза: \${simPhase}\`}
+          </div>
+          <div style={{ marginLeft: 'auto', color: QWIK, fontFamily: 'monospace', fontSize: 14, fontWeight: 700 }}>
+            {totalLoaded.toFixed(1)} / {chunks.reduce((a, c) => a + c.size, 0).toFixed(1)} КБ
+          </div>
+        </div>
+
+        {/* Filter */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+          <button onClick={() => setFilter('all')} style={{ background: filter === 'all' ? QWIK : CARD, color: filter === 'all' ? '#0f172a' : TEXT, border: \`1px solid \${filter === 'all' ? QWIK : '#334155'}\`, borderRadius: 6, padding: '5px 12px', cursor: 'pointer', fontSize: 12 }}>Все</button>
+          {(Object.keys(chunkTypeColors) as ChunkType[]).map(t => (
+            <button key={t} onClick={() => setFilter(t)} style={{ background: filter === t ? chunkTypeColors[t] : CARD, color: filter === t ? '#0f172a' : TEXT, border: \`1px solid \${filter === t ? chunkTypeColors[t] : '#334155'}\`, borderRadius: 6, padding: '5px 12px', cursor: 'pointer', fontSize: 12 }}>
+              {chunkTypeLabels[t]}
+            </button>
+          ))}
+        </div>
+
+        {/* Chunk list */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {filteredChunks.map(chunk => (
+            <div key={chunk.id} style={{
+              background: CARD, borderRadius: 8, padding: '10px 14px',
+              border: \`1px solid \${chunk.loaded ? chunkTypeColors[chunk.type] + '44' : '#334155'}\`,
+              display: 'flex', alignItems: 'center', gap: 12,
+              opacity: chunk.loaded ? 1 : 0.5, transition: 'all 0.4s',
+            }}>
+              <div style={{ width: 8, height: 8, borderRadius: '50%', background: chunk.loaded ? chunkTypeColors[chunk.type] : '#334155', flexShrink: 0, transition: 'background 0.3s' }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ color: chunk.loaded ? TEXT : MUTED, fontSize: 13, fontWeight: 600 }}>{chunk.name}</div>
+                <div style={{ color: MUTED, fontSize: 11 }}>{loadTimeLabels[chunk.loadedAt]}</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ background: \`\${chunkTypeColors[chunk.type]}22\`, color: chunkTypeColors[chunk.type], fontSize: 10, padding: '2px 6px', borderRadius: 4, fontWeight: 700 }}>
+                  {chunkTypeLabels[chunk.type]}
+                </span>
+                <span style={{ color: MUTED, fontFamily: 'monospace', fontSize: 12 }}>{chunk.size} КБ</span>
+                <span style={{ fontSize: 14 }}>{chunk.loaded ? '✅' : '⏳'}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

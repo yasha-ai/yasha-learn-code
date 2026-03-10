@@ -1,0 +1,320 @@
+---
+title: "9. Polling vs SSE vs WebSocket"
+sidebar:
+  order: 9
+---
+
+import { Playground } from "@components/Playground"
+
+Детальное сравнение всех технологий real-time с реальными метриками.
+
+## Протокол и соединение
+
+```
+Polling:
+  HTTP запрос каждые N секунд
+  Клиент → Сервер → Клиент → Сервер → ...
+  Каждый запрос = новое TCP-соединение (или HTTP Keep-Alive)
+
+Long Polling:
+  HTTP запрос висит открытым пока нет данных
+  Клиент → Сервер... (ждём) ...→ Клиент → снова запрос
+  Одно TCP-соединение на запрос
+
+SSE:
+  Один HTTP GET запрос, который никогда не закрывается
+  Клиент → Сервер ← ← ← ← ← (поток данных)
+  Одно TCP-соединение на всё время
+
+WebSocket:
+  Начинается с HTTP Upgrade, становится WS-соединением
+  Клиент ↔ Сервер (полнодуплексный)
+  Одно TCP-соединение на всё время
+```
+
+## Задержка
+
+| Технология | Задержка | Комментарий |
+|------------|----------|-------------|
+| Polling (5 сек) | 0–5000 мс | Зависит от интервала |
+| Polling (1 сек) | 0–1000 мс | Нагрузка на сервер растёт |
+| Long Polling | 0–100 мс | Почти реальное время |
+| SSE | ~10–50 мс | Очень низкая |
+| WebSocket | ~5–30 мс | Минимальная задержка |
+
+## Нагрузка на сервер (1000 клиентов)
+
+```
+Polling (каждые 5 сек):
+  Запросов в минуту: 1000 × 12 = 12,000
+  Заголовки HTTP: ~500 байт × 12,000 = 6 MB/мин
+  CPU: высокий (TLS handshake на каждый запрос)
+
+Long Polling:
+  Открытых соединений: 1000
+  Запросов/мин: ~1000 (одно переподключение)
+  Потребление памяти: ~2KB/соединение = 2MB
+
+SSE:
+  Открытых соединений: 1000
+  Запросов: 1 на всё время
+  Память: ~1-2KB/соединение = 1-2MB
+  Node.js: отличная поддержка
+
+WebSocket:
+  Открытых соединений: 1000
+  Запросов: 1 на всё время
+  Память: ~2-4KB/соединение = 2-4MB
+  Фреймы без HTTP overhead
+```
+
+## Ограничения браузера
+
+```javascript
+// Лимит одновременных HTTP/1.1 соединений (per domain)
+// Браузер: обычно 6 соединений на домен
+
+// SSE лимит (HTTP/1.1)
+// 6 вкладок × SSE = уже лимит!
+// HTTP/2 снимает ограничение (мультиплексирование)
+
+// WebSocket - не ограничен браузерным лимитом HTTP соединений
+
+// Решение для SSE в HTTP/1.1:
+const eventSource = new EventSource('https://events.example.com/stream');
+// Используй отдельный домен/поддомен для SSE!
+```
+
+## Поддержка прокси и файрволов
+
+```
+Polling:     ✅ Работает везде (обычный HTTP)
+Long Poll:   ✅ Работает везде
+SSE:         ✅ HTTP, но иногда прокси буферизует
+WebSocket:   ⚠️ Некоторые корпоративные прокси блокируют
+```
+
+```javascript
+// Nginx для SSE - отключить буферизацию
+location /api/events {
+    proxy_pass http://backend;
+    proxy_buffering off;           # ← критично для SSE!
+    proxy_cache off;
+    proxy_set_header Connection '';
+    proxy_http_version 1.1;
+    add_header X-Accel-Buffering no;
+}
+
+// Nginx для WebSocket
+location /socket.io {
+    proxy_pass http://backend;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 86400;      # ← не таймаутить долгие соединения
+}
+```
+
+## Автопереподключение
+
+```javascript
+// Polling — не нужно, каждый запрос независим
+
+// Long Polling — самостоятельно
+async function longPoll() {
+  try {
+    const res = await fetch('/api/poll');
+    processData(await res.json());
+  } catch (e) {
+    await sleep(5000); // Подождать перед повтором
+  }
+  longPoll();
+}
+
+// SSE — АВТОМАТИЧЕСКИ браузером!
+const es = new EventSource('/api/events');
+// Браузер сам переподключится через retry мс (по умолчанию 3 сек)
+// Сервер может изменить: res.write('retry: 5000\n\n');
+
+// WebSocket — ВРУЧНУЮ (или Socket.io делает сам)
+function connect() {
+  const ws = new WebSocket('wss://example.com');
+  ws.onclose = () => setTimeout(connect, 3000);
+}
+```
+
+## Когда что выбирать
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Выбор технологии                      │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  Нужна двусторонняя связь?                              │
+│  ├── ДА  → WebSocket / Socket.io                        │
+│  └── НЕТ                                                │
+│       ├── Простые уведомления/обновления статуса?       │
+│       │   └── SSE (проще, надёжнее, HTTP/2 friendly)    │
+│       ├── Нужно работать через старые прокси?           │
+│       │   └── Long Polling                               │
+│       └── Совсем простой случай, задержка не критична?  │
+│           └── Polling                                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### SSE — хорош для:
+- Уведомления (новые сообщения, лайки, комментарии)
+- Прогресс операций (загрузка файла, обработка)
+- Новостные ленты, обновления контента
+- Мониторинг (метрики, логи)
+- LLM streaming (ChatGPT использует именно SSE!)
+
+### WebSocket — хорош для:
+- Чаты и мессенджеры
+- Онлайн-игры
+- Совместное редактирование (Google Docs)
+- Финансовые терминалы (биржа, трейдинг)
+- IoT (устройства, которые часто шлют данные)
+
+## Пример: ChatGPT streaming через SSE
+
+```javascript
+// Сервер — стриминг ответа LLM
+app.post('/api/chat', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.flushHeaders();
+
+  const stream = await openai.chat.completions.create({
+    model: 'gpt-4',
+    messages: req.body.messages,
+    stream: true,
+  });
+
+  for await (const chunk of stream) {
+    const delta = chunk.choices[0]?.delta?.content || '';
+    if (delta) {
+      res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+    }
+  }
+
+  res.write('data: [DONE]\n\n');
+  res.end();
+});
+
+// Клиент — читаем токены по мере генерации
+async function* streamChat(messages) {
+  const response = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages }),
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+        yield JSON.parse(line.slice(6));
+      }
+    }
+  }
+}
+
+// Использование в React
+const [response, setResponse] = useState('');
+
+const handleSend = async (message) => {
+  setResponse('');
+  for await (const { delta } of streamChat([{ role: 'user', content: message }])) {
+    setResponse((prev) => prev + delta);
+  }
+};
+```
+
+## Задания
+
+1. Замерь разницу в нагрузке: 100 клиентов на polling vs SSE (node --inspect)
+2. Реализуй стриминг ответа от OpenAI/Gemini через SSE в Next.js
+3. Почему Socket.io по умолчанию начинает с HTTP polling, а потом апгрейдится до WS?
+4. Придумай архитектуру для приложения, где нужны и SSE, и WebSocket одновременно
+
+## Итог
+
+Нет "лучшей" технологии — есть подходящая для задачи. SSE проще и надёжнее для однонаправленных потоков. WebSocket мощнее для двусторонней связи. Polling — запасной вариант. В следующем уроке — масштабирование реального приложения.
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState, useEffect, useRef } from "react";
+
+export default function App() {
+  const [mode, setMode] = useState(null);
+  const [requests, setRequests] = useState(0);
+  const [messages, setMessages] = useState([]);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!mode) return;
+    let count = 0;
+    const add = (text, color) => setMessages(p => [...p.slice(-5), { text, color, time: Date.now() }]);
+
+    if (mode === "polling") {
+      ref.current = setInterval(() => {
+        count++;
+        setRequests(count);
+        add(\`Запрос #\${count} → \${Math.random() > 0.7 ? "есть данные ✓" : "пусто"}\`, "#f59e0b");
+      }, 1500);
+    } else if (mode === "sse") {
+      add("EventSource открыт (однонаправленный)", "#10b981");
+      setRequests(1);
+      ref.current = setInterval(() => {
+        add("← Сервер пушит: event " + (++count), "#10b981");
+      }, 2000);
+    } else if (mode === "ws") {
+      add("WebSocket открыт (двунаправленный)", "#3b82f6");
+      setRequests(1);
+      ref.current = setInterval(() => {
+        const dir = Math.random() > 0.5;
+        add(dir ? "← Сервер: данные " + (++count) : "→ Клиент: сообщение " + (++count), "#3b82f6");
+      }, 1200);
+    }
+    return () => clearInterval(ref.current);
+  }, [mode]);
+
+  const reset = (m) => { clearInterval(ref.current); setMessages([]); setRequests(0); setMode(m); };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Polling vs SSE vs WebSocket</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {[["polling", "Polling", "#f59e0b"], ["sse", "SSE", "#10b981"], ["ws", "WebSocket", "#3b82f6"]].map(([m, label, color]) => (
+          <button key={m} onClick={() => reset(m)}
+            style={{ padding: "5px 12px", background: mode === m ? color : "#1e293b", color: "#fff", border: "1px solid " + color, borderRadius: 4, cursor: "pointer", fontSize: 12 }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 8 }}>HTTP запросов: {requests}</div>
+      <div style={{ background: "#0f172a", padding: 12, borderRadius: 6, minHeight: 100 }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{ fontSize: 12, color: m.color }}>{m.text}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

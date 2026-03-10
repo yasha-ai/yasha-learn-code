@@ -1,0 +1,325 @@
+---
+title: "4. Loaders: загрузка данных"
+sidebar:
+  order: 4
+---
+import { Playground } from '@components/Playground'
+
+
+`loader` — это серверная функция в Remix, которая выполняется **перед рендерингом** страницы. Она загружает данные из БД, API или любого другого источника, и передаёт их компоненту через `useLoaderData`.
+
+## Базовый loader
+
+```typescript
+import { json } from "@remix-run/node";
+import { useLoaderData } from "@remix-run/react";
+
+// Серверная функция — выполняется ТОЛЬКО на сервере
+export async function loader() {
+  const users = await db.user.findMany();
+  return json(users);
+}
+
+// Клиентский компонент — получает данные из loader
+export default function Users() {
+  const users = useLoaderData<typeof loader>();
+  return (
+    <ul>
+      {users.map(user => <li key={user.id}>{user.name}</li>)}
+    </ul>
+  );
+}
+```
+
+## Параметры loader
+
+```typescript
+export async function loader({ request, params, context }) {
+  // params — динамические сегменты URL (:id, :slug)
+  const { id } = params;
+
+  // request — полный Request объект (URL, headers, cookies)
+  const url = new URL(request.url);
+  const search = url.searchParams.get("q");
+
+  // context — данные из адаптера (env переменные и т.д.)
+  const user = await db.user.findUnique({ where: { id } });
+
+  if (!user) {
+    throw new Response("Not Found", { status: 404 });
+  }
+
+  return json({ user, search });
+}
+```
+
+## TypeScript типизация
+
+```typescript
+import type { LoaderFunctionArgs } from "@remix-run/node";
+
+export async function loader({ params }: LoaderFunctionArgs) {
+  const post = await getPost(params.slug!);
+  return json({ post });
+}
+
+// Автовывод типов — TypeScript знает структуру данных
+export default function Post() {
+  const { post } = useLoaderData<typeof loader>();
+  // post имеет правильный тип!
+  return <h1>{post.title}</h1>;
+}
+```
+
+## Обработка ошибок
+
+```typescript
+export async function loader({ params }) {
+  const user = await db.user.findUnique({
+    where: { id: params.id }
+  });
+
+  // 404 — бросаем Response
+  if (!user) {
+    throw new Response("Пользователь не найден", { status: 404 });
+  }
+
+  return json(user);
+}
+```
+
+## Headers и кэширование
+
+```typescript
+export async function loader() {
+  const data = await getStaticData();
+  return json(data, {
+    headers: {
+      "Cache-Control": "max-age=3600, stale-while-revalidate=86400",
+    },
+  });
+}
+```
+
+## defer — стриминг данных
+
+```typescript
+import { defer } from "@remix-run/node";
+import { Await } from "@remix-run/react";
+import { Suspense } from "react";
+
+export async function loader() {
+  // Быстрые данные — ждём
+  const user = await getUser();
+  // Медленные данные — стримим
+  const posts = getSlowPosts(); // Promise, без await!
+
+  return defer({ user, posts });
+}
+
+export default function Page() {
+  const { user, posts } = useLoaderData<typeof loader>();
+  return (
+    <div>
+      <h1>{user.name}</h1>
+      <Suspense fallback={<p>Загрузка постов...</p>}>
+        <Await resolve={posts}>
+          {(data) => <PostList posts={data} />}
+        </Await>
+      </Suspense>
+    </div>
+  );
+}
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const WARN = "#f59e0b";
+const ERROR = "#ef4444";
+
+type Status = "idle" | "loading" | "success" | "error" | "deferred";
+
+const mockUsers = [
+  { id: 1, name: "Алексей Иванов", email: "alex@example.com", role: "admin" },
+  { id: 2, name: "Мария Петрова", email: "maria@example.com", role: "user" },
+  { id: 3, name: "Дмитрий Сидоров", email: "dima@example.com", role: "user" },
+];
+
+export default function App() {
+  const [status, setStatus] = useState<Status>("idle");
+  const [users, setUsers] = useState<typeof mockUsers>([]);
+  const [deferredLoaded, setDeferredLoaded] = useState(false);
+  const [scenario, setScenario] = useState<"success" | "error" | "defer">("success");
+
+  const runLoader = () => {
+    setStatus("loading");
+    setUsers([]);
+    setDeferredLoaded(false);
+
+    if (scenario === "error") {
+      setTimeout(() => setStatus("error"), 1500);
+      return;
+    }
+
+    if (scenario === "defer") {
+      setTimeout(() => {
+        setStatus("deferred");
+        setTimeout(() => setDeferredLoaded(true), 2000);
+      }, 800);
+      return;
+    }
+
+    setTimeout(() => {
+      setUsers(mockUsers);
+      setStatus("success");
+    }, 1200);
+  };
+
+  const statusInfo: Record<Status, { label: string; color: string; icon: string }> = {
+    idle: { label: "Ожидание", color: MUTED, icon: "⏸️" },
+    loading: { label: "loader() выполняется...", color: WARN, icon: "⏳" },
+    success: { label: "Данные загружены", color: SUCCESS, icon: "✅" },
+    error: { label: "throw new Response(404)", color: ERROR, icon: "❌" },
+    deferred: { label: "Быстрые данные пришли, ждём медленные...", color: ACCENT, icon: "🌊" },
+  };
+
+  const info = statusInfo[status];
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>📦 Remix Loaders</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>Симуляция загрузки данных через loader()</p>
+
+      <div style={{ display: "flex", gap: "8px", marginBottom: "20px", flexWrap: "wrap" }}>
+        {(["success", "error", "defer"] as const).map((s) => (
+          <button
+            key={s}
+            onClick={() => setScenario(s)}
+            style={{
+              padding: "8px 16px",
+              borderRadius: "8px",
+              border: \`2px solid \${scenario === s ? ACCENT : "#334155"}\`,
+              background: scenario === s ? ACCENT + "22" : CARD,
+              color: scenario === s ? ACCENT : MUTED,
+              cursor: "pointer",
+              fontSize: "13px",
+            }}
+          >
+            {s === "success" ? "✅ Успех" : s === "error" ? "❌ Ошибка (404)" : "🌊 defer()"}
+          </button>
+        ))}
+        <button
+          onClick={runLoader}
+          style={{
+            padding: "8px 20px",
+            borderRadius: "8px",
+            border: "none",
+            background: ACCENT,
+            color: "#fff",
+            cursor: "pointer",
+            fontSize: "13px",
+            fontWeight: 700,
+            marginLeft: "auto",
+          }}
+        >
+          ▶ Запустить loader()
+        </button>
+      </div>
+
+      <div style={{
+        background: CARD,
+        borderRadius: "12px",
+        padding: "16px 20px",
+        marginBottom: "16px",
+        border: \`1px solid \${info.color}44\`,
+        display: "flex",
+        alignItems: "center",
+        gap: "12px",
+      }}>
+        <span style={{ fontSize: "20px" }}>{info.icon}</span>
+        <span style={{ color: info.color, fontWeight: 600 }}>{info.label}</span>
+      </div>
+
+      {status === "loading" && (
+        <div style={{ background: CARD, borderRadius: "12px", padding: "20px" }}>
+          {[1, 2, 3].map((i) => (
+            <div key={i} style={{ height: "40px", background: "#334155", borderRadius: "6px", marginBottom: "8px", opacity: 0.6 }} />
+          ))}
+        </div>
+      )}
+
+      {status === "success" && users.length > 0 && (
+        <div style={{ background: CARD, borderRadius: "12px", overflow: "hidden" }}>
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid #334155", color: SUCCESS, fontSize: "13px", fontFamily: "monospace" }}>
+            {"// useLoaderData<typeof loader>()"}
+          </div>
+          {users.map((u, i) => (
+            <div key={u.id} style={{
+              padding: "14px 16px",
+              borderBottom: i < users.length - 1 ? "1px solid #334155" : "none",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}>
+              <div>
+                <div style={{ fontWeight: 600, color: TEXT }}>{u.name}</div>
+                <div style={{ color: MUTED, fontSize: "12px" }}>{u.email}</div>
+              </div>
+              <span style={{
+                padding: "2px 10px",
+                borderRadius: "12px",
+                fontSize: "11px",
+                background: u.role === "admin" ? ACCENT + "33" : "#334155",
+                color: u.role === "admin" ? ACCENT : MUTED,
+              }}>
+                {u.role}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {status === "error" && (
+        <div style={{ background: ERROR + "11", border: \`1px solid \${ERROR}44\`, borderRadius: "12px", padding: "20px" }}>
+          <h3 style={{ color: ERROR, margin: "0 0 8px" }}>ErrorBoundary перехватил ошибку</h3>
+          <div style={{ fontFamily: "monospace", fontSize: "12px", color: "#fca5a5" }}>
+            {"throw new Response(\"Not Found\", { status: 404 })"}
+          </div>
+        </div>
+      )}
+
+      {(status === "deferred" || deferredLoaded) && (
+        <div style={{ background: CARD, borderRadius: "12px", padding: "20px" }}>
+          <div style={{ color: SUCCESS, fontSize: "13px", marginBottom: "12px" }}>
+            ✅ Быстрые данные: user = &#123; name: "Алексей" &#125;
+          </div>
+          {!deferredLoaded ? (
+            <div style={{
+              background: ACCENT + "11",
+              border: \`1px dashed \${ACCENT}\`,
+              borderRadius: "8px",
+              padding: "16px",
+              color: ACCENT,
+              fontSize: "13px",
+              textAlign: "center",
+            }}>
+              ⏳ {"<Suspense>"} fallback: Загрузка постов...
+            </div>
+          ) : (
+            <div style={{ color: SUCCESS, fontSize: "13px" }}>
+              ✅ Медленные данные загружены: posts = [...]
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

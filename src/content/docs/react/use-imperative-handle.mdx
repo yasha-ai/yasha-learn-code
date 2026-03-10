@@ -1,0 +1,432 @@
+---
+title: "15. useImperativeHandle"
+sidebar:
+  order: 15
+---
+import { Playground } from '@components/Playground'
+
+
+## TypeScript: `useImperativeHandle` — Власть над Рефами
+
+Привет, кодер! Яша на связи. Сегодня мы погрузимся в одну из самых мощных, но в то же время требующих осторожности фишек React с TypeScript – хук `useImperativeHandle`. Если ты уже чувствуешь себя уверенно с `useState`, `useEffect` и `useRef`, значит, готов к этому уровню.
+
+React славится своей декларативной природой: мы описываем, *что* хотим видеть, а не *как* это сделать. Однако, в реальном мире иногда приходится иметь дело с императивными сценариями. Представь, что у тебя есть сложный дочерний компонент, и родительский компонент должен "достучаться" до него, чтобы выполнить какое-то конкретное действие. Например, сфокусировать input, запустить проигрыватель, или сбросить состояние формы.
+
+Обычно, мы не хотим, чтобы родитель "ковырялся" во внутренностях дочернего компонента. Это нарушает инкапсуляцию и делает код хрупким. Но что, если дочерний компонент сам *решит*, какие "рычаги" он готов предоставить родителю, и как они будут работать? Вот тут на сцену и выходит `useImperativeHandle`.
+
+### 🧠 Суть `useImperativeHandle`
+
+`useImperativeHandle` — это хук, который позволяет кастомизировать значение, предоставляемое родительскому компоненту через `ref`. Он работает в связке с `React.forwardRef`, так как обычные рефы не могут быть напрямую прикреплены к функциональным компонентам.
+
+Представь дочерний компонент как двигатель автомобиля. Родительский компонент — это панель управления. `useImperativeHandle` позволяет производителю двигателя (разработчику дочернего компонента) решить, какие кнопки и индикаторы (методы и свойства) будут выведены на панель управления, чтобы водитель (родительский компонент) мог безопасно взаимодействовать с двигателем, не залезая под капот.
+
+Сигнатура: `useImperativeHandle(ref, createHandle, [deps])`
+
+*   `ref`: Объект `ref`, переданный родительским компонентом через `forwardRef`.
+*   `createHandle`: Функция, которая возвращает объект с методами и свойствами, которые вы хотите предоставить родительскому компоненту.
+*   `deps`: Массив зависимостей, как в `useEffect`. Если зависимости меняются, `createHandle` будет вызвана повторно.
+
+Давай посмотрим, как это выглядит на практике.
+
+#### Пример 1: Кастомный Input с Фокусом и Очисткой
+
+Допустим, у нас есть свой компонент `Input`, который содержит внутреннюю логику (например, стили, иконки) и мы хотим, чтобы родитель мог вызвать методы `focus()` и `clear()` на нем.
+
+```typescript
+import React, { useRef, useImperativeHandle, useState, useCallback } from 'react';
+
+// 1. Определяем интерфейс для объекта, который будет передан через ref.
+// Это наш "контракт" между родителем и ребенком.
+interface CustomInputHandle {
+  focus: () => void;
+  clear: () => void;
+  // Можно добавить и другие свойства, если нужно
+  getValue: () => string;
+}
+
+// 2. Оборачиваем компонент в React.forwardRef, чтобы он мог принимать ref.
+// Типизируем forwardRef:
+// - Первым параметром идут пропсы компонента.
+// - Вторым параметром идет тип объекта, который будет передан через ref (наш CustomInputHandle).
+const CustomInput = React.forwardRef<CustomInputHandle, { placeholder?: string }>(
+  ({ placeholder }, ref) => {
+    const inputRef = useRef<HTMLInputElement>(null);
+    const [inputValue, setInputValue] = useState('');
+
+    // 3. Используем useImperativeHandle для кастомизации объекта ref.current
+    useImperativeHandle(ref, () => ({
+      focus: () => {
+        // Фокусируем на внутреннем HTML input элементе
+        inputRef.current?.focus();
+      },
+      clear: () => {
+        // Очищаем значение и фокус
+        setInputValue('');
+        inputRef.current?.focus();
+      },
+      getValue: () => {
+        return inputValue;
+      }
+    }), [inputValue]); // Зависимость от inputValue, если getValue будет использовать его актуальное значение
+
+    const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+      setInputValue(e.target.value);
+    }, []);
+
+    return (
+      <input
+        ref={inputRef} // Внутренний ref для HTML input
+        type="text"
+        placeholder={placeholder}
+        value={inputValue}
+        onChange={handleChange}
+        style={{ padding: '8px', borderRadius: '4px', border: '1px solid #ccc' }}
+      />
+    );
+  }
+);
+
+// Родительский компонент, который будет использовать CustomInput
+function ParentComponent() {
+  const customInputRef = useRef<CustomInputHandle>(null);
+
+  const handleFocusClick = () => {
+    // Вызываем метод focus() на дочернем компоненте
+    customInputRef.current?.focus();
+  };
+
+  const handleClearClick = () => {
+    // Вызываем метод clear()
+    customInputRef.current?.clear();
+  };
+
+  const handleGetValueClick = () => {
+    const value = customInputRef.current?.getValue();
+    alert(`Текущее значение: ${value}`);
+  };
+
+  return (
+    <div style={{ padding: '20px', border: '1px dashed blue', margin: '20px' }}>
+      <h3>Родительский Компонент</h3>
+      <CustomInput ref={customInputRef} placeholder="Введите что-нибудь..." />
+      <div style={{ marginTop: '10px' }}>
+        <button onClick={handleFocusClick} style={{ marginRight: '10px' }}>
+          Фокус Input
+        </button>
+        <button onClick={handleClearClick} style={{ marginRight: '10px' }}>
+          Очистить Input
+        </button>
+        <button onClick={handleGetValueClick}>
+          Получить значение
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Экспорт компонента для использования в приложении
+export default ParentComponent;
+```
+
+В этом примере мы создали `CustomInput` компонент, который с помощью `useImperativeHandle` открывает наружу только методы `focus()` и `clear()`. Родительский компонент получает доступ к этим методам через свой `ref`, но не может напрямую манипулировать внутренним `<input>` элементом или его состоянием. Это чистая, контролируемая инкапсуляция!
+
+### 💡 Типизация `forwardRef` и `useImperativeHandle`
+
+Как ты заметил, типизация здесь играет ключевую роль.
+*   `React.forwardRef<CustomInputHandle, { placeholder?: string }>`:
+    *   `CustomInputHandle` — это тип значения, которое `ref.current` будет иметь в родительском компоненте.
+    *   `{ placeholder?: string }` — это тип пропсов, которые принимает `CustomInput`.
+*   `useRef<CustomInputHandle>(null)`: Родительский реф должен быть типизирован тем же интерфейсом, что и `useImperativeHandle` предоставляет.
+
+Это гарантирует, что TypeScript будет проверять вызовы методов, например, `customInputRef.current?.focus()`, и подсказывать доступные методы.
+
+### 🚀 Продвинутые Сценарии
+
+`useImperativeHandle` особенно полезен для взаимодействия со сторонними библиотеками DOM или сложными компонентами, которые имеют внутреннее состояние и требуют императивных действий.
+
+#### Пример 2: Компонент Карусели
+
+Представь компонент `Carousel`, который управляет слайдами внутри себя. Родительский компонент хочет иметь возможность переключать слайды, не передавая каждый раз пропсы с текущим индексом и коллбэки для переключения.
+
+```typescript
+import React, { useRef, useImperativeHandle, useState, useCallback, Fragment } from 'react';
+
+interface CarouselHandle {
+  nextSlide: () => void;
+  prevSlide: () => void;
+  goToSlide: (index: number) => void;
+  getCurrentSlide: () => number; // Добавим для получения текущего слайда
+}
+
+interface CarouselProps {
+  images: string[];
+}
+
+const Carousel = React.forwardRef<CarouselHandle, CarouselProps>(
+  ({ images }, ref) => {
+    const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
+
+    const totalSlides = images.length;
+
+    const nextSlide = useCallback(() => {
+      setCurrentSlideIndex((prevIndex) => (prevIndex + 1) % totalSlides);
+    }, [totalSlides]);
+
+    const prevSlide = useCallback(() => {
+      setCurrentSlideIndex((prevIndex) => (prevIndex - 1 + totalSlides) % totalSlides);
+    }, [totalSlides]);
+
+    const goToSlide = useCallback((index: number) => {
+      if (index >= 0 && index < totalSlides) {
+        setCurrentSlideIndex(index);
+      }
+    }, [totalSlides]);
+
+    // Предоставляем методы через useImperativeHandle
+    useImperativeHandle(ref, () => ({
+      nextSlide,
+      prevSlide,
+      goToSlide,
+      getCurrentSlide: () => currentSlideIndex, // Получаем текущий индекс
+    }), [nextSlide, prevSlide, goToSlide, currentSlideIndex]); // Зависимости для актуальных функций и состояния
+
+    if (images.length === 0) {
+      return <div>Нет изображений для карусели</div>;
+    }
+
+    return (
+      <div style={{ border: '1px solid #ddd', padding: '10px', width: '300px', textAlign: 'center' }}>
+        <img
+          src={images[currentSlideIndex]}
+          alt={`Slide ${currentSlideIndex + 1}`}
+          style={{ maxWidth: '100%', height: 'auto', display: 'block', margin: '0 auto' }}
+        />
+        <p>Слайд {currentSlideIndex + 1} из {totalSlides}</p>
+      </div>
+    );
+  }
+);
+
+function CarouselContainer() {
+  const carouselRef = useRef<CarouselHandle>(null);
+
+  const imageUrls = [
+    'https://via.placeholder.com/300x150/FF5733/FFFFFF?text=Slide+1',
+    'https://via.placeholder.com/300x150/33FF57/FFFFFF?text=Slide+2',
+    'https://via.placeholder.com/300x150/3357FF/FFFFFF?text=Slide+3',
+  ];
+
+  const handleNext = () => carouselRef.current?.nextSlide();
+  const handlePrev = () => carouselRef.current?.prevSlide();
+  const handleGoTo = (index: number) => carouselRef.current?.goToSlide(index);
+  const handleGetCurrent = () => {
+    const current = carouselRef.current?.getCurrentSlide();
+    alert(`Текущий слайд: ${current !== undefined ? current + 1 : 'N/A'}`);
+  };
+
+  return (
+    <div style={{ padding: '20px', border: '1px dashed green', margin: '20px' }}>
+      <h3>Контроллер Карусели</h3>
+      <Carousel ref={carouselRef} images={imageUrls} />
+      <div style={{ marginTop: '15px' }}>
+        <button onClick={handlePrev} style={{ marginRight: '10px' }}>Назад</button>
+        <button onClick={handleNext} style={{ marginRight: '10px' }}>Вперед</button>
+        <button onClick={() => handleGoTo(0)} style={{ marginRight: '10px' }}>К Слайду 1</button>
+        <button onClick={() => handleGoTo(1)} style={{ marginRight: '10px' }}>К Слайду 2</button>
+        <button onClick={() => handleGoTo(2)} style={{ marginRight: '10px' }}>К Слайду 3</button>
+        <button onClick={handleGetCurrent}>Какой слайд?</button>
+      </div>
+    </div>
+  );
+}
+
+export { CarouselContainer as default, Carousel };
+```
+Здесь `Carousel` инкапсулирует свою логику переключения слайдов, а родительский `CarouselContainer` получает лишь "пульт управления" с ограниченным набором действий, без необходимости передавать множество пропсов для каждого действия.
+
+### ⚠️ Типичные Ошибки и Как Их Избежать
+
+1.  **Забыть `forwardRef`**: Если вы пытаетесь использовать `useImperativeHandle` в компоненте, который не обернут в `React.forwardRef`, то `ref` будет `null`, и `useImperativeHandle` не будет иметь эффекта.
+    ```typescript
+    // ❌ Ошибка: этот компонент не принимает ref
+    function MyComponent() {
+      const myRef = useRef(null);
+      useImperativeHandle(myRef, () => ({ /* ... */ })); // myRef всегда будет null снаружи
+      return <div />;
+    }
+
+    // ✅ Правильно
+    const MyComponentWithRef = React.forwardRef((props, ref) => {
+      useImperativeHandle(ref, () => ({ /* ... */ }));
+      return <div />;
+    });
+    ```
+
+2.  **Неправильная типизация рефа**: Если тип, указанный в `useRef` родительского компонента, не соответствует типу, возвращаемому `useImperativeHandle`, вы потеряете автодополнение и получите ошибки TypeScript.
+    ```typescript
+    interface ExpectedHandle { greet: () => void; }
+
+    const Child = React.forwardRef<ExpectedHandle, {}>(({}, ref) => {
+      useImperativeHandle(ref, () => ({ greet: () => console.log('Hello!') }));
+      return <div />;
+    });
+
+    function Parent() {
+      // ❌ Ошибка: MyOtherHandle не соответствует ExpectedHandle
+      // const childRef = useRef<MyOtherHandle>(null);
+      // ✅ Правильно:
+      const childRef = useRef<ExpectedHandle>(null);
+
+      const handleClick = () => {
+        childRef.current?.greet(); // TypeScript знает, что greet существует
+      };
+      return <Child ref={childRef} />;
+    }
+    ```
+
+3.  **Чрезмерное использование**: `useImperativeHandle` – это мощный, но опасный инструмент. Он нарушает декларативную природу React и должен использоваться только тогда, когда это действительно необходимо.
+    *   **Когда НЕ использовать**:
+        *   Для обмена данными между компонентами (используйте пропсы, контекст, Redux).
+        *   Для выполнения простых действий, которые можно передать через пропсы-коллбэки. Например, если родитель хочет просто узнать, когда дочерний компонент завершил загрузку, лучше передать `onLoadComplete` пропсом.
+    *   **Когда использовать**:
+        *   Когда нужно напрямую взаимодействовать с DOM элементом (фокусировка, прокрутка, воспроизведение медиа).
+        *   Когда вы оборачиваете сторонние не-React библиотеки, которые требуют императивных вызовов.
+        *   Когда дочерний компонент имеет сложную внутреннюю логику и состояние, и вы хотите предоставить родительскому компоненту строго контролируемый API для выполнения специфических действий.
+
+### 🎯 Практика
+
+Время закрепить знания!
+
+1.  **Модальное окно с контролем извне**:
+    Создайте компонент `Modal`, который имеет внутреннее состояние `isOpen`. Используйте `useImperativeHandle`, чтобы предоставить родительскому компоненту методы `open()` и `close()`, а также `toggle()` и `isVisible: boolean`.
+2.  **Видеоплеер**:
+    Создайте простой компонент `VideoPlayer` (можно использовать обычный `<video>` HTML-тег). Через `useImperativeHandle` предоставьте родительскому компоненту методы `play()`, `pause()`, `seekTo(seconds: number)`, а также свойство `isPlaying: boolean`.
+3.  **Форма сброса и получения данных**:
+    Создайте компонент `UserForm` с несколькими полями ввода (имя, email). Предоставьте родительскому компоненту методы `resetForm()` (для очистки всех полей) и `getFormData()` (для получения текущих значений полей в виде объекта `{ name: string, email: string }`). Добавьте базовую валидацию и метод `validateForm(): boolean` к предоставляемому handle.
+
+### 💡 Совет
+
+`useImperativeHandle` — это тот редкий инструмент, который стоит хранить в своем арсенале, но доставать только для самых сложных и специфических задач. Всегда спрашивай себя: "Могу ли я решить эту задачу декларативно, используя пропсы и коллбэки?" Если ответ "да", то это, вероятно, лучший путь. Если "нет" или решение декларативным способом становится громоздким и неоправданно сложным, тогда `useImperativeHandle` может стать твоим спасением. И, конечно же, всегда, *всегда* используй его с TypeScript для максимальной безопасности и понятности кода!
+### Практика
+
+Попробуйте примеры в интерактивном редакторе:
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useRef, useImperativeHandle, forwardRef, useState } from 'react';
+
+// Интерфейс публичного API — только то, что родитель должен видеть
+interface InputHandle {
+  focus: () => void;
+  clear: () => void;
+  getValue: () => string;
+  highlight: () => void;
+}
+
+// Дочерний компонент раскрывает только выбранные методы через ref
+const FancyInput = forwardRef<InputHandle, { placeholder?: string }>(({ placeholder }, ref) => {
+  const inputEl = useRef<HTMLInputElement>(null);
+  const [value, setValue] = useState('');
+  const [highlighted, setHighlighted] = useState(false);
+
+  // Определяем, что видит родитель через ref — не весь DOM-элемент, а контракт
+  useImperativeHandle(ref, () => ({
+    focus: () => inputEl.current?.focus(),
+    clear: () => { setValue(''); inputEl.current?.focus(); },
+    getValue: () => value,
+    highlight: () => {
+      setHighlighted(true);
+      setTimeout(() => setHighlighted(false), 800);
+    },
+  }), [value]);
+
+  return (
+    <input
+      ref={inputEl}
+      value={value}
+      onChange={e => setValue(e.target.value)}
+      placeholder={placeholder}
+      style={{
+        width: '100%',
+        background: highlighted ? '#1e3a5f' : '#0f172a',
+        color: '#e2e8f0',
+        border: '2px solid ' + (highlighted ? '#0ea5e9' : '#334155'),
+        borderRadius: 8,
+        padding: '10px 12px',
+        boxSizing: 'border-box',
+        fontSize: 14,
+        outline: 'none',
+        transition: 'all 0.3s',
+      }}
+    />
+  );
+});
+
+export default function App() {
+  const inputRef = useRef<InputHandle>(null);
+  const [log, setLog] = useState<string[]>([]);
+
+  const addLog = (msg: string) => setLog(prev => [msg, ...prev.slice(0, 5)]);
+
+  const actions = [
+    {
+      label: 'focus()',
+      desc: 'Поставить фокус',
+      run: () => { inputRef.current?.focus(); addLog('focus() — поле получило фокус'); },
+      color: '#0ea5e9',
+    },
+    {
+      label: 'clear()',
+      desc: 'Очистить поле',
+      run: () => { inputRef.current?.clear(); addLog('clear() — поле очищено'); },
+      color: '#8b5cf6',
+    },
+    {
+      label: 'getValue()',
+      desc: 'Прочитать значение',
+      run: () => {
+        const v = inputRef.current?.getValue() ?? '';
+        addLog('getValue() вернул: "' + v + '"');
+      },
+      color: '#10b981',
+    },
+    {
+      label: 'highlight()',
+      desc: 'Подсветить поле',
+      run: () => { inputRef.current?.highlight(); addLog('highlight() — поле подсвечено'); },
+      color: '#f59e0b',
+    },
+  ];
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#0f172a', padding: 24, fontFamily: 'sans-serif' }}>
+      <h2 style={{ color: '#38bdf8', marginTop: 0, marginBottom: 4 }}>useImperativeHandle</h2>
+      <p style={{ color: '#94a3b8', fontSize: 14, marginBottom: 16 }}>
+        Родитель вызывает методы дочернего компонента через ref — только те, что разрешил ребёнок.
+      </p>
+      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <p style={{ color: '#64748b', fontSize: 12, margin: '0 0 8px' }}>FancyInput (дочерний компонент)</p>
+        <FancyInput ref={inputRef} placeholder="Введите что-нибудь..." />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
+        {actions.map(a => (
+          <button
+            key={a.label}
+            onClick={a.run}
+            style={{ background: '#1e293b', color: a.color, border: '1px solid ' + a.color + '44', borderRadius: 8, padding: '10px 12px', cursor: 'pointer', fontSize: 13, textAlign: 'left' }}
+          >
+            <div style={{ fontWeight: 'bold', fontFamily: 'monospace' }}>{a.label}</div>
+            <div style={{ color: '#64748b', fontSize: 12, marginTop: 2 }}>{a.desc}</div>
+          </button>
+        ))}
+      </div>
+      {log.length > 0 && (
+        <div style={{ background: '#1e293b', borderRadius: 8, padding: 12 }}>
+          <p style={{ color: '#64748b', fontSize: 12, margin: '0 0 8px' }}>Лог вызовов:</p>
+          {log.map((entry, i) => (
+            <div key={i} style={{ color: '#10b981', fontSize: 13, padding: '2px 0', fontFamily: 'monospace' }}>{'→ ' + entry}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

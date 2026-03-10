@@ -1,0 +1,414 @@
+---
+title: "9. Production-сборка"
+sidebar:
+  order: 9
+---
+import { Playground } from '@components/Playground'
+
+
+Команда `vite build` создаёт оптимизированный production бандл с помощью Rollup. Понимание структуры вывода и стратегий чанкования поможет создавать более быстрые приложения.
+
+## Базовый build
+
+```bash
+# Production сборка
+npm run build
+# Эквивалентно: tsc && vite build
+
+# Предпросмотр production версии локально
+npm run preview
+# Запускает статический сервер на dist/
+```
+
+## Структура dist/
+
+```
+dist/
+├── index.html              ← Входной HTML с инжектированными тегами
+├── assets/
+│   ├── index-BxS1p2qR.js   ← Main chunk (entry point)
+│   ├── index-DtS3A2lQ.css  ← Extracted CSS
+│   ├── vendor-abc12345.js  ← Vendor chunk (react, react-dom)
+│   ├── LazyPage-xyz.js     ← Dynamic import chunk
+│   └── logo-abc123.png     ← Хэшированные ресурсы
+└── vite.svg                ← Из директории public/
+```
+
+## build опции
+
+```typescript
+// vite.config.ts
+export default defineConfig({
+  build: {
+    // Директория вывода (по умолчанию 'dist')
+    outDir: 'dist',
+
+    // Целевые браузеры/версии
+    target: 'es2015',  // 'esnext' | 'es2015' | ['chrome87', 'safari13']
+
+    // Минификатор
+    minify: 'esbuild',   // 'esbuild' (быстро) | 'terser' (лучше, медленнее) | false
+
+    // Source maps для debugging
+    sourcemap: false,    // true | 'inline' | 'hidden'
+
+    // Лимит для inline (base64) ресурсов в байтах
+    assetsInlineLimit: 4096,
+
+    // CSS Code Splitting
+    cssCodeSplit: true,
+
+    // Subdirectory для ресурсов (внутри outDir)
+    assetsDir: 'assets',
+
+    // Вывод сборки
+    reportCompressedSize: true, // Показывать gzip размер
+
+    // Chunk size warning (по умолчанию 500KB)
+    chunkSizeWarningLimit: 500,
+  },
+})
+```
+
+## target — Целевые браузеры
+
+```typescript
+// Для современных браузеров
+target: 'esnext'
+
+// Для широкой поддержки
+target: 'es2015'  // ES5 + необходимые полифиллы
+
+// Конкретные браузеры (через browserslist)
+target: ['chrome87', 'firefox78', 'safari13', 'edge88']
+
+// Для Node.js SSR
+target: 'node16'
+
+// Legacy поддержка (IE11) — через @vitejs/plugin-legacy
+```
+
+## Code Splitting стратегии
+
+```typescript
+build: {
+  rollupOptions: {
+    output: {
+      // Ручное разделение на чанки
+      manualChunks: {
+        // Vendor chunk — всё из react экосистемы
+        'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+
+        // UI библиотека отдельно
+        'vendor-ui': ['@mui/material', '@emotion/react'],
+
+        // Утилиты отдельно
+        'vendor-utils': ['lodash', 'date-fns', 'axios'],
+      },
+
+      // Или функция для динамического разделения
+      manualChunks(id) {
+        if (id.includes('node_modules')) {
+          // Каждый пакет в отдельный чанк
+          return id.toString().split('node_modules/')[1].split('/')[0]
+        }
+      },
+    },
+  },
+}
+```
+
+## Dynamic Import — автоматическое code splitting
+
+```typescript
+// Автоматически создаёт отдельный чанк для страницы
+const DashboardPage = lazy(() => import('./pages/Dashboard'))
+const SettingsPage = lazy(() => import('./pages/Settings'))
+
+// Vite автоматически сделает:
+// dist/assets/Dashboard-abc123.js
+// dist/assets/Settings-def456.js
+// Загружаются ТОЛЬКО когда пользователь переходит на страницу
+```
+
+## minify — Выбор минификатора
+
+```typescript
+// esbuild (по умолчанию) — быстро, хорошее сжатие
+minify: 'esbuild'
+
+// terser — лучшее сжатие, в 20-40x медленнее
+minify: 'terser'
+// npm i -D terser  — нужно установить отдельно
+
+build: {
+  minify: 'terser',
+  terserOptions: {
+    compress: {
+      drop_console: true,   // Удалить console.log в production!
+      drop_debugger: true,
+    },
+  },
+}
+```
+
+Ниже — интерактивный визуализатор структуры production сборки с симуляцией разных стратегий чанкования:
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const VITE_COLOR = '#646cff';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#38bdf8';
+const GREEN = '#4ade80';
+const AMBER = '#f59e0b';
+
+type ChunkStrategy = 'default' | 'vendor' | 'granular' | 'lazy';
+
+interface ChunkFile {
+  name: string;
+  size: number;
+  type: 'js' | 'css' | 'asset' | 'html';
+  kind: 'entry' | 'vendor' | 'chunk' | 'asset';
+  color: string;
+  note?: string;
+}
+
+const strategies: Record<ChunkStrategy, { label: string; desc: string; files: ChunkFile[] }> = {
+  default: {
+    label: 'По умолчанию',
+    desc: 'Vite автоматически разделяет dynamic imports',
+    files: [
+      { name: 'index.html', size: 0.5, type: 'html', kind: 'entry', color: '#f59e0b' },
+      { name: 'assets/index-BxS1.js', size: 380, type: 'js', kind: 'entry', color: VITE_COLOR, note: 'всё включая react' },
+      { name: 'assets/index-DtS3.css', size: 24, type: 'css', kind: 'asset', color: ACCENT },
+      { name: 'assets/logo-abc1.png', size: 4, type: 'asset', kind: 'asset', color: '#94a3b8' },
+    ],
+  },
+  vendor: {
+    label: 'Vendor Chunk',
+    desc: 'React вынесен в отдельный чанк — кэшируется браузером',
+    files: [
+      { name: 'index.html', size: 0.5, type: 'html', kind: 'entry', color: '#f59e0b' },
+      { name: 'assets/index-BxS1.js', size: 80, type: 'js', kind: 'entry', color: VITE_COLOR, note: 'app code only' },
+      { name: 'assets/vendor-react-abc.js', size: 142, type: 'js', kind: 'vendor', color: '#61dafb', note: 'react + react-dom' },
+      { name: 'assets/index-DtS3.css', size: 24, type: 'css', kind: 'asset', color: ACCENT },
+      { name: 'assets/logo-abc1.png', size: 4, type: 'asset', kind: 'asset', color: '#94a3b8' },
+    ],
+  },
+  granular: {
+    label: 'Гранулярный',
+    desc: 'Каждая npm библиотека — отдельный чанк',
+    files: [
+      { name: 'index.html', size: 0.5, type: 'html', kind: 'entry', color: '#f59e0b' },
+      { name: 'assets/index-BxS1.js', size: 45, type: 'js', kind: 'entry', color: VITE_COLOR },
+      { name: 'assets/react-abc.js', size: 7, type: 'js', kind: 'vendor', color: '#61dafb' },
+      { name: 'assets/react-dom-def.js', size: 135, type: 'js', kind: 'vendor', color: '#61dafb' },
+      { name: 'assets/react-router-ghi.js', size: 28, type: 'js', kind: 'vendor', color: '#ca8a04' },
+      { name: 'assets/lodash-jkl.js', size: 72, type: 'js', kind: 'vendor', color: '#6366f1' },
+      { name: 'assets/index-DtS3.css', size: 24, type: 'css', kind: 'asset', color: ACCENT },
+    ],
+  },
+  lazy: {
+    label: 'Dynamic Import',
+    desc: 'Страницы загружаются только при переходе',
+    files: [
+      { name: 'index.html', size: 0.5, type: 'html', kind: 'entry', color: '#f59e0b' },
+      { name: 'assets/index-BxS1.js', size: 55, type: 'js', kind: 'entry', color: VITE_COLOR, note: 'entry + router' },
+      { name: 'assets/vendor-abc.js', size: 142, type: 'js', kind: 'vendor', color: '#61dafb' },
+      { name: 'assets/HomePage-xyz.js', size: 12, type: 'js', kind: 'chunk', color: GREEN, note: 'lazy' },
+      { name: 'assets/Dashboard-mno.js', size: 48, type: 'js', kind: 'chunk', color: GREEN, note: 'lazy' },
+      { name: 'assets/Settings-pqr.js', size: 22, type: 'js', kind: 'chunk', color: GREEN, note: 'lazy' },
+      { name: 'assets/index-DtS3.css', size: 24, type: 'css', kind: 'asset', color: ACCENT },
+    ],
+  },
+};
+
+function sizeBar(size: number, maxSize: number, color: string) {
+  const pct = Math.max(3, (size / maxSize) * 100);
+  return (
+    <div style={{ height: 6, width: \`\${pct}%\`, background: color, borderRadius: 3, minWidth: 6 }} />
+  );
+}
+
+function formatSize(kb: number): string {
+  if (kb < 1) return \`\${Math.round(kb * 1024)}B\`;
+  if (kb < 1000) return \`\${kb.toFixed(1)}KB\`;
+  return \`\${(kb / 1024).toFixed(2)}MB\`;
+}
+
+export default function App() {
+  const [strategy, setStrategy] = useState<ChunkStrategy>('default');
+  const [tab, setTab] = useState<'files' | 'sizes' | 'config'>('files');
+  const data = strategies[strategy];
+  const jsFiles = data.files.filter(f => f.type === 'js');
+  const totalKB = data.files.reduce((s, f) => s + f.size, 0);
+  const maxSize = Math.max(...data.files.map(f => f.size));
+
+  const configMap: Record<ChunkStrategy, string> = {
+    default: \`// Без конфига — Vite разделяет dynamic imports
+export default defineConfig({
+  plugins: [react()],
+  build: {
+    // по умолчанию
+  },
+})\`,
+    vendor: \`export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom'],
+        },
+      },
+    },
+  },
+})\`,
+    granular: \`export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            return id.toString()
+              .split('node_modules/')[1]
+              .split('/')[0];
+          }
+        },
+      },
+    },
+  },
+})\`,
+    lazy: \`// В коде приложения используй dynamic imports:
+const HomePage = lazy(() => import('./pages/Home'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Settings = lazy(() => import('./pages/Settings'));
+
+// Vite автоматически создаст отдельные чанки!
+// Не нужно конфигурировать вручную.\`,
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '24px 16px', fontFamily: 'system-ui, sans-serif', color: TEXT }}>
+      <div style={{ maxWidth: 680, margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <h1 style={{
+            margin: 0, fontSize: 22, fontWeight: 800,
+            background: \`linear-gradient(90deg, \${VITE_COLOR}, \${ACCENT})\`,
+            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+          }}>Build Output Visualizer</h1>
+          <p style={{ color: '#64748b', fontSize: 13, marginTop: 6 }}>
+            Сравни стратегии чанкования production сборки
+          </p>
+        </div>
+
+        {/* Strategy selector */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+          {(Object.keys(strategies) as ChunkStrategy[]).map(s => (
+            <button key={s} onClick={() => setStrategy(s)} style={{
+              padding: '7px 14px', borderRadius: 20, border: 'none', cursor: 'pointer',
+              background: strategy === s ? VITE_COLOR : CARD,
+              color: strategy === s ? '#fff' : '#94a3b8',
+              fontSize: 12, fontWeight: strategy === s ? 700 : 400,
+              transition: 'all 0.2s',
+            }}>{strategies[s].label}</button>
+          ))}
+        </div>
+
+        <div style={{ background: CARD, borderRadius: 12, padding: '10px 14px', marginBottom: 16, border: \`1px solid \${VITE_COLOR}25\`, fontSize: 13, color: '#94a3b8' }}>
+          💡 {data.desc}
+        </div>
+
+        {/* Stats row */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+          {[
+            { label: 'Файлов', value: data.files.length },
+            { label: 'JS чанков', value: jsFiles.length },
+            { label: 'Общий размер', value: formatSize(totalKB) },
+            { label: 'Мин JS чанк', value: formatSize(Math.min(...jsFiles.map(f => f.size))) },
+          ].map(stat => (
+            <div key={stat.label} style={{ flex: 1, background: BG, borderRadius: 10, padding: '10px 8px', textAlign: 'center', border: '1px solid #334155' }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: VITE_COLOR }}>{stat.value}</div>
+              <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>{stat.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 16, background: CARD, padding: 4, borderRadius: 10 }}>
+          {[
+            { id: 'files' as const, label: '📁 Файлы' },
+            { id: 'sizes' as const, label: '📊 Размеры' },
+            { id: 'config' as const, label: '⚙️ Конфиг' },
+          ].map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              flex: 1, padding: '7px 4px', borderRadius: 7, border: 'none', cursor: 'pointer',
+              background: tab === t.id ? VITE_COLOR : 'transparent',
+              color: tab === t.id ? '#fff' : '#94a3b8', fontSize: 12, fontWeight: tab === t.id ? 700 : 400,
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {tab === 'files' && (
+          <div style={{ background: CARD, borderRadius: 12, overflow: 'hidden', border: '1px solid #334155' }}>
+            <div style={{ padding: '8px 14px', borderBottom: '1px solid #334155', background: '#1a2744', fontSize: 11, color: '#64748b' }}>
+              📁 dist/
+            </div>
+            {data.files.map((file, i) => (
+              <div key={i} style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '10px 14px', borderBottom: '1px solid #1a1a2e',
+                transition: 'background 0.1s',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 14 }}>
+                    {file.type === 'js' ? '📦' : file.type === 'css' ? '🎨' : file.type === 'html' ? '🌐' : '🖼️'}
+                  </span>
+                  <span style={{ fontFamily: 'monospace', fontSize: 12, color: file.color }}>{file.name}</span>
+                  {file.note && <span style={{ fontSize: 10, color: '#475569', background: '#334155', padding: '1px 6px', borderRadius: 4 }}>{file.note}</span>}
+                </div>
+                <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#64748b' }}>
+                  {file.size < 1 ? \`\${Math.round(file.size * 1024)}B\` : \`\${file.size}KB\`}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'sizes' && (
+          <div style={{ background: CARD, borderRadius: 12, padding: 16, border: '1px solid #334155' }}>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 12 }}>Визуальное сравнение размеров</div>
+            {data.files.filter(f => f.size > 0.5).map((file, i) => (
+              <div key={i} style={{ marginBottom: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: 12 }}>
+                  <span style={{ color: file.color, fontFamily: 'monospace' }}>{file.name.split('/').pop()}</span>
+                  <span style={{ color: '#64748b' }}>{file.size}KB</span>
+                </div>
+                <div style={{ height: 10, background: '#334155', borderRadius: 5, overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%',
+                    width: \`\${Math.max(2, (file.size / maxSize) * 100)}%\`,
+                    background: file.color, borderRadius: 5,
+                  }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'config' && (
+          <div style={{ background: CARD, borderRadius: 12, overflow: 'hidden', border: '1px solid #334155' }}>
+            <div style={{ padding: '8px 14px', borderBottom: '1px solid #334155', background: '#1a2744', fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>
+              vite.config.ts
+            </div>
+            <pre style={{ margin: 0, padding: 16, fontSize: 12, color: TEXT, fontFamily: 'monospace', lineHeight: 1.6, overflowX: 'auto' }}>
+              <code>{configMap[strategy]}</code>
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}` }} />

@@ -1,0 +1,376 @@
+---
+title: "46. Декораторы глубже"
+sidebar:
+  order: 46
+---
+import { Playground } from '@components/Playground'
+
+
+## TypeScript: Декораторы глубже
+
+Шалом, кодеры и кодессы! Вы уже освоили базовые типы, интерфейсы, дженерики и даже успели познакомиться с декораторами. Но, как говорится, "нет предела совершенству", и сегодня Яша покажет вам, что декораторы — это не просто синтаксический сахар, а мощный инструмент для метапрограммирования, способный менять поведение классов, методов и свойств налету, совсем как хамелеон, меняющий цвет.
+
+В этом уроке мы не будем повторять азы, а нырнем глубже в механику работы декораторов. Мы разберем их внутреннее устройство, научимся создавать фабрики декораторов, работать с метаданными и, конечно же, рассмотрим самые хитрые моменты и ошибки, с которыми сталкиваются даже опытные разработчики. Готовы? Поехали!
+
+### 🧱 Фундамент: Что под капотом?
+
+Вспомним, что декораторы — это специальные функции, которые могут быть применены к классам, методам, свойствам и параметрам методов. Они предоставляют декларативный способ добавления аннотаций и изменения частей класса во время компиляции. Но как они это делают?
+
+Самое главное — это сигнатура декоратора и его возвращаемое значение:
+
+*   **Декоратор класса**: `(constructor: Function) => Function | void`
+    *   Может заменить конструктор класса или добавить ему новое поведение.
+*   **Декоратор метода**: `(target: Object, propertyKey: string | symbol, descriptor: PropertyDescriptor) => PropertyDescriptor | void`
+    *   Получает `descriptor` свойства (аналогично `Object.defineProperty`) и может изменить его (например, обернуть оригинальный метод).
+*   **Декоратор свойства**: `(target: Object, propertyKey: string | symbol) => void`
+    *   Не получает `descriptor`! Может использоваться для добавления метаданных или для создания геттеров/сеттеров через `Object.defineProperty` на классе-цели.
+*   **Декоратор параметра**: `(target: Object, propertyKey: string | symbol, parameterIndex: number) => void`
+    *   Используется для добавления метаданных о параметре.
+
+### 🏭 Декораторы как фабрики: Сила аргументов
+
+Часто декоратору нужны дополнительные параметры, чтобы настроить его поведение. Для этого декоратор должен быть не просто функцией, а *фабрикой* — функцией, которая *возвращает* настоящую функцию-декоратор.
+
+```typescript
+// Фабрика декораторов, которая принимает конфигурацию
+function Logged(message: string) {
+    // Это и есть настоящий декоратор метода
+    return function (
+        target: Object,
+        propertyKey: string | symbol,
+        descriptor: PropertyDescriptor
+    ) {
+        const originalMethod = descriptor.value; // Сохраняем оригинальный метод
+
+        // Переопределяем метод
+        descriptor.value = function (...args: any[]) {
+            console.log(`[${message}] Вызов метода ${String(propertyKey)} с аргументами:`, args);
+            const result = originalMethod.apply(this, args); // Вызываем оригинальный метод, сохраняя контекст 'this'
+            console.log(`[${message}] Метод ${String(propertyKey)} завершил работу. Результат:`, result);
+            return result;
+        };
+
+        // Возвращаем новый дескриптор
+        return descriptor;
+    };
+}
+
+class Calculator {
+    @Logged("Супер-калькулятор") // Используем фабрику декоратора
+    add(a: number, b: number): number {
+        return a + b;
+    }
+
+    @Logged("Еще один калькулятор")
+    subtract(a: number, b: number): number {
+        return a - b;
+    }
+}
+
+const calc = new Calculator();
+calc.add(5, 3);
+calc.subtract(10, 4);
+
+// Вывод в консоль:
+// [Супер-калькулятор] Вызов метода add с аргументами: [ 5, 3 ]
+// [Супер-калькулятор] Метод add завершил работу. Результат: 8
+// [Еще один калькулятор] Вызов метода subtract с аргументами: [ 10, 4 ]
+// [Еще один калькулятор] Метод subtract завершил работу. Результат: 6
+```
+
+### 🧠 Порядок выполнения: Кто первый, тот и папа?
+
+Когда на одном элементе висит несколько декораторов, или декораторы применяются к разным частям класса, важно понимать порядок их выполнения.
+
+1.  **Параметры -> Методы -> Свойства -> Аксессоры -> Класс**. Декораторы применяются от "внутренних" частей к "внешним".
+2.  **Несколько декораторов на одном элементе**: Выполняются **снизу вверх** (то есть, самый нижний декоратор в коде применяется первым), если это обычные декораторы.
+3.  **Несколько фабрик декораторов на одном элементе**: Функции-фабрики вызываются **сверху вниз** для создания декораторов, но сами декораторы затем выполняются **снизу вверх** (как в пункте 2).
+
+Посмотрим на пример:
+
+```typescript
+function First() {
+    console.log("ДЕКОРАТОР-ФАБРИКА: First()");
+    return function (target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+        console.log("ДЕКОРАТОР: First()");
+        // Убедимся, что метод существует, прежде чем оборачивать его
+        if (descriptor && typeof descriptor.value === 'function') {
+            const originalMethod = descriptor.value;
+            descriptor.value = function(...args: any[]) {
+                console.log(`First - перед вызовом ${String(propertyKey)}`);
+                const result = originalMethod.apply(this, args);
+                console.log(`First - после вызова ${String(propertyKey)}`);
+                return result;
+            };
+        }
+    };
+}
+
+function Second() {
+    console.log("ДЕКОРАТОР-ФАБРИКА: Second()");
+    return function (target: any, propertyKey: string, descriptor: PropertyDescriptor) {
+        console.log("ДЕКОРАТОР: Second()");
+        if (descriptor && typeof descriptor.value === 'function') {
+            const originalMethod = descriptor.value;
+            descriptor.value = function(...args: any[]) {
+                console.log(`Second - перед вызовом ${String(propertyKey)}`);
+                const result = originalMethod.apply(this, args);
+                console.log(`Second - после вызова ${String(propertyKey)}`);
+                return result;
+            };
+        }
+    };
+}
+
+class TestOrder {
+    @First() // Фабрика First вызовется первой, но декоратор First - второй
+    @Second() // Фабрика Second вызовется второй, но декоратор Second - первой
+    testMethod() {
+        console.log("       Внутри testMethod()");
+    }
+}
+
+console.log("\nСоздаем экземпляр класса TestOrder:");
+const test = new TestOrder();
+console.log("\nВызываем testMethod:");
+test.testMethod();
+
+// Ожидаемый вывод:
+// ДЕКОРАТОР-ФАБРИКА: First()
+// ДЕКОРАТОР-ФАБРИКА: Second()
+// ДЕКОРАТОР: Second()
+// ДЕКОРАТОР: First()
+//
+// Создаем экземпляр класса TestOrder:
+//
+// Вызываем testMethod:
+// First - перед вызовом testMethod
+// Second - перед вызовом testMethod
+//        Внутри testMethod()
+// Second - после вызова testMethod
+// First - после вызова testMethod
+```
+Как видите, фабрики вызвались сверху вниз, а сами декораторы обернули метод снизу вверх, создав матрешку из функций.
+
+### 🌟 Работа с метаданными: `reflect-metadata`
+
+Декораторы часто используются для добавления метаданных к классам и их членам, которые затем могут быть прочитаны во время выполнения. TypeScript позволяет это делать с помощью библиотеки `reflect-metadata`. Не забудьте установить ее (`npm i reflect-metadata`) и импортировать в начале файла (`import "reflect-metadata";`), а также включить опцию `emitDecoratorMetadata` в `tsconfig.json`.
+
+```typescript
+import "reflect-metadata"; // Важно импортировать первым
+
+// Декоратор свойства, который помечает свойство как "обязательное"
+function Required(target: Object, propertyKey: string | symbol) {
+    // Сохраняем метаданные: что это свойство является обязательным
+    Reflect.defineMetadata("design:required", true, target, propertyKey);
+}
+
+// Декоратор класса, который запускает валидацию
+function ValidateClass(constructor: Function) {
+    // Возвращаем новый конструктор, который расширяет оригинальный
+    return class extends (constructor as any) {
+        constructor(...args: any[]) {
+            super(...args); // Вызываем оригинальный конструктор
+            console.log(`Валидируем экземпляр класса: ${constructor.name}`);
+
+            // Проходимся по всем свойствам экземпляра класса
+            for (const propertyKey in this) {
+                // Проверяем, помечено ли свойство как "обязательное"
+                const isRequired = Reflect.getMetadata("design:required", this, propertyKey);
+
+                if (isRequired && (this[propertyKey] === undefined || this[propertyKey] === null)) {
+                    throw new Error(`Ошибка валидации: Свойство "${String(propertyKey)}" является обязательным.`);
+                }
+            }
+        }
+    };
+}
+
+@ValidateClass // Применяем декоратор валидации к классу
+class User {
+    @Required // Помечаем свойство как обязательное
+    name: string;
+    
+    // Это свойство не обязательное
+    email?: string;
+
+    constructor(name: string, email?: string) {
+        this.name = name;
+        this.email = email;
+    }
+}
+
+try {
+    const user1 = new User("Яша", "yasha@example.com"); // OK
+    console.log("User 1 создан:", user1);
+
+    // Пример с отсутствующим обязательным полем
+    // Намеренно передаем null для name, чтобы спровоцировать ошибку
+    const user3 = new (User as any)(null, "another@example.com"); 
+    console.log("User 3 создан:", user3); // Эта строка не будет выполнена из-за ошибки
+} catch (error: any) {
+    console.error(error.message);
+}
+
+// Вывод:
+// Валидируем экземпляр класса: User
+// User 1 создан: User { name: 'Яша', email: 'yasha@example.com' }
+// Валидируем экземпляр класса: User
+// Ошибка валидации: Свойство "name" является обязательным.
+```
+Здесь `@Required` просто добавляет метаданные, а `@ValidateClass` *использует* эти метаданные, чтобы добавить логику валидации в конструктор класса.
+
+### 🧩 Декорирование для регистрации сервисов (DI-подобное)
+
+Декораторы класса идеально подходят для регистрации классов в неком "реестре" или для внедрения зависимостей.
+
+```typescript
+// Глобальный реестр сервисов
+const serviceRegistry = new Map<string, Function>();
+
+// Декоратор класса для регистрации сервисов
+function Service(name: string) {
+    return function <T extends { new(...args: any[]): {} }>(constructor: T) {
+        if (serviceRegistry.has(name)) {
+            console.warn(`Сервис с именем "${name}" уже зарегистрирован. Перезаписываем.`);
+        }
+        serviceRegistry.set(name, constructor); // Регистрируем конструктор класса
+
+        // Можно также расширить класс, добавив в него что-то
+        return class extends constructor {
+            // Пример: добавим статический метод для получения имени
+            static getServiceName() {
+                return name;
+            }
+            // Добавим свойство экземпляра (только для примера)
+            serviceId = name;
+        };
+    };
+}
+
+@Service("EmailSender")
+class EmailService {
+    sendEmail(to: string, subject: string, body: string) {
+        console.log(`Отправка письма на ${to}: "${subject}" - "${body}"`);
+    }
+}
+
+@Service("SMSSender")
+class SMSService {
+    sendSMS(to: string, message: string) {
+        console.log(`Отправка SMS на ${to}: "${message}"`);
+    }
+}
+
+// Получаем сервис из реестра и используем его
+function getService<T>(name: string): T {
+    const ServiceConstructor = serviceRegistry.get(name);
+    if (!ServiceConstructor) {
+        throw new Error(`Сервис "${name}" не найден.`);
+    }
+    return new (ServiceConstructor as any)(); // Создаем экземпляр сервиса
+}
+
+console.log("\nДоступные сервисы:", Array.from(serviceRegistry.keys()));
+
+const emailSender = getService<EmailService>("EmailSender");
+emailSender.sendEmail("yasha@example.com", "Привет", "Как дела?");
+
+const smsSender = getService<SMSService>("SMSSender");
+smsSender.sendSMS("+79001234567", "Встреча через час!");
+
+// Проверяем расширение класса декоратором
+console.log("\nИмя сервиса EmailService (статический метод):", (EmailService as any).getServiceName());
+const emailServiceInstance = new EmailService();
+console.log("ID экземпляра EmailService:", emailServiceInstance.serviceId);
+
+// Вывод:
+// Доступные сервисы: [ 'EmailSender', 'SMSSender' ]
+// Отправка письма на yasha@example.com: "Привет" - "Как дела?"
+// Отправка SMS на +79001234567: "Встреча через час!"
+//
+// Имя сервиса EmailService (статический метод): EmailSender
+// ID экземпляра EmailService: EmailSender
+```
+
+### 🚨 Типичные ошибки и подводные камни
+
+1.  **Забыли `experimentalDecorators` и `emitDecoratorMetadata`**: TypeScript не будет обрабатывать декораторы без `experimentalDecorators: true` в `tsconfig.json`. А для `reflect-metadata` также нужен `emitDecoratorMetadata: true`.
+2.  **Декораторы свойств не получают `descriptor`**: Это частая ловушка. Декораторы свойств не могут напрямую изменить значение свойства или его getter/setter через `descriptor` во время применения. Для этого обычно приходится использовать `Object.defineProperty` либо в декораторе класса, либо в декораторе метода, который обрабатывает свойство.
+3.  **Неправильный порядок выполнения**: Как мы видели, порядок выполнения декораторов на одном элементе (снизу вверх) и порядок вызова фабрик (сверху вниз) могут сбить с толку. Всегда тестируйте сложные композиции.
+4.  **`this` контекст внутри обернутых методов**: При оборачивании метода через `descriptor.value = function(...)`, важно использовать `originalMethod.apply(this, args)` или `originalMethod.call(this, ...args)`, чтобы сохранить корректный `this` контекст. Иначе `this` внутри оригинального метода будет указывать на глобальный объект или `undefined` в строгом режиме.
+
+### 🎯 Практика
+
+Время закрепить знания, юный (и не очень) кодер!
+
+1.  **Создайте декоратор метода `@Debounce(delayMs: number)`**: Этот декоратор должен предотвращать слишком частые вызовы метода. Метод должен вызываться только после того, как прошло `delayMs` миллисекунд с момента последнего вызова. Если вызов происходит раньше, предыдущий запланированный вызов отменяется.
+    *   Подсказка: используйте `setTimeout` и `clearTimeout`. Храните `timeoutId` в свойстве экземпляра, чтобы каждый экземпляр имел свой дебаунсер.
+2.  **Создайте декоратор свойства `@LogAccess`**: Этот декоратор должен автоматически создавать геттер и сеттер для свойства, которые будут логировать каждое обращение к свойству (чтение и запись).
+    *   Подсказка: вам понадобится использовать `Object.defineProperty` внутри фабрики декоратора или внутри декоратора класса, который будет обрабатывать свойства, помеченные `@LogAccess`. Декоратор свойства сам по себе не может менять `descriptor` свойства! Для простоты можно создать декоратор класса, который будет сканировать свойства с помощью `Reflect.getMetadata`.
+3.  **Расширьте декоратор класса `@Service`**: Добавьте возможность указывать зависимости для сервиса. Например, `@Service("MyService", ["EmailSender"])`. Затем в `getService` при создании экземпляра `MyService` он должен автоматически получать экземпляры `EmailSender` и передавать их в конструктор `MyService`.
+    *   Подсказка: сохраняйте список зависимостей в метаданных класса. В `getService` сначала рекурсивно получите все зависимости, а затем создайте экземпляр текущего сервиса, передав зависимости в его конструктор.
+
+### 💡 Совет
+
+Декораторы — это мощный инструмент для AOP (аспектно-ориентированного программирования) и добавления метаданных, но используйте их с умом. Чрезмерное использование может сделать код менее читаемым и сложным для отладки, так как логика будет распределена между декларациями и реализациями. Всегда задавайте себе вопрос: можно ли решить эту задачу обычной функцией или композицией, без магических декораторов? Если ответ "да", возможно, это более простой и понятный путь. Однако для фреймворков и библиотек декораторы незаменимы!
+
+Удачи в ваших кодерских приключениях, и помните: "Пишите код так, чтобы было понятно не только вам, но и Яше!"
+
+
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="static"
+  files={{
+    "/index.html": `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TypeScript Decorators</title>
+    <style>
+        body { background-color: #282c34; color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        #app { text-align: center; }
+        button { background-color: #61dafb; color: #282c34; border: none; padding: 10px 20px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <h1>Decorator Example</h1>
+        <button id="myButton">Click Me</button>
+    </div>
+
+    <script>
+        function logMethod(target, propertyKey, descriptor) {
+            const originalMethod = descriptor.value;
+
+            descriptor.value = function (...args) {
+                console.log(\`Calling \${propertyKey} with arguments: \${args}\`);
+                const result = originalMethod.apply(this, args);
+                console.log(\`\${propertyKey} returned: \${result}\`);
+                return result;
+            };
+
+            return descriptor;
+        }
+
+        class MyClass {
+            @logMethod
+            myMethod(arg1, arg2) {
+                return arg1 + arg2;
+            }
+        }
+
+        const myInstance = new MyClass();
+        document.getElementById('myButton').addEventListener('click', () => {
+            myInstance.myMethod(5, 3);
+        });
+    <\/script>
+</body>
+</html>
+`
+  }}
+/>

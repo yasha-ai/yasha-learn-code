@@ -1,0 +1,431 @@
+---
+title: "53. Паттерны Redux с TypeScript"
+sidebar:
+  order: 53
+---
+import { Playground } from '@components/Playground'
+
+
+## TypeScript: Паттерны Redux для Строгой Типизации
+
+Привет, кодеры! Сегодня мы погрузимся в одну из самых мощных комбинаций в мире фронтенда — Redux, усиленный строгой типизацией TypeScript. Представьте, что Redux — это хорошо организованный склад, где каждое действие — это команда, а состояние — это инвентарь. TypeScript же — это ваш супер-инспектор по качеству, который следит за тем, чтобы каждая команда была понятна, а каждый предмет инвентаря лежал на своём месте и был того типа, который вы ожидаете.
+
+Зачем нам TypeScript с Redux? Всё просто: для предотвращения ошибок, улучшения читаемости кода, облегчения рефакторинга и, конечно, для полного счастья вашего автодополнения в IDE! Мы рассмотрим, как правильно типизировать действия, редюсеры, асинхронные операции с Redux Thunk и как организовать ваш код с помощью паттерна "Ducks".
+
+### 🦆 Redux Ducks Паттерн и Базовая Типизация
+
+Паттерн "Ducks" предлагает помещать весь код, относящийся к одной фиче Redux (константы действий, редюсеры, создатели действий, и даже селекторы), в один файл. Это делает ваш код более модульным и легкодоступным.
+
+Давайте начнем с создания простого модуля для управления пользователями.
+
+```typescript
+// users.ts
+import { AnyAction } from 'redux'; // Используем AnyAction для базовых примеров
+
+// 1. Определение типов действий
+export const ADD_USER = 'users/ADD_USER';
+export const REMOVE_USER = 'users/REMOVE_USER';
+export const UPDATE_USER = 'users/UPDATE_USER';
+
+// 2. Типы для состояния (State)
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+export interface UsersState {
+  list: User[];
+  isLoading: boolean;
+  error: string | null;
+}
+
+const initialState: UsersState = {
+  list: [],
+  isLoading: false,
+  error: null,
+};
+
+// 3. Определение типов для каждого действия
+// Важно использовать `as const` для строковых литералов, чтобы TS мог вывести точный тип.
+interface AddUserAction {
+  type: typeof ADD_USER;
+  payload: User;
+}
+
+interface RemoveUserAction {
+  type: typeof REMOVE_USER;
+  payload: { id: string };
+}
+
+interface UpdateUserAction {
+  type: typeof UPDATE_USER;
+  payload: User;
+}
+
+// Объединяем все возможные действия в один Union Type
+export type UsersActionTypes = AddUserAction | RemoveUserAction | UpdateUserAction;
+
+// 4. Создатели действий (Action Creators)
+export const addUser = (user: User): AddUserAction => ({
+  type: ADD_USER,
+  payload: user,
+});
+
+export const removeUser = (id: string): RemoveUserAction => ({
+  type: REMOVE_USER,
+  payload: { id },
+});
+
+export const updateUser = (user: User): UpdateUserAction => ({
+  type: UPDATE_USER,
+  payload: user,
+});
+
+// 5. Редюсер
+// Редюсер принимает состояние и действие, возвращает новое состояние.
+// Здесь TypeScript "сужает" тип действия внутри `switch` благодаря discriminated union.
+export const usersReducer = (
+  state: UsersState = initialState,
+  action: UsersActionTypes // Теперь action имеет строгий тип
+): UsersState => {
+  switch (action.type) {
+    case ADD_USER:
+      return { ...state, list: [...state.list, action.payload] };
+    case REMOVE_USER:
+      return { ...state, list: state.list.filter((user) => user.id !== action.payload.id) };
+    case UPDATE_USER:
+      return {
+        ...state,
+        list: state.list.map((user) => (user.id === action.payload.id ? action.payload : user)),
+      };
+    default:
+      // В Redux типично возвращать текущее состояние для неизвестных действий
+      // Если используем AnyAction, то `action` будет иметь тип `never` здесь,
+      // что является хорошим сигналом для проверки всех возможных типов.
+      return state;
+  }
+};
+```
+
+**Ключевые моменты:**
+*   **`as const` для `type`**: Это гарантирует, что TypeScript понимает `ADD_USER` как строковый литерал `'users/ADD_USER'`, а не просто `string`. Это критически важно для строгой типизации действий и discriminated unions.
+*   **Discriminated Unions**: `UsersActionTypes` — это объединение всех возможных типов действий. TypeScript использует свойство `type` (которое является уникальным для каждого типа действия) для сужения типа внутри `switch` оператора. Это позволяет вам безопасно получать доступ к `action.payload` без приведения типов.
+
+### 🚀 Асинхронные Действия с Redux Thunk
+
+Когда дело доходит до асинхронных операций (например, запросов к API), на помощь приходит Redux Thunk. TypeScript позволяет очень элегантно типизировать thunk'и.
+
+Для этого нам понадобятся типы для `RootState` (общее состояние приложения) и `AppDispatch` (типизированная функция `dispatch`).
+
+```typescript
+// store.ts (Файл для настройки вашего Redux-хранилища)
+import { createStore, combineReducers, applyMiddleware } from 'redux';
+import { thunk, ThunkAction, ThunkDispatch } from 'redux-thunk'; // Импортируем типы из redux-thunk
+import { usersReducer, UsersActionTypes } from './users'; // Импортируем наш редюсер и типы действий
+
+// Корневой редюсер, объединяющий все наши редюсеры
+const rootReducer = combineReducers({
+  users: usersReducer,
+  // ... другие редюсеры
+});
+
+// 1. Типизируем RootState: тип всего хранилища
+export type RootState = ReturnType<typeof rootReducer>;
+
+// 2. Типизируем Dispatch:
+// ThunkDispatch - это типизированная версия dispatch, которая может принимать не только Action, но и Thunk
+export type AppDispatch = ThunkDispatch<RootState, unknown, UsersActionTypes>; // В третьем параметре перечисляем все возможные действия
+
+// Создаем хранилище
+export const store = createStore(rootReducer, applyMiddleware(thunk));
+
+// Тип для наших Thunk'ов.
+// Параметры:
+// R - тип возвращаемого значения Thunk
+// S - тип состояния (RootState)
+// E - тип ExtraArgument (если используется с Thunk. В данном случае unknown)
+// A - тип действия (UsersActionTypes или AnyAction, если у вас много редюсеров)
+export type AppThunk<ReturnType = void> = ThunkAction<
+  ReturnType,
+  RootState,
+  unknown,
+  UsersActionTypes // Здесь можно использовать AnyAction для всех модулей
+>;
+```
+
+Теперь, используя эти типы, мы можем создать типизированный thunk в нашем `users.ts` файле.
+
+```typescript
+// users.ts (добавляем к существующему файлу)
+import { AppThunk, AppDispatch } from './store'; // Импортируем AppThunk и AppDispatch
+
+// Дополнительные типы действий для асинхронных операций
+export const FETCH_USERS_START = 'users/FETCH_USERS_START';
+export const FETCH_USERS_SUCCESS = 'users/FETCH_USERS_SUCCESS';
+export const FETCH_USERS_FAILURE = 'users/FETCH_USERS_FAILURE';
+
+interface FetchUsersStartAction {
+  type: typeof FETCH_USERS_START;
+}
+
+interface FetchUsersSuccessAction {
+  type: typeof FETCH_USERS_SUCCESS;
+  payload: User[];
+}
+
+interface FetchUsersFailureAction {
+  type: typeof FETCH_USERS_FAILURE;
+  payload: string; // Сообщение об ошибке
+}
+
+// Расширяем наш Union Type действий
+export type UsersActionTypes =
+  | AddUserAction
+  | RemoveUserAction
+  | UpdateUserAction
+  | FetchUsersStartAction
+  | FetchUsersSuccessAction
+  | FetchUsersFailureAction;
+
+// Расширяем редюсер для обработки новых асинхронных действий
+export const usersReducer = (
+  state: UsersState = initialState,
+  action: UsersActionTypes
+): UsersState => {
+  switch (action.type) {
+    // ... существующие кейсы
+    case FETCH_USERS_START:
+      return { ...state, isLoading: true, error: null };
+    case FETCH_USERS_SUCCESS:
+      return { ...state, isLoading: false, list: action.payload };
+    case FETCH_USERS_FAILURE:
+      return { ...state, isLoading: false, error: action.payload };
+    default:
+      return state;
+  }
+};
+
+// Типизированный thunk для загрузки пользователей
+export const fetchUsers = (): AppThunk<Promise<void>> => {
+  // Thunk получает dispatch и getState, которые уже правильно типизированы!
+  return async (dispatch, getState) => {
+    dispatch({ type: FETCH_USERS_START });
+    try {
+      // Имитация задержки сети и получения данных
+      const response = await new Promise<User[]>((resolve) =>
+        setTimeout(() => {
+          const users: User[] = [
+            { id: '1', name: 'Alice', email: 'alice@example.com' },
+            { id: '2', name: 'Bob', email: 'bob@example.com' },
+          ];
+          resolve(users);
+        }, 1000)
+      );
+      dispatch({ type: FETCH_USERS_SUCCESS, payload: response });
+    } catch (error: any) {
+      dispatch({ type: FETCH_USERS_FAILURE, payload: error.message || 'Failed to fetch users' });
+    }
+  };
+};
+
+// Пример использования (в компоненте или другом месте)
+// import { store } from './store';
+// store.dispatch(fetchUsers());
+// store.dispatch(addUser({ id: '3', name: 'Charlie', email: 'charlie@example.com' }));
+```
+
+**Ключевые моменты:**
+*   **`AppThunk`**: Определяет универсальный тип для всех thunk'ов, используя `ThunkAction` из `redux-thunk`. Это дает вам типизацию для `dispatch` и `getState` внутри thunk'а.
+*   **`AppDispatch`**: Этот тип необходим, если вы хотите вызывать thunk'и через `dispatch` в вашем коде (например, в компонентах React с `useDispatch`). Он сообщает TypeScript, что `dispatch` может принимать не только обычные объекты действий, но и thunk'и.
+
+### 🔍 Типизация Селекторов
+
+Селекторы — это функции, которые извлекают части состояния из хранилища. TypeScript делает их невероятно безопасными.
+
+```typescript
+// users.ts (добавляем к существующему файлу)
+import { RootState } from './store'; // Импортируем RootState
+
+// Базовый селектор: получаем весь пользовательский модуль состояния
+export const selectUsersState = (state: RootState) => state.users;
+
+// Селектор: получаем список пользователей
+export const selectAllUsers = (state: RootState) => selectUsersState(state).list;
+
+// Селектор: получаем состояние загрузки
+export const selectIsLoading = (state: RootState) => selectUsersState(state).isLoading;
+
+// Селектор: получаем пользователя по ID (пример с параметром)
+export const selectUserById = (state: RootState, id: string) =>
+  selectUsersState(state).list.find((user) => user.id === id);
+
+// Пример использования
+// import { store } from './store';
+// import { selectAllUsers, selectUserById } from './users';
+// const users = selectAllUsers(store.getState()); // users будет типа User[]
+// const user = selectUserById(store.getState(), '1'); // user будет типа User | undefined
+```
+
+**Ключевые моменты:**
+*   **`RootState`**: Используя `RootState` в качестве параметра селектора, вы получаете полную типизацию состояния, и TypeScript поможет вам при навигации по объекту состояния.
+
+### ❌ Типичные Ошибки и Решения
+
+1.  **Забыли `as const`**:
+    *   Ошибка: `type: 'users/ADD_USER'` вместо `type: typeof ADD_USER`.
+    *   Проблема: TypeScript будет считать `type` просто `string`, а не строковым литералом. Это сломает discriminated unions и сужение типов в редюсере.
+    *   Решение: Всегда используйте `as const` для констант типов действий:
+        ```typescript
+        export const ADD_USER = 'users/ADD_USER' as const; // Правильно
+        ```
+
+2.  **Неправильная типизация `dispatch` для Thunk'ов**:
+    *   Ошибка: Использование `Dispatch<AnyAction>` вместо `AppDispatch` в компонентах или хуках.
+    *   Проблема: TypeScript не знает, что `dispatch` может принимать функции (thunk'и), и вы получите ошибку, когда попытаетесь вызвать `dispatch(someThunk())`.
+    *   Решение: Определите `AppDispatch` как `ThunkDispatch<RootState, unknown, AnyAction>` или более строго, как мы сделали, и используйте его:
+        ```typescript
+        // В хуке React
+        // const dispatch: AppDispatch = useDispatch();
+        // dispatch(fetchUsers()); // Теперь работает!
+        ```
+
+3.  **Чрезмерно широкий тип действий в редюсере**:
+    *   Ошибка: `reducer(state: State, action: AnyAction): State`
+    *   Проблема: Вы теряете всю пользу от discriminated unions. TypeScript не сможет сузить тип `action.payload` внутри `switch`, и вам придется делать приведения типов (`(action as AddUserAction).payload`).
+    *   Решение: Всегда используйте ваш объединенный тип действий (например, `UsersActionTypes`) для конкретного редюсера.
+
+### 🎯 Практика
+
+Ваше задание, мой юный падаван Redux-мастер!
+
+1.  **Создайте новый "Ducks" модуль для управления задачами (Todos)**:
+    *   Определите интерфейс `Todo` (id, title, completed).
+    *   Определите `TodosState` (список задач, флаги загрузки/ошибки).
+    *   Создайте типы действий для: `ADD_TODO`, `TOGGLE_TODO`, `DELETE_TODO`. Используйте `as const`.
+    *   Создайте соответствующие интерфейсы для этих действий и объедините их в `TodosActionTypes`.
+    *   Напишите создателей действий (action creators).
+    *   Напишите `todosReducer`.
+
+2.  **Добавьте асинхронное действие в модуль Todos**:
+    *   Создайте thunk `fetchTodos`, который имитирует загрузку списка задач с сервера.
+    *   Добавьте соответствующие типы действий (`FETCH_TODOS_START`, `FETCH_TODOS_SUCCESS`, `FETCH_TODOS_FAILURE`) и обновите `TodosActionTypes` и `todosReducer`.
+    *   Убедитесь, что ваш thunk правильно использует типизированные `dispatch` и `getState`.
+
+3.  **Создайте селекторы для модуля Todos**:
+    *   `selectAllTodos`: возвращает весь список задач.
+    *   `selectCompletedTodos`: возвращает только выполненные задачи.
+    *   `selectTodoById(id: string)`: возвращает задачу по её ID.
+
+4.  **Интегрируйте в Root State**:
+    *   Обновите `rootReducer` в `store.ts`, добавив ваш `todosReducer`.
+    *   Обновите `RootState` и `AppThunk`, чтобы они включали новые типы действий и состояния.
+
+### 💡 Совет
+
+Использование Redux Toolkit (RTK) — это современный и рекомендуемый способ работы с Redux. RTK значительно упрощает создание редюсеров, действий и thunk'ов, автоматически генерируя многие boilerplate типы, которые мы создавали вручную. Например, `createSlice` из RTK сам выводит типы действий и редюсеров, а `createAsyncThunk` полностью типизирует асинхронные операции.
+
+Хотя важно понимать базовую типизацию Redux, как мы сейчас изучили, для новых проектов настоятельно рекомендую рассмотреть Redux Toolkit — он сделает вашу жизнь гораздо проще и ваш код еще безопаснее!
+
+
+
+## Интерактивный пример
+
+<Playground client:visible
+  template="vanilla-ts"
+  files={{
+    "/index.html": `<!DOCTYPE html>
+<html>
+<head>
+  <title>Redux + TS</title>
+  <style>
+    body { background-color: #282c34; color: white; font-family: sans-serif; }
+    button { background-color: #61dafb; border: none; padding: 8px 16px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Redux + TypeScript</h1>
+  <button id="addUser">Add User</button>
+  <ul id="userList"></ul>
+
+
+</body>
+</html>`,
+    "/users.ts": `import { AnyAction } from 'redux';
+
+// 1. Определение типов действий
+export const ADD_USER = 'users/ADD_USER';
+
+// 2. Типы для состояния (State)
+export interface User {
+  id: string;
+  name: string;
+}
+
+export interface UsersState {
+  list: User[];
+}
+
+const initialState: UsersState = {
+  list: [],
+};
+
+// 3. Определение типов для каждого действия
+interface AddUserAction {
+  type: typeof ADD_USER;
+  payload: User;
+}
+
+type UsersActions = AddUserAction;
+
+// 4. Reducer
+export function usersReducer(
+  state: UsersState = initialState,
+  action: UsersActions
+): UsersState {
+  switch (action.type) {
+    case ADD_USER:
+      return { ...state, list: [...state.list, action.payload] };
+    default:
+      return state;
+  }
+}
+
+// 5. Action Creator
+export const addUser = (user: User): AddUserAction => ({
+  type: ADD_USER,
+  payload: user,
+});`,
+    "/package.json": `{
+  "dependencies": {
+    "redux": "latest"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}`,
+    "/index.ts": `
+import { usersReducer, addUser } from './users';
+import type { User, UsersState } from './users';
+
+let state: UsersState = { list: [] };
+
+const userList = document.getElementById('userList') as HTMLUListElement;
+const addBtn = document.getElementById('addUser') as HTMLButtonElement;
+
+function render() {
+  userList.innerHTML = state.list
+    .map(user => \`<li>\${user.name}</li>\`)
+    .join('');
+}
+
+addBtn.addEventListener('click', () => {
+  const newUser: User = { id: Date.now().toString(), name: \`User \${state.list.length + 1}\` };
+  state = usersReducer(state, addUser(newUser));
+  render();
+});
+
+render();
+`
+  }}
+/>

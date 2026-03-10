@@ -1,0 +1,822 @@
+---
+title: "27. SvelteKit: Деплой"
+sidebar:
+  order: 27
+---
+import { Playground } from '@components/Playground'
+
+
+## 🚀 SvelteKit Деплой: От Localhost до Продакшна
+
+Привет! 👋 Написать приложение — это полдела. Нужно ещё его задеплоить! SvelteKit с его системой адаптеров делает это удивительно гибким. Один и тот же код можно задеплоить на Vercel, Netlify, Cloudflare Workers, обычный VPS или даже как статический сайт. Выбирай что хочешь!
+
+---
+
+## 🔌 Адаптеры: ключевая концепция
+
+Адаптер — это пакет npm, который трансформирует собранное SvelteKit приложение в формат, понятный конкретной платформе.
+
+```
+npm run build
+     ↓
+[SvelteKit компиляция]
+     ↓
+[Адаптер обрабатывает вывод]
+     ↓
+Готовый артефакт для платформы
+```
+
+---
+
+## 🤖 adapter-auto: умный выбор
+
+`adapter-auto` — это дефолтный адаптер при создании проекта. Он автоматически определяет платформу по переменным окружения:
+
+```javascript
+// svelte.config.js с adapter-auto
+import adapter from '@sveltejs/adapter-auto';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+
+/** @type {import('@sveltejs/kit').Config} */
+const config = {
+  preprocess: vitePreprocess(),
+  kit: {
+    adapter: adapter(),
+  },
+};
+
+export default config;
+```
+
+**Что он делает:**
+- `VERCEL` env → использует adapter-vercel
+- `NETLIFY` env → использует adapter-netlify
+- `CF_PAGES` env → использует adapter-cloudflare-pages
+- Ничего нет → падает с ошибкой (нужен явный адаптер)
+
+---
+
+## 🟢 adapter-node: деплой на VPS/Docker
+
+```bash
+npm install -D @sveltejs/adapter-node
+```
+
+```javascript
+// svelte.config.js
+import adapter from '@sveltejs/adapter-node';
+
+const config = {
+  kit: {
+    adapter: adapter({
+      out: 'build',           // Папка вывода
+      precompress: false,     // Предсжатие gzip/brotli
+      envPrefix: '',          // Префикс для env переменных
+    }),
+  },
+};
+```
+
+**Dockerfile для Node.js:**
+
+```dockerfile
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+# Production образ (минимальный):
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+# Только нужные файлы:
+COPY --from=builder /app/build ./build
+COPY --from=builder /app/package*.json ./
+
+# Устанавливаем только prod зависимости:
+RUN npm ci --only=production
+
+# Открываем порт:
+EXPOSE 3000
+
+# Запускаем:
+CMD ["node", "build/index.js"]
+```
+
+**docker-compose.yml:**
+
+```yaml
+version: '3.8'
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - ORIGIN=https://myapp.com
+      - DATABASE_URL=postgresql://db:5432/myapp
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: myapp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+```
+
+**PM2 для управления процессом:**
+
+```bash
+# Глобальная установка PM2:
+npm install -g pm2
+
+# ecosystem.config.js:
+module.exports = {
+  apps: [{
+    name: 'sveltekit-app',
+    script: './build/index.js',
+    instances: 'max',      // По одному на каждое ядро CPU
+    exec_mode: 'cluster',  // Режим кластера
+    env_production: {
+      NODE_ENV: 'production',
+      PORT: 3000,
+      ORIGIN: 'https://myapp.com',
+    },
+  }],
+};
+
+# Запуск:
+pm2 start ecosystem.config.js --env production
+
+# Автостарт после перезагрузки:
+pm2 startup
+pm2 save
+```
+
+---
+
+## ▲ adapter-vercel: нулевая конфигурация
+
+```bash
+npm install -D @sveltejs/adapter-vercel
+```
+
+```javascript
+// svelte.config.js
+import adapter from '@sveltejs/adapter-vercel';
+
+const config = {
+  kit: {
+    adapter: adapter({
+      runtime: 'nodejs20.x',  // Node.js версия
+      regions: ['fra1'],       // Регион (Frankfurt)
+      // Edge Functions вместо Node.js:
+      // runtime: 'edge',
+    }),
+  },
+};
+```
+
+**Per-route конфигурация на Vercel:**
+
+```typescript
+// src/routes/api/fast/+server.ts — Edge Function
+export const config = {
+  runtime: 'edge',          // Этот route на Edge
+  regions: ['iad1', 'fra1'], // Регионы
+};
+
+// src/routes/heavy/+page.server.ts — обычный serverless
+export const config = {
+  runtime: 'nodejs20.x',
+  maxDuration: 60, // Максимум 60 секунд
+};
+```
+
+**ISR (Incremental Static Regeneration) на Vercel:**
+
+```typescript
+// src/routes/blog/+page.server.ts
+export const config = {
+  isr: {
+    expiration: 60, // Ревалидировать через 60 секунд
+    // bypassToken: process.env.BYPASS_TOKEN, // Для on-demand ISR
+  },
+};
+```
+
+---
+
+## 🌊 adapter-netlify
+
+```bash
+npm install -D @sveltejs/adapter-netlify
+```
+
+```javascript
+// svelte.config.js
+import adapter from '@sveltejs/adapter-netlify';
+
+const config = {
+  kit: {
+    adapter: adapter({
+      edge: false,         // Использовать Netlify Functions (не Edge)
+      split: false,        // Один бандл для всех функций
+    }),
+  },
+};
+```
+
+**netlify.toml:**
+
+```toml
+[build]
+  command = "npm run build"
+  publish = "build"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# Редиректы:
+[[redirects]]
+  from = "/old-path"
+  to = "/new-path"
+  status = 301
+
+# Заголовки безопасности:
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+```
+
+---
+
+## 🔶 adapter-cloudflare: Workers и Pages
+
+```bash
+npm install -D @sveltejs/adapter-cloudflare
+```
+
+```javascript
+// svelte.config.js для Cloudflare
+import adapter from '@sveltejs/adapter-cloudflare';
+
+const config = {
+  kit: {
+    adapter: adapter({
+      routes: {
+        include: ['/*'],
+        exclude: ['<all>'], // Статические файлы напрямую
+      },
+    }),
+  },
+};
+```
+
+**Доступ к Cloudflare Workers API:**
+
+```typescript
+// src/app.d.ts — типы для Cloudflare platform
+declare global {
+  namespace App {
+    interface Platform {
+      env: {
+        // KV Storage:
+        CACHE: KVNamespace;
+        // D1 Database:
+        DB: D1Database;
+        // R2 Storage:
+        ASSETS: R2Bucket;
+        // Дополнительные Workers Services:
+        AI: Ai;
+      };
+      context: ExecutionContext;
+      caches: CacheStorage & { default: Cache };
+    }
+  }
+}
+```
+
+```typescript
+// src/routes/api/cached/+server.ts — использование KV Cache
+import type { RequestHandler } from './$types';
+import { json } from '@sveltejs/kit';
+
+export const GET: RequestHandler = async ({ platform, params }) => {
+  const { env } = platform!;
+  const cacheKey = `product:${params.id}`;
+
+  // Проверяем KV кэш:
+  const cached = await env.CACHE.get(cacheKey);
+  if (cached) return json(JSON.parse(cached));
+
+  // Запрашиваем из D1:
+  const result = await env.DB
+    .prepare('SELECT * FROM products WHERE id = ?')
+    .bind(params.id)
+    .first();
+
+  // Сохраняем в KV на 5 минут:
+  await env.CACHE.put(cacheKey, JSON.stringify(result), {
+    expirationTtl: 300,
+  });
+
+  return json(result);
+};
+```
+
+**wrangler.toml для конфигурации:**
+
+```toml
+name = "my-sveltekit-app"
+main = "./build/index.js"
+compatibility_date = "2024-01-01"
+pages_build_output_dir = ".svelte-kit/cloudflare"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "xxxxxxxxxx"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "my-database"
+database_id = "xxxxxxxxxx"
+```
+
+---
+
+## 📄 adapter-static: чистый SSG
+
+```bash
+npm install -D @sveltejs/adapter-static
+```
+
+```javascript
+// svelte.config.js
+import adapter from '@sveltejs/adapter-static';
+
+const config = {
+  kit: {
+    adapter: adapter({
+      pages: 'build',        // Куда кладём HTML
+      assets: 'build',       // Куда кладём статику
+      fallback: '404.html',  // SPA fallback (или 'index.html' для SPA)
+      precompress: true,     // Gzip + Brotli предсжатие
+      strict: true,          // Ошибка если страница не предрендерена
+    }),
+    prerender: {
+      entries: ['*'],  // Предрендеривать все страницы
+    },
+  },
+};
+```
+
+**Настройка предрендеринга:**
+
+```typescript
+// src/routes/blog/[slug]/+page.ts
+import type { EntryGenerator, PageLoad } from './$types';
+
+// Генерируем список всех слагов для предрендеринга:
+export const entries: EntryGenerator = async () => {
+  const posts = await getAllPosts();
+  return posts.map((post) => ({ slug: post.slug }));
+};
+
+export const prerender = true;
+
+export const load: PageLoad = async ({ params }) => {
+  const post = await getPost(params.slug);
+  return { post };
+};
+```
+
+```typescript
+// Отключить предрендеринг для динамических страниц:
+// src/routes/dashboard/+page.ts
+export const prerender = false;
+export const ssr = false; // SPA режим для динамических страниц
+```
+
+---
+
+## 🌍 Переменные окружения: полный гайд
+
+```
+Модуль                    Тип         Доступен где
+──────────────────────────────────────────────────────────────────
+$env/static/public        Билд-тайм   Сервер + Клиент (PUBLIC_ prefix)
+$env/static/private       Билд-тайм   Только сервер
+$env/dynamic/public       Runtime     Сервер + Клиент (PUBLIC_ prefix)
+$env/dynamic/private      Runtime     Только сервер
+```
+
+```typescript
+// Примеры использования:
+import { PUBLIC_API_URL, PUBLIC_STRIPE_KEY } from '$env/static/public';
+import { DATABASE_URL, SECRET_KEY, STRIPE_SECRET } from '$env/static/private';
+import { env as dynamicPrivate } from '$env/dynamic/private';
+
+// static — вшивается в бандл при сборке (оптимальнее):
+const apiUrl = PUBLIC_API_URL; // 'https://api.myapp.com'
+
+// dynamic — читается при каждом запросе (нужно для runtime конфигурации):
+const dbUrl = dynamicPrivate.DATABASE_URL;
+
+// ⚠️ Нельзя использовать $env/static/private в +page.svelte или +page.ts!
+// Только в +page.server.ts, +layout.server.ts, +server.ts, hooks.server.ts
+```
+
+**Типизация переменных окружения:**
+
+```typescript
+// src/app.d.ts
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      DATABASE_URL: string;
+      SECRET_KEY: string;
+      PUBLIC_API_URL: string;
+    }
+  }
+}
+```
+
+---
+
+## ⚙️ ORIGIN: критически важная переменная
+
+```bash
+# Обязательно для Node.js деплоя!
+# ORIGIN указывает откуда приходят запросы — нужен для CSRF защиты
+
+# В production:
+ORIGIN=https://myapp.com
+
+# При деплое через Docker/PM2 обязательно задать:
+PORT=3000
+ORIGIN=https://myapp.com
+```
+
+```typescript
+// Если ORIGIN не задан — SvelteKit падает с ошибкой для Form Actions
+// Это защищает от CSRF атак
+```
+
+---
+
+## 📊 Предрендеринг: конфигурация
+
+```typescript
+// svelte.config.js — глобальные настройки предрендеринга
+const config = {
+  kit: {
+    prerender: {
+      // Что делать при HTTP ошибках во время предрендеринга:
+      handleHttpError: ({ path, referrer, message }) => {
+        if (path.includes('/api/')) return; // Игнорируем ошибки API
+        throw new Error(message);
+      },
+
+      // Что делать при отсутствии якоря в ссылке:
+      handleMissingId: 'warn', // 'ignore' | 'warn' | 'error'
+
+      // Точки входа для предрендеринга:
+      entries: ['*'], // Все страницы
+      // или ['/', '/about', '/contact']
+
+      // Параллельность предрендеринга:
+      concurrency: 4,
+
+      // Предотвратить краулинг:
+      crawl: true,
+    },
+  },
+};
+```
+
+---
+
+## 🔧 Полный CI/CD пайплайн
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci
+      - run: npm run check     # TypeScript проверка
+      - run: npm run test      # Тесты
+      - run: npm run lint      # Линтер
+
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - run: npm ci
+      - run: npm run build
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PUBLIC_API_URL: ${{ vars.PUBLIC_API_URL }}
+
+      - name: Deploy to Server
+        run: |
+          rsync -avz --delete ./build user@server:/app/build
+          ssh user@server "pm2 reload sveltekit-app"
+```
+
+---
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const SVELTE_ORANGE = "#ff3e00";
+const SVELTE_YELLOW = "#ffba00";
+const BG = "#0f172a";
+const BG2 = "#1e293b";
+const BG3 = "#334155";
+
+type Tab = "adapters" | "env" | "docker" | "checklist";
+
+const tabs = [
+  { id: "adapters" as Tab, label: "Адаптеры", emoji: "🔌" },
+  { id: "env" as Tab, label: "Env Vars", emoji: "🌍" },
+  { id: "docker" as Tab, label: "Docker", emoji: "🐳" },
+  { id: "checklist" as Tab, label: "Чеклист", emoji: "✅" },
+];
+
+const adapters = [
+  { name: "adapter-auto", icon: "🤖", platforms: ["Vercel", "Netlify", "CF Pages"], pros: ["Авто-детект", "Нулевая конфиг"], cons: ["Нет явного контроля"], color: "#818cf8" },
+  { name: "adapter-node", icon: "🟢", platforms: ["VPS", "Docker", "PM2"], pros: ["Полный контроль", "Любой сервер"], cons: ["Нужна настройка инфра"], color: "#34d399" },
+  { name: "adapter-vercel", icon: "▲", platforms: ["Vercel"], pros: ["ISR", "Edge Functions", "Zero-config"], cons: ["Привязка к Vercel"], color: "#e2e8f0" },
+  { name: "adapter-cloudflare", icon: "🔶", platforms: ["CF Workers", "CF Pages"], pros: ["Глобал. сеть", "D1 + KV + R2"], cons: ["CF специфичный API"], color: "#fb923c" },
+  { name: "adapter-static", icon: "📄", platforms: ["GitHub Pages", "S3", "CDN"], pros: ["Нет сервера", "Максим. скорость"], cons: ["Нет SSR", "Нет API routes"], color: SVELTE_YELLOW },
+];
+
+function AdaptersDemo() {
+  const [selected, setSelected] = useState(adapters[0]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "12px" }}>
+        {adapters.map((a) => (
+          <button key={a.name} onClick={() => setSelected(a)} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px", border: \`1px solid \${selected.name === a.name ? a.color : "#334155"}\`, borderRadius: "8px", background: selected.name === a.name ? \`\${a.color}15\` : BG3, cursor: "pointer", textAlign: "left", transition: "all 0.15s" }}>
+            <span style={{ fontSize: "18px" }}>{a.icon}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: "12px", color: a.color, fontFamily: "monospace", fontWeight: "bold" }}>{a.name}</div>
+              <div style={{ fontSize: "10px", color: "#64748b" }}>{a.platforms.join(", ")}</div>
+            </div>
+            {selected.name === a.name && <span style={{ color: SVELTE_ORANGE }}>◀</span>}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ background: BG, borderRadius: "8px", padding: "12px", border: \`1px solid \${selected.color}33\` }}>
+        <div style={{ fontSize: "20px", marginBottom: "8px" }}>{selected.icon}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+          <div>
+            <div style={{ fontSize: "11px", color: "#34d399", marginBottom: "4px" }}>✅ Плюсы</div>
+            {selected.pros.map((pro, i) => (
+              <div key={i} style={{ fontSize: "11px", color: "#e2e8f0", padding: "2px 0" }}>+ {pro}</div>
+            ))}
+          </div>
+          <div>
+            <div style={{ fontSize: "11px", color: "#f87171", marginBottom: "4px" }}>❌ Минусы</div>
+            {selected.cons.map((con, i) => (
+              <div key={i} style={{ fontSize: "11px", color: "#e2e8f0", padding: "2px 0" }}>− {con}</div>
+            ))}
+          </div>
+        </div>
+        <div style={{ marginTop: "10px", background: BG3, borderRadius: "6px", padding: "8px" }}>
+          <div style={{ fontSize: "10px", color: "#64748b", fontFamily: "monospace", marginBottom: "4px" }}>svelte.config.js</div>
+          <code style={{ fontSize: "11px", color: SVELTE_YELLOW, fontFamily: "monospace" }}>
+            import adapter from '@sveltejs/{selected.name}';
+          </code>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const envModules = [
+  { module: "$env/static/public", timing: "build", scope: "both", prefix: "PUBLIC_", example: "PUBLIC_API_URL", desc: "Вшивается в бандл. Для клиентских конфигов." },
+  { module: "$env/static/private", timing: "build", scope: "server", prefix: "любой", example: "DATABASE_URL", desc: "Вшивается в сервер-бандл. Секреты, API ключи." },
+  { module: "$env/dynamic/public", timing: "runtime", scope: "both", prefix: "PUBLIC_", example: "PUBLIC_FEATURE_FLAG", desc: "Runtime значения. Для feature flags." },
+  { module: "$env/dynamic/private", timing: "runtime", scope: "server", prefix: "любой", example: "RUNTIME_SECRET", desc: "Runtime секреты. Для платформ без rebuild." },
+];
+
+function EnvDemo() {
+  const [selected, setSelected] = useState(envModules[0]);
+  const [showSecret, setShowSecret] = useState(false);
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "5px", marginBottom: "12px" }}>
+        {envModules.map((e) => (
+          <button key={e.module} onClick={() => setSelected(e)} style={{ padding: "8px 10px", border: \`1px solid \${selected.module === e.module ? SVELTE_ORANGE : "#334155"}\`, borderRadius: "6px", background: selected.module === e.module ? \`\${SVELTE_ORANGE}15\` : BG3, cursor: "pointer", textAlign: "left", transition: "all 0.15s" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "14px" }}>{e.scope === "both" ? "🌐" : "🔒"}</span>
+              <span style={{ fontSize: "11px", color: selected.module === e.module ? SVELTE_ORANGE : "#94a3b8", fontFamily: "monospace" }}>{e.module}</span>
+              <span style={{ marginLeft: "auto", fontSize: "10px", color: e.timing === "build" ? "#818cf8" : "#34d399", background: e.timing === "build" ? "#818cf822" : "#34d39922", padding: "2px 5px", borderRadius: "4px" }}>{e.timing}</span>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ background: BG, borderRadius: "8px", padding: "12px", border: \`1px solid \${SVELTE_ORANGE}33\` }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "10px" }}>
+          <div style={{ background: BG3, borderRadius: "6px", padding: "8px" }}>
+            <div style={{ fontSize: "10px", color: "#64748b" }}>Доступен</div>
+            <div style={{ fontSize: "12px", color: selected.scope === "both" ? "#34d399" : "#f87171" }}>
+              {selected.scope === "both" ? "🌐 Сервер + Клиент" : "🔒 Только сервер"}
+            </div>
+          </div>
+          <div style={{ background: BG3, borderRadius: "6px", padding: "8px" }}>
+            <div style={{ fontSize: "10px", color: "#64748b" }}>Загружается</div>
+            <div style={{ fontSize: "12px", color: selected.timing === "build" ? "#818cf8" : "#34d399" }}>
+              {selected.timing === "build" ? "⚙️ При сборке" : "🔄 Runtime"}
+            </div>
+          </div>
+        </div>
+        <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "8px" }}>{selected.desc}</div>
+        <div style={{ background: BG3, borderRadius: "6px", padding: "8px", fontFamily: "monospace" }}>
+          <div style={{ fontSize: "10px", color: "#64748b", marginBottom: "4px" }}>Пример:</div>
+          <div style={{ fontSize: "11px", color: SVELTE_YELLOW }}>
+            import {"{ "}{selected.example}{"} "} from '{selected.module}';
+          </div>
+        </div>
+        <div style={{ marginTop: "8px", fontSize: "11px", color: "#64748b" }}>
+          Префикс: <span style={{ color: SVELTE_ORANGE }}>{selected.prefix}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DockerDemo() {
+  const [buildStep, setBuildStep] = useState(0);
+
+  const steps = [
+    { cmd: "npm ci", desc: "Устанавливаем зависимости", time: 1200 },
+    { cmd: "npm run build", desc: "Собираем SvelteKit", time: 2000 },
+    { cmd: "npm ci --only=production", desc: "Только prod-зависимости", time: 800 },
+    { cmd: "COPY ./build", desc: "Копируем артефакт", time: 200 },
+    { cmd: "EXPOSE 3000", desc: "Открываем порт", time: 100 },
+    { cmd: "node build/index.js", desc: "Запускаем сервер!", time: 300 },
+  ];
+
+  const [running, setRunning] = useState(false);
+
+  const runBuild = async () => {
+    setRunning(true);
+    setBuildStep(0);
+    for (let i = 0; i < steps.length; i++) {
+      await new Promise((r) => setTimeout(r, steps[i].time / 3));
+      setBuildStep(i + 1);
+    }
+    setRunning(false);
+  };
+
+  return (
+    <div>
+      <button onClick={runBuild} disabled={running} style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "10px", cursor: running ? "not-allowed" : "pointer", fontSize: "13px", marginBottom: "12px" }}>
+        {running ? "🐳 Строим образ..." : "▶ Симулировать Docker build"}
+      </button>
+
+      {steps.map((step, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px", background: i < buildStep ? "#34d39911" : i === buildStep && running ? \`\${SVELTE_YELLOW}11\` : BG3, borderRadius: "6px", marginBottom: "4px", border: \`1px solid \${i < buildStep ? "#34d39933" : i === buildStep && running ? \`\${SVELTE_YELLOW}44\` : "#334155"}\`, transition: "all 0.3s" }}>
+          <span style={{ fontSize: "14px", minWidth: "20px" }}>
+            {i < buildStep ? "✅" : i === buildStep && running ? "⏳" : "○"}
+          </span>
+          <div>
+            <div style={{ fontSize: "12px", color: i < buildStep ? "#34d399" : i === buildStep && running ? SVELTE_YELLOW : "#94a3b8", fontFamily: "monospace" }}>
+              {step.cmd}
+            </div>
+            <div style={{ fontSize: "10px", color: "#64748b" }}>{step.desc}</div>
+          </div>
+        </div>
+      ))}
+
+      {buildStep === steps.length && !running && (
+        <div style={{ marginTop: "10px", background: "#34d39922", border: "1px solid #34d399", borderRadius: "8px", padding: "10px", textAlign: "center" }}>
+          <div style={{ color: "#34d399", fontWeight: "bold" }}>🎉 Образ готов!</div>
+          <div style={{ fontSize: "12px", color: "#64748b", fontFamily: "monospace", marginTop: "4px" }}>
+            docker run -p 3000:3000 -e ORIGIN=https://myapp.com my-app
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const checklistItems = [
+  { category: "Переменные", items: [{ text: "ORIGIN задан", critical: true }, { text: "DATABASE_URL задан", critical: true }, { text: "SECRET_KEY задан", critical: true }, { text: "PUBLIC_* переменные добавлены", critical: false }] },
+  { category: "Адаптер", items: [{ text: "Адаптер выбран и установлен", critical: true }, { text: "svelte.config.js обновлён", critical: true }, { text: "Build проходит без ошибок", critical: true }] },
+  { category: "Безопасность", items: [{ text: "HTTPS включён", critical: true }, { text: "Куки с Secure=true", critical: true }, { text: "CSP заголовки настроены", critical: false }, { text: "Rate limiting добавлен", critical: false }] },
+  { category: "Производительность", items: [{ text: "precompress включён", critical: false }, { text: "Статика кэшируется", critical: false }, { text: "DB connection pooling", critical: false }] },
+];
+
+function ChecklistDemo() {
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+
+  const toggle = (key: string) => setChecked((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  const total = checklistItems.flatMap((c) => c.items).length;
+  const criticalTotal = checklistItems.flatMap((c) => c.items.filter((i) => i.critical)).length;
+  const done = checklistItems.flatMap((c) => c.items.map((item, j) => \`\${c.category}-\${j}\`)).filter((k) => checked.has(k)).length;
+  const criticalDone = checklistItems.flatMap((c) => c.items.map((item, j) => ({ key: \`\${c.category}-\${j}\`, critical: item.critical }))).filter((i) => i.critical && checked.has(i.key)).length;
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+        <div style={{ flex: 1, background: \`\${SVELTE_ORANGE}22\`, border: \`1px solid \${SVELTE_ORANGE}44\`, borderRadius: "8px", padding: "8px", textAlign: "center" }}>
+          <div style={{ fontSize: "18px", fontWeight: "bold", color: SVELTE_ORANGE }}>{criticalDone}/{criticalTotal}</div>
+          <div style={{ fontSize: "10px", color: "#94a3b8" }}>Критичных</div>
+        </div>
+        <div style={{ flex: 1, background: "#34d39922", border: "1px solid #34d39933", borderRadius: "8px", padding: "8px", textAlign: "center" }}>
+          <div style={{ fontSize: "18px", fontWeight: "bold", color: "#34d399" }}>{done}/{total}</div>
+          <div style={{ fontSize: "10px", color: "#94a3b8" }}>Всего</div>
+        </div>
+      </div>
+
+      {checklistItems.map((cat) => (
+        <div key={cat.category} style={{ marginBottom: "10px" }}>
+          <div style={{ fontSize: "11px", color: SVELTE_YELLOW, fontFamily: "monospace", marginBottom: "5px" }}>{cat.category}</div>
+          {cat.items.map((item, j) => {
+            const key = \`\${cat.category}-\${j}\`;
+            return (
+              <div key={j} onClick={() => toggle(key)} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "7px 8px", background: checked.has(key) ? "#34d39911" : BG3, borderRadius: "6px", marginBottom: "3px", cursor: "pointer", border: \`1px solid \${checked.has(key) ? "#34d39933" : "#334155"}\`, transition: "all 0.15s" }}>
+                <span style={{ fontSize: "14px" }}>{checked.has(key) ? "✅" : "⬜"}</span>
+                <span style={{ flex: 1, fontSize: "12px", color: checked.has(key) ? "#64748b" : "#e2e8f0", textDecoration: checked.has(key) ? "line-through" : "none" }}>{item.text}</span>
+                {item.critical && <span style={{ fontSize: "10px", color: "#f87171", background: "#f8717122", padding: "1px 5px", borderRadius: "4px" }}>critical</span>}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("adapters");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "20px", fontFamily: "system-ui, sans-serif", color: "#e2e8f0" }}>
+      <div style={{ maxWidth: "520px", margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: "20px" }}>
+          <div style={{ fontSize: "26px", fontWeight: "bold", color: SVELTE_ORANGE }}>SvelteKit Деплой</div>
+          <div style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>От localhost до продакшна 🚀</div>
+        </div>
+
+        <div style={{ display: "flex", gap: "6px", marginBottom: "16px", background: BG2, padding: "4px", borderRadius: "10px" }}>
+          {tabs.map((tab) => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "8px 2px", border: "none", borderRadius: "7px", cursor: "pointer", background: activeTab === tab.id ? SVELTE_ORANGE : "transparent", color: activeTab === tab.id ? "#fff" : "#94a3b8", fontSize: "11px", fontWeight: activeTab === tab.id ? "bold" : "normal", transition: "all 0.15s" }}>
+              {tab.emoji} {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: BG2, borderRadius: "12px", padding: "16px", border: "1px solid #1e293b" }}>
+          {activeTab === "adapters" && <AdaptersDemo />}
+          {activeTab === "env" && <EnvDemo />}
+          {activeTab === "docker" && <DockerDemo />}
+          {activeTab === "checklist" && <ChecklistDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

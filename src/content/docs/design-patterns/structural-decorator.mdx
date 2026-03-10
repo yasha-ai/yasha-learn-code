@@ -1,0 +1,297 @@
+---
+title: "11. Decorator"
+sidebar:
+  order: 11
+---
+import { Playground } from '@components/Playground'
+
+## Design Patterns. Урок: Decorator (Декоратор)
+
+**Decorator** — структурный паттерн, позволяющий динамически добавлять новое поведение объектам, оборачивая их в полезные «обёртки». Альтернатива наследованию для расширения функциональности.
+
+---
+
+### Принцип работы
+
+Декоратор оборачивает объект и добавляет поведение до/после основных операций, сохраняя тот же интерфейс.
+
+```typescript
+// Базовый интерфейс
+interface TextProcessor {
+  process(text: string): string;
+}
+
+// Базовая реализация
+class PlainTextProcessor implements TextProcessor {
+  process(text: string): string {
+    return text;
+  }
+}
+
+// Декораторы добавляют поведение
+class UpperCaseDecorator implements TextProcessor {
+  constructor(private wrapped: TextProcessor) {}
+
+  process(text: string): string {
+    return this.wrapped.process(text).toUpperCase();
+  }
+}
+
+class TrimDecorator implements TextProcessor {
+  constructor(private wrapped: TextProcessor) {}
+
+  process(text: string): string {
+    return this.wrapped.process(text).trim();
+  }
+}
+
+class HtmlEscapeDecorator implements TextProcessor {
+  constructor(private wrapped: TextProcessor) {}
+
+  process(text: string): string {
+    return this.wrapped.process(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+}
+
+// Комбинируем декораторы как угодно
+const processor = new UpperCaseDecorator(
+  new TrimDecorator(
+    new HtmlEscapeDecorator(
+      new PlainTextProcessor()
+    )
+  )
+);
+
+console.log(processor.process('  <Hello World>  '));
+// "&LT;HELLO WORLD&GT;"
+```
+
+---
+
+### Практический пример: кеширование и логирование
+
+```typescript
+interface UserRepository {
+  findById(id: string): Promise<User>;
+  findAll(): Promise<User[]>;
+}
+
+// Базовая реализация
+class DatabaseUserRepository implements UserRepository {
+  async findById(id: string): Promise<User> {
+    return await db.query('SELECT * FROM users WHERE id = $1', [id]);
+  }
+
+  async findAll(): Promise<User[]> {
+    return await db.query('SELECT * FROM users');
+  }
+}
+
+// Декоратор кеширования
+class CachingUserRepository implements UserRepository {
+  private cache = new Map<string, User>();
+
+  constructor(
+    private wrapped: UserRepository,
+    private ttlMs: number = 60_000,
+  ) {}
+
+  async findById(id: string): Promise<User> {
+    const cached = this.cache.get(id);
+    if (cached) return cached;
+
+    const user = await this.wrapped.findById(id);
+    this.cache.set(id, user);
+    setTimeout(() => this.cache.delete(id), this.ttlMs);
+    return user;
+  }
+
+  async findAll(): Promise<User[]> {
+    return this.wrapped.findAll(); // Не кешируем список
+  }
+}
+
+// Декоратор логирования
+class LoggingUserRepository implements UserRepository {
+  constructor(
+    private wrapped: UserRepository,
+    private logger: Logger,
+  ) {}
+
+  async findById(id: string): Promise<User> {
+    const start = Date.now();
+    const user = await this.wrapped.findById(id);
+    this.logger.log(`findById(${id}) took ${Date.now() - start}ms`);
+    return user;
+  }
+
+  async findAll(): Promise<User[]> {
+    const start = Date.now();
+    const users = await this.wrapped.findAll();
+    this.logger.log(`findAll() returned ${users.length} users in ${Date.now() - start}ms`);
+    return users;
+  }
+}
+
+// Собираем стек декораторов
+const repository: UserRepository = new LoggingUserRepository(
+  new CachingUserRepository(
+    new DatabaseUserRepository(),
+    30_000, // 30 секунд кеш
+  ),
+  logger,
+);
+```
+
+---
+
+### TypeScript Decorators (экспериментальные)
+
+TypeScript поддерживает декораторы как синтаксис (популярны в NestJS, Angular):
+
+```typescript
+// Method decorator
+function measureTime(target: any, key: string, descriptor: PropertyDescriptor) {
+  const original = descriptor.value;
+  descriptor.value = async function (...args: any[]) {
+    const start = Date.now();
+    const result = await original.apply(this, args);
+    console.log(`${key} took ${Date.now() - start}ms`);
+    return result;
+  };
+  return descriptor;
+}
+
+// Class decorator
+function injectable(target: Function) {
+  Reflect.defineMetadata('injectable', true, target);
+}
+
+// Property decorator
+function required(target: any, key: string) {
+  Reflect.defineMetadata('required', true, target, key);
+}
+
+class UserService {
+  @measureTime
+  async getUser(id: string): Promise<User> {
+    return await userRepository.findById(id);
+  }
+}
+```
+
+---
+
+### Декоратор для middleware в Express
+
+```typescript
+// Функциональный стиль — декораторы как HOF
+function withAuth(handler: RequestHandler): RequestHandler {
+  return async (req, res, next) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    
+    req.user = await verifyToken(token);
+    return handler(req, res, next);
+  };
+}
+
+function withRateLimit(limit: number, windowMs: number): (handler: RequestHandler) => RequestHandler {
+  const counters = new Map<string, number>();
+  
+  return (handler) => async (req, res, next) => {
+    const ip = req.ip!;
+    const count = (counters.get(ip) ?? 0) + 1;
+    counters.set(ip, count);
+    setTimeout(() => counters.delete(ip), windowMs);
+    
+    if (count > limit) return res.status(429).json({ error: 'Too many requests' });
+    return handler(req, res, next);
+  };
+}
+
+// Оборачиваем handlers декораторами
+const getUserHandler: RequestHandler = async (req, res) => {
+  const user = await userService.getUser(req.params.id);
+  res.json(user);
+};
+
+app.get('/users/:id',
+  withAuth(
+    withRateLimit(10, 60_000)(
+      getUserHandler
+    )
+  )
+);
+```
+
+---
+
+### Практические задания
+
+1. Создай набор декораторов для `console.log`: `withTimestamp`, `withPrefix(prefix)`, `withColor(color)`. Их можно комбинировать.
+
+2. Реализуй `RetryDecorator` для HTTP клиента — автоматически повторяет запрос при ошибке (до N раз).
+
+3. Создай `ValidationDecorator` для репозитория который валидирует данные перед сохранением.
+
+4. В чём разница между Decorator и Inheritance для расширения поведения?
+
+5. Изучи как работают декораторы в NestJS (`@Get`, `@Post`, `@UseGuards`, `@Injectable`).
+
+---
+
+### Playground: Decorator в действии
+
+<Playground client:visible template="vanilla" files={{ '/index.js': `// Decorator: добавляем поведение оборачивая объекты
+
+class PlainText {
+  process(text) { return text; }
+}
+
+class UpperCaseDecorator {
+  constructor(inner) { this.inner = inner; }
+  process(text) { return this.inner.process(text).toUpperCase(); }
+}
+
+class TrimDecorator {
+  constructor(inner) { this.inner = inner; }
+  process(text) { return this.inner.process(text).trim(); }
+}
+
+class ExclamationDecorator {
+  constructor(inner) { this.inner = inner; }
+  process(text) { return this.inner.process(text) + "!!!"; }
+}
+
+class TimestampDecorator {
+  constructor(inner) { this.inner = inner; }
+  process(text) {
+    const ts = new Date().toLocaleTimeString();
+    return "[" + ts + "] " + this.inner.process(text);
+  }
+}
+
+// Комбинируем декораторы как слои
+const processor = new TimestampDecorator(
+  new ExclamationDecorator(
+    new UpperCaseDecorator(
+      new TrimDecorator(
+        new PlainText()
+      )
+    )
+  )
+);
+
+console.log(processor.process("  hello world  "));
+// [time] HELLO WORLD!!!
+
+// Другая комбинация
+const simple = new ExclamationDecorator(new TrimDecorator(new PlainText()));
+console.log(simple.process("  goodbye  "));
+// goodbye!!!
+` }} />

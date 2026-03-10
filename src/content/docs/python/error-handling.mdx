@@ -1,0 +1,325 @@
+---
+title: "12. Обработка ошибок"
+sidebar:
+  order: 11
+---
+import { Playground } from '@components/Playground'
+
+![Иллюстрация к уроку](/lessons/intro.png)
+
+## try / except / else / finally
+
+```python
+try:
+    result = 10 / 0
+except ZeroDivisionError:
+    print("Деление на ноль!")
+
+# Несколько except
+try:
+    data = int(input("Введи число: "))
+    result = 100 / data
+except ValueError:
+    print("Это не число!")
+except ZeroDivisionError:
+    print("Не делим на ноль!")
+except Exception as e:  # поймать всё
+    print(f"Неизвестная ошибка: {e}")
+else:
+    print(f"Результат: {result}")  # если не было исключений
+finally:
+    print("Это выполнится всегда")  # cleanup
+
+# Несколько в одном except
+try:
+    ...
+except (ValueError, TypeError) as e:
+    print(f"Ошибка данных: {e}")
+```
+
+## Иерархия исключений
+
+```python
+# Основные встроенные исключения:
+# Exception
+# ├── ValueError     — неверное значение
+# ├── TypeError      — неверный тип
+# ├── KeyError       — ключ не найден в словаре
+# ├── IndexError     — индекс вне диапазона
+# ├── AttributeError — объект не имеет атрибута
+# ├── FileNotFoundError — файл не найден
+# ├── PermissionError — нет доступа
+# ├── ZeroDivisionError — деление на ноль
+# ├── ImportError    — ошибка импорта
+# ├── RuntimeError   — общая ошибка выполнения
+# └── StopIteration  — конец итерации
+
+# Ловить базовый класс — поймает все наследников
+try:
+    open("nonexistent.txt")
+except OSError as e:  # FileNotFoundError, PermissionError и др.
+    print(f"Ошибка ФС: {e}")
+```
+
+## Создание своих исключений
+
+```python
+# Базовое исключение для модуля
+class AppError(Exception):
+    """Базовое исключение приложения."""
+    pass
+
+class ValidationError(AppError):
+    """Ошибка валидации данных."""
+    def __init__(self, field: str, message: str):
+        self.field = field
+        self.message = message
+        super().__init__(f"Ошибка в поле '{field}': {message}")
+
+class NotFoundError(AppError):
+    """Объект не найден."""
+    def __init__(self, resource: str, id: int | str):
+        super().__init__(f"{resource} с id={id} не найден")
+        self.resource = resource
+        self.id = id
+
+class AuthError(AppError):
+    """Ошибка аутентификации."""
+    pass
+
+# Использование
+def get_user(id: int) -> dict:
+    users = {1: {"name": "Яша"}}
+    if id not in users:
+        raise NotFoundError("User", id)
+    return users[id]
+
+def validate_age(age: int) -> None:
+    if age < 0:
+        raise ValidationError("age", "не может быть отрицательным")
+    if age > 150:
+        raise ValidationError("age", "слишком большое значение")
+
+try:
+    user = get_user(999)
+except NotFoundError as e:
+    print(f"404: {e}")  # 404: User с id=999 не найден
+```
+
+## raise и reraise
+
+```python
+def process_payment(amount: float) -> None:
+    if amount <= 0:
+        raise ValueError(f"Сумма должна быть положительной, получено: {amount}")
+
+# Re-raise — поймать, добавить контекст, перебросить
+def transfer_money(from_account: str, to_account: str, amount: float):
+    try:
+        process_payment(amount)
+    except ValueError as e:
+        raise RuntimeError(f"Ошибка перевода {from_account} → {to_account}") from e
+
+# Поймать и проверить цепочку ошибок
+try:
+    transfer_money("acc1", "acc2", -100)
+except RuntimeError as e:
+    print(f"Основная ошибка: {e}")
+    print(f"Причина: {e.__cause__}")
+```
+
+## Практический паттерн: Result type
+
+```python
+from typing import TypeVar, Generic
+from dataclasses import dataclass
+
+T = TypeVar("T")
+E = TypeVar("E", bound=Exception)
+
+@dataclass
+class Ok(Generic[T]):
+    value: T
+    
+    @property
+    def is_ok(self) -> bool:
+        return True
+
+@dataclass  
+class Err(Generic[E]):
+    error: E
+    
+    @property
+    def is_ok(self) -> bool:
+        return False
+
+Result = Ok[T] | Err[Exception]
+
+def safe_divide(a: float, b: float) -> Result:
+    try:
+        return Ok(a / b)
+    except ZeroDivisionError as e:
+        return Err(e)
+
+result = safe_divide(10, 0)
+if result.is_ok:
+    print(f"Результат: {result.value}")
+else:
+    print(f"Ошибка: {result.error}")
+```
+
+## Логирование вместо print
+
+```python
+import logging
+
+# Настройка базового логирования
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()  # консоль
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+def process_data(data: dict) -> None:
+    logger.debug(f"Начало обработки: {data}")
+    
+    try:
+        result = expensive_operation(data)
+        logger.info(f"Обработано успешно: {result}")
+    except ValueError as e:
+        logger.warning(f"Некорректные данные: {e}")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        raise
+
+# Использование loguru (лучше для новых проектов)
+# pip install loguru
+from loguru import logger
+
+logger.add("app.log", rotation="1 day", retention="7 days")
+logger.add("errors.log", level="ERROR")
+
+logger.info("Сервер запущен на порту {port}", port=8000)
+logger.error("Ошибка подключения к БД")
+```
+
+## Обработка ошибок в FastAPI
+
+```python
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+# Кастомное исключение
+class ItemNotFoundError(Exception):
+    def __init__(self, item_id: int):
+        self.item_id = item_id
+
+# Регистрируем обработчик
+@app.exception_handler(ItemNotFoundError)
+async def item_not_found_handler(request: Request, exc: ItemNotFoundError):
+    return JSONResponse(
+        status_code=404,
+        content={"detail": f"Item {exc.item_id} not found"}
+    )
+
+@app.get("/items/{item_id}")
+async def get_item(item_id: int):
+    items = {1: "Apple", 2: "Banana"}
+    
+    if item_id not in items:
+        raise ItemNotFoundError(item_id)  # наш exception
+    
+    return {"id": item_id, "name": items[item_id]}
+
+# HTTPException — стандарт FastAPI
+@app.delete("/items/{item_id}")
+async def delete_item(item_id: int, user_role: str):
+    if user_role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Только администраторы могут удалять элементы"
+        )
+    return {"deleted": item_id}
+```
+
+## Задание
+
+```python
+# Задание 1: Иерархия ошибок для интернет-магазина
+# Создай:
+# - ShopError (базовый)
+#   - ProductNotFoundError(product_id)
+#   - OutOfStockError(product_name, requested, available)
+#   - PaymentError(amount, reason)
+#   - InvalidCouponError(code)
+
+# Задание 2: Безопасный JSON парсер
+def safe_parse_json(text: str) -> dict | None:
+    """Возвращает None вместо исключения при ошибке."""
+    pass
+
+# Задание 3: Retry декоратор
+def retry(max_attempts: int = 3, exceptions=(Exception,)):
+    """
+    Декоратор для повторных попыток при ошибке.
+    Пример: @retry(max_attempts=3, exceptions=(ConnectionError,))
+    """
+    pass
+```
+
+В следующем уроке — Async/Await!
+
+<Playground client:visible
+  template="vanilla"
+  files={{
+    "/index.js": `// JavaScript-эквивалент обработки ошибок Python
+
+// Python: try / except / finally
+// JS:     try / catch / finally
+try {
+  const result = JSON.parse('{"valid": true}');
+  console.log("Успех:", result);
+} catch (error) {
+  console.log("Ошибка:", error.message);
+} finally {
+  console.log("Finally: выполняется всегда");
+}
+
+// Python: raise ValueError("msg")
+// JS:     throw new Error("msg")
+function divide(a, b) {
+  if (b === 0) throw new Error("Деление на ноль!");
+  return a / b;
+}
+
+try {
+  console.log("\\n10 / 2 =", divide(10, 2));
+  console.log("10 / 0 =", divide(10, 0));
+} catch (e) {
+  console.log("Поймали:", e.message);
+}
+
+// Python: class CustomError(Exception)
+class ValidationError extends Error {
+  constructor(field, message) {
+    super(message);
+    this.name = "ValidationError";
+    this.field = field;
+  }
+}
+
+try {
+  throw new ValidationError("email", "Некорректный email");
+} catch (e) {
+  console.log("\\n" + e.name + ":", e.field, "-", e.message);
+}
+`
+  }}
+/>

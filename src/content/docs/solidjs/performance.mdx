@@ -1,0 +1,540 @@
+---
+title: "25. Производительность и Fine-Grained Reactivity"
+sidebar:
+  order: 25
+---
+import { Playground } from '@components/Playground'
+
+
+## ⚡ Производительность и Fine-Grained Reactivity
+
+Привет! 👋 Одна из главных причин, по которой разработчики выбирают Solid.js — его феноменальная производительность. Но чтобы получить максимум, нужно понимать как работает реактивность "под капотом".
+
+Думай о реактивности Solid как о хирурге с лазерным скальпелем: вместо того чтобы перерисовывать весь компонент (как React), он точечно обновляет только нужный DOM-узел. Никаких лишних операций.
+
+---
+
+## 🧠 Как работает Fine-Grained Reactivity
+
+```
+React (Virtual DOM подход):
+  Состояние изменилось
+    → Компонент перерендерился (вся функция запустилась)
+    → Создан новый Virtual DOM
+    → Diff старого и нового VDOM
+    → Применение минимальных DOM-изменений
+  
+  Цена: функция компонента + VDOM diff + reconciliation
+
+Solid.js (Fine-Grained Reactivity):
+  Сигнал изменился
+    → Все подписчики этого сигнала получают уведомление
+    → Только зависимые DOM-выражения обновляются
+    → Прямая запись в DOM (без VDOM!)
+  
+  Цена: обновление только изменённых узлов
+```
+
+В Solid **компонент — это функция-фабрика**, которая запускается один раз при создании и возвращает DOM. Потом DOM обновляется напрямую через реактивные связи:
+
+```tsx
+function Counter() {
+  const [count, setCount] = createSignal(0);
+
+  // ↓ Эта функция запускается ОДИН РАЗ
+  // JSX компилируется в прямые DOM-операции
+  return (
+    <div>
+      {/* Solid создаёт текстовый узел, подписанный на count() */}
+      <span>{count()}</span>
+      {/* При count() изменении — обновляется ТОЛЬКО этот текстовый узел */}
+      <button onClick={() => setCount(n => n + 1)}>+</button>
+    </div>
+  );
+}
+// При изменении count — функция Counter() НЕ вызывается повторно!
+```
+
+---
+
+## 🔬 Как Solid отслеживает зависимости
+
+Solid использует **push-pull реактивность** с автоматическим отслеживанием:
+
+```tsx
+// Во время выполнения createEffect/createMemo/JSX-выражения
+// Solid "прислушивается" к каждому вызову сигнала
+
+const [a, setA] = createSignal(1);
+const [b, setB] = createSignal(2);
+
+// При первом выполнении createMemo:
+// → вызов a() → регистрирует зависимость от a
+// → вызов b() → регистрирует зависимость от b
+const sum = createMemo(() => a() + b());
+// Теперь sum зависит от a и b
+
+// Динамические зависимости:
+const [useA, setUseA] = createSignal(true);
+
+const dynamic = createMemo(() => {
+  if (useA()) {
+    return a(); // ← зависимость от useA И a
+  }
+  return b(); // ← при useA=false: зависимость от useA и b (не a!)
+});
+// Зависимости пересчитываются при каждом выполнении!
+```
+
+---
+
+## 🎯 keyed vs non-keyed в компоненте For
+
+```tsx
+import { For, Index } from 'solid-js';
+
+const items = ['А', 'Б', 'В'];
+
+// For — KEYED (каждый элемент получает реактивный accessor)
+// При изменении порядка — Solid переиспользует DOM-узлы
+<For each={items()}>
+  {(item, index) => (
+    // item — строка (не сигнал!), index — Accessor<number>
+    <li>{item} at {index()}</li>
+  )}
+</For>
+
+// Index — NON-KEYED (позиционные узлы)
+// Каждая позиция сохраняет DOM-узел, item становится Accessor
+<Index each={items()}>
+  {(item, index) => (
+    // item — Accessor<string>!, index — number (не сигнал)
+    <li>{item()} at {index}</li>
+  )}
+</Index>
+```
+
+**Когда использовать:**
+- `<For>` — объекты с ID, часто меняющийся порядок (drag & drop)
+- `<Index>` — примитивные значения, фиксированная длина
+
+---
+
+## 🧊 Lazy Evaluation: createMemo не пересчитывает без подписчиков
+
+```tsx
+const [count, setCount] = createSignal(0);
+
+// ЛЕНИВЫЙ: createMemo не вычисляется пока нет подписчиков
+const expensive = createMemo(() => {
+  console.log('Вычисляю...'); // НЕ логируется без подписчика!
+  return count() * 1000 * Math.PI;
+});
+
+// Только при чтении expensive() — вычисление происходит
+createEffect(() => {
+  console.log(expensive()); // Теперь логируется!
+});
+
+// Кеширование: createMemo не пересчитывает если значение не изменилось
+const isEven = createMemo(() => count() % 2 === 0);
+// Если count() меняется с 2 на 4 — isEven() всё равно true
+// Подписчики isEven() НЕ получат уведомление!
+```
+
+---
+
+## ⚡ Оптимизация: избегай избыточной реактивности
+
+```tsx
+// ❌ Проблема: сигнал в цикле читается много раз
+function List({ items }: { items: Accessor<string[]> }) {
+  return (
+    <div>
+      {/* ✅ Solid компилирует это в For — правильно */}
+      <For each={items()}>
+        {(item) => <div>{item}</div>}
+      </For>
+    </div>
+  );
+}
+
+// ❌ Создание лишних вычислений
+function BadComponent() {
+  const [count, setCount] = createSignal(0);
+
+  // ❌ Каждое выражение в JSX — отдельная подписка
+  // Три подписки на одни и те же данные
+  const a = createMemo(() => count() * 1);
+  const b = createMemo(() => count() * 2);
+  const c = createMemo(() => count() * 3);
+
+  return <div>{a()} {b()} {c()}</div>;
+}
+
+// ✅ Группируй связанные вычисления
+function GoodComponent() {
+  const [count, setCount] = createSignal(0);
+
+  const derived = createMemo(() => ({
+    a: count() * 1,
+    b: count() * 2,
+    c: count() * 3,
+  }));
+
+  return <div>{derived().a} {derived().b} {derived().c}</div>;
+}
+
+// ✅ Используй untrack() чтобы читать сигнал без подписки
+import { untrack } from 'solid-js';
+
+createEffect(() => {
+  const current = count(); // ← подписываемся
+  const snapshot = untrack(() => otherSignal()); // ← читаем без подписки
+  console.log(current, snapshot);
+});
+```
+
+---
+
+## 📊 Профилирование производительности
+
+```tsx
+// Метрика 1: Считаем DOM-обновления
+let domUpdates = 0;
+const observer = new MutationObserver(mutations => {
+  domUpdates += mutations.length;
+  console.log(`DOM обновлений: ${domUpdates}`);
+});
+observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+// Метрика 2: createMemo с измерением
+function measureMemo<T>(name: string, fn: () => T) {
+  return createMemo(() => {
+    const start = performance.now();
+    const result = fn();
+    const elapsed = performance.now() - start;
+    if (elapsed > 1) console.warn(`${name}: ${elapsed.toFixed(2)}ms`);
+    return result;
+  });
+}
+
+// Метрика 3: Подсчёт ре-рендеров компонента
+function withRenderCount<T>(Component: Component<T>) {
+  let count = 0;
+  return (props: T) => {
+    count++;
+    console.log(`${Component.name} renders: ${count}`);
+    return <Component {...props} />;
+  };
+}
+
+// Совет: DevTools для Solid
+// 1. solid-devtools (npm) — инспектор компонентов и сигналов
+// 2. Chrome DevTools Performance — записывай профиль
+// 3. Lighthouse — общая производительность
+```
+
+---
+
+## ⚠️ Типичные ловушки производительности
+
+```tsx
+// ❌ Создание сигнала внутри createEffect — цикл!
+createEffect(() => {
+  const count = someSignal();
+  // ❌ Создаём новый сигнал при каждом выполнении эффекта
+  const [local, setLocal] = createSignal(count);
+});
+
+// ✅ Сигналы создаются вне эффектов
+const [local, setLocal] = createSignal(0);
+createEffect(() => {
+  setLocal(someSignal());
+});
+
+// ❌ Чтение сигнала вне реактивного контекста — нет подписки
+const count = mySignal(); // ← читает значение ОДИН РАЗ
+// Никакого обновления при изменении!
+
+// ✅ Читай сигналы внутри JSX или реактивных примитивов
+const value = createMemo(() => mySignal()); // ← правильно
+
+// ❌ Слишком частые обновления без batch
+function rapidUpdates() {
+  for (let i = 0; i < 100; i++) {
+    setCount(n => n + 1); // 100 обновлений DOM!
+  }
+}
+
+// ✅ Группируй обновления через batch
+import { batch } from 'solid-js';
+function batchedUpdates() {
+  batch(() => {
+    for (let i = 0; i < 100; i++) {
+      setCount(n => n + 1); // 1 обновление DOM
+    }
+  });
+}
+```
+
+---
+
+## 🎯 Playground: Визуализатор производительности
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect, useRef, useCallback } from "react";
+
+const BG = '#0f172a';
+const SOLID_BLUE = '#2c67d5';
+const SOLID_LIGHT = '#598fc1';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const TEXT = '#e2e8f0';
+const MUTED = '#64748b';
+const GREEN = '#34d399';
+const ORANGE = '#fb923c';
+const RED = '#ef4444';
+
+// Симуляция React vs Solid рендеринга
+type Mode = 'react-style' | 'solid-style';
+
+interface DataItem {
+  id: number;
+  name: string;
+  value: number;
+  color: string;
+}
+
+const COLORS = [SOLID_BLUE, GREEN, ORANGE, '#f472b6', '#a78bfa', '#34d399'];
+
+function generateItems(n = 8): DataItem[] {
+  return Array.from({ length: n }, (_, i) => ({
+    id: i,
+    name: \`Элемент \${i + 1}\`,
+    value: Math.floor(Math.random() * 100),
+    color: COLORS[i % COLORS.length],
+  }));
+}
+
+// Счётчик рендеров для симуляции
+const renderCounters: Record<number, number> = {};
+
+// React-style: весь компонент перерендеривается
+function ReactStyleItem({ item, highlight }: { item: DataItem; highlight: boolean }) {
+  renderCounters[item.id] = (renderCounters[item.id] ?? 0) + 1;
+  const rc = renderCounters[item.id];
+
+  return (
+    <div style={{
+      padding: '8px 10px', background: highlight ? item.color + '33' : CARD,
+      borderRadius: '8px', marginBottom: '4px',
+      border: \`1px solid \${highlight ? item.color : BORDER}\`,
+      transition: 'all 0.2s',
+      display: 'flex', alignItems: 'center', gap: '8px',
+    }}>
+      <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: item.color, flexShrink: 0 }} />
+      <span style={{ color: TEXT, fontSize: '12px', flex: 1 }}>{item.name}</span>
+      <div style={{ background: BG, borderRadius: '4px', padding: '2px 6px' }}>
+        <span style={{ color: highlight ? item.color : MUTED, fontSize: '12px', fontFamily: 'monospace' }}>{item.value}</span>
+      </div>
+      <div style={{ background: highlight ? RED + '33' : BG, borderRadius: '4px', padding: '2px 5px' }}>
+        <span style={{ color: highlight ? RED : MUTED, fontSize: '10px', fontFamily: 'monospace' }}>×{rc}</span>
+      </div>
+    </div>
+  );
+}
+
+// Solid-style: только изменённый узел обновляется
+function SolidStyleItem({ item, updatedId }: { item: DataItem; updatedId: number | null }) {
+  const isUpdated = item.id === updatedId;
+
+  return (
+    <div style={{
+      padding: '8px 10px', background: CARD, borderRadius: '8px', marginBottom: '4px',
+      border: \`1px solid \${isUpdated ? item.color : BORDER}\`,
+      transition: 'border-color 0.3s',
+      display: 'flex', alignItems: 'center', gap: '8px',
+    }}>
+      <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: item.color, flexShrink: 0 }} />
+      <span style={{ color: TEXT, fontSize: '12px', flex: 1 }}>{item.name}</span>
+      <div style={{ background: BG, borderRadius: '4px', padding: '2px 6px' }}>
+        {/* Только этот узел обновился — остальные не трогались */}
+        <span style={{ color: isUpdated ? item.color : MUTED, fontSize: '12px', fontFamily: 'monospace',
+          transition: 'color 0.3s',
+        }}>{item.value}</span>
+      </div>
+      <div style={{ background: isUpdated ? GREEN + '22' : BG, borderRadius: '4px', padding: '2px 5px', transition: 'background 0.3s' }}>
+        <span style={{ color: isUpdated ? GREEN : MUTED, fontSize: '10px', fontFamily: 'monospace' }}>
+          {isUpdated ? '✓1' : '×0'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// Статистика
+function StatsBar({ label, updates, total, color }: { label: string; updates: number; total: number; color: string }) {
+  return (
+    <div style={{ background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${color}44\`, flex: 1 }}>
+      <div style={{ color, fontSize: '11px', marginBottom: '4px' }}>{label}</div>
+      <div style={{ color: TEXT, fontSize: '22px', fontWeight: 'bold', fontFamily: 'monospace' }}>{updates}</div>
+      <div style={{ color: MUTED, fontSize: '10px' }}>из {total} элементов</div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [items, setItems] = useState(generateItems());
+  const [mode, setMode] = useState<Mode>('react-style');
+  const [reactUpdates, setReactUpdates] = useState(0);
+  const [solidUpdates, setSolidUpdates] = useState(0);
+  const [lastUpdatedId, setLastUpdatedId] = useState<number | null>(null);
+  const [animating, setAnimating] = useState(false);
+  const [renderCount, setRenderCount] = useState(0);
+
+  // Симуляция React: при любом обновлении весь список перерендеривается
+  const updateReactStyle = useCallback(() => {
+    if (animating) return;
+    setAnimating(true);
+    const idx = Math.floor(Math.random() * items.length);
+    
+    // React: меняем состояние → все дочерние компоненты перерендеривались
+    setItems(prev => prev.map((item, i) =>
+      i === idx ? { ...item, value: Math.floor(Math.random() * 100) } : item
+    ));
+    setRenderCount(rc => rc + 1);
+    setReactUpdates(prev => prev + items.length); // Все элементы рендерятся!
+    
+    setTimeout(() => setAnimating(false), 400);
+  }, [items, animating]);
+
+  // Симуляция Solid: только изменённый узел обновился
+  const updateSolidStyle = useCallback(() => {
+    if (animating) return;
+    setAnimating(true);
+    const idx = Math.floor(Math.random() * items.length);
+    
+    setItems(prev => prev.map((item, i) =>
+      i === idx ? { ...item, value: Math.floor(Math.random() * 100) } : item
+    ));
+    setLastUpdatedId(idx);
+    setSolidUpdates(prev => prev + 1); // Только 1 узел обновился!
+    
+    setTimeout(() => {
+      setLastUpdatedId(null);
+      setAnimating(false);
+    }, 800);
+  }, [items, animating]);
+
+  const reset = () => {
+    Object.keys(renderCounters).forEach(k => delete renderCounters[Number(k)]);
+    setItems(generateItems());
+    setReactUpdates(0);
+    setSolidUpdates(0);
+    setLastUpdatedId(null);
+    setRenderCount(0);
+  };
+
+  const currentItems = items;
+
+  return (
+    <div style={{ background: BG, color: TEXT, minHeight: '100vh', padding: '16px', fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ maxWidth: '520px', margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold', color: SOLID_BLUE }}>⚡ React vs Solid: DOM-обновления</div>
+          <div style={{ color: MUTED, fontSize: '12px', marginTop: '4px' }}>Визуализация fine-grained reactivity</div>
+        </div>
+
+        {/* Переключатель режима */}
+        <div style={{ display: 'flex', gap: '4px', marginBottom: '16px', background: CARD, padding: '4px', borderRadius: '10px' }}>
+          <button onClick={() => setMode('react-style')}
+            style={{ flex: 1, background: mode === 'react-style' ? '#61dafb33' : 'transparent', color: mode === 'react-style' ? '#61dafb' : MUTED, border: mode === 'react-style' ? '1px solid #61dafb44' : '1px solid transparent', borderRadius: '8px', padding: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold' }}>
+            ⚛️ React-стиль
+          </button>
+          <button onClick={() => setMode('solid-style')}
+            style={{ flex: 1, background: mode === 'solid-style' ? SOLID_BLUE + '33' : 'transparent', color: mode === 'solid-style' ? SOLID_LIGHT : MUTED, border: mode === 'solid-style' ? \`1px solid \${SOLID_BLUE}44\` : '1px solid transparent', borderRadius: '8px', padding: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold' }}>
+            🔷 Solid-стиль
+          </button>
+        </div>
+
+        {/* Статистика */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+          <StatsBar
+            label={mode === 'react-style' ? '⚛️ Рендеров React' : '🔷 DOM-обновлений Solid'}
+            updates={mode === 'react-style' ? reactUpdates : solidUpdates}
+            total={items.length}
+            color={mode === 'react-style' ? '#61dafb' : SOLID_BLUE}
+          />
+          <div style={{ background: CARD, borderRadius: '8px', padding: '10px', border: \`1px solid \${BORDER}\`, flex: 1 }}>
+            <div style={{ color: MUTED, fontSize: '11px', marginBottom: '4px' }}>
+              {mode === 'react-style' ? 'Кликов' : 'Эффективность'}
+            </div>
+            <div style={{ color: TEXT, fontSize: '22px', fontWeight: 'bold', fontFamily: 'monospace' }}>
+              {mode === 'react-style' ? renderCount : solidUpdates > 0 ? \`1/\${items.length}\` : '—'}
+            </div>
+            <div style={{ color: MUTED, fontSize: '10px' }}>
+              {mode === 'react-style' ? 'обновлений стейта' : 'узлов обновляется'}
+            </div>
+          </div>
+        </div>
+
+        {/* Описание */}
+        <div style={{ background: mode === 'react-style' ? '#61dafb11' : SOLID_BLUE + '11', borderRadius: '8px', padding: '10px', marginBottom: '12px', border: \`1px solid \${mode === 'react-style' ? '#61dafb' : SOLID_BLUE}33\` }}>
+          <div style={{ color: mode === 'react-style' ? '#61dafb' : SOLID_LIGHT, fontSize: '12px', marginBottom: '4px', fontWeight: 'bold' }}>
+            {mode === 'react-style' ? '⚛️ React Virtual DOM' : '🔷 Solid Fine-Grained'}
+          </div>
+          <div style={{ color: MUTED, fontSize: '11px', lineHeight: '1.5' }}>
+            {mode === 'react-style'
+              ? \`Состояние изменилось → ВЕСЬ компонент перерендеривается → все \${items.length} дочерних элементов получат новые пропсы → VDOM diff → применение изменений\`
+              : \`Сигнал изменился → только подписанный текстовый узел обновляется напрямую в DOM → остальные \${items.length - 1} узлов НЕ трогаются\`
+            }
+          </div>
+        </div>
+
+        {/* Список */}
+        <div style={{ background: CARD, borderRadius: '12px', padding: '12px', marginBottom: '12px', border: \`1px solid \${BORDER}\` }}>
+          <div style={{ color: MUTED, fontSize: '11px', marginBottom: '8px' }}>
+            {mode === 'react-style'
+              ? '🔴 Красный счётчик = сколько раз рендерился элемент'
+              : '🟢 Зелёный = обновился | ×0 = не трогался'
+            }
+          </div>
+          {mode === 'react-style'
+            ? currentItems.map(item => <ReactStyleItem key={item.id} item={item} highlight={animating} />)
+            : currentItems.map(item => <SolidStyleItem key={item.id} item={item} updatedId={lastUpdatedId} />)
+          }
+        </div>
+
+        {/* Кнопки */}
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            onClick={mode === 'react-style' ? updateReactStyle : updateSolidStyle}
+            disabled={animating}
+            style={{ flex: 1, background: animating ? MUTED : SOLID_BLUE, color: '#fff', border: 'none', borderRadius: '8px', padding: '12px', cursor: animating ? 'not-allowed' : 'pointer', fontSize: '14px', fontWeight: 'bold' }}>
+            {animating ? '⟳ Обновляю...' : '🎲 Обновить случайный элемент'}
+          </button>
+          <button onClick={reset}
+            style={{ background: CARD, color: MUTED, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '12px', cursor: 'pointer', fontSize: '14px' }}>
+            ↺
+          </button>
+        </div>
+
+        {/* Вывод */}
+        {(reactUpdates > 0 || solidUpdates > 0) && (
+          <div style={{ marginTop: '12px', padding: '10px', background: CARD, borderRadius: '8px', border: \`1px solid \${BORDER}\`, fontSize: '11px' }}>
+            <div style={{ color: TEXT, marginBottom: '4px', fontWeight: 'bold' }}>📊 Итог:</div>
+            <div style={{ color: '#61dafb' }}>⚛️ React: {reactUpdates} DOM-операций ({renderCount} кликов × {items.length} элементов)</div>
+            <div style={{ color: SOLID_LIGHT }}>🔷 Solid: {solidUpdates} DOM-операций ({solidUpdates} кликов × 1 элемент)</div>
+            {reactUpdates > 0 && solidUpdates > 0 && (
+              <div style={{ color: GREEN, marginTop: '4px' }}>
+                Solid эффективнее в ~{Math.round(reactUpdates / Math.max(solidUpdates, 1))}x раз!
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }}
+/>

@@ -1,0 +1,349 @@
+---
+title: "13. Variables и Arguments"
+sidebar:
+  order: 13
+---
+import { Playground } from '@components/Playground'
+
+
+![GraphQL Variables](/lessons/graphql-variables.png)
+
+Variables и Arguments — способы передавать динамические данные в GraphQL запросы.
+
+## Arguments — аргументы полей
+
+Каждое поле в схеме может принимать аргументы:
+
+```graphql
+type Query {
+  user(id: ID!): User
+  posts(
+    limit: Int = 20
+    offset: Int = 0
+    status: PostStatus
+    orderBy: String
+    order: SortOrder = DESC
+  ): PostConnection!
+  search(query: String!, types: [SearchType!]): [SearchResult!]!
+}
+
+type User {
+  posts(limit: Int = 10, published: Boolean = true): [Post!]!
+  avatar(size: Int = 200): String!  # Аргумент на обычном поле
+}
+```
+
+## Variables — переменные операции
+
+Variables позволяют параметризировать запросы:
+
+```graphql
+# Объявляем переменные в сигнатуре операции
+query GetUser($id: ID!) {
+  user(id: $id) {
+    name
+  }
+}
+
+# Аргументы с дефолтными значениями
+query GetPosts($limit: Int = 10, $offset: Int = 0, $status: PostStatus) {
+  posts(limit: $limit, offset: $offset, status: $status) {
+    items {
+      id
+      title
+    }
+    total
+  }
+}
+```
+
+Передача переменных (отдельный JSON объект):
+```json
+{
+  "id": "user-123"
+}
+```
+
+**Почему не интерполяция?**
+
+```graphql
+# ❌ Никогда так не делай (XSS, инъекции)
+query {
+  user(id: "${userId}") { name }
+}
+
+# ✅ Правильно — переменные
+query GetUser($id: ID!) {
+  user(id: $id) { name }
+}
+```
+
+## Типы переменных
+
+```graphql
+query Examples(
+  $id: ID!           # Скаляр, обязательный
+  $name: String      # Скаляр, необязательный (null)
+  $count: Int = 10   # Скаляр с дефолтом
+  $ids: [ID!]!       # Список обязательных ID
+  $input: UserInput! # Input объект
+  $role: UserRole    # Enum
+) {
+  ...
+}
+```
+
+## Variables в Apollo Client
+
+```jsx
+// useQuery с переменными
+const { data, loading } = useQuery(GET_POSTS, {
+  variables: {
+    limit: 10,
+    offset: 0,
+    status: 'PUBLISHED',
+  },
+});
+
+// useMutation с переменными
+const [createPost] = useMutation(CREATE_POST);
+
+const handleSubmit = () => {
+  createPost({
+    variables: {
+      input: {
+        title: 'My Post',
+        body: 'Content...',
+      },
+    },
+  });
+};
+```
+
+## Динамические переменные
+
+```jsx
+function PostFilter() {
+  const [filters, setFilters] = useState({
+    status: 'PUBLISHED',
+    orderBy: 'createdAt',
+    order: 'DESC',
+  });
+
+  const { data, loading } = useQuery(GET_POSTS, {
+    variables: filters,
+    // При изменении variables Apollo автоматически делает новый запрос
+  });
+
+  return (
+    <div>
+      <select
+        value={filters.status}
+        onChange={e => setFilters({ ...filters, status: e.target.value })}
+      >
+        <option value="PUBLISHED">Опубликованные</option>
+        <option value="DRAFT">Черновики</option>
+      </select>
+
+      <select
+        value={filters.order}
+        onChange={e => setFilters({ ...filters, order: e.target.value })}
+      >
+        <option value="DESC">Сначала новые</option>
+        <option value="ASC">Сначала старые</option>
+      </select>
+
+      {loading ? <Spinner /> : data?.posts.items.map(/* ... */)}
+    </div>
+  );
+}
+```
+
+## Input объекты как переменные
+
+```graphql
+input CreateUserInput {
+  name: String!
+  email: String!
+  password: String!
+  role: UserRole = READER
+}
+
+mutation CreateUser($input: CreateUserInput!) {
+  createUser(input: $input) {
+    id
+    name
+    email
+  }
+}
+```
+
+```javascript
+// Передача input объекта
+await createUser({
+  variables: {
+    input: {
+      name: 'Иван Иванов',
+      email: 'ivan@example.com',
+      password: 'securePass123',
+      role: 'EDITOR',
+    },
+  },
+});
+```
+
+## Вложенные аргументы
+
+```graphql
+query ComplexQuery(
+  $userId: ID!
+  $postLimit: Int = 5
+  $postStatus: PostStatus
+  $commentLimit: Int = 3
+) {
+  user(id: $userId) {
+    name
+    posts(limit: $postLimit, status: $postStatus) {
+      title
+      comments(limit: $commentLimit) {
+        body
+        author {
+          name
+        }
+      }
+    }
+  }
+}
+```
+
+## Аргументы в resolvers
+
+```javascript
+const resolvers = {
+  Query: {
+    posts: async (_, args, { db }) => {
+      const {
+        limit = 20,
+        offset = 0,
+        status,
+        orderBy = 'createdAt',
+        order = 'DESC',
+        filters = {},
+      } = args;
+
+      const where = {};
+      if (status) where.status = status;
+      if (filters.authorId) where.authorId = filters.authorId;
+      if (filters.tag) where.tags = { contains: filters.tag };
+
+      const [items, total] = await Promise.all([
+        db.posts.findMany({
+          where,
+          take: limit,
+          skip: offset,
+          orderBy: { [orderBy]: order.toLowerCase() },
+        }),
+        db.posts.count({ where }),
+      ]);
+
+      return { items, total, hasMore: offset + limit < total };
+    },
+  },
+
+  User: {
+    // Аргумент на поле объекта
+    avatar: (parent, { size = 200 }) => {
+      return `https://cdn.example.com/avatars/${parent.id}?size=${size}`;
+    },
+
+    posts: (parent, { limit = 10, published = true }, { db }) => {
+      return db.posts.findMany({
+        where: {
+          authorId: parent.id,
+          ...(published ? { status: 'PUBLISHED' } : {}),
+        },
+        take: limit,
+      });
+    },
+  },
+};
+```
+
+## Проверка переменных
+
+GraphQL валидирует переменные автоматически:
+
+```graphql
+query BadQuery($id: ID!) {
+  user(id: $id) { name }
+}
+```
+
+Если передать переменные:
+```json
+{ "id": null }  # ❌ Ошибка: ID! не может быть null
+{ }             # ❌ Ошибка: ID! обязателен
+{ "id": "123" } # ✅ OK
+```
+
+## Практика
+
+1. Напиши запрос с 5 разными переменными разных типов
+2. Создай аргумент `avatar(width: Int, height: Int)` на типе User
+3. Реализуй фильтрацию продуктов с переменными (цена, категория, в наличии)
+4. Создай форму с фильтрами, где изменение любого поля запускает новый запрос
+5. Напиши resolver, который принимает сложный input объект и фильтрует БД
+
+## Итого
+
+- Arguments — параметры полей в схеме
+- Variables — параметры операции (передаются отдельно от запроса)
+- Всегда используй переменные для динамических данных
+- GraphQL автоматически валидирует типы переменных
+- Input объекты — для сложных аргументов
+
+**Следующий урок** → [Directives →](/graphql/directives/)
+
+<Playground client:visible template="vite-react" files={{
+  '/App.jsx': `import { useState } from 'react';
+
+const mockUsers = {
+  '1': { name: 'Алексей', email: 'alex@dev.com', role: 'ADMIN' },
+  '2': { name: 'Мария', email: 'maria@dev.com', role: 'EDITOR' },
+  '3': { name: 'Иван', email: 'ivan@dev.com', role: 'VIEWER' },
+};
+
+export default function App() {
+  const [userId, setUserId] = useState('1');
+  const [result, setResult] = useState(null);
+
+  const execute = () => {
+    const user = mockUsers[userId];
+    setResult(user ? { data: { user } } : { errors: [{ message: 'User not found' }] });
+  };
+
+  return (
+    <div style={{ padding: 20, fontFamily: 'sans-serif' }}>
+      <h2>Variables: передача параметров</h2>
+      <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: 12, borderRadius: 8, fontSize: 13 }}>{'query GetUser($id: ID!) {\\n  user(id: $id) { name, email, role }\\n}'}</pre>
+      <div style={{ marginTop: 8 }}>
+        <label>$id: </label>
+        <select value={userId} onChange={e => setUserId(e.target.value)}
+          style={{ padding: 4, marginRight: 8 }}>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="99">99 (не существует)</option>
+        </select>
+        <button onClick={execute} style={{ padding: '6px 12px', cursor: 'pointer' }}>Выполнить</button>
+      </div>
+      {result && (
+        <pre style={{ background: '#f5f5f5', padding: 12, borderRadius: 8, marginTop: 8 }}>
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+`
+}} />

@@ -1,0 +1,546 @@
+---
+title: "58. Микрофронтенды"
+sidebar:
+  order: 61
+---
+import { Playground } from '@components/Playground'
+
+
+## 61. Микрофронтенды 🏗️
+
+Привет! Яша здесь. Микрофронтенды — это микросервисы для фронтенда. Каждая команда владеет своим куском интерфейса независимо. Сегодня разберём Module Federation и Native Federation — самые популярные подходы для Angular 🚀
+
+---
+
+### Зачем нужны микрофронтенды
+
+**Проблема**: Монолитный Angular-проект на 50+ разработчиков:
+- Долгие сборки (15+ минут)
+- Частые merge-конфликты
+- Риск деплоя — один баг ломает всё
+- Трудно масштабировать команды
+
+**Решение** — разбить на независимые приложения:
+```
+Shell (оркестратор) — загружает удалённые модули
+├── Team A → header, nav (порт 4201)
+├── Team B → catalog, product-card (порт 4202)
+├── Team C → cart, checkout (порт 4203)
+└── Team D → user-profile, settings (порт 4204)
+```
+
+---
+
+### Module Federation: концепция
+
+Module Federation (Webpack 5) позволяет **загружать JavaScript модули из других приложений в runtime**:
+
+```
+Shell App (localhost:4200)
+    │
+    ├── загружает → Team A Remote (localhost:4201)
+    │                  exposes: ['./Header', './Nav']
+    │
+    └── загружает → Team B Remote (localhost:4202)
+                       exposes: ['./CatalogPage', './ProductCard']
+```
+
+---
+
+### Native Federation с @angular-architects/native-federation
+
+Современный подход без Webpack — работает с esbuild:
+
+```bash
+npm install @angular-architects/native-federation
+ng add @angular-architects/native-federation --project=shell --type=host
+
+# В remote приложении
+ng add @angular-architects/native-federation --project=catalog --type=remote --port=4202
+```
+
+```typescript
+// federation.config.js — shell (host)
+const { withNativeFederation, shareAll } = require('@angular-architects/native-federation/config');
+
+module.exports = withNativeFederation({
+  remotes: {
+    'catalog': 'http://localhost:4202/remoteEntry.json',
+    'cart': 'http://localhost:4203/remoteEntry.json',
+  },
+  shared: {
+    ...shareAll({ singleton: true, strictVersion: true, requiredVersion: 'auto' }),
+  },
+});
+```
+
+```typescript
+// federation.config.js — catalog remote
+const { withNativeFederation, shareAll } = require('@angular-architects/native-federation/config');
+
+module.exports = withNativeFederation({
+  name: 'catalog',
+  exposes: {
+    './routes': './src/app/catalog/catalog.routes.ts',
+    './ProductCard': './src/app/catalog/product-card/product-card.component.ts',
+  },
+  shared: {
+    ...shareAll({ singleton: true, strictVersion: true, requiredVersion: 'auto' }),
+  },
+});
+```
+
+---
+
+### Маршрутизация в Shell
+
+```typescript
+// shell/src/app/app.routes.ts
+import { loadRemoteModule } from '@angular-architects/native-federation';
+
+export const routes: Routes = [
+  {
+    path: '',
+    component: HomeComponent,
+  },
+  {
+    path: 'catalog',
+    // Lazy loading удалённого модуля!
+    loadChildren: () =>
+      loadRemoteModule('catalog', './routes')
+        .then(m => m.CATALOG_ROUTES),
+  },
+  {
+    path: 'cart',
+    loadChildren: () =>
+      loadRemoteModule('cart', './routes')
+        .then(m => m.CART_ROUTES),
+  },
+];
+```
+
+---
+
+### Общие зависимости (Shared Dependencies)
+
+```typescript
+// Критическая настройка: singleton dependencies
+// Если Angular загрузится дважды — всё сломается!
+
+// federation.config.js
+module.exports = withNativeFederation({
+  shared: {
+    '@angular/core': {
+      singleton: true,         // ← только одна копия!
+      strictVersion: true,     // ← версии должны совпадать
+      requiredVersion: 'auto', // ← берётся из package.json
+    },
+    '@angular/router': {
+      singleton: true,
+      strictVersion: true,
+      requiredVersion: 'auto',
+    },
+    '@ngrx/store': {
+      singleton: true,
+      strictVersion: false,  // ← менее критично
+      requiredVersion: 'auto',
+    },
+  },
+});
+```
+
+---
+
+### Module Federation (Webpack): классический подход
+
+```bash
+npm install @angular-architects/module-federation
+ng add @angular-architects/module-federation --project=shell --type=host
+ng add @angular-architects/module-federation --project=catalog --type=remote --port=4202
+```
+
+```javascript
+// webpack.config.js — shell
+const ModuleFederationPlugin = require('webpack/lib/container/ModuleFederationPlugin');
+
+module.exports = {
+  plugins: [
+    new ModuleFederationPlugin({
+      remotes: {
+        catalog: 'catalog@http://localhost:4202/remoteEntry.js',
+        cart: 'cart@http://localhost:4203/remoteEntry.js',
+      },
+      shared: share({
+        '@angular/core': { singleton: true, strictVersion: true, requiredVersion: 'auto' },
+        '@angular/common': { singleton: true, strictVersion: true, requiredVersion: 'auto' },
+        '@angular/router': { singleton: true, strictVersion: true, requiredVersion: 'auto' },
+      }),
+    }),
+  ],
+};
+```
+
+---
+
+### Граница команды: контракты
+
+```typescript
+// shared-contracts/src/index.ts — публичный API между командами
+// Это библиотека в Nx монорепо, или отдельный npm пакет
+
+export interface UserContext {
+  id: string;
+  name: string;
+  roles: string[];
+}
+
+export interface NavigationEvent {
+  type: 'navigate';
+  path: string;
+}
+
+// Каждый remote получает контекст через injection token
+export const USER_CONTEXT = new InjectionToken<UserContext>('USER_CONTEXT');
+```
+
+```typescript
+// Shell передаёт контекст в remotes
+const routes: Routes = [
+  {
+    path: 'catalog',
+    providers: [
+      {
+        provide: USER_CONTEXT,
+        useFactory: (authService: AuthService) => authService.currentUser,
+        deps: [AuthService],
+      }
+    ],
+    loadChildren: () => loadRemoteModule('catalog', './routes'),
+  }
+];
+```
+
+---
+
+### Shell Service: коммуникация между remotes
+
+```typescript
+// shell/src/app/shell.service.ts — шина событий для MF
+import { Injectable } from '@angular/core';
+import { Subject, Observable } from 'rxjs';
+import { filter } from 'rxjs/operators';
+
+export interface MFEvent {
+  type: string;
+  source: string;
+  payload: unknown;
+}
+
+@Injectable({ providedIn: 'root' })
+export class ShellService {
+  private eventBus = new Subject<MFEvent>();
+
+  emit(event: MFEvent): void {
+    this.eventBus.next(event);
+  }
+
+  on<T = unknown>(type: string): Observable<MFEvent & { payload: T }> {
+    return this.eventBus.pipe(
+      filter(e => e.type === type),
+    ) as Observable<MFEvent & { payload: T }>;
+  }
+}
+
+// В catalog remote:
+// this.shellService.emit({ type: 'cart:add', source: 'catalog', payload: { productId } });
+
+// В cart remote:
+// this.shellService.on('cart:add').subscribe(({ payload }) => this.addToCart(payload.productId));
+```
+
+---
+
+### Shadow DOM для изоляции стилей
+
+```typescript
+// В remote компонентах — Shadow DOM предотвращает утечку стилей
+@Component({
+  selector: 'catalog-app',
+  encapsulation: ViewEncapsulation.ShadowDom,
+  template: `<router-outlet></router-outlet>`,
+  styles: [`:host { display: block; }`],
+})
+export class CatalogShellComponent {}
+```
+
+---
+
+### Динамические remotes: конфигурация в runtime
+
+```typescript
+// shell/src/app/mf-config.service.ts
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { initFederation } from '@angular-architects/native-federation';
+
+@Injectable({ providedIn: 'root' })
+export class MFConfigService {
+  async loadRemotes(): Promise<void> {
+    // Загружаем список remotes с сервера
+    const config = await this.http
+      .get<Record<string, string>>('/api/mf-config')
+      .toPromise();
+
+    // config = { catalog: 'https://catalog.example.com', cart: 'https://cart.example.com' }
+    await initFederation(config!);
+  }
+}
+```
+
+---
+
+## Playground 🎮
+
+Симулятор shell + remote архитектуры микрофронтендов:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback, useEffect } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const REMOTES = {
+  catalog: {
+    name: 'Catalog MF',
+    port: 4201,
+    color: '#8b5cf6',
+    status: 'online',
+    routes: ['/catalog', '/catalog/:id'],
+    exposes: ['./routes', './ProductCard', './CategoryFilter'],
+    icon: '🛍️',
+    content: ({ cart, onAddToCart }) => (
+      <div>
+        <h3 style={{ color: '#8b5cf6', marginBottom: '12px' }}>📦 Catalog Remote (Team B)</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          {[
+            { id: 1, name: 'Angular Book', price: 2990 },
+            { id: 2, name: 'RxJS Course', price: 1990 },
+            { id: 3, name: 'NgRx Kit', price: 3490 },
+            { id: 4, name: 'Material UI', price: 990 },
+          ].map(p => (
+            <div key={p.id} style={{ background: '#0f172a', borderRadius: '8px', padding: '12px' }}>
+              <div style={{ color: '#f1f5f9', fontWeight: 'bold', marginBottom: '6px' }}>{p.name}</div>
+              <div style={{ color: '#8b5cf6', marginBottom: '8px' }}>₽ {p.price.toLocaleString()}</div>
+              <button onClick={() => onAddToCart(p)} style={{
+                width: '100%', padding: '6px', borderRadius: '6px', border: 'none',
+                background: cart.find(i => i.id === p.id) ? '#14532d' : ANGULAR_RED,
+                color: 'white', cursor: 'pointer', fontSize: '12px',
+              }}>
+                {cart.find(i => i.id === p.id) ? '✅ В корзине' : '🛒 Добавить'}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    ),
+  },
+  cart: {
+    name: 'Cart MF',
+    port: 4202,
+    color: '#10b981',
+    status: 'online',
+    routes: ['/cart', '/checkout'],
+    exposes: ['./routes', './CartWidget'],
+    icon: '🛒',
+    content: ({ cart }) => (
+      <div>
+        <h3 style={{ color: '#10b981', marginBottom: '12px' }}>🛒 Cart Remote (Team C)</h3>
+        {cart.length === 0 ? (
+          <div style={{ color: '#64748b', textAlign: 'center', padding: '24px' }}>Корзина пуста</div>
+        ) : (
+          <>
+            {cart.map(item => (
+              <div key={item.id} style={{
+                display: 'flex', justifyContent: 'space-between',
+                padding: '8px 0', borderBottom: '1px solid #334155',
+              }}>
+                <span style={{ color: '#f1f5f9', fontSize: '14px' }}>{item.name}</span>
+                <span style={{ color: '#10b981' }}>₽ {item.price.toLocaleString()}</span>
+              </div>
+            ))}
+            <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
+              <span style={{ color: '#94a3b8' }}>Итого:</span>
+              <span style={{ color: '#10b981', fontSize: '18px' }}>
+                ₽ {cart.reduce((s, i) => s + i.price, 0).toLocaleString()}
+              </span>
+            </div>
+            <button style={{
+              width: '100%', marginTop: '12px', padding: '10px',
+              borderRadius: '8px', border: 'none', background: '#10b981',
+              color: 'white', fontWeight: 'bold', cursor: 'pointer',
+            }}>Оформить заказ →</button>
+          </>
+        )}
+      </div>
+    ),
+  },
+  user: {
+    name: 'User MF',
+    port: 4203,
+    color: '#f59e0b',
+    status: 'online',
+    routes: ['/profile', '/settings'],
+    exposes: ['./routes', './UserBadge'],
+    icon: '👤',
+    content: () => (
+      <div>
+        <h3 style={{ color: '#f59e0b', marginBottom: '12px' }}>👤 User Remote (Team D)</h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+          <div style={{ width: '56px', height: '56px', borderRadius: '50%', background: ANGULAR_RED, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px' }}>🧑‍💻</div>
+          <div>
+            <div style={{ color: '#f1f5f9', fontWeight: 'bold' }}>Яша Петров</div>
+            <div style={{ color: '#94a3b8', fontSize: '13px' }}>Angular Developer</div>
+            <div style={{ color: '#f59e0b', fontSize: '12px' }}>Premium Member</div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {['Настройки профиля', 'История заказов', 'Способы оплаты', 'Выйти'].map(item => (
+            <div key={item} style={{ padding: '8px 12px', background: '#0f172a', borderRadius: '6px', color: '#94a3b8', fontSize: '13px', cursor: 'pointer' }}>{item}</div>
+          ))}
+        </div>
+      </div>
+    ),
+  },
+};
+
+export default function App() {
+  const [activePage, setActivePage] = useState('catalog');
+  const [remoteStatuses, setRemoteStatuses] = useState({ catalog: true, cart: true, user: true });
+  const [cart, setCart] = useState([]);
+  const [loadTime, setLoadTime] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  const navigate = useCallback((page) => {
+    const remote = REMOTES[page];
+    if (!remote || !remoteStatuses[page]) return;
+    
+    setLoading(true);
+    // Симуляция времени загрузки remote
+    const time = Math.random() * 400 + 100;
+    setTimeout(() => {
+      setActivePage(page);
+      setLoadTime(prev => ({ ...prev, [page]: Math.round(time) }));
+      setLoading(false);
+    }, time);
+  }, [remoteStatuses]);
+
+  const addToCart = useCallback((product) => {
+    setCart(prev => prev.find(i => i.id === product.id) ? prev : [...prev, product]);
+  }, []);
+
+  const activeRemote = REMOTES[activePage];
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+        {/* Shell header */}
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '12px 16px',
+          marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <div>
+            <div style={{ fontWeight: 'bold', fontSize: '16px' }}>🏗️ Shell App (port: 4200)</div>
+            <div style={{ fontSize: '11px', opacity: 0.8 }}>Module Federation Host</div>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            {cart.length > 0 && (
+              <div style={{ background: '#fff', color: ANGULAR_RED, borderRadius: '12px', padding: '2px 8px', fontSize: '12px', fontWeight: 'bold' }}>
+                🛒 {cart.length}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Remote status */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px' }}>
+          <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>
+            REMOTES (симуляция статуса сервисов):
+          </div>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            {Object.entries(REMOTES).map(([key, remote]) => (
+              <div key={key} style={{
+                background: '#0f172a', borderRadius: '8px', padding: '10px 14px',
+                border: \`1px solid \${remoteStatuses[key] ? remote.color : '#ef4444'}\`,
+                display: 'flex', gap: '10px', alignItems: 'center',
+              }}>
+                <span style={{ fontSize: '16px' }}>{remote.icon}</span>
+                <div>
+                  <div style={{ color: '#f1f5f9', fontSize: '12px', fontWeight: 'bold' }}>{remote.name}</div>
+                  <div style={{ color: '#64748b', fontSize: '10px' }}>:{remote.port}</div>
+                </div>
+                <div onClick={() => setRemoteStatuses(prev => ({ ...prev, [key]: !prev[key] }))} style={{
+                  width: '32px', height: '18px', borderRadius: '9px',
+                  background: remoteStatuses[key] ? '#4ade80' : '#ef4444',
+                  cursor: 'pointer', position: 'relative',
+                }}>
+                  <div style={{
+                    position: 'absolute', top: '3px',
+                    left: remoteStatuses[key] ? '16px' : '3px',
+                    width: '12px', height: '12px', borderRadius: '50%',
+                    background: 'white', transition: 'left 0.2s',
+                  }} />
+                </div>
+                {loadTime[key] && <span style={{ color: '#94a3b8', fontSize: '10px' }}>{loadTime[key]}мс</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Navigation */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+          {Object.entries(REMOTES).map(([key, remote]) => (
+            <button key={key} onClick={() => navigate(key)} style={{
+              flex: 1, padding: '10px', borderRadius: '8px', border: 'none',
+              cursor: remoteStatuses[key] ? 'pointer' : 'not-allowed',
+              background: activePage === key ? remote.color + '30' : '#1e293b',
+              color: activePage === key ? remote.color : '#64748b',
+              fontWeight: activePage === key ? 'bold' : 'normal',
+              fontSize: '13px', borderBottom: activePage === key ? \`3px solid \${remote.color}\` : '3px solid transparent',
+              opacity: remoteStatuses[key] ? 1 : 0.4,
+            }}>
+              {remote.icon} {key}
+              {!remoteStatuses[key] && ' (offline)'}
+            </button>
+          ))}
+        </div>
+
+        {/* Remote content */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', minHeight: '280px' }}>
+          <div style={{ color: '#64748b', fontSize: '11px', marginBottom: '12px', fontFamily: 'monospace' }}>
+            loadRemoteModule('{activePage}', './routes') → loaded in {loadTime[activePage] || 0}ms
+          </div>
+          {loading ? (
+            <div style={{ textAlign: 'center', padding: '60px', color: '#64748b' }}>
+              <div style={{ fontSize: '32px', marginBottom: '8px' }}>⏳</div>
+              Загрузка remote module...
+            </div>
+          ) : !remoteStatuses[activePage] ? (
+            <div style={{ textAlign: 'center', padding: '60px', color: '#ef4444' }}>
+              <div style={{ fontSize: '32px', marginBottom: '8px' }}>💥</div>
+              Remote недоступен! Shell показывает fallback UI.
+            </div>
+          ) : activeRemote ? (
+            activeRemote.content({ cart, onAddToCart: addToCart })
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

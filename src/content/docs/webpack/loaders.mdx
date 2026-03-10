@@ -1,0 +1,392 @@
+---
+title: "4. Loaders: трансформация файлов"
+sidebar:
+  order: 4
+---
+import { Playground } from '@components/Playground'
+
+
+Webpack по умолчанию понимает только JavaScript и JSON. **Loaders** — это трансформаторы, которые позволяют Webpack обрабатывать любые типы файлов: TypeScript, CSS, SASS, изображения, шрифты и многое другое. Каждый лоадер получает исходный файл и возвращает трансформированный JavaScript.
+
+## Как работают Loaders
+
+```
+src/styles.scss
+       ↓
+  sass-loader    ← SCSS → CSS
+       ↓
+  css-loader     ← CSS → JS module (разрешает @import, url())
+       ↓
+  style-loader   ← Инжектирует <style> тег в DOM
+       ↓
+  bundle.js      ← Финальный бандл
+```
+
+**Важно**: Лоадеры применяются **справа налево** (или снизу вверх в массиве). Последний в массиве выполняется первым.
+
+## Конфигурация module.rules
+
+```js
+module.exports = {
+  module: {
+    rules: [
+      {
+        test: /\\.tsx?$/,         // RegExp для типов файлов
+        use: 'ts-loader',         // Строка, объект, или массив
+        exclude: /node_modules/,  // Исключения
+        include: path.resolve(__dirname, 'src'), // Включения
+      },
+    ],
+  },
+};
+```
+
+### Поля правила
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `test` | RegExp | Какие файлы обрабатывать |
+| `use` | string/array/object | Какие лоадеры применять |
+| `include` | string/RegExp | Только эти пути |
+| `exclude` | string/RegExp | Исключить эти пути |
+| `type` | string | Тип модуля (asset и др.) |
+| `issuer` | RegExp | Фильтр по файлу-источнику импорта |
+
+## Популярные Loaders
+
+### babel-loader — JavaScript и TypeScript
+```bash
+npm install --save-dev babel-loader @babel/core @babel/preset-env @babel/preset-react @babel/preset-typescript
+```
+
+```js
+{
+  test: /\\.(js|jsx|ts|tsx)$/,
+  use: {
+    loader: 'babel-loader',
+    options: {
+      presets: [
+        ['@babel/preset-env', { targets: 'defaults' }],
+        ['@babel/preset-react', { runtime: 'automatic' }],
+        '@babel/preset-typescript',
+      ],
+      plugins: ['@babel/plugin-transform-runtime'],
+    },
+  },
+  exclude: /node_modules/,
+}
+```
+
+### css-loader + style-loader
+```bash
+npm install --save-dev css-loader style-loader
+```
+
+```js
+{
+  test: /\\.css$/,
+  use: ['style-loader', 'css-loader'], // ← порядок справа налево!
+}
+// css-loader: разрешает @import, url() → JS модуль
+// style-loader: инжектирует CSS в <style> тег
+```
+
+### SASS/SCSS
+```bash
+npm install --save-dev sass-loader sass
+```
+
+```js
+{
+  test: /\\.s[ac]ss$/i,
+  use: [
+    'style-loader',
+    {
+      loader: 'css-loader',
+      options: { modules: true }, // CSS Modules
+    },
+    'sass-loader',
+  ],
+}
+```
+
+### file-loader / url-loader (устарело в Webpack 5)
+```js
+// Webpack 4 и ниже
+{ test: /\\.(png|jpg|gif)$/, use: 'file-loader' }
+{ test: /\\.(png|jpg|gif)$/, use: { loader: 'url-loader', options: { limit: 8192 } } }
+
+// Webpack 5 — используйте Asset Modules вместо этого
+{ test: /\\.(png|jpg|gif)$/, type: 'asset/resource' }
+```
+
+### Передача опций лоадеру
+```js
+{
+  loader: 'css-loader',
+  options: {
+    modules: {
+      localIdentName: '[name]__[local]--[hash:base64:5]',
+    },
+    importLoaders: 1, // сколько лоадеров применяется после css-loader
+  },
+}
+```
+
+## Написание кастомного лоадера
+
+```js
+// loaders/markdown-loader.js
+module.exports = function(source) {
+  // source — содержимое входного файла (строка)
+  const html = markdownParser(source);
+  return \`module.exports = \${JSON.stringify(html)}\`;
+};
+
+// Async лоадер
+module.exports = async function(source) {
+  const result = await processAsync(source);
+  return result;
+};
+```
+
+Ниже — интерактивный визуализатор pipeline лоадеров. Выберите тип файла и посмотрите, как он проходит через цепочку лоадеров.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from 'react';
+
+const BG = '#0f172a';
+const WEBPACK_COLOR = '#8dd6f9';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const ACCENT = '#fb923c';
+const SUCCESS = '#4ade80';
+const MUTED = '#64748b';
+const PURPLE = '#a78bfa';
+
+interface LoaderStep {
+  name: string;
+  input: string;
+  output: string;
+  description: string;
+  color: string;
+  time: number;
+}
+
+interface FileType {
+  id: string;
+  label: string;
+  extension: string;
+  icon: string;
+  loaders: LoaderStep[];
+}
+
+const FILE_TYPES: FileType[] = [
+  {
+    id: 'ts',
+    label: 'TypeScript',
+    extension: '.tsx',
+    icon: '📘',
+    loaders: [
+      { name: 'ts-loader', input: 'const x: number = 42;\\nconst greet = (name: string): string => {\\n  return \`Hello, \${name}!\`;\\n};', output: 'const x = 42;\\nconst greet = (name) => {\\n  return \`Hello, \${name}!\`;\\n};', description: 'TypeScript → JavaScript, удаляет типы', color: WEBPACK_COLOR, time: 45 },
+      { name: 'babel-loader', input: 'const x = 42;\\nconst greet = (name) => {\\n  return \`Hello, \${name}!\`;\\n};', output: '"use strict";\\nvar x = 42;\\nvar greet = function(name) {\\n  return "Hello, " + name + "!";\\n};', description: 'ES6+ → ES5, полифиллы, транспиляция', color: ACCENT, time: 62 },
+    ],
+  },
+  {
+    id: 'scss',
+    label: 'SCSS',
+    extension: '.scss',
+    icon: '🎨',
+    loaders: [
+      { name: 'sass-loader', input: '$color: #8dd6f9;\\n.container {\\n  background: $color;\\n  .title {\\n    font-size: 24px;\\n  }\\n}', output: '.container {\\n  background: #8dd6f9;\\n}\\n.container .title {\\n  font-size: 24px;\\n}', description: 'SCSS/SASS → CSS, компиляция переменных и вложенности', color: '#f472b6', time: 38 },
+      { name: 'css-loader', input: '.container {\\n  background: #8dd6f9;\\n}\\n.container .title {\\n  font-size: 24px;\\n}', output: 'exports = module.exports = require("css-loader/lib/css-base.js")();\\nexports.push([module.id, "\\n.container { background: #8dd6f9; }\\n.container .title { font-size: 24px; }\\n", ""]);', description: 'CSS → JS модуль, разрешает @import и url()', color: PURPLE, time: 28 },
+      { name: 'style-loader', input: 'CSS модуль (JS)', output: '// Инжектирует в DOM:\\n<style>\\n.container {\\n  background: #8dd6f9;\\n}\\n.container .title {\\n  font-size: 24px;\\n}\\n</style>', description: 'Инжектирует CSS в <style> тег в DOM', color: SUCCESS, time: 15 },
+    ],
+  },
+  {
+    id: 'png',
+    label: 'PNG Image',
+    extension: '.png',
+    icon: '🖼️',
+    loaders: [
+      { name: 'file-loader', input: '[Binary PNG data]\\nSize: 24.3 KB', output: 'module.exports = "/dist/assets/logo.a1b2c3d4.png";', description: 'Копирует файл в dist/, возвращает URL', color: ACCENT, time: 12 },
+    ],
+  },
+  {
+    id: 'svg',
+    label: 'SVG',
+    extension: '.svg',
+    icon: '🔷',
+    loaders: [
+      { name: '@svgr/webpack', input: '<svg xmlns="..." viewBox="0 0 24 24">\\n  <path d="M12 2L2 7l10 5..."/>\\n</svg>', output: 'import React from "react";\\nconst SvgIcon = (props) => (\\n  <svg viewBox="0 0 24 24" {...props}>\\n    <path d="M12 2L2 7l10 5..."/>\\n  </svg>\\n);\\nexport default SvgIcon;', description: 'SVG → React компонент', color: WEBPACK_COLOR, time: 22 },
+    ],
+  },
+  {
+    id: 'markdown',
+    label: 'Markdown',
+    extension: '.md',
+    icon: '📝',
+    loaders: [
+      { name: 'raw-loader', input: '# Hello World\\n\\nThis is markdown content.\\n\\n- Item 1\\n- Item 2', output: 'module.exports = "# Hello World\\\\n\\\\nThis is markdown content.\\\\n\\\\n- Item 1\\\\n- Item 2";', description: 'Импортирует файл как строку', color: MUTED, time: 5 },
+    ],
+  },
+];
+
+export default function App() {
+  const [selectedType, setSelectedType] = useState<string>('ts');
+  const [activeStep, setActiveStep] = useState<number>(-1);
+  const [running, setRunning] = useState(false);
+  const [completed, setCompleted] = useState<number[]>([]);
+
+  const fileType = FILE_TYPES.find(f => f.id === selectedType)!;
+
+  useEffect(() => {
+    setActiveStep(-1);
+    setCompleted([]);
+  }, [selectedType]);
+
+  const runPipeline = () => {
+    setRunning(true);
+    setActiveStep(0);
+    setCompleted([]);
+    let step = 0;
+    const next = () => {
+      if (step >= fileType.loaders.length) {
+        setActiveStep(-1);
+        setRunning(false);
+        return;
+      }
+      setTimeout(() => {
+        setCompleted(prev => [...prev, step]);
+        step++;
+        if (step < fileType.loaders.length) {
+          setActiveStep(step);
+          next();
+        } else {
+          setActiveStep(-1);
+          setRunning(false);
+        }
+      }, fileType.loaders[step].time * 20 + 600);
+    };
+    next();
+  };
+
+  const currentStepData = activeStep >= 0 ? fileType.loaders[activeStep] : (completed.length > 0 ? fileType.loaders[completed[completed.length - 1]] : null);
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', color: TEXT, fontFamily: 'monospace', padding: '24px' }}>
+      <div style={{ maxWidth: 900, margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: WEBPACK_COLOR, marginBottom: 6 }}>
+            🔄 Loader Pipeline Visualizer
+          </div>
+          <div style={{ color: MUTED, fontSize: 13 }}>Выберите тип файла и запустите цепочку лоадеров</div>
+        </div>
+
+        {/* File type selector */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 24, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {FILE_TYPES.map(ft => (
+            <div
+              key={ft.id}
+              onClick={() => setSelectedType(ft.id)}
+              style={{
+                padding: '10px 18px', borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s',
+                background: selectedType === ft.id ? WEBPACK_COLOR : CARD,
+                color: selectedType === ft.id ? BG : TEXT,
+                fontWeight: selectedType === ft.id ? 700 : 400,
+                border: \`2px solid \${selectedType === ft.id ? WEBPACK_COLOR : 'transparent'}\`,
+              }}
+            >
+              <span style={{ marginRight: 6 }}>{ft.icon}</span>
+              <span style={{ fontSize: 13 }}>{ft.label}</span>
+              <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 4 }}>{ft.extension}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Pipeline */}
+        <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+            {/* Source file */}
+            <div style={{ background: '#0a0f1e', borderRadius: 8, padding: '10px 14px', fontSize: 12 }}>
+              <div style={{ color: MUTED, fontSize: 10, marginBottom: 2 }}>Источник</div>
+              <div style={{ color: TEXT }}>{fileType.icon} input{fileType.extension}</div>
+            </div>
+
+            {fileType.loaders.map((loader, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{ color: MUTED, fontSize: 18 }}>→</div>
+                <div
+                  onClick={() => setActiveStep(activeStep === i ? -1 : i)}
+                  style={{
+                    background: completed.includes(i) ? '#0a2e1a' : (activeStep === i ? '#0f2744' : '#0a0f1e'),
+                    border: \`2px solid \${completed.includes(i) ? SUCCESS : (activeStep === i ? loader.color : '#334155')}\`,
+                    borderRadius: 8, padding: '10px 14px', cursor: 'pointer', transition: 'all 0.3s', minWidth: 120,
+                  }}
+                >
+                  <div style={{ fontSize: 10, color: MUTED, marginBottom: 2 }}>Лоадер {i + 1}</div>
+                  <div style={{ fontSize: 12, color: completed.includes(i) ? SUCCESS : (activeStep === i ? loader.color : TEXT), fontWeight: 700 }}>
+                    {completed.includes(i) ? '✓ ' : (activeStep === i ? '⟳ ' : '')}{loader.name}
+                  </div>
+                  <div style={{ fontSize: 10, color: MUTED, marginTop: 2 }}>{loader.time}ms</div>
+                </div>
+              </div>
+            ))}
+
+            <div style={{ color: MUTED, fontSize: 18 }}>→</div>
+            <div style={{ background: completed.length === fileType.loaders.length ? '#0a2e1a' : '#0a0f1e', borderRadius: 8, padding: '10px 14px', border: \`2px solid \${completed.length === fileType.loaders.length ? SUCCESS : '#334155'}\` }}>
+              <div style={{ color: MUTED, fontSize: 10, marginBottom: 2 }}>Вывод</div>
+              <div style={{ fontSize: 12, color: completed.length === fileType.loaders.length ? SUCCESS : MUTED }}>bundle.js</div>
+            </div>
+          </div>
+
+          <button
+            onClick={runPipeline}
+            disabled={running}
+            style={{
+              padding: '10px 24px', background: running ? MUTED : WEBPACK_COLOR, color: BG,
+              border: 'none', borderRadius: 8, cursor: running ? 'wait' : 'pointer', fontWeight: 700, fontSize: 13, fontFamily: 'monospace',
+            }}
+          >
+            {running ? '⟳ Обработка...' : '▶ Запустить Pipeline'}
+          </button>
+        </div>
+
+        {/* Step detail */}
+        {currentStepData && (
+          <div style={{ background: CARD, borderRadius: 12, padding: 20, marginBottom: 24 }}>
+            <div style={{ fontSize: 14, color: currentStepData.color, fontWeight: 700, marginBottom: 4 }}>
+              {currentStepData.name}
+            </div>
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 16 }}>{currentStepData.description}</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <div>
+                <div style={{ fontSize: 11, color: MUTED, marginBottom: 6 }}>ВХОД</div>
+                <pre style={{ margin: 0, background: '#0a0f1e', borderRadius: 8, padding: 12, fontSize: 11, lineHeight: 1.5, color: TEXT, overflow: 'auto', maxHeight: 200 }}>
+                  {currentStepData.input}
+                </pre>
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: MUTED, marginBottom: 6 }}>ВЫХОД</div>
+                <pre style={{ margin: 0, background: '#0a0f1e', borderRadius: 8, padding: 12, fontSize: 11, lineHeight: 1.5, color: SUCCESS, overflow: 'auto', maxHeight: 200 }}>
+                  {currentStepData.output}
+                </pre>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Total time */}
+        {completed.length > 0 && (
+          <div style={{ background: CARD, borderRadius: 12, padding: 16, textAlign: 'center' }}>
+            <div style={{ color: MUTED, fontSize: 12, marginBottom: 4 }}>Итого времени обработки</div>
+            <div style={{ color: WEBPACK_COLOR, fontSize: 24, fontWeight: 700 }}>
+              {fileType.loaders.filter((_, i) => completed.includes(i)).reduce((acc, l) => acc + l.time, 0)} мс
+            </div>
+            <div style={{ color: MUTED, fontSize: 11 }}>на один модуль</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

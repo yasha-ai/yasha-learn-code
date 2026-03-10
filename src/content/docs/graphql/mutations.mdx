@@ -1,0 +1,423 @@
+---
+title: "6. Mutations"
+sidebar:
+  order: 6
+---
+import { Playground } from '@components/Playground'
+
+
+![GraphQL Mutations](/lessons/graphql-mutations.png)
+
+Mutation — операция изменения данных. Аналог POST/PUT/DELETE в REST. В отличие от Query, mutations выполняются последовательно (не параллельно).
+
+## Базовый синтаксис
+
+```graphql
+mutation CreatePost($input: CreatePostInput!) {
+  createPost(input: $input) {
+    id
+    title
+    author {
+      name
+    }
+    createdAt
+  }
+}
+```
+
+Переменные:
+```json
+{
+  "input": {
+    "title": "Мой первый пост о GraphQL",
+    "body": "GraphQL — это мощный инструмент...",
+    "tags": ["graphql", "api"]
+  }
+}
+```
+
+## Схема для mutations
+
+```graphql
+input CreatePostInput {
+  title: String!
+  body: String!
+  tags: [String!]
+  status: PostStatus = DRAFT
+}
+
+input UpdatePostInput {
+  title: String
+  body: String
+  tags: [String!]
+  status: PostStatus
+}
+
+type Mutation {
+  # CRUD
+  createPost(input: CreatePostInput!): Post!
+  updatePost(id: ID!, input: UpdatePostInput!): Post!
+  deletePost(id: ID!): DeleteResult!
+  publishPost(id: ID!): Post!
+
+  # Пользователи
+  createUser(input: CreateUserInput!): AuthPayload!
+  login(email: String!, password: String!): AuthPayload!
+  logout: Boolean!
+
+  # Другие действия
+  likePost(postId: ID!): Post!
+  followUser(userId: ID!): User!
+}
+
+type DeleteResult {
+  success: Boolean!
+  message: String
+}
+
+type AuthPayload {
+  token: String!
+  user: User!
+}
+```
+
+## Resolvers для mutations
+
+```javascript
+const resolvers = {
+  Mutation: {
+    createPost: async (_, { input }, { db, user }) => {
+      // Проверка авторизации
+      if (!user) throw new Error('Необходима авторизация');
+
+      const post = await db.posts.create({
+        ...input,
+        authorId: user.id,
+        createdAt: new Date(),
+      });
+
+      return post;
+    },
+
+    updatePost: async (_, { id, input }, { db, user }) => {
+      if (!user) throw new Error('Необходима авторизация');
+
+      const post = await db.posts.findById(id);
+      if (!post) throw new Error('Пост не найден');
+      if (post.authorId !== user.id) throw new Error('Нет доступа');
+
+      return db.posts.update(id, input);
+    },
+
+    deletePost: async (_, { id }, { db, user }) => {
+      if (!user) throw new Error('Необходима авторизация');
+
+      const post = await db.posts.findById(id);
+      if (!post) throw new Error('Пост не найден');
+      if (post.authorId !== user.id) throw new Error('Нет доступа');
+
+      await db.posts.delete(id);
+      return { success: true, message: 'Пост удалён' };
+    },
+
+    publishPost: async (_, { id }, { db, user }) => {
+      if (!user) throw new Error('Необходима авторизация');
+
+      return db.posts.update(id, {
+        status: 'PUBLISHED',
+        publishedAt: new Date(),
+      });
+    },
+
+    login: async (_, { email, password }, { db }) => {
+      const user = await db.users.findByEmail(email);
+      if (!user) throw new Error('Пользователь не найден');
+
+      const valid = await bcrypt.compare(password, user.passwordHash);
+      if (!valid) throw new Error('Неверный пароль');
+
+      const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET);
+      return { token, user };
+    },
+  },
+};
+```
+
+## Несколько мутаций в одной операции
+
+В отличие от query, mutations в одной операции выполняются **последовательно**:
+
+```graphql
+mutation CreateAndPublish($input: CreatePostInput!, $id: ID!) {
+  created: createPost(input: $input) {
+    id
+    title
+  }
+  published: publishPost(id: $id) {
+    id
+    status
+    publishedAt
+  }
+}
+```
+
+## useMutation в React
+
+```jsx
+import { useMutation, gql } from '@apollo/client';
+
+const CREATE_POST = gql`
+  mutation CreatePost($input: CreatePostInput!) {
+    createPost(input: $input) {
+      id
+      title
+      status
+      createdAt
+    }
+  }
+`;
+
+function CreatePostForm() {
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+
+  const [createPost, { loading, error, data }] = useMutation(CREATE_POST, {
+    // Обновляем кэш после мутации
+    update(cache, { data: { createPost } }) {
+      cache.modify({
+        fields: {
+          posts(existingPosts = []) {
+            const newPostRef = cache.writeFragment({
+              data: createPost,
+              fragment: gql`
+                fragment NewPost on Post {
+                  id
+                  title
+                  status
+                }
+              `,
+            });
+            return { ...existingPosts, items: [newPostRef, ...existingPosts.items] };
+          },
+        },
+      });
+    },
+    onCompleted: (data) => {
+      console.log('Пост создан:', data.createPost.id);
+    },
+    onError: (error) => {
+      console.error('Ошибка:', error.message);
+    },
+  });
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    await createPost({
+      variables: {
+        input: { title, body },
+      },
+    });
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        value={title}
+        onChange={e => setTitle(e.target.value)}
+        placeholder="Заголовок"
+      />
+      <textarea
+        value={body}
+        onChange={e => setBody(e.target.value)}
+        placeholder="Содержание"
+      />
+      <button type="submit" disabled={loading}>
+        {loading ? 'Сохранение...' : 'Создать пост'}
+      </button>
+      {error && <p>Ошибка: {error.message}</p>}
+      {data && <p>Пост создан! ID: {data.createPost.id}</p>}
+    </form>
+  );
+}
+```
+
+## Optimistic UI
+
+Apollo Client позволяет немедленно показать результат пока сервер ещё обрабатывает:
+
+```jsx
+const [likePost] = useMutation(LIKE_POST, {
+  optimisticResponse: {
+    likePost: {
+      __typename: 'Post',
+      id: postId,
+      likesCount: currentLikes + 1,  // Показываем сразу
+      isLiked: true,
+    },
+  },
+});
+```
+
+## Обработка ошибок в mutations
+
+### GraphQL ошибки (ожидаемые)
+
+```javascript
+// На сервере
+import { GraphQLError } from 'graphql';
+
+const resolvers = {
+  Mutation: {
+    createPost: async (_, { input }, { user }) => {
+      if (!user) {
+        throw new GraphQLError('Необходима авторизация', {
+          extensions: {
+            code: 'UNAUTHENTICATED',
+            http: { status: 401 },
+          },
+        });
+      }
+
+      if (input.title.length < 3) {
+        throw new GraphQLError('Заголовок слишком короткий', {
+          extensions: {
+            code: 'BAD_USER_INPUT',
+            field: 'title',
+          },
+        });
+      }
+    },
+  },
+};
+```
+
+На клиенте:
+```javascript
+const [createPost] = useMutation(CREATE_POST);
+
+try {
+  await createPost({ variables: { input } });
+} catch (error) {
+  if (error.graphQLErrors) {
+    error.graphQLErrors.forEach(({ message, extensions }) => {
+      if (extensions.code === 'UNAUTHENTICATED') {
+        router.push('/login');
+      }
+    });
+  }
+}
+```
+
+## Паттерн: Payload объект
+
+Хорошая практика — возвращать из мутации объект-payload:
+
+```graphql
+type CreatePostPayload {
+  post: Post
+  errors: [UserError!]!
+  success: Boolean!
+}
+
+type UserError {
+  field: String
+  message: String!
+}
+
+type Mutation {
+  createPost(input: CreatePostInput!): CreatePostPayload!
+}
+```
+
+```javascript
+const resolvers = {
+  Mutation: {
+    createPost: async (_, { input }, { db, user }) => {
+      const errors = [];
+
+      if (!user) {
+        errors.push({ field: null, message: 'Необходима авторизация' });
+      }
+      if (input.title.length < 3) {
+        errors.push({ field: 'title', message: 'Заголовок слишком короткий' });
+      }
+
+      if (errors.length > 0) {
+        return { post: null, errors, success: false };
+      }
+
+      const post = await db.posts.create(input);
+      return { post, errors: [], success: true };
+    },
+  },
+};
+```
+
+## Практика
+
+1. Создай мутации `createUser` и `login` с возвратом токена
+2. Реализуй форму регистрации в React через `useMutation`
+3. Добавь optimistic update при лайке поста
+4. Реализуй payload-паттерн для мутации `createProduct`
+5. Обработай ошибку авторизации — редирект на /login
+
+## Итого
+
+- Mutation — операция изменения данных
+- Mutations в одной операции выполняются последовательно
+- `useMutation` — хук для выполнения мутаций в React
+- Обновляй кэш Apollo Client после мутации
+- Optimistic UI — показывай результат до ответа сервера
+- Payload-паттерн — возвращай объект с `errors` и `success`
+
+**Следующий урок** → [Subscriptions →](/graphql/subscriptions/)
+
+<Playground client:visible template="vite-react" files={{
+  '/App.jsx': `import { useState } from 'react';
+
+export default function App() {
+  const [books, setBooks] = useState([
+    { id: 1, title: 'Война и мир', author: 'Толстой' },
+  ]);
+  const [title, setTitle] = useState('');
+  const [author, setAuthor] = useState('');
+  const [log, setLog] = useState([]);
+
+  const addBook = () => {
+    if (!title || !author) return;
+    const mutation = \`mutation { createBook(input: { title: "\${title}", author: "\${author}" }) { id title } }\`;
+    setLog(prev => [...prev, mutation]);
+    setBooks(prev => [...prev, { id: Date.now(), title, author }]);
+    setTitle(''); setAuthor('');
+  };
+
+  const deleteBook = (id) => {
+    setLog(prev => [...prev, \`mutation { deleteBook(id: "\${id}") }\`]);
+    setBooks(prev => prev.filter(b => b.id !== id));
+  };
+
+  return (
+    <div style={{ padding: 20, fontFamily: 'sans-serif' }}>
+      <h2>Mutations: создание и удаление</h2>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <input placeholder="Название" value={title} onChange={e => setTitle(e.target.value)}
+          style={{ padding: 6, borderRadius: 4, border: '1px solid #ccc' }} />
+        <input placeholder="Автор" value={author} onChange={e => setAuthor(e.target.value)}
+          style={{ padding: 6, borderRadius: 4, border: '1px solid #ccc' }} />
+        <button onClick={addBook} style={{ padding: '6px 12px', cursor: 'pointer' }}>Добавить</button>
+      </div>
+      <ul>{books.map(b => (
+        <li key={b.id}>{b.title} — {b.author}
+          <button onClick={() => deleteBook(b.id)} style={{ marginLeft: 8, cursor: 'pointer' }}>✕</button>
+        </li>
+      ))}</ul>
+      {log.length > 0 && (
+        <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: 12, borderRadius: 8, fontSize: 12, maxHeight: 120, overflow: 'auto' }}>
+          {log.join('\n')}
+        </pre>
+      )}
+    </div>
+  );
+}
+`
+}} />

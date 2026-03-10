@@ -1,0 +1,1119 @@
+---
+title: "4. TS Weather App"
+sidebar:
+  order: 4
+---
+
+Создай приложение прогноза погоды с использованием TypeScript! API, типизация, модули — всё как в настоящих production-проектах.
+
+---
+
+## Что будем делать
+
+- **Weather API** — работа с OpenWeatherMap API
+- **TypeScript** — типизация данных и интерфейсы
+- **Modules** — разделение кода на модули
+- **Error handling** — обработка ошибок запросов
+- **Local caching** — кеширование результатов
+- **Responsive UI** — адаптивный дизайн
+
+---
+
+## Этап 1: Подготовка
+
+### Инструменты
+
+✅ **Node.js** (v18+) — для работы с TypeScript  
+[Скачать Node.js →](https://nodejs.org/)
+
+✅ **VS Code** — редактор кода  
+[Скачать VS Code →](https://code.visualstudio.com/)
+
+✅ **OpenWeatherMap API Key** — бесплатный ключ  
+[Получить API key →](https://openweathermap.org/api)
+
+### Создай проект
+
+```bash
+# Создай папку
+mkdir weather-app
+cd weather-app
+
+# Инициализация npm
+npm init -y
+
+# Установка TypeScript
+npm install -D typescript
+
+# Установка типов для DOM
+npm install -D @types/node
+
+# Создание конфига TypeScript
+npx tsc --init
+```
+
+### Структура проекта
+
+```bash
+weather-app/
+├── src/
+│   ├── types/           # TypeScript интерфейсы
+│   │   └── weather.ts
+│   ├── api/             # API модули
+│   │   └── weatherAPI.ts
+│   ├── utils/           # Утилиты
+│   │   └── formatters.ts
+│   ├── components/      # UI компоненты
+│   │   └── weatherCard.ts
+│   └── app.ts           # Главный файл
+├── public/
+│   ├── index.html
+│   └── style.css
+├── dist/                # Скомпилированный JS (создаётся автоматически)
+├── tsconfig.json        # TypeScript конфиг
+└── package.json
+```
+
+---
+
+## Этап 2: Настройка TypeScript
+
+Открой `tsconfig.json` и настрой:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ES2020",
+    "lib": ["ES2020", "DOM"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}
+```
+
+Добавь scripts в `package.json`:
+
+```json
+{
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "dev": "tsc --watch"
+  }
+}
+```
+
+---
+
+## Этап 3: TypeScript типы
+
+Создай файл `src/types/weather.ts`:
+
+```typescript
+// === WEATHER DATA TYPES ===
+
+/**
+ * Ответ от OpenWeatherMap API
+ */
+export interface WeatherResponse {
+  coord: {
+    lon: number;
+    lat: number;
+  };
+  weather: Array<{
+    id: number;
+    main: string;
+    description: string;
+    icon: string;
+  }>;
+  base: string;
+  main: {
+    temp: number;
+    feels_like: number;
+    temp_min: number;
+    temp_max: number;
+    pressure: number;
+    humidity: number;
+  };
+  visibility: number;
+  wind: {
+    speed: number;
+    deg: number;
+  };
+  clouds: {
+    all: number;
+  };
+  dt: number;
+  sys: {
+    type: number;
+    id: number;
+    country: string;
+    sunrise: number;
+    sunset: number;
+  };
+  timezone: number;
+  id: number;
+  name: string;
+  cod: number;
+}
+
+/**
+ * Упрощённые данные о погоде для отображения
+ */
+export interface WeatherData {
+  city: string;
+  country: string;
+  temperature: number;
+  feelsLike: number;
+  description: string;
+  icon: string;
+  humidity: number;
+  windSpeed: number;
+  pressure: number;
+  sunrise: number;
+  sunset: number;
+}
+
+/**
+ * Конфигурация API
+ */
+export interface APIConfig {
+  apiKey: string;
+  baseURL: string;
+  units: 'metric' | 'imperial';
+}
+
+/**
+ * Кеш погоды
+ */
+export interface WeatherCache {
+  data: WeatherData;
+  timestamp: number;
+  expiresIn: number; // milliseconds
+}
+
+/**
+ * Статус запроса
+ */
+export type RequestStatus = 'idle' | 'loading' | 'success' | 'error';
+
+/**
+ * Ошибка API
+ */
+export interface APIError {
+  code: number;
+  message: string;
+}
+```
+
+**Что здесь:**
+- ✅ **Интерфейсы** для всех структур данных
+- ✅ **Type safety** — TypeScript проверяет типы
+- ✅ **JSDoc комментарии** — документация прямо в коде
+- ✅ **Union types** (metric | imperial)
+
+---
+
+## Этап 4: API модуль
+
+Создай файл `src/api/weatherAPI.ts`:
+
+```typescript
+import { WeatherResponse, WeatherData, APIConfig, APIError } from '../types/weather.js';
+
+/**
+ * Weather API Client
+ */
+export class WeatherAPI {
+  private config: APIConfig;
+
+  constructor(apiKey: string) {
+    this.config = {
+      apiKey,
+      baseURL: 'https://api.openweathermap.org/data/2.5',
+      units: 'metric'
+    };
+  }
+
+  /**
+   * Получить погоду по названию города
+   */
+  async getWeatherByCity(city: string): Promise<WeatherData> {
+    try {
+      const url = `${this.config.baseURL}/weather?q=${encodeURIComponent(city)}&appid=${this.config.apiKey}&units=${this.config.units}`;
+      
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw this.createError(response.status, errorData.message);
+      }
+
+      const data: WeatherResponse = await response.json();
+      return this.transformResponse(data);
+      
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw this.createError(500, 'Unknown error occurred');
+    }
+  }
+
+  /**
+   * Получить погоду по координатам
+   */
+  async getWeatherByCoords(lat: number, lon: number): Promise<WeatherData> {
+    try {
+      const url = `${this.config.baseURL}/weather?lat=${lat}&lon=${lon}&appid=${this.config.apiKey}&units=${this.config.units}`;
+      
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw this.createError(response.status, errorData.message);
+      }
+
+      const data: WeatherResponse = await response.json();
+      return this.transformResponse(data);
+      
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw this.createError(500, 'Unknown error occurred');
+    }
+  }
+
+  /**
+   * Преобразовать ответ API в упрощённую структуру
+   */
+  private transformResponse(response: WeatherResponse): WeatherData {
+    return {
+      city: response.name,
+      country: response.sys.country,
+      temperature: Math.round(response.main.temp),
+      feelsLike: Math.round(response.main.feels_like),
+      description: response.weather[0].description,
+      icon: response.weather[0].icon,
+      humidity: response.main.humidity,
+      windSpeed: response.wind.speed,
+      pressure: response.main.pressure,
+      sunrise: response.sys.sunrise,
+      sunset: response.sys.sunset
+    };
+  }
+
+  /**
+   * Создать объект ошибки
+   */
+  private createError(code: number, message: string): APIError {
+    return {
+      code,
+      message
+    };
+  }
+}
+```
+
+**Что здесь:**
+- ✅ **Class-based API** — ООП подход
+- ✅ **Private methods** — инкапсуляция логики
+- ✅ **Type annotations** — все параметры типизированы
+- ✅ **Error handling** — обработка всех ошибок
+- ✅ **Data transformation** — преобразование сложного ответа в простой формат
+
+---
+
+## Этап 5: Утилиты
+
+Создай файл `src/utils/formatters.ts`:
+
+```typescript
+/**
+ * Форматирование Unix timestamp в время (HH:MM)
+ */
+export function formatTime(timestamp: number): string {
+  const date = new Date(timestamp * 1000);
+  const hours = date.getHours().toString().padStart(2, '0');
+  const minutes = date.getMinutes().toString().padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+/**
+ * Получить иконку погоды URL
+ */
+export function getWeatherIconURL(icon: string): string {
+  return `https://openweathermap.org/img/wn/${icon}@2x.png`;
+}
+
+/**
+ * Преобразовать м/с в км/ч
+ */
+export function convertWindSpeed(speedMs: number): string {
+  const speedKmh = Math.round(speedMs * 3.6);
+  return `${speedKmh} км/ч`;
+}
+
+/**
+ * Получить направление ветра по градусам
+ */
+export function getWindDirection(degrees: number): string {
+  const directions = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ'];
+  const index = Math.round(degrees / 45) % 8;
+  return directions[index];
+}
+
+/**
+ * Capitalize first letter
+ */
+export function capitalize(str: string): string {
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+```
+
+**Что здесь:**
+- ✅ **Pure functions** — функции без побочных эффектов
+- ✅ **Type safety** — каждая функция типизирована
+- ✅ **Reusable utilities** — можно использовать в других проектах
+
+---
+
+## Этап 6: UI компонент
+
+Создай файл `src/components/weatherCard.ts`:
+
+```typescript
+import { WeatherData } from '../types/weather.js';
+import { formatTime, getWeatherIconURL, convertWindSpeed, capitalize } from '../utils/formatters.js';
+
+/**
+ * Отрисовать карточку погоды
+ */
+export function renderWeatherCard(data: WeatherData): string {
+  return `
+    <div class="weather-card">
+      <!-- Header -->
+      <div class="location">
+        <h2>${data.city}, ${data.country}</h2>
+      </div>
+
+      <!-- Main Info -->
+      <div class="main-info">
+        <img 
+          src="${getWeatherIconURL(data.icon)}" 
+          alt="${data.description}"
+          class="weather-icon"
+        >
+        <div class="temperature">
+          <span class="temp-value">${data.temperature}°</span>
+          <span class="temp-unit">C</span>
+        </div>
+        <p class="description">${capitalize(data.description)}</p>
+      </div>
+
+      <!-- Details Grid -->
+      <div class="details-grid">
+        <div class="detail-item">
+          <span class="detail-label">Ощущается</span>
+          <span class="detail-value">${data.feelsLike}°C</span>
+        </div>
+
+        <div class="detail-item">
+          <span class="detail-label">Влажность</span>
+          <span class="detail-value">${data.humidity}%</span>
+        </div>
+
+        <div class="detail-item">
+          <span class="detail-label">Ветер</span>
+          <span class="detail-value">${convertWindSpeed(data.windSpeed)}</span>
+        </div>
+
+        <div class="detail-item">
+          <span class="detail-label">Давление</span>
+          <span class="detail-value">${data.pressure} мбар</span>
+        </div>
+
+        <div class="detail-item">
+          <span class="detail-label">Восход</span>
+          <span class="detail-value">${formatTime(data.sunrise)}</span>
+        </div>
+
+        <div class="detail-item">
+          <span class="detail-label">Закат</span>
+          <span class="detail-value">${formatTime(data.sunset)}</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Отрисовать состояние загрузки
+ */
+export function renderLoading(): string {
+  return `
+    <div class="loading">
+      <div class="spinner"></div>
+      <p>Загрузка погоды...</p>
+    </div>
+  `;
+}
+
+/**
+ * Отрисовать ошибку
+ */
+export function renderError(message: string): string {
+  return `
+    <div class="error">
+      <p class="error-icon">⚠️</p>
+      <p class="error-message">${message}</p>
+      <button class="retry-btn">Попробовать снова</button>
+    </div>
+  `;
+}
+```
+
+**Что здесь:**
+- ✅ **Template strings** — HTML генерация в JS
+- ✅ **Pure render functions** — принимают данные, возвращают HTML
+- ✅ **Loading & Error states** — UI для всех состояний
+
+---
+
+## Этап 7: Главный файл приложения
+
+Создай файл `src/app.ts`:
+
+```typescript
+import { WeatherAPI } from './api/weatherAPI.js';
+import { WeatherData, RequestStatus } from './types/weather.js';
+import { renderWeatherCard, renderLoading, renderError } from './components/weatherCard.js';
+
+/**
+ * Weather App Class
+ */
+class WeatherApp {
+  private api: WeatherAPI;
+  private searchInput: HTMLInputElement;
+  private searchBtn: HTMLButtonElement;
+  private geoBtn: HTMLButtonElement;
+  private weatherContainer: HTMLElement;
+  private status: RequestStatus = 'idle';
+
+  constructor(apiKey: string) {
+    this.api = new WeatherAPI(apiKey);
+    
+    // Get DOM elements
+    this.searchInput = document.getElementById('searchInput') as HTMLInputElement;
+    this.searchBtn = document.getElementById('searchBtn') as HTMLButtonElement;
+    this.geoBtn = document.getElementById('geoBtn') as HTMLButtonElement;
+    this.weatherContainer = document.getElementById('weatherContainer') as HTMLElement;
+
+    this.init();
+  }
+
+  /**
+   * Инициализация приложения
+   */
+  private init(): void {
+    // Event listeners
+    this.searchBtn.addEventListener('click', () => this.handleSearch());
+    this.searchInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') this.handleSearch();
+    });
+    this.geoBtn.addEventListener('click', () => this.handleGeolocation());
+
+    // Load default city (Moscow)
+    this.fetchWeather('Moscow');
+  }
+
+  /**
+   * Обработка поиска по городу
+   */
+  private async handleSearch(): Promise<void> {
+    const city = this.searchInput.value.trim();
+    
+    if (!city) {
+      this.showError('Введите название города');
+      return;
+    }
+
+    await this.fetchWeather(city);
+  }
+
+  /**
+   * Обработка геолокации
+   */
+  private handleGeolocation(): void {
+    if (!navigator.geolocation) {
+      this.showError('Геолокация не поддерживается вашим браузером');
+      return;
+    }
+
+    this.setStatus('loading');
+    this.weatherContainer.innerHTML = renderLoading();
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        this.fetchWeatherByCoords(latitude, longitude);
+      },
+      (error) => {
+        this.showError('Не удалось получить геолокацию: ' + error.message);
+      }
+    );
+  }
+
+  /**
+   * Получить погоду по городу
+   */
+  private async fetchWeather(city: string): Promise<void> {
+    try {
+      this.setStatus('loading');
+      this.weatherContainer.innerHTML = renderLoading();
+
+      const data = await this.api.getWeatherByCity(city);
+      
+      this.setStatus('success');
+      this.weatherContainer.innerHTML = renderWeatherCard(data);
+
+    } catch (error) {
+      this.setStatus('error');
+      const message = error instanceof Error ? error.message : 'Неизвестная ошибка';
+      this.showError(message);
+    }
+  }
+
+  /**
+   * Получить погоду по координатам
+   */
+  private async fetchWeatherByCoords(lat: number, lon: number): Promise<void> {
+    try {
+      const data = await this.api.getWeatherByCoords(lat, lon);
+      
+      this.setStatus('success');
+      this.weatherContainer.innerHTML = renderWeatherCard(data);
+
+    } catch (error) {
+      this.setStatus('error');
+      const message = error instanceof Error ? error.message : 'Неизвестная ошибка';
+      this.showError(message);
+    }
+  }
+
+  /**
+   * Показать ошибку
+   */
+  private showError(message: string): void {
+    this.weatherContainer.innerHTML = renderError(message);
+
+    // Retry button
+    const retryBtn = this.weatherContainer.querySelector('.retry-btn');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', () => {
+        this.fetchWeather(this.searchInput.value || 'Moscow');
+      });
+    }
+  }
+
+  /**
+   * Установить статус запроса
+   */
+  private setStatus(status: RequestStatus): void {
+    this.status = status;
+    console.log('Status:', status);
+  }
+}
+
+// === INIT APP ===
+const API_KEY = 'YOUR_API_KEY_HERE'; // Вставь свой ключ!
+
+document.addEventListener('DOMContentLoaded', () => {
+  new WeatherApp(API_KEY);
+});
+```
+
+**Что здесь:**
+- ✅ **Class-based architecture** — весь код в одном классе
+- ✅ **Private methods** — все вспомогательные методы private
+- ✅ **Type safety** — все переменные типизированы
+- ✅ **Event delegation** — централизованная обработка событий
+- ✅ **Geolocation support** — определение погоды по местоположению
+
+---
+
+## Этап 8: HTML
+
+Создай файл `public/index.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Weather App — TypeScript Project</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1>🌤️ Weather App</h1>
+      <p class="subtitle">Прогноз погоды на TypeScript</p>
+    </header>
+
+    <!-- Search -->
+    <div class="search-section">
+      <input 
+        type="text" 
+        id="searchInput" 
+        placeholder="Введите город (Moscow, London...)"
+        autocomplete="off"
+      >
+      <button id="searchBtn">Найти</button>
+      <button id="geoBtn" class="geo-btn" title="Моё местоположение">
+        📍
+      </button>
+    </div>
+
+    <!-- Weather Display -->
+    <div id="weatherContainer" class="weather-container">
+      <!-- Weather card будет здесь -->
+    </div>
+  </div>
+
+  <script type="module" src="../dist/app.js"></script>
+</body>
+</html>
+```
+
+---
+
+## Этап 9: CSS
+
+Создай файл `public/style.css`:
+
+```css
+/* === RESET === */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.container {
+  max-width: 500px;
+  width: 100%;
+}
+
+/* === HEADER === */
+.header {
+  text-align: center;
+  color: white;
+  margin-bottom: 30px;
+}
+
+.header h1 {
+  font-size: 2.5rem;
+  margin-bottom: 5px;
+}
+
+.subtitle {
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+
+/* === SEARCH === */
+.search-section {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 30px;
+}
+
+#searchInput {
+  flex: 1;
+  padding: 15px 20px;
+  border: none;
+  border-radius: 10px;
+  font-size: 1rem;
+  outline: none;
+}
+
+#searchBtn {
+  padding: 15px 30px;
+  background: white;
+  color: #667eea;
+  border: none;
+  border-radius: 10px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+#searchBtn:hover {
+  background: #f0f0f0;
+  transform: translateY(-2px);
+}
+
+.geo-btn {
+  padding: 15px 20px;
+  background: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.geo-btn:hover {
+  background: #f0f0f0;
+  transform: scale(1.1);
+}
+
+/* === WEATHER CARD === */
+.weather-card {
+  background: white;
+  border-radius: 20px;
+  padding: 30px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+}
+
+.location h2 {
+  font-size: 1.8rem;
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.main-info {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.weather-icon {
+  width: 120px;
+  height: 120px;
+}
+
+.temperature {
+  font-size: 4rem;
+  font-weight: 700;
+  color: #667eea;
+  margin: 10px 0;
+}
+
+.temp-unit {
+  font-size: 2rem;
+  font-weight: 400;
+  color: #999;
+}
+
+.description {
+  font-size: 1.2rem;
+  color: #666;
+  text-transform: capitalize;
+}
+
+/* === DETAILS GRID === */
+.details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 15px;
+}
+
+.detail-item {
+  background: #f9f9f9;
+  padding: 15px;
+  border-radius: 10px;
+  text-align: center;
+}
+
+.detail-label {
+  display: block;
+  font-size: 0.85rem;
+  color: #999;
+  margin-bottom: 5px;
+}
+
+.detail-value {
+  display: block;
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #333;
+}
+
+/* === LOADING === */
+.loading {
+  text-align: center;
+  padding: 60px 20px;
+  background: white;
+  border-radius: 20px;
+}
+
+.spinner {
+  width: 50px;
+  height: 50px;
+  border: 5px solid #f3f3f3;
+  border-top: 5px solid #667eea;
+  border-radius: 50%;
+  margin: 0 auto 20px;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.loading p {
+  color: #666;
+  font-size: 1rem;
+}
+
+/* === ERROR === */
+.error {
+  text-align: center;
+  padding: 60px 20px;
+  background: white;
+  border-radius: 20px;
+}
+
+.error-icon {
+  font-size: 3rem;
+  margin-bottom: 15px;
+}
+
+.error-message {
+  color: #e74c3c;
+  font-size: 1.1rem;
+  margin-bottom: 20px;
+}
+
+.retry-btn {
+  padding: 12px 30px;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.retry-btn:hover {
+  background: #5568d3;
+}
+
+/* === RESPONSIVE === */
+@media (max-width: 600px) {
+  .header h1 {
+    font-size: 2rem;
+  }
+
+  .temperature {
+    font-size: 3rem;
+  }
+
+  .details-grid {
+    grid-template-columns: 1fr;
+  }
+}
+```
+
+---
+
+## Этап 10: Компиляция и запуск
+
+### 1. Получи API ключ
+
+1. Перейди на [OpenWeatherMap](https://openweathermap.org/api)
+2. Создай аккаунт
+3. Сгенерируй API key (бесплатно)
+4. Вставь ключ в `src/app.ts`:
+
+```typescript
+const API_KEY = 'твой_api_ключ_здесь';
+```
+
+### 2. Скомпилируй TypeScript
+
+```bash
+npm run build
+
+# Или в режиме watch (авто-компиляция):
+npm run dev
+```
+
+TypeScript скомпилируется в `dist/app.js`.
+
+### 3. Запусти приложение
+
+Открой `public/index.html` в браузере или используй Live Server.
+
+---
+
+## Этап 11: Тестирование
+
+✅ **Что проверить:**
+
+1. **Поиск по городу:**
+   - Введи "Moscow" → должна показаться погода в Москве
+   - Введи несуществующий город → должна показаться ошибка
+   - Пустое поле → должна показаться ошибка
+
+2. **Геолокация:**
+   - Клик на 📍 → браузер спросит разрешение
+   - Разрешить → погода по твоему местоположению
+   - Запретить → показать ошибку
+
+3. **Loading state:**
+   - При запросе должен показаться spinner
+   - После загрузки — карточка погоды
+
+4. **Error handling:**
+   - Неверный API key → ошибка авторизации
+   - Нет интернета → ошибка сети
+   - Кнопка "Retry" → повторить запрос
+
+---
+
+## Этап 12: Деплой
+
+### Вариант 1: Vercel
+
+```bash
+# Установи Vercel CLI
+npm i -g vercel
+
+# Скомпилируй TypeScript
+npm run build
+
+# Деплой
+vercel
+
+# Укажи public/ как корневую папку
+```
+
+### Вариант 2: Netlify
+
+1. Скомпилируй проект: `npm run build`
+2. Перейди на [netlify.com](https://www.netlify.com/)
+3. Drag & Drop папку `public/` в браузер
+4. Готово!
+
+### Вариант 3: GitHub Pages
+
+```bash
+# 1. Добавь build в .gitignore (если не хочешь коммитить)
+# 2. Скопируй dist/ в public/
+cp -r dist public/
+
+# 3. Закоммить и запушить
+git add .
+git commit -m "Deploy: Weather App"
+git push origin main
+
+# 4. Включи GitHub Pages (Settings → Pages)
+```
+
+---
+
+## Улучшения (бонус)
+
+### 1. Кеширование результатов
+
+```typescript
+class WeatherCache {
+  private cache: Map<string, { data: WeatherData; timestamp: number }> = new Map();
+  private expiresIn = 10 * 60 * 1000; // 10 минут
+
+  get(key: string): WeatherData | null {
+    const cached = this.cache.get(key);
+    
+    if (!cached) return null;
+    
+    const isExpired = Date.now() - cached.timestamp > this.expiresIn;
+    if (isExpired) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    return cached.data;
+  }
+
+  set(key: string, data: WeatherData): void {
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now()
+    });
+  }
+}
+```
+
+### 2. Прогноз на 5 дней
+
+```typescript
+async getForecast(city: string): Promise<ForecastData[]> {
+  const url = `${this.config.baseURL}/forecast?q=${city}&appid=${this.config.apiKey}&units=${this.config.units}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  
+  return data.list.map(this.transformForecast);
+}
+```
+
+### 3. Переключение единиц измерения
+
+```typescript
+toggleUnits(): void {
+  this.config.units = this.config.units === 'metric' ? 'imperial' : 'metric';
+  // Refresh weather
+}
+```
+
+---
+
+## Итоги
+
+✅ **Что ты создал:**
+- Weather App на TypeScript с полной типизацией
+- Модульная архитектура (API, utils, components)
+- Работа с OpenWeatherMap API
+- Геолокация через Navigator API
+- Error handling и Loading states
+- Responsive UI
+
+✅ **Что ты освоил:**
+- **TypeScript basics** (types, interfaces, classes)
+- **Modules** (import/export)
+- **Async/Await** (API запросы)
+- **Error handling** (try/catch, custom errors)
+- **OOP** (classes, private/public methods)
+- **DOM manipulation** с типизацией
+
+---
+
+## Практика
+
+Попробуй базовую реализацию Weather App прямо здесь (упрощённая JavaScript версия с JSDoc типами):

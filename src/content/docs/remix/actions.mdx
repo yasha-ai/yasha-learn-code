@@ -1,0 +1,292 @@
+---
+title: "5. Actions: мутации данных"
+sidebar:
+  order: 5
+---
+import { Playground } from '@components/Playground'
+
+
+`action` — серверная функция для обработки мутаций: создания, обновления, удаления данных. Вызывается при отправке формы через `<Form method="post">`.
+
+## Базовый action
+
+```typescript
+import { json, redirect } from "@remix-run/node";
+import { Form, useActionData } from "@remix-run/react";
+
+export async function action({ request }) {
+  const formData = await request.formData();
+  const name = formData.get("name") as string;
+  const email = formData.get("email") as string;
+
+  // Валидация
+  if (!name || name.length < 2) {
+    return json({ error: "Имя слишком короткое" }, { status: 400 });
+  }
+
+  // Сохранение
+  await db.user.create({ data: { name, email } });
+
+  // Редирект после успеха
+  return redirect("/users");
+}
+
+export default function NewUser() {
+  const actionData = useActionData<typeof action>();
+
+  return (
+    <Form method="post">
+      <input name="name" placeholder="Имя" />
+      <input name="email" placeholder="Email" />
+      {actionData?.error && <p>{actionData.error}</p>}
+      <button type="submit">Создать</button>
+    </Form>
+  );
+}
+```
+
+## Несколько action в одном маршруте
+
+```typescript
+export async function action({ request }) {
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  switch (intent) {
+    case "create":
+      return createUser(formData);
+    case "delete":
+      return deleteUser(formData.get("id") as string);
+    case "update":
+      return updateUser(formData);
+    default:
+      return json({ error: "Неизвестное действие" }, { status: 400 });
+  }
+}
+
+// В компоненте:
+<Form method="post">
+  <button name="intent" value="create">Создать</button>
+</Form>
+<Form method="post">
+  <input type="hidden" name="id" value={user.id} />
+  <button name="intent" value="delete">Удалить</button>
+</Form>
+```
+
+## Валидация с zod
+
+```typescript
+import { z } from "zod";
+import { parseWithZod } from "@conform-to/zod";
+
+const schema = z.object({
+  email: z.string().email("Неверный email"),
+  password: z.string().min(8, "Минимум 8 символов"),
+});
+
+export async function action({ request }) {
+  const formData = await request.formData();
+  const submission = parseWithZod(formData, { schema });
+
+  if (submission.status !== "success") {
+    return json(submission.reply());
+  }
+
+  // Данные валидны
+  const { email, password } = submission.value;
+  await createUser({ email, password });
+  return redirect("/dashboard");
+}
+```
+
+## useSubmit — программная отправка
+
+```typescript
+import { useSubmit } from "@remix-run/react";
+
+export default function AutoSave() {
+  const submit = useSubmit();
+
+  function handleChange(event) {
+    submit(event.currentTarget, {
+      method: "post",
+      debounce: 500, // через 500ms после последнего изменения
+    });
+  }
+
+  return (
+    <Form method="post" onChange={handleChange}>
+      <textarea name="content" />
+    </Form>
+  );
+}
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+const WARN = "#f59e0b";
+
+type Phase = "idle" | "submitting" | "error" | "success";
+
+const validate = (name: string, email: string): Record<string, string> => {
+  const errors: Record<string, string> = {};
+  if (!name || name.length < 2) errors.name = "Имя слишком короткое (мин. 2 символа)";
+  if (!email || !email.includes("@")) errors.email = "Неверный email адрес";
+  return errors;
+};
+
+export default function App() {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [users, setUsers] = useState<{ name: string; email: string }[]>([]);
+  const [serverError, setServerError] = useState("");
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const errs = validate(name, email);
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs);
+      return;
+    }
+    setErrors({});
+    setPhase("submitting");
+    setServerError("");
+
+    // Симуляция action()
+    setTimeout(() => {
+      if (email === "taken@example.com") {
+        setPhase("error");
+        setServerError("Email уже занят (ошибка с сервера)");
+        return;
+      }
+      setUsers((prev) => [...prev, { name, email }]);
+      setName("");
+      setEmail("");
+      setPhase("success");
+      setTimeout(() => setPhase("idle"), 2000);
+    }, 1000);
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>📝 Remix Actions</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>
+        Форма с валидацией и обработкой ошибок. Попробуй email "taken@example.com".
+      </p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px", maxWidth: "800px" }}>
+        <div style={{ background: CARD, borderRadius: "12px", padding: "24px" }}>
+          <h2 style={{ margin: "0 0 20px", fontSize: "16px", color: ACCENT }}>
+            {"<Form method=\"post\">"}
+          </h2>
+
+          <form onSubmit={handleSubmit}>
+            <div style={{ marginBottom: "16px" }}>
+              <label style={{ display: "block", fontSize: "13px", color: MUTED, marginBottom: "6px" }}>
+                name="name"
+              </label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Имя пользователя"
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  background: BG,
+                  border: \`1px solid \${errors.name ? ERROR : "#334155"}\`,
+                  borderRadius: "8px",
+                  color: TEXT,
+                  fontSize: "14px",
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+              {errors.name && <p style={{ color: ERROR, fontSize: "12px", margin: "4px 0 0" }}>{errors.name}</p>}
+            </div>
+
+            <div style={{ marginBottom: "20px" }}>
+              <label style={{ display: "block", fontSize: "13px", color: MUTED, marginBottom: "6px" }}>
+                name="email"
+              </label>
+              <input
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="email@example.com"
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  background: BG,
+                  border: \`1px solid \${errors.email ? ERROR : "#334155"}\`,
+                  borderRadius: "8px",
+                  color: TEXT,
+                  fontSize: "14px",
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+              {errors.email && <p style={{ color: ERROR, fontSize: "12px", margin: "4px 0 0" }}>{errors.email}</p>}
+            </div>
+
+            {serverError && (
+              <div style={{ background: ERROR + "11", border: \`1px solid \${ERROR}44\`, borderRadius: "8px", padding: "10px 14px", marginBottom: "16px", color: ERROR, fontSize: "13px" }}>
+                {serverError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={phase === "submitting"}
+              style={{
+                width: "100%",
+                padding: "12px",
+                background: phase === "success" ? SUCCESS : ACCENT,
+                color: "#fff",
+                border: "none",
+                borderRadius: "8px",
+                cursor: phase === "submitting" ? "not-allowed" : "pointer",
+                fontSize: "14px",
+                fontWeight: 700,
+                transition: "all 0.2s",
+                opacity: phase === "submitting" ? 0.7 : 1,
+              }}
+            >
+              {phase === "submitting" ? "⏳ action() выполняется..." : phase === "success" ? "✅ Создан!" : "Создать пользователя"}
+            </button>
+          </form>
+        </div>
+
+        <div style={{ background: CARD, borderRadius: "12px", padding: "24px" }}>
+          <h2 style={{ margin: "0 0 20px", fontSize: "16px", color: ACCENT }}>Созданные пользователи</h2>
+          {users.length === 0 ? (
+            <p style={{ color: MUTED, fontSize: "13px" }}>Список пуст. Создай первого!</p>
+          ) : (
+            users.map((u, i) => (
+              <div key={i} style={{
+                padding: "12px",
+                background: BG,
+                borderRadius: "8px",
+                marginBottom: "8px",
+                borderLeft: \`3px solid \${SUCCESS}\`,
+              }}>
+                <div style={{ fontWeight: 600 }}>{u.name}</div>
+                <div style={{ color: MUTED, fontSize: "12px" }}>{u.email}</div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

@@ -1,0 +1,776 @@
+---
+title: "5. Server vs Client Components"
+sidebar:
+  order: 5
+---
+import { Playground } from '@components/Playground'
+
+
+## ⚡ Server Components vs Client Components
+
+Это **самая важная концепция** в современном Next.js. React Server Components (RSC) меняют способ мышления о рендеринге. Давай разберём раз и навсегда! 🧠
+
+```
+Старый React (всё на клиенте):
+Browser → загружает JS → React рендерит HTML → показывает пользователю
+
+Next.js RSC (разделение):
+Server → рендерит Server Components → отправляет HTML + Client Components
+Browser → получает готовый HTML → "оживляет" Client Components (hydration)
+```
+
+---
+
+### 🖥️ Server Components: По умолчанию
+
+В App Router **все компоненты серверные по умолчанию**. Без единой директивы:
+
+```typescript
+// app/products/page.tsx — Server Component!
+// Никакого 'use client', никаких пометок
+
+import { db } from '@/lib/db'; // 🔒 Безопасно — только на сервере
+import { cache } from 'react';
+
+// async/await прямо в компоненте!
+export default async function ProductsPage() {
+  // Прямой запрос к базе данных
+  const products = await db.product.findMany({
+    include: { category: true },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+
+  return (
+    <main>
+      <h1>Товары ({products.length})</h1>
+      <ul>
+        {products.map(product => (
+          <li key={product.id}>
+            {product.name} — {product.price}₽
+          </li>
+        ))}
+      </ul>
+    </main>
+  );
+}
+```
+
+**Что могут Server Components:**
+
+```typescript
+// 1. Асинхронные запросы прямо в компоненте
+async function UserCard({ userId }: { userId: string }) {
+  const user = await fetchUser(userId); // Нет useEffect!
+  return <div>{user.name}</div>;
+}
+
+// 2. Прямой доступ к серверным ресурсам
+import { db } from '@/lib/prisma';
+import { cookies } from 'next/headers';
+import { headers } from 'next/headers';
+
+async function SecureData() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get('auth-token');
+  
+  const headersList = await headers();
+  const userAgent = headersList.get('user-agent');
+  
+  // Прямо к БД!
+  const data = await db.secret.findMany();
+  
+  return <div>{data.length} записей</div>;
+}
+
+// 3. Доступ к переменным окружения (серверным!)
+async function Config() {
+  const apiKey = process.env.SECRET_API_KEY; // Не утечёт в браузер!
+  const data = await fetch('https://api.service.com', {
+    headers: { 'X-API-Key': apiKey! }
+  });
+  return <div>Данные загружены</div>;
+}
+
+// 4. Импорт heavy библиотек без влияния на bundle
+import { marked } from 'marked'; // Не попадёт в JS-бандл!
+import { highlight } from 'shiki'; // Только на сервере
+
+async function MarkdownRenderer({ content }: { content: string }) {
+  const html = await marked(content);
+  return <div dangerouslySetInnerHTML={{ __html: html }} />;
+}
+```
+
+**Что НЕ могут Server Components:**
+
+```typescript
+// ❌ useState — нет
+// ❌ useEffect — нет
+// ❌ useRef — нет
+// ❌ Event handlers (onClick, onChange...) — нет
+// ❌ Browser APIs (window, document, localStorage) — нет
+// ❌ Context (useContext) — нет (можно передавать через props)
+// ❌ Class components с lifecycle методами — нет
+
+// Всё это только в Client Components!
+```
+
+---
+
+### 💻 Client Components: Интерактивность
+
+Client Components нужны для интерактивности. Пометь их директивой `'use client'`:
+
+```typescript
+// components/counter.tsx
+'use client'; // Эта директива делает компонент клиентским
+
+import { useState, useEffect } from 'react';
+
+export function Counter({ initialCount = 0 }: { initialCount?: number }) {
+  const [count, setCount] = useState(initialCount);
+  
+  useEffect(() => {
+    document.title = `Счётчик: ${count}`;
+  }, [count]);
+  
+  return (
+    <div>
+      <p>Счётчик: {count}</p>
+      <button onClick={() => setCount(c => c + 1)}>+1</button>
+      <button onClick={() => setCount(c => c - 1)}>-1</button>
+    </div>
+  );
+}
+```
+
+**Что могут Client Components:**
+
+```typescript
+'use client';
+
+// ✅ Все хуки React
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
+
+// ✅ Event handlers
+function Form() {
+  const [value, setValue] = useState('');
+  
+  return (
+    <form onSubmit={e => {
+      e.preventDefault();
+      console.log(value);
+    }}>
+      <input onChange={e => setValue(e.target.value)} value={value} />
+      <button type="submit">Отправить</button>
+    </form>
+  );
+}
+
+// ✅ Browser APIs
+function LocalStorageExample() {
+  const [theme, setTheme] = useState<string>(() => {
+    // Работает только на клиенте!
+    return typeof window !== 'undefined' 
+      ? localStorage.getItem('theme') ?? 'light'
+      : 'light';
+  });
+  
+  const toggleTheme = () => {
+    const next = theme === 'light' ? 'dark' : 'light';
+    setTheme(next);
+    localStorage.setItem('theme', next);
+  };
+  
+  return <button onClick={toggleTheme}>Тема: {theme}</button>;
+}
+
+// ✅ Third-party клиентские библиотеки
+import { motion } from 'framer-motion';
+import { Swiper, SwiperSlide } from 'swiper/react';
+
+function AnimatedCard() {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      whileHover={{ scale: 1.05 }}
+    >
+      Анимированная карточка
+    </motion.div>
+  );
+}
+```
+
+---
+
+### 🌊 Граница между Server и Client
+
+Ключевое правило: **`'use client'` создаёт границу**. Всё ниже этой границы — клиентский код:
+
+```typescript
+// app/page.tsx — Server Component
+import { ClientSearch } from './ClientSearch'; // Импорт клиентского компонента
+
+export default async function Page() {
+  const posts = await fetchPosts(); // Серверный код
+  
+  return (
+    <div>
+      <h1>Блог</h1>
+      <ClientSearch /> {/* Граница! Внутри — клиентский код */}
+      <PostList posts={posts} /> {/* Серверный компонент */}
+    </div>
+  );
+}
+```
+
+```typescript
+// components/ClientSearch.tsx
+'use client'; // Граница начинается здесь
+
+import { useState } from 'react';
+// ВСЁ что импортируется здесь — тоже становится клиентским!
+
+export function ClientSearch() {
+  const [query, setQuery] = useState('');
+  // ... логика поиска
+}
+```
+
+---
+
+### 📦 Паттерны: как сочетать Server и Client
+
+**Паттерн 1: Server Component как контейнер данных**
+
+```typescript
+// app/dashboard/page.tsx — Server Component
+import { UserProfile } from './UserProfile'; // Client Component
+
+export default async function DashboardPage() {
+  // Загружаем данные на сервере
+  const user = await db.user.findUnique({ where: { id: session.userId } });
+  const stats = await getStats(session.userId);
+  
+  return (
+    <div>
+      {/* Передаём серверные данные в клиентский компонент */}
+      <UserProfile 
+        user={user}           // Сериализуемые данные!
+        stats={stats}
+      />
+    </div>
+  );
+}
+
+// components/UserProfile.tsx — Client Component
+'use client';
+
+interface Props {
+  user: { id: string; name: string; email: string };
+  stats: { posts: number; views: number };
+}
+
+export function UserProfile({ user, stats }: Props) {
+  const [editing, setEditing] = useState(false);
+  
+  return (
+    <div>
+      <h2>{user.name}</h2>
+      {/* Интерактивность на клиенте */}
+      <button onClick={() => setEditing(true)}>Редактировать</button>
+    </div>
+  );
+}
+```
+
+**Паттерн 2: Интерлив Server и Client**
+
+```typescript
+// ✅ Server Component может рендерить Client Component
+// ✅ Client Component может рендерить Server Component через props children
+
+// app/page.tsx — Server Component
+import { InteractiveWrapper } from '@/components/InteractiveWrapper'; // Client
+
+export default async function Page() {
+  const data = await fetchData();
+  
+  return (
+    <InteractiveWrapper>
+      {/* Это — Server Component, переданный как children */}
+      <ServerDataDisplay data={data} />
+    </InteractiveWrapper>
+  );
+}
+
+// components/InteractiveWrapper.tsx — Client Component
+'use client';
+import { useState } from 'react';
+
+export function InteractiveWrapper({ children }: { children: React.ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  
+  return (
+    <div>
+      <button onClick={() => setExpanded(!expanded)}>
+        {expanded ? 'Свернуть' : 'Развернуть'}
+      </button>
+      {expanded && children} {/* children — Server Component! */}
+    </div>
+  );
+}
+// children выполнены на сервере, WrapperClient — на клиенте
+```
+
+**Паттерн 3: Context с RSC**
+
+```typescript
+// Context работает только в Client Components!
+
+// providers/ThemeProvider.tsx
+'use client'; // Обязательно!
+
+import { createContext, useContext, useState } from 'react';
+
+const ThemeContext = createContext<{
+  theme: string;
+  toggle: () => void;
+} | null>(null);
+
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState('light');
+  
+  return (
+    <ThemeContext.Provider value={{ theme, toggle: () => setTheme(t => t === 'light' ? 'dark' : 'light') }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+export function useTheme() {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) throw new Error('useTheme должен быть внутри ThemeProvider');
+  return ctx;
+}
+
+// app/layout.tsx — Server Component (!)
+import { ThemeProvider } from '@/providers/ThemeProvider';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        {/* ThemeProvider — Client Component, но children могут быть серверными */}
+        <ThemeProvider>
+          {children}
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### 🏗️ Гидрация (Hydration)
+
+Гидрация — процесс "оживления" серверного HTML на клиенте:
+
+```
+Сервер:
+1. Рендерит HTML с данными
+2. Сериализует состояние компонентов (React Server Component Payload)
+3. Отправляет HTML + JS клиенту
+
+Клиент:
+4. Браузер показывает HTML (контент виден сразу!)
+5. Загружается JavaScript (только клиентские компоненты!)
+6. React "gидрирует" DOM — прикрепляет обработчики событий
+7. Приложение становится интерактивным
+```
+
+```typescript
+// Ошибки гидрации — частая проблема!
+// Возникает когда серверный и клиентский HTML различаются
+
+// ❌ Плохо — Math.random() разный на сервере и клиенте
+function BadComponent() {
+  return <div id={Math.random().toString()}>Контент</div>;
+}
+
+// ❌ Плохо — Date.now() разный
+function BadDate() {
+  return <div>{new Date().toISOString()}</div>;
+}
+
+// ✅ Хорошо — используй useEffect для клиентского контента
+'use client';
+function GoodComponent() {
+  const [id, setId] = useState<string | null>(null);
+  
+  useEffect(() => {
+    setId(Math.random().toString()); // Только на клиенте
+  }, []);
+  
+  if (!id) return null;
+  return <div id={id}>Контент</div>;
+}
+
+// ✅ Или suppressHydrationWarning для элементов с динамическим контентом
+function TimeDisplay() {
+  return (
+    <time suppressHydrationWarning>
+      {new Date().toISOString()}
+    </time>
+  );
+}
+```
+
+---
+
+### 📚 Сторонние библиотеки с RSC
+
+Многие npm-пакеты написаны до RSC и используют клиентские APIs:
+
+```typescript
+// ❌ Ошибка: библиотека использует useState внутри
+import { SomeUILibComponent } from 'some-ui-lib';
+// → Error: useState can only be used in Client Components
+
+// ✅ Решение 1: Обернуть в Client Component
+// components/ClientSomeUI.tsx
+'use client';
+import { SomeUILibComponent } from 'some-ui-lib';
+export { SomeUILibComponent }; // Re-export как клиентский
+
+// ✅ Решение 2: Создать wrapper
+// components/ClientWrapper.tsx
+'use client';
+import { SomeUILibComponent } from 'some-ui-lib';
+
+export function MyComponent(props: SomeProps) {
+  return <SomeUILibComponent {...props} />;
+}
+
+// Теперь можно использовать в Server Component:
+import { MyComponent } from '@/components/ClientWrapper';
+```
+
+---
+
+### 🎯 Резюме урока
+
+| | Server Components | Client Components |
+|--|------------------|-------------------|
+| **Директива** | Нет (по умолчанию) | `'use client'` |
+| **useState/useEffect** | ❌ | ✅ |
+| **async/await** | ✅ | ❌ (useEffect) |
+| **DB / API secrets** | ✅ | ❌ |
+| **onClick, onChange** | ❌ | ✅ |
+| **Browser APIs** | ❌ | ✅ |
+| **В bundle клиента** | ❌ (не попадает!) | ✅ |
+
+**Правило большого пальца:** Начни с Server Component. Добавь `'use client'` только когда действительно нужно.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useEffect } from "react";
+
+type ComponentType = "server" | "client";
+
+interface ComponentNode {
+  id: string;
+  name: string;
+  type: ComponentType;
+  children?: ComponentNode[];
+  capabilities: string[];
+  file: string;
+}
+
+const tree: ComponentNode = {
+  id: "root",
+  name: "RootLayout",
+  type: "server",
+  file: "app/layout.tsx",
+  capabilities: ["async/await", "db запросы", "server secrets"],
+  children: [
+    {
+      id: "header",
+      name: "Header",
+      type: "server",
+      file: "components/Header.tsx",
+      capabilities: ["async/await", "env vars"],
+      children: [
+        {
+          id: "nav",
+          name: "NavMenu",
+          type: "client",
+          file: "components/NavMenu.tsx",
+          capabilities: ["useState", "onClick", "window"],
+        },
+      ],
+    },
+    {
+      id: "page",
+      name: "ProductsPage",
+      type: "server",
+      file: "app/products/page.tsx",
+      capabilities: ["async/await", "db запросы"],
+      children: [
+        {
+          id: "grid",
+          name: "ProductGrid",
+          type: "server",
+          file: "components/ProductGrid.tsx",
+          capabilities: ["async/await"],
+        },
+        {
+          id: "cart",
+          name: "CartButton",
+          type: "client",
+          file: "components/CartButton.tsx",
+          capabilities: ["useState", "useEffect", "onClick"],
+          children: [
+            {
+              id: "modal",
+              name: "CartModal",
+              type: "client",
+              file: "components/CartModal.tsx",
+              capabilities: ["useState", "useRef", "window.scroll"],
+            },
+          ],
+        },
+        {
+          id: "filters",
+          name: "ProductFilters",
+          type: "client",
+          file: "components/ProductFilters.tsx",
+          capabilities: ["useState", "onChange", "URL params"],
+        },
+      ],
+    },
+  ],
+};
+
+const serverBundle: string[] = [];
+const clientBundle = ["NavMenu.tsx", "CartButton.tsx", "CartModal.tsx", "ProductFilters.tsx"];
+
+function ComponentNode({
+  node,
+  depth,
+  selected,
+  onSelect,
+}: {
+  node: ComponentNode;
+  depth: number;
+  selected: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const isServer = node.type === "server";
+  const color = isServer ? "#4ade80" : "#60a5fa";
+  const isSelected = selected === node.id;
+
+  return (
+    <div style={{ marginLeft: depth * 20 }}>
+      <div
+        onClick={() => onSelect(node.id)}
+        style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "8px 12px", borderRadius: 6, cursor: "pointer",
+          marginBottom: 4,
+          background: isSelected ? color + "22" : "#0f172a",
+          border: \`1px solid \${isSelected ? color : "#1e293b"}\`,
+          transition: "all 0.2s"
+        }}
+      >
+        <span style={{
+          width: 8, height: 8, borderRadius: "50%",
+          background: color, flexShrink: 0
+        }} />
+        <span style={{ color: "#e2e8f0", fontSize: 13, fontFamily: "monospace" }}>
+          {node.name}
+        </span>
+        <span style={{
+          marginLeft: "auto", fontSize: 10, padding: "1px 6px",
+          borderRadius: 4, background: color + "22", color
+        }}>
+          {isServer ? "SERVER" : "CLIENT"}
+        </span>
+      </div>
+      {node.children?.map(child => (
+        <ComponentNode
+          key={child.id}
+          node={child}
+          depth={depth + 1}
+          selected={selected}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
+
+function findNode(node: ComponentNode, id: string): ComponentNode | null {
+  if (node.id === id) return node;
+  for (const child of node.children ?? []) {
+    const found = findNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+export default function App() {
+  const [selected, setSelected] = useState<string | null>(null);
+  const [tab, setTab] = useState<"tree" | "bundle">("tree");
+
+  const selectedNode = selected ? findNode(tree, selected) : null;
+
+  return (
+    <div style={{
+      background: "#0f172a", minHeight: "100vh", padding: 24,
+      fontFamily: "'Segoe UI', sans-serif", color: "#e2e8f0"
+    }}>
+      <div style={{ maxWidth: 680, margin: "0 auto" }}>
+        <h2 style={{ color: "#fff", fontSize: 20, marginBottom: 4 }}>
+          ⚡ Server vs Client Components
+        </h2>
+        <p style={{ color: "#64748b", fontSize: 13, marginBottom: 20 }}>
+          Изучи дерево компонентов и их возможности
+        </p>
+
+        {/* Legend */}
+        <div style={{ display: "flex", gap: 16, marginBottom: 20 }}>
+          {[
+            { color: "#4ade80", label: "Server Component" },
+            { color: "#60a5fa", label: "Client Component" },
+          ].map(item => (
+            <div key={item.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{
+                width: 10, height: 10, borderRadius: "50%",
+                background: item.color
+              }} />
+              <span style={{ fontSize: 13, color: "#94a3b8" }}>{item.label}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          {(["tree", "bundle"] as const).map(t => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              style={{
+                padding: "7px 16px", borderRadius: 7, border: "none",
+                background: tab === t ? "#1e293b" : "transparent",
+                color: tab === t ? "#fff" : "#64748b",
+                cursor: "pointer", fontSize: 13
+              }}
+            >
+              {t === "tree" ? "🌳 Дерево компонентов" : "📦 JS Bundle"}
+            </button>
+          ))}
+        </div>
+
+        {tab === "tree" ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div style={{
+              background: "#111827", borderRadius: 10, padding: 16, border: "1px solid #1e293b"
+            }}>
+              <div style={{ color: "#64748b", fontSize: 11, marginBottom: 12 }}>
+                КОМПОНЕНТЫ — кликни для деталей
+              </div>
+              <ComponentNode
+                node={tree}
+                depth={0}
+                selected={selected}
+                onSelect={setSelected}
+              />
+            </div>
+
+            <div style={{
+              background: "#111827", borderRadius: 10, padding: 16, border: "1px solid #1e293b"
+            }}>
+              {selectedNode ? (
+                <>
+                  <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>ДЕТАЛИ</div>
+                  <div style={{
+                    color: selectedNode.type === "server" ? "#4ade80" : "#60a5fa",
+                    fontSize: 16, fontWeight: 700, marginBottom: 4
+                  }}>
+                    {selectedNode.name}
+                  </div>
+                  <div style={{ color: "#475569", fontSize: 11, marginBottom: 12, fontFamily: "monospace" }}>
+                    {selectedNode.file}
+                  </div>
+                  <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>ВОЗМОЖНОСТИ:</div>
+                  {selectedNode.capabilities.map(cap => (
+                    <div key={cap} style={{
+                      padding: "4px 10px", borderRadius: 5, marginBottom: 4,
+                      background: "#1e293b", color: "#94a3b8", fontSize: 12,
+                      fontFamily: "monospace"
+                    }}>
+                      ✓ {cap}
+                    </div>
+                  ))}
+                  <div style={{
+                    marginTop: 12, padding: "8px 10px", borderRadius: 6,
+                    background: selectedNode.type === "server" ? "#052e16" : "#0c1a3a",
+                    color: selectedNode.type === "server" ? "#6ee7b7" : "#93c5fd",
+                    fontSize: 11
+                  }}>
+                    {selectedNode.type === "server"
+                      ? "🔒 Код не попадёт в JS-бандл браузера"
+                      : "📦 Включается в JS-бандл клиента"}
+                  </div>
+                </>
+              ) : (
+                <div style={{
+                  display: "flex", flexDirection: "column",
+                  alignItems: "center", justifyContent: "center",
+                  height: 200, color: "#334155", fontSize: 13
+                }}>
+                  ← Выбери компонент
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {[
+              { label: "Серверный код (не в бандле)", items: ["RootLayout.tsx", "Header.tsx", "ProductsPage.tsx", "ProductGrid.tsx"], color: "#4ade80", icon: "🔒" },
+              { label: "JS Бандл клиента", items: clientBundle, color: "#60a5fa", icon: "📦" },
+            ].map(section => (
+              <div key={section.label} style={{
+                background: "#111827", borderRadius: 10, padding: 16, border: "1px solid #1e293b"
+              }}>
+                <div style={{ color: section.color, fontSize: 12, fontWeight: 600, marginBottom: 12 }}>
+                  {section.icon} {section.label}
+                </div>
+                {section.items.map(item => (
+                  <div key={item} style={{
+                    padding: "6px 10px", borderRadius: 5, marginBottom: 4,
+                    background: "#0f172a", color: "#94a3b8", fontSize: 12,
+                    fontFamily: "monospace", borderLeft: \`2px solid \${section.color}44\`
+                  }}>
+                    {item}
+                  </div>
+                ))}
+                <div style={{
+                  marginTop: 8, color: "#475569", fontSize: 11
+                }}>
+                  {section.icon === "🔒"
+                    ? "Выполняется только на сервере"
+                    : \`Загружается в браузер (~\${section.items.length * 4}KB)\`}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+` }} />

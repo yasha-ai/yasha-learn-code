@@ -1,0 +1,613 @@
+---
+title: "55. Конфигурация окружений"
+sidebar:
+  order: 58
+---
+import { Playground } from '@components/Playground'
+
+
+## 58. Конфигурация окружений 🔧
+
+Привет! Яша здесь. Управление конфигурацией — это то, что отличает хорошее приложение от production-ready. Сегодня разберём всё: от `environment.ts` до секретов и feature flags 🔐
+
+---
+
+### Стандартный паттерн environment.ts
+
+Angular CLI создаёт два файла по умолчанию:
+
+```typescript
+// src/environments/environment.ts — для разработки
+export const environment = {
+  production: false,
+  apiUrl: 'http://localhost:3000/api',
+  wsUrl: 'ws://localhost:3000',
+  analyticsKey: '',
+  featureFlags: {
+    newDashboard: true,
+    betaFeature: false,
+  },
+  // Никогда не храните секреты здесь! Это попадёт в бандл
+  // apiSecret: '...' ← НЕВЕРНО!
+};
+```
+
+```typescript
+// src/environments/environment.prod.ts — для продакшена
+export const environment = {
+  production: true,
+  apiUrl: 'https://api.example.com',
+  wsUrl: 'wss://api.example.com',
+  analyticsKey: 'GA-XXXXX',
+  featureFlags: {
+    newDashboard: false,
+    betaFeature: false,
+  },
+};
+```
+
+```json
+// angular.json — file replacements при сборке
+{
+  "configurations": {
+    "production": {
+      "fileReplacements": [
+        {
+          "replace": "src/environments/environment.ts",
+          "with": "src/environments/environment.prod.ts"
+        }
+      ]
+    },
+    "staging": {
+      "fileReplacements": [
+        {
+          "replace": "src/environments/environment.ts",
+          "with": "src/environments/environment.staging.ts"
+        }
+      ]
+    }
+  }
+}
+```
+
+```bash
+ng build --configuration=staging
+ng serve --configuration=staging
+```
+
+---
+
+### Типизация environment (правильный подход)
+
+```typescript
+// src/environments/environment.model.ts
+export interface Environment {
+  production: boolean;
+  apiUrl: string;
+  wsUrl: string;
+  analyticsKey: string;
+  featureFlags: FeatureFlags;
+  logging: LoggingConfig;
+}
+
+export interface FeatureFlags {
+  newDashboard: boolean;
+  betaCheckout: boolean;
+  aiAssistant: boolean;
+  maintenanceMode: boolean;
+}
+
+export interface LoggingConfig {
+  level: 'debug' | 'info' | 'warn' | 'error';
+  remote: boolean;
+}
+
+// environment.ts — реализует интерфейс
+import { Environment } from './environment.model';
+
+export const environment: Environment = {
+  production: false,
+  apiUrl: 'http://localhost:3000',
+  wsUrl: 'ws://localhost:3000',
+  analyticsKey: '',
+  featureFlags: {
+    newDashboard: true,
+    betaCheckout: true,
+    aiAssistant: true,
+    maintenanceMode: false,
+  },
+  logging: {
+    level: 'debug',
+    remote: false,
+  },
+};
+```
+
+---
+
+### APP_INITIALIZER: runtime конфигурация
+
+Проблема `environment.ts` — значения вшиты в бандл на этапе сборки. Для **runtime конфигурации** (разные значения для одного бандла в разных средах) используем `APP_INITIALIZER`:
+
+```typescript
+// config.service.ts
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+
+export interface AppConfig {
+  apiUrl: string;
+  wsUrl: string;
+  featureFlags: Record<string, boolean>;
+  version: string;
+}
+
+@Injectable({ providedIn: 'root' })
+export class ConfigService {
+  private config: AppConfig | null = null;
+
+  constructor(private http: HttpClient) {}
+
+  // Вызывается ПЕРЕД запуском приложения
+  load(): Promise<void> {
+    return this.http
+      .get<AppConfig>('/assets/config.json')
+      .toPromise()
+      .then(config => {
+        this.config = config!;
+        console.log('Конфигурация загружена:', config?.version);
+      })
+      .catch(err => {
+        console.error('Ошибка загрузки конфигурации:', err);
+        // Используем fallback конфигурацию
+        this.config = this.getDefaultConfig();
+      });
+  }
+
+  get<K extends keyof AppConfig>(key: K): AppConfig[K] {
+    if (!this.config) {
+      throw new Error('ConfigService: конфигурация не загружена. Проверь APP_INITIALIZER');
+    }
+    return this.config[key];
+  }
+
+  isFeatureEnabled(flag: string): boolean {
+    return this.config?.featureFlags[flag] ?? false;
+  }
+
+  private getDefaultConfig(): AppConfig {
+    return {
+      apiUrl: '/api',
+      wsUrl: '/ws',
+      featureFlags: {},
+      version: 'unknown',
+    };
+  }
+}
+```
+
+```typescript
+// app.module.ts — регистрация APP_INITIALIZER
+import { APP_INITIALIZER, NgModule } from '@angular/core';
+import { ConfigService } from './config.service';
+
+export function initializeApp(configService: ConfigService) {
+  // Возвращаем функцию, возвращающую Promise
+  return () => configService.load();
+}
+
+@NgModule({
+  providers: [
+    {
+      provide: APP_INITIALIZER,
+      useFactory: initializeApp,
+      deps: [ConfigService],
+      multi: true, // multi: true — можно иметь несколько инициализаторов!
+    }
+  ]
+})
+export class AppModule {}
+```
+
+```json
+// assets/config.json — загружается в runtime
+{
+  "apiUrl": "https://api.production.example.com",
+  "wsUrl": "wss://api.production.example.com",
+  "version": "2.1.0",
+  "featureFlags": {
+    "newDashboard": true,
+    "betaCheckout": false,
+    "aiAssistant": false,
+    "maintenanceMode": false
+  }
+}
+```
+
+---
+
+### Docker: инжекция переменных окружения
+
+```dockerfile
+FROM node:20-alpine as build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN ng build --configuration=production
+
+FROM nginx:alpine
+COPY --from=build /app/dist/my-app /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+ENTRYPOINT ["/docker-entrypoint.sh"]
+```
+
+```bash
+# docker-entrypoint.sh — генерирует config.json из ENV переменных
+#!/bin/sh
+cat > /usr/share/nginx/html/assets/config.json << EOF
+{
+  "apiUrl": "${API_URL:-/api}",
+  "wsUrl": "${WS_URL:-/ws}",
+  "version": "${APP_VERSION:-unknown}",
+  "featureFlags": {
+    "newDashboard": ${FEATURE_NEW_DASHBOARD:-false},
+    "aiAssistant": ${FEATURE_AI_ASSISTANT:-false}
+  }
+}
+EOF
+exec nginx -g "daemon off;"
+```
+
+```yaml
+# docker-compose.yml
+services:
+  frontend:
+    image: my-angular-app:latest
+    environment:
+      - API_URL=https://api.example.com
+      - WS_URL=wss://api.example.com
+      - APP_VERSION=2.1.0
+      - FEATURE_NEW_DASHBOARD=true
+      - FEATURE_AI_ASSISTANT=false
+```
+
+---
+
+### Feature Flags: система управления
+
+```typescript
+// feature-flag.service.ts
+import { Injectable, inject } from '@angular/core';
+import { ConfigService } from './config.service';
+import { BehaviorSubject, Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+@Injectable({ providedIn: 'root' })
+export class FeatureFlagService {
+  private config = inject(ConfigService);
+  private overrides = new BehaviorSubject<Record<string, boolean>>({});
+
+  isEnabled(flag: string): boolean {
+    const override = this.overrides.value[flag];
+    if (override !== undefined) return override;
+    return this.config.isFeatureEnabled(flag);
+  }
+
+  isEnabled$(flag: string): Observable<boolean> {
+    return this.overrides.pipe(
+      map(overrides => {
+        if (overrides[flag] !== undefined) return overrides[flag];
+        return this.config.isFeatureEnabled(flag);
+      })
+    );
+  }
+
+  // Для A/B тестирования и дебага
+  override(flag: string, value: boolean): void {
+    this.overrides.next({ ...this.overrides.value, [flag]: value });
+    console.log(\`Feature flag "\${flag}" overridden to \${value}\`);
+  }
+
+  resetOverrides(): void {
+    this.overrides.next({});
+  }
+}
+
+// feature-flag.directive.ts — структурная директива
+@Directive({
+  selector: '[appFeatureFlag]',
+  standalone: true,
+})
+export class FeatureFlagDirective implements OnInit {
+  @Input('appFeatureFlag') flag!: string;
+
+  constructor(
+    private vcr: ViewContainerRef,
+    private template: TemplateRef<unknown>,
+    private featureFlags: FeatureFlagService,
+  ) {}
+
+  ngOnInit(): void {
+    if (this.featureFlags.isEnabled(this.flag)) {
+      this.vcr.createEmbeddedView(this.template);
+    }
+  }
+}
+
+// Использование
+// <div *appFeatureFlag="'newDashboard'">Новый дашборд!</div>
+```
+
+---
+
+### Injection Token для конфигурации
+
+```typescript
+// app.config.ts — типизированный токен
+import { InjectionToken } from '@angular/core';
+
+export interface ApiConfig {
+  baseUrl: string;
+  timeout: number;
+  retries: number;
+}
+
+export const API_CONFIG = new InjectionToken<ApiConfig>('API_CONFIG');
+
+// Провайдинг
+@NgModule({
+  providers: [
+    {
+      provide: API_CONFIG,
+      useFactory: (config: ConfigService) => ({
+        baseUrl: config.get('apiUrl'),
+        timeout: 30000,
+        retries: 3,
+      }),
+      deps: [ConfigService],
+    }
+  ]
+})
+
+// Использование
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  constructor(@Inject(API_CONFIG) private apiConfig: ApiConfig) {
+    console.log('API baseUrl:', this.apiConfig.baseUrl);
+  }
+}
+```
+
+---
+
+### Секреты и безопасность
+
+```typescript
+// ❌ НЕВЕРНО — секреты в environment.ts (попадут в бандл!)
+export const environment = {
+  jwtSecret: 'my-super-secret-key',        // видно в браузере!
+  databasePassword: 'password123',          // видно в браузере!
+  stripeSecretKey: 'sk_live_...',           // видно в браузере!
+};
+
+// ✅ ВЕРНО — секреты только на бэкенде
+// Фронтенд знает только публичные ключи
+export const environment = {
+  stripePublishableKey: 'pk_live_...',     // публичный — можно
+  googleMapsApiKey: 'AIza...',              // публичный — можно
+  sentryDsn: 'https://xxx@sentry.io/...',  // публичный — можно
+};
+
+// ✅ Публичные ключи в runtime config (не в бандле)
+// config.json:
+// { "stripePublishableKey": "pk_live_..." }
+```
+
+---
+
+## Playground 🎮
+
+Интерактивная система feature flags:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const DEFAULT_CONFIG = {
+  apiUrl: 'https://api.production.example.com',
+  version: '2.1.0',
+  featureFlags: {
+    newDashboard: false,
+    betaCheckout: true,
+    aiAssistant: false,
+    maintenanceMode: false,
+    darkMode: true,
+    exportCSV: true,
+  },
+};
+
+const FLAG_DESCRIPTIONS = {
+  newDashboard: { label: 'Новый Dashboard', icon: '📊', desc: 'Переработанный интерфейс дашборда' },
+  betaCheckout: { label: 'Beta Checkout', icon: '🛒', desc: 'Новый процесс оформления заказа' },
+  aiAssistant: { label: 'AI Ассистент', icon: '🤖', desc: 'GPT-4 помощник в интерфейсе' },
+  maintenanceMode: { label: 'Режим ТО', icon: '🔧', desc: 'Показывать заглушку обслуживания' },
+  darkMode: { label: 'Dark Mode', icon: '🌙', desc: 'Тёмная тема по умолчанию' },
+  exportCSV: { label: 'Экспорт CSV', icon: '📥', desc: 'Кнопка экспорта в таблицах' },
+};
+
+const ENVIRONMENTS = ['development', 'staging', 'production'];
+
+const ENV_CONFIGS = {
+  development: { newDashboard: true, betaCheckout: true, aiAssistant: true, maintenanceMode: false, darkMode: true, exportCSV: true },
+  staging: { newDashboard: true, betaCheckout: true, aiAssistant: false, maintenanceMode: false, darkMode: true, exportCSV: true },
+  production: { newDashboard: false, betaCheckout: false, aiAssistant: false, maintenanceMode: false, darkMode: true, exportCSV: true },
+};
+
+function FlagCard({ name, enabled, onToggle }) {
+  const info = FLAG_DESCRIPTIONS[name] || {};
+  return (
+    <div style={{
+      background: enabled ? '#1e3a2f' : '#1e293b',
+      border: \`1px solid \${enabled ? '#4ade80' : '#334155'}\`,
+      borderRadius: '10px', padding: '14px 16px',
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      transition: 'all 0.2s',
+    }}>
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+          <span style={{ fontSize: '16px' }}>{info.icon}</span>
+          <span style={{ color: '#f1f5f9', fontWeight: 'bold', fontSize: '14px' }}>{info.label}</span>
+        </div>
+        <div style={{ color: '#64748b', fontSize: '12px' }}>{info.desc}</div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <span style={{ fontSize: '12px', color: enabled ? '#4ade80' : '#64748b' }}>
+          {enabled ? 'ON' : 'OFF'}
+        </span>
+        <div onClick={onToggle} style={{
+          width: '44px', height: '24px', borderRadius: '12px',
+          background: enabled ? '#4ade80' : '#334155',
+          cursor: 'pointer', position: 'relative', transition: 'background 0.2s',
+        }}>
+          <div style={{
+            position: 'absolute', top: '3px',
+            left: enabled ? '22px' : '3px',
+            width: '18px', height: '18px', borderRadius: '50%',
+            background: 'white', transition: 'left 0.2s',
+          }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AppPreview({ flags }) {
+  if (flags.maintenanceMode) {
+    return (
+      <div style={{ background: '#0f172a', borderRadius: '10px', padding: '24px', textAlign: 'center' }}>
+        <div style={{ fontSize: '48px', marginBottom: '12px' }}>🔧</div>
+        <div style={{ color: '#fbbf24', fontSize: '18px', fontWeight: 'bold' }}>Техническое обслуживание</div>
+        <div style={{ color: '#94a3b8', fontSize: '13px', marginTop: '8px' }}>Сайт временно недоступен</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      background: flags.darkMode ? '#0f172a' : '#f8fafc',
+      borderRadius: '10px', padding: '16px',
+      color: flags.darkMode ? '#f1f5f9' : '#1e293b',
+    }}>
+      <div style={{ marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontWeight: 'bold', fontSize: '15px' }}>
+          {flags.newDashboard ? '📊 Новый Dashboard ✨' : '📋 Старый Dashboard'}
+        </div>
+        {flags.aiAssistant && (
+          <div style={{
+            background: '#7c3aed', color: 'white', borderRadius: '16px',
+            padding: '4px 10px', fontSize: '12px',
+          }}>🤖 AI</div>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+        <div style={{ flex: 1, background: flags.darkMode ? '#1e293b' : '#e2e8f0', borderRadius: '6px', padding: '10px', fontSize: '12px' }}>
+          <div style={{ color: '#94a3b8', marginBottom: '4px' }}>Выручка</div>
+          <div style={{ fontWeight: 'bold' }}>₽ 1,234,567</div>
+        </div>
+        <div style={{ flex: 1, background: flags.darkMode ? '#1e293b' : '#e2e8f0', borderRadius: '6px', padding: '10px', fontSize: '12px' }}>
+          <div style={{ color: '#94a3b8', marginBottom: '4px' }}>Заказы</div>
+          <div style={{ fontWeight: 'bold' }}>4,321</div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: '8px' }}>
+        {flags.betaCheckout && (
+          <button style={{ padding: '8px 16px', borderRadius: '6px', border: 'none', background: ANGULAR_RED, color: 'white', cursor: 'pointer', fontSize: '13px' }}>
+            🛒 Оформить (Beta)
+          </button>
+        )}
+        {flags.exportCSV && (
+          <button style={{ padding: '8px 16px', borderRadius: '6px', border: 'none', background: '#334155', color: '#94a3b8', cursor: 'pointer', fontSize: '13px' }}>
+            📥 Экспорт CSV
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [env, setEnv] = useState('production');
+  const [flags, setFlags] = useState({ ...ENV_CONFIGS.production });
+
+  const loadEnv = useCallback((newEnv) => {
+    setEnv(newEnv);
+    setFlags({ ...ENV_CONFIGS[newEnv] });
+  }, []);
+
+  const toggleFlag = useCallback((name) => {
+    setFlags(prev => ({ ...prev, [name]: !prev[name] }));
+  }, []);
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '680px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>🔧 Feature Flags System</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>APP_INITIALIZER + Runtime Config</div>
+        </div>
+
+        {/* Env selector */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px' }}>
+          <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px' }}>
+            Загрузить config.json для окружения:
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {ENVIRONMENTS.map(e => (
+              <button key={e} onClick={() => loadEnv(e)} style={{
+                flex: 1, padding: '8px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+                background: env === e ? ANGULAR_RED : '#334155',
+                color: 'white', fontWeight: env === e ? 'bold' : 'normal', fontSize: '13px',
+              }}>{e}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          {/* Flags */}
+          <div>
+            <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>
+              FEATURE FLAGS (переопределение для дебага):
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {Object.keys(flags).map(name => (
+                <FlagCard key={name} name={name} enabled={flags[name]} onToggle={() => toggleFlag(name)} />
+              ))}
+            </div>
+          </div>
+
+          {/* Preview */}
+          <div>
+            <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px', fontWeight: 'bold' }}>
+              ПРЕВЬЮ ПРИЛОЖЕНИЯ:
+            </div>
+            <AppPreview flags={flags} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

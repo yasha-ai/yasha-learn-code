@@ -1,0 +1,630 @@
+---
+title: "22. Renderless компоненты"
+sidebar:
+  order: 23
+---
+import { Playground } from '@components/Playground'
+
+
+## 🎭 Урок 23 — Renderless компоненты и продвинутые паттерны
+
+Renderless компоненты — это один из самых элегантных паттернов в Vue, который разделяет **логику** и **представление**. Компонент содержит умную логику, но не рендерит никакого HTML — всю разметку делает потребитель через scoped slots. Это headless UI в мире Vue.
+
+---
+
+## 🤔 Зачем нужны renderless компоненты?
+
+Представь: тебе нужна функциональность выпадающего списка — открытие, закрытие, навигация клавишами, accessibility. Но дизайн должен быть разным: где-то это dropdown в шапке, где-то — inline-список в форме.
+
+```vue
+<!-- Без renderless: дублируем логику в каждом компоненте 😢 -->
+<HeaderDropdown />    <!-- кнопка + список -->
+<FormSelect />        <!-- лейбл + список -->
+<MobileMenu />        <!-- бургер + drawer -->
+<!-- У всех одна логика, разный вид -->
+
+<!-- С renderless: логика один раз, вид — любой 🎉 -->
+<DropdownLogic v-slot="{ isOpen, toggle, items }">
+  <!-- Ты рисуешь что хочешь! -->
+  <button @click="toggle">{{ isOpen ? '▲' : '▼' }}</button>
+  <ul v-show="isOpen">
+    <li v-for="item in items" :key="item.id">{{ item.label }}</li>
+  </ul>
+</DropdownLogic>
+```
+
+---
+
+## 🔧 Создание renderless компонента
+
+Простейший renderless компонент возвращает только `$slots.default()`:
+
+```vue
+<!-- FetchData.vue — получает данные, не рендерит DOM -->
+<script setup>
+import { ref, onMounted } from 'vue'
+
+const props = defineProps({
+  url: { type: String, required: true }
+})
+
+const data = ref(null)
+const error = ref(null)
+const loading = ref(true)
+
+onMounted(async () => {
+  try {
+    const res = await fetch(props.url)
+    data.value = await res.json()
+  } catch (e) {
+    error.value = e
+  } finally {
+    loading.value = false
+  }
+})
+</script>
+
+<template>
+  <slot :data="data" :error="error" :loading="loading" />
+</template>
+```
+
+Использование:
+
+```vue
+<FetchData url="https://api.example.com/users">
+  <template #default="{ data, error, loading }">
+    <div v-if="loading">⏳ Загружаем...</div>
+    <div v-else-if="error">❌ {{ error.message }}</div>
+    <ul v-else>
+      <li v-for="user in data" :key="user.id">{{ user.name }}</li>
+    </ul>
+  </template>
+</FetchData>
+```
+
+---
+
+## 📐 Scoped Slots как API данных
+
+Scoped slots — это способ передавать данные **из дочернего компонента в родительский шаблон**. Это инверсия обычного потока данных и ключевой механизм renderless-компонентов:
+
+```vue
+<!-- DataTable.vue — renderless таблица -->
+<script setup>
+import { ref, computed } from 'vue'
+
+const props = defineProps({
+  items: Array,
+  sortable: Boolean
+})
+
+const sortKey = ref(null)
+const sortDir = ref('asc')
+
+const sorted = computed(() => {
+  if (!sortKey.value) return props.items
+  return [...props.items].sort((a, b) => {
+    const val = (x) => x[sortKey.value]
+    const dir = sortDir.value === 'asc' ? 1 : -1
+    return val(a) > val(b) ? dir : -dir
+  })
+})
+
+const sort = (key) => {
+  if (sortKey.value === key) {
+    sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    sortKey.value = key
+    sortDir.value = 'asc'
+  }
+}
+</script>
+
+<template>
+  <slot
+    :rows="sorted"
+    :sort="sort"
+    :sortKey="sortKey"
+    :sortDir="sortDir"
+  />
+</template>
+```
+
+```vue
+<!-- Использование: полный контроль над видом таблицы -->
+<DataTable :items="users" sortable v-slot="{ rows, sort, sortKey, sortDir }">
+  <table>
+    <thead>
+      <tr>
+        <th @click="sort('name')">
+          Имя {{ sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : '↕' }}
+        </th>
+        <th @click="sort('age')">
+          Возраст {{ sortKey === 'age' ? (sortDir === 'asc' ? '↑' : '↓') : '↕' }}
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr v-for="user in rows" :key="user.id">
+        <td>{{ user.name }}</td>
+        <td>{{ user.age }}</td>
+      </tr>
+    </tbody>
+  </table>
+</DataTable>
+```
+
+---
+
+## 🏗️ Compound Components паттерн
+
+Compound Components — группа компонентов, которые работают вместе и делят состояние через `provide/inject`:
+
+```vue
+<!-- Accordion.vue — родительский компонент-контейнер -->
+<script setup>
+import { ref, provide } from 'vue'
+
+const openItems = ref(new Set())
+
+const toggle = (id) => {
+  if (openItems.value.has(id)) {
+    openItems.value.delete(id)
+  } else {
+    openItems.value.add(id)
+  }
+  openItems.value = new Set(openItems.value) // триггер реактивности
+}
+
+// Передаём состояние и методы вниз
+provide('accordion', {
+  openItems,
+  toggle
+})
+</script>
+
+<template>
+  <div class="accordion">
+    <slot />
+  </div>
+</template>
+```
+
+```vue
+<!-- AccordionItem.vue — дочерний компонент -->
+<script setup>
+import { inject, computed } from 'vue'
+
+const props = defineProps({
+  id: { type: String, required: true }
+})
+
+const { openItems, toggle } = inject('accordion')
+
+const isOpen = computed(() => openItems.value.has(props.id))
+</script>
+
+<template>
+  <div class="accordion-item">
+    <button class="accordion-trigger" @click="toggle(id)">
+      <slot name="title" />
+      <span>{{ isOpen ? '▲' : '▼' }}</span>
+    </button>
+    <Transition name="accordion">
+      <div v-show="isOpen" class="accordion-content">
+        <slot />
+      </div>
+    </Transition>
+  </div>
+</template>
+```
+
+```vue
+<!-- Использование — декларативно и читаемо! -->
+<Accordion>
+  <AccordionItem id="faq-1">
+    <template #title>Что такое Vue 3?</template>
+    Vue 3 — прогрессивный JavaScript фреймворк...
+  </AccordionItem>
+  <AccordionItem id="faq-2">
+    <template #title>Как установить Vue?</template>
+    npm create vue@latest...
+  </AccordionItem>
+</Accordion>
+```
+
+---
+
+## 🪝 Hooks паттерн для переиспользования логики
+
+В Vue 3 Composables (hooks) — предпочтительный способ переиспользования логики. Но для UI-компонентов renderless-паттерн иногда удобнее:
+
+```javascript
+// composables/useToggle.js
+import { ref } from 'vue'
+
+export function useToggle(initial = false) {
+  const state = ref(initial)
+
+  const toggle = () => { state.value = !state.value }
+  const setTrue = () => { state.value = true }
+  const setFalse = () => { state.value = false }
+
+  return { state, toggle, setTrue, setFalse }
+}
+```
+
+```javascript
+// composables/useList.js
+import { ref, computed } from 'vue'
+
+export function useList(initial = []) {
+  const items = ref([...initial])
+
+  const add = (item) => items.value.push(item)
+  const remove = (index) => items.value.splice(index, 1)
+  const clear = () => { items.value = [] }
+  const move = (from, to) => {
+    const item = items.value.splice(from, 1)[0]
+    items.value.splice(to, 0, item)
+  }
+
+  const isEmpty = computed(() => items.value.length === 0)
+  const count = computed(() => items.value.length)
+
+  return { items, add, remove, clear, move, isEmpty, count }
+}
+```
+
+---
+
+## 🔒 Renderless с TypeScript и generic типами
+
+```typescript
+// UseModelValue.vue — типизированный renderless компонент
+<script setup lang="ts" generic="T">
+import { computed } from 'vue'
+
+interface Props {
+  modelValue: T
+  validator?: (value: T) => string | null
+}
+
+const props = defineProps<Props>()
+const emit = defineEmits<{ 'update:modelValue': [value: T] }>()
+
+const error = computed(() =>
+  props.validator ? props.validator(props.modelValue) : null
+)
+
+const update = (value: T) => emit('update:modelValue', value)
+</script>
+
+<template>
+  <slot
+    :value="modelValue"
+    :update="update"
+    :error="error"
+    :isValid="!error"
+  />
+</template>
+```
+
+---
+
+## 🎮 MouseTracker — классический renderless пример
+
+```vue
+<!-- MouseTracker.vue -->
+<script setup>
+import { ref, onMounted, onUnmounted } from 'vue'
+
+const x = ref(0)
+const y = ref(0)
+
+const track = (e) => {
+  x.value = e.clientX
+  y.value = e.clientY
+}
+
+onMounted(() => window.addEventListener('mousemove', track))
+onUnmounted(() => window.removeEventListener('mousemove', track))
+</script>
+
+<template>
+  <slot :x="x" :y="y" />
+</template>
+```
+
+```vue
+<!-- Использование в разных контекстах -->
+<MouseTracker v-slot="{ x, y }">
+  <div class="cursor-follow" :style="{ left: x + 'px', top: y + 'px' }" />
+</MouseTracker>
+
+<MouseTracker v-slot="{ x, y }">
+  <p>Курсор: {{ x }}, {{ y }}</p>
+</MouseTracker>
+```
+
+---
+
+## ⚙️ WindowSize renderless composable
+
+```javascript
+// composables/useWindowSize.js
+import { ref, onMounted, onUnmounted } from 'vue'
+
+export function useWindowSize() {
+  const width = ref(window.innerWidth)
+  const height = ref(window.innerHeight)
+
+  const update = () => {
+    width.value = window.innerWidth
+    height.value = window.innerHeight
+  }
+
+  onMounted(() => window.addEventListener('resize', update))
+  onUnmounted(() => window.removeEventListener('resize', update))
+
+  return { width, height }
+}
+```
+
+---
+
+## 📋 Renderless форма с валидацией
+
+```vue
+<!-- FormField.vue -->
+<script setup>
+import { ref, computed } from 'vue'
+
+const props = defineProps({
+  rules: { type: Array, default: () => [] }
+})
+
+const value = ref('')
+const touched = ref(false)
+
+const errors = computed(() => {
+  if (!touched.value) return []
+  return props.rules
+    .map(rule => rule(value.value))
+    .filter(Boolean)
+})
+
+const isValid = computed(() => errors.value.length === 0)
+</script>
+
+<template>
+  <slot
+    :value="value"
+    :errors="errors"
+    :isValid="isValid"
+    :onInput="(v) => { value = v; touched = true }"
+    :onBlur="() => { touched = true }"
+  />
+</template>
+```
+
+---
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState, useCallback } from "react";
+
+const VUE_GREEN = "#42b883";
+const VUE_DARK = "#35495e";
+
+// ---- Renderless "компонент" как хук ----
+function useToggle(initial = false) {
+  const [state, setState] = useState(initial);
+  const toggle = useCallback(() => setState(s => !s), []);
+  const setTrue = useCallback(() => setState(true), []);
+  const setFalse = useCallback(() => setState(false), []);
+  return { state, toggle, setTrue, setFalse };
+}
+
+function useList<T>(initial: T[] = []) {
+  const [items, setItems] = useState<T[]>(initial);
+  const add = useCallback((item: T) => setItems(prev => [...prev, item]), []);
+  const remove = useCallback((i: number) => setItems(prev => prev.filter((_, idx) => idx !== i)), []);
+  const clear = useCallback(() => setItems([]), []);
+  return { items, add, remove, clear, count: items.length, isEmpty: items.length === 0 };
+}
+
+// ---- Accordion compound component ----
+function Accordion({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState<string | null>(null);
+  return (
+    <div style={{ border: "1px solid " + VUE_GREEN + "44", borderRadius: 10, overflow: "hidden" }}>
+      {typeof children === "function" ? (children as any)(open, setOpen) : children}
+    </div>
+  );
+}
+
+function AccordionItem({ id, title, content, openId, setOpenId }: any) {
+  const isOpen = openId === id;
+  return (
+    <div style={{ borderBottom: "1px solid #f0f0f0" }}>
+      <button onClick={() => setOpenId(isOpen ? null : id)} style={{
+        width: "100%", textAlign: "left", padding: "12px 16px",
+        background: isOpen ? VUE_GREEN + "12" : "#fff",
+        border: "none", cursor: "pointer", fontWeight: 600,
+        fontSize: 14, color: VUE_DARK, display: "flex", justifyContent: "space-between"
+      }}>
+        {title}
+        <span style={{ color: VUE_GREEN }}>{isOpen ? "▲" : "▼"}</span>
+      </button>
+      {isOpen && (
+        <div style={{ padding: "10px 16px 14px", fontSize: 13, color: "#555", background: VUE_GREEN + "06" }}>
+          {content}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- FetchData renderless ----
+function FetchDataDemo() {
+  const [stage, setStage] = useState<"idle"|"loading"|"done"|"error">("idle");
+  const [data, setData] = useState<any>(null);
+  const [url, setUrl] = useState("https://api.example.com/users");
+
+  const simulate = () => {
+    setStage("loading");
+    const willFail = url.includes("error");
+    setTimeout(() => {
+      if (willFail) {
+        setStage("error");
+      } else {
+        setData([
+          { id: 1, name: "Александр Петров", role: "Frontend Dev" },
+          { id: 2, name: "Мария Иванова", role: "Designer" },
+          { id: 3, name: "Сергей Козлов", role: "Backend Dev" },
+        ]);
+        setStage("done");
+      }
+    }, 1500);
+  };
+
+  return (
+    <div style={{ background: "#f8fffe", borderRadius: 10, padding: "14px" }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: VUE_DARK, marginBottom: 8 }}>
+        🔌 FetchData renderless компонент
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <input value={url} onChange={e => setUrl(e.target.value)} style={{
+          flex: 1, padding: "7px 10px", borderRadius: 7, border: "1px solid #ddd", fontSize: 12
+        }} />
+        <button onClick={simulate} disabled={stage === "loading"} style={{
+          background: stage === "loading" ? "#ccc" : VUE_GREEN, color: "#fff",
+          border: "none", borderRadius: 7, padding: "7px 14px", cursor: stage === "loading" ? "not-allowed" : "pointer",
+          fontWeight: 600, fontSize: 12
+        }}>Запрос</button>
+      </div>
+      <div style={{ fontSize: 11, color: "#888", marginBottom: 8, fontStyle: "italic" }}>
+        Добавь "error" в URL чтобы симулировать ошибку
+      </div>
+      {stage === "loading" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#888", fontSize: 13 }}>
+          <div style={{ width: 14, height: 14, border: "2px solid " + VUE_GREEN, borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+          ⏳ Слот fallback...
+        </div>
+      )}
+      {stage === "error" && <div style={{ color: "#e74c3c", fontSize: 13 }}>❌ Слот error: Failed to fetch</div>}
+      {stage === "done" && data && (
+        <div>
+          <div style={{ fontSize: 12, color: VUE_GREEN, fontWeight: 600, marginBottom: 6 }}>✓ Слот default получил данные:</div>
+          {data.map((u: any) => (
+            <div key={u.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 10px", background: "#fff", borderRadius: 6, marginBottom: 4, fontSize: 13 }}>
+              <div style={{ width: 28, height: 28, borderRadius: "50%", background: VUE_GREEN + "22", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, color: VUE_GREEN }}>
+                {u.name[0]}
+              </div>
+              <div>
+                <div style={{ fontWeight: 600, color: VUE_DARK, fontSize: 12 }}>{u.name}</div>
+                <div style={{ fontSize: 11, color: "#888" }}>{u.role}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [tab, setTab] = useState<"accordion"|"list"|"fetch">("accordion");
+  const list = useList<string>(["Элемент 1", "Элемент 2"]);
+  const [input, setInput] = useState("");
+  const [accordionOpen, setAccordionOpen] = useState<string | null>(null);
+
+  const accordionItems = [
+    { id: "1", title: "Что такое Renderless компоненты?", content: "Компоненты без HTML — только логика через scoped slots. Полная свобода оформления." },
+    { id: "2", title: "Чем отличаются от Composables?", content: "Composables — логика в JS/TS. Renderless — логика в компоненте с шаблоном через slots." },
+    { id: "3", title: "Compound Components паттерн", content: "Группа компонентов делит состояние через provide/inject. Accordion, Tabs, Select." },
+  ];
+
+  return (
+    <div style={{ fontFamily: "system-ui, sans-serif", background: "#f5f7fa", minHeight: "100vh", padding: "1.5rem" }}>
+      <style>{"@keyframes spin { to { transform: rotate(360deg); } }"}</style>
+      <div style={{ maxWidth: 580, margin: "0 auto" }}>
+        <div style={{ background: VUE_DARK, color: "#fff", borderRadius: 12, padding: "1.25rem 1.5rem", marginBottom: "1.5rem" }}>
+          <h2 style={{ margin: 0, fontSize: 20 }}>🎭 Renderless компоненты</h2>
+          <p style={{ margin: "6px 0 0", opacity: 0.75, fontSize: 14 }}>Урок 23 — headless UI, scoped slots, compound components</p>
+        </div>
+
+        <div style={{ display: "flex", gap: 6, marginBottom: "1rem", flexWrap: "wrap" }}>
+          {([["accordion","🪗 Compound"], ["list","📋 useList"], ["fetch","🔌 FetchData"]] as const).map(([t, label]) => (
+            <button key={t} onClick={() => setTab(t)} style={{
+              background: tab === t ? VUE_GREEN : "#fff",
+              color: tab === t ? "#fff" : VUE_DARK,
+              border: "1px solid " + (tab === t ? VUE_GREEN : "#ddd"),
+              borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontWeight: 600, fontSize: 13
+            }}>{label}</button>
+          ))}
+        </div>
+
+        <div style={{ background: "#fff", borderRadius: 12, padding: "1.25rem", boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+          {tab === "accordion" && (
+            <div>
+              <p style={{ margin: "0 0 12px", fontSize: 13, color: "#666" }}>
+                Compound Components: дочерние компоненты делят состояние через provide/inject.
+              </p>
+              {accordionItems.map(item => (
+                <AccordionItem key={item.id} {...item} openId={accordionOpen} setOpenId={setAccordionOpen} />
+              ))}
+            </div>
+          )}
+
+          {tab === "list" && (
+            <div>
+              <p style={{ margin: "0 0 12px", fontSize: 13, color: "#666" }}>
+                useList — renderless хук для управления списком.
+              </p>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <input
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && input.trim()) { list.add(input.trim()); setInput(""); }}}
+                  placeholder="Новый элемент (Enter)"
+                  style={{ flex: 1, padding: "8px 12px", borderRadius: 8, border: "1px solid #ddd", fontSize: 13 }}
+                />
+                <button onClick={() => { if (input.trim()) { list.add(input.trim()); setInput(""); }}} style={{
+                  background: VUE_GREEN, color: "#fff", border: "none", borderRadius: 8,
+                  padding: "8px 14px", cursor: "pointer", fontWeight: 600
+                }}>+</button>
+                {!list.isEmpty && <button onClick={list.clear} style={{
+                  background: "#fff", color: "#e74c3c", border: "1px solid #e74c3c",
+                  borderRadius: 8, padding: "8px 10px", cursor: "pointer", fontSize: 13
+                }}>Очистить</button>}
+              </div>
+              <div style={{ display: "grid", gap: 6 }}>
+                {list.isEmpty ? (
+                  <div style={{ textAlign: "center", color: "#aaa", padding: "1.5rem", fontSize: 13 }}>
+                    isEmpty: true — список пуст
+                  </div>
+                ) : list.items.map((item, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "#f8fffe", borderRadius: 8, border: "1px solid " + VUE_GREEN + "33" }}>
+                    <span style={{ flex: 1, fontSize: 13 }}>{item}</span>
+                    <span style={{ fontSize: 11, color: VUE_GREEN }}>index: {i}</span>
+                    <button onClick={() => list.remove(i)} style={{ background: "none", border: "none", color: "#e74c3c", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
+                  </div>
+                ))}
+              </div>
+              {!list.isEmpty && <div style={{ fontSize: 12, color: "#888", marginTop: 8 }}>count: {list.count}</div>}
+            </div>
+          )}
+
+          {tab === "fetch" && <FetchDataDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

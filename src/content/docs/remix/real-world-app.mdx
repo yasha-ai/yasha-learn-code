@@ -1,0 +1,544 @@
+---
+title: "27. Реальный проект: E-commerce"
+sidebar:
+  order: 27
+---
+import { Playground } from '@components/Playground'
+
+
+Собираем всё изученное вместе в полноценный e-commerce интерфейс. Каталог товаров с фильтрами, поиском, корзиной с оптимистичными обновлениями и имитацией loader/action паттернов Remix.
+
+## Архитектура проекта
+
+```
+app/
+├── routes/
+│   ├── _store.tsx              # Общий layout магазина
+│   ├── _store._index.tsx       # Главная / каталог
+│   ├── _store.products.$id.tsx # Страница товара
+│   ├── _store.cart.tsx         # Корзина
+│   └── api.cart.ts             # Resource Route для корзины
+├── models/
+│   ├── product.server.ts       # Работа с товарами
+│   └── cart.server.ts          # Работа с корзиной
+└── session.server.ts           # Сессии для корзины
+```
+
+## loader для каталога
+
+```typescript
+// app/routes/_store._index.tsx
+export async function loader({ request }) {
+  const url = new URL(request.url);
+  const category = url.searchParams.get("category");
+  const q = url.searchParams.get("q");
+  const sort = url.searchParams.get("sort") ?? "popular";
+
+  const [products, categories] = await Promise.all([
+    getProducts({ category, q, sort }),
+    getCategories(),
+  ]);
+
+  return json({ products, categories, q, category, sort });
+}
+```
+
+## action для корзины
+
+```typescript
+// app/routes/api.cart.ts (Resource Route)
+export async function action({ request }) {
+  const session = await getSession(request.headers.get("Cookie"));
+  const formData = await request.formData();
+  const intent = formData.get("intent") as string;
+
+  switch (intent) {
+    case "add":
+      addToCart(session, formData.get("productId") as string);
+      break;
+    case "remove":
+      removeFromCart(session, formData.get("productId") as string);
+      break;
+    case "clear":
+      clearCart(session);
+      break;
+  }
+
+  return json({ ok: true }, {
+    headers: { "Set-Cookie": await commitSession(session) },
+  });
+}
+```
+
+## Оптимистичная корзина
+
+```typescript
+function AddToCartButton({ product }) {
+  const fetcher = useFetcher();
+
+  // Оптимистично определяем состояние
+  const isAdding = fetcher.state !== "idle" &&
+                   fetcher.formData?.get("intent") === "add";
+
+  return (
+    <fetcher.Form method="post" action="/api/cart">
+      <input type="hidden" name="intent" value="add" />
+      <input type="hidden" name="productId" value={product.id} />
+      <button type="submit" disabled={isAdding}>
+        {isAdding ? "Добавляется..." : "В корзину"}
+      </button>
+    </fetcher.Form>
+  );
+}
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useMemo } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+const WARN = "#f59e0b";
+
+type Product = {
+  id: string;
+  name: string;
+  category: string;
+  price: number;
+  rating: number;
+  reviews: number;
+  emoji: string;
+  badge?: string;
+};
+
+type CartItem = {
+  product: Product;
+  qty: number;
+  pending?: boolean;
+};
+
+const products: Product[] = [
+  { id: "1", name: "Беспроводные наушники", category: "electronics", price: 8990, rating: 4.8, reviews: 234, emoji: "🎧", badge: "Хит" },
+  { id: "2", name: "Механическая клавиатура", category: "electronics", price: 12490, rating: 4.6, reviews: 189, emoji: "⌨️" },
+  { id: "3", name: "Умные часы", category: "electronics", price: 24990, rating: 4.7, reviews: 312, emoji: "⌚", badge: "Новинка" },
+  { id: "4", name: "Рюкзак для ноутбука", category: "accessories", price: 4490, rating: 4.5, reviews: 156, emoji: "🎒" },
+  { id: "5", name: "Чехол для телефона", category: "accessories", price: 890, rating: 4.3, reviews: 445, emoji: "📱" },
+  { id: "6", name: "Подставка для монитора", category: "accessories", price: 2990, rating: 4.9, reviews: 78, emoji: "🖥️", badge: "ТОП" },
+  { id: "7", name: "Кофемашина", category: "home", price: 31990, rating: 4.8, reviews: 203, emoji: "☕" },
+  { id: "8", name: "Настольная лампа LED", category: "home", price: 3490, rating: 4.4, reviews: 167, emoji: "💡" },
+  { id: "9", name: "Книга о Remix", category: "books", price: 1290, rating: 5.0, reviews: 42, emoji: "📚", badge: "🎸" },
+  { id: "10", name: "Курс TypeScript", category: "books", price: 4990, rating: 4.9, reviews: 98, emoji: "📖" },
+  { id: "11", name: "USB-C Hub", category: "electronics", price: 3990, rating: 4.6, reviews: 321, emoji: "🔌" },
+  { id: "12", name: "Коврик для мыши XL", category: "accessories", price: 1490, rating: 4.7, reviews: 267, emoji: "🖱️" },
+];
+
+const categories = [
+  { id: "all", label: "Все товары", icon: "🏪" },
+  { id: "electronics", label: "Электроника", icon: "💻" },
+  { id: "accessories", label: "Аксессуары", icon: "🎒" },
+  { id: "home", label: "Дом и быт", icon: "🏠" },
+  { id: "books", label: "Книги и курсы", icon: "📚" },
+];
+
+const sortOptions = [
+  { id: "popular", label: "Популярные" },
+  { id: "price-asc", label: "Цена ↑" },
+  { id: "price-desc", label: "Цена ↓" },
+  { id: "rating", label: "По рейтингу" },
+];
+
+function formatPrice(p: number) {
+  return p.toLocaleString("ru-RU") + " ₽";
+}
+
+function Stars({ rating }: { rating: number }) {
+  return (
+    <span style={{ color: WARN, fontSize: "12px" }}>
+      {"★".repeat(Math.round(rating))}{"☆".repeat(5 - Math.round(rating))}
+    </span>
+  );
+}
+
+export default function App() {
+  const [category, setCategory] = useState("all");
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState("popular");
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [view, setView] = useState<"shop" | "cart">("shop");
+  const [pendingItems, setPendingItems] = useState<Set<string>>(new Set());
+  const [notification, setNotification] = useState<string | null>(null);
+
+  const showNotification = (msg: string) => {
+    setNotification(msg);
+    setTimeout(() => setNotification(null), 2000);
+  };
+
+  const addToCart = (product: Product) => {
+    // Optimistic update
+    setPendingItems(prev => new Set([...prev, product.id]));
+
+    // Simulate action()
+    setTimeout(() => {
+      setCart(prev => {
+        const existing = prev.find(i => i.product.id === product.id);
+        if (existing) {
+          return prev.map(i => i.product.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+        }
+        return [...prev, { product, qty: 1 }];
+      });
+      setPendingItems(prev => {
+        const next = new Set(prev);
+        next.delete(product.id);
+        return next;
+      });
+      showNotification(\`\${product.emoji} \${product.name} добавлен в корзину\`);
+    }, 500);
+  };
+
+  const removeFromCart = (productId: string) => {
+    setCart(prev => prev.filter(i => i.product.id !== productId));
+  };
+
+  const updateQty = (productId: string, delta: number) => {
+    setCart(prev => prev
+      .map(i => i.product.id === productId ? { ...i, qty: i.qty + delta } : i)
+      .filter(i => i.qty > 0)
+    );
+  };
+
+  const filtered = useMemo(() => {
+    let result = [...products];
+    if (category !== "all") result = result.filter(p => p.category === category);
+    if (search) result = result.filter(p => p.name.toLowerCase().includes(search.toLowerCase()));
+    if (sort === "price-asc") result.sort((a, b) => a.price - b.price);
+    if (sort === "price-desc") result.sort((a, b) => b.price - a.price);
+    if (sort === "rating") result.sort((a, b) => b.rating - a.rating);
+    if (sort === "popular") result.sort((a, b) => b.reviews - a.reviews);
+    return result;
+  }, [category, search, sort]);
+
+  const totalItems = cart.reduce((s, i) => s + i.qty, 0);
+  const totalPrice = cart.reduce((s, i) => s + i.product.price * i.qty, 0);
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      {/* Notification */}
+      {notification && (
+        <div style={{
+          position: "fixed", top: "16px", right: "16px", zIndex: 100,
+          background: SUCCESS + "ee", borderRadius: "10px", padding: "10px 16px",
+          fontSize: "13px", color: "#fff", fontWeight: 600,
+          boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+          animation: "none",
+        }}>
+          {notification}
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{ background: CARD, borderBottom: "1px solid #334155", padding: "12px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 50 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <span style={{ fontSize: "24px" }}>🎸</span>
+          <span style={{ fontWeight: 800, color: REMIX, fontSize: "18px" }}>Remix Store</span>
+          <span style={{ color: MUTED, fontSize: "12px" }}>loader + action + optimistic UI</span>
+        </div>
+        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+          <button
+            onClick={() => setView(view === "shop" ? "cart" : "shop")}
+            style={{
+              padding: "8px 20px",
+              background: view === "cart" ? ACCENT : CARD,
+              color: view === "cart" ? "#fff" : TEXT,
+              border: \`1px solid \${view === "cart" ? ACCENT : "#334155"}\`,
+              borderRadius: "8px",
+              cursor: "pointer",
+              fontSize: "14px",
+              fontWeight: 600,
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+            }}
+          >
+            🛒 Корзина
+            {totalItems > 0 && (
+              <span style={{ background: ACCENT, color: "#fff", borderRadius: "12px", padding: "1px 8px", fontSize: "11px" }}>
+                {totalItems}
+              </span>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {view === "shop" ? (
+        <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", height: "calc(100vh - 56px)" }}>
+          {/* Sidebar */}
+          <div style={{ background: "#0a1628", borderRight: "1px solid #1e3a5f", padding: "20px 16px", overflowY: "auto" }}>
+            <div style={{ fontSize: "11px", color: MUTED, textTransform: "uppercase", marginBottom: "12px", fontWeight: 600 }}>
+              Категории
+            </div>
+            {categories.map(cat => (
+              <div
+                key={cat.id}
+                onClick={() => setCategory(cat.id)}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "8px",
+                  cursor: "pointer",
+                  background: category === cat.id ? ACCENT + "33" : "transparent",
+                  color: category === cat.id ? ACCENT : MUTED,
+                  fontSize: "13px",
+                  marginBottom: "4px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  transition: "all 0.15s",
+                }}
+              >
+                <span>{cat.icon}</span>
+                <span>{cat.label}</span>
+                <span style={{ marginLeft: "auto", fontSize: "11px", color: category === cat.id ? ACCENT : "#475569" }}>
+                  {cat.id === "all" ? products.length : products.filter(p => p.category === cat.id).length}
+                </span>
+              </div>
+            ))}
+
+            <div style={{ marginTop: "24px", borderTop: "1px solid #1e3a5f", paddingTop: "16px" }}>
+              <div style={{ fontSize: "11px", color: MUTED, textTransform: "uppercase", marginBottom: "12px", fontWeight: 600 }}>
+                Сортировка
+              </div>
+              {sortOptions.map(opt => (
+                <div
+                  key={opt.id}
+                  onClick={() => setSort(opt.id)}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: "6px",
+                    cursor: "pointer",
+                    background: sort === opt.id ? ACCENT + "22" : "transparent",
+                    color: sort === opt.id ? ACCENT : MUTED,
+                    fontSize: "12px",
+                    marginBottom: "2px",
+                  }}
+                >
+                  {sort === opt.id ? "● " : "  "}{opt.label}
+                </div>
+              ))}
+            </div>
+
+            <div style={{ marginTop: "24px", borderTop: "1px solid #1e3a5f", paddingTop: "16px" }}>
+              <div style={{ fontSize: "10px", color: MUTED, marginBottom: "4px" }}>Remix route info:</div>
+              <div style={{ fontFamily: "monospace", fontSize: "9px", color: "#475569", lineHeight: 1.6 }}>
+                loader() выполняется<br/>
+                при каждой навигации<br/>
+                <br/>
+                searchParams:<br/>
+                ?category={category}<br/>
+                &sort={sort}<br/>
+                {search && \`&q=\${search}\`}
+              </div>
+            </div>
+          </div>
+
+          {/* Main content */}
+          <div style={{ overflowY: "auto", padding: "20px" }}>
+            {/* Search bar */}
+            <div style={{ display: "flex", gap: "12px", marginBottom: "20px" }}>
+              <div style={{ flex: 1, position: "relative" }}>
+                <span style={{ position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", color: MUTED }}>🔍</span>
+                <input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Поиск товаров... (Form method=&quot;get&quot;)"
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px 10px 36px",
+                    background: CARD,
+                    border: "1px solid #334155",
+                    borderRadius: "8px",
+                    color: TEXT,
+                    fontSize: "14px",
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                />
+              </div>
+              <div style={{ display: "flex", alignItems: "center", color: MUTED, fontSize: "13px" }}>
+                {filtered.length} товаров
+              </div>
+            </div>
+
+            {/* Products grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "14px" }}>
+              {filtered.map(product => {
+                const inCart = cart.find(i => i.product.id === product.id);
+                const isPending = pendingItems.has(product.id);
+                return (
+                  <div key={product.id} style={{
+                    background: CARD,
+                    borderRadius: "12px",
+                    overflow: "hidden",
+                    border: "1px solid #334155",
+                    transition: "transform 0.15s, border-color 0.15s",
+                    position: "relative",
+                  }}>
+                    {product.badge && (
+                      <div style={{
+                        position: "absolute",
+                        top: "10px",
+                        right: "10px",
+                        background: product.badge === "🎸" ? ACCENT : product.badge === "Новинка" ? SUCCESS : WARN,
+                        color: "#fff",
+                        padding: "2px 8px",
+                        borderRadius: "6px",
+                        fontSize: "10px",
+                        fontWeight: 700,
+                      }}>
+                        {product.badge}
+                      </div>
+                    )}
+                    <div style={{
+                      height: "80px",
+                      background: "linear-gradient(135deg, #1e293b, #0f172a)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: "40px",
+                    }}>
+                      {product.emoji}
+                    </div>
+                    <div style={{ padding: "12px" }}>
+                      <div style={{ fontSize: "13px", fontWeight: 600, color: TEXT, marginBottom: "4px", lineHeight: 1.3 }}>
+                        {product.name}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px" }}>
+                        <Stars rating={product.rating} />
+                        <span style={{ color: MUTED, fontSize: "11px" }}>{product.rating} ({product.reviews})</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ color: ACCENT, fontWeight: 700, fontSize: "15px" }}>
+                          {formatPrice(product.price)}
+                        </span>
+                        <button
+                          onClick={() => addToCart(product)}
+                          disabled={isPending}
+                          style={{
+                            padding: "6px 12px",
+                            background: inCart ? SUCCESS + "33" : isPending ? "#334155" : ACCENT,
+                            color: inCart ? SUCCESS : isPending ? MUTED : "#fff",
+                            border: \`1px solid \${inCart ? SUCCESS : "transparent"}\`,
+                            borderRadius: "6px",
+                            cursor: isPending ? "not-allowed" : "pointer",
+                            fontSize: "11px",
+                            fontWeight: 600,
+                            transition: "all 0.2s",
+                          }}
+                        >
+                          {isPending ? "⏳" : inCart ? \`✓ \${inCart.qty}\` : "+ Купить"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {filtered.length === 0 && (
+              <div style={{ textAlign: "center", padding: "60px", color: MUTED }}>
+                <div style={{ fontSize: "48px", marginBottom: "12px" }}>🔍</div>
+                <p>Ничего не найдено для "{search}"</p>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        /* Cart view */
+        <div style={{ maxWidth: "700px", margin: "0 auto", padding: "24px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px" }}>
+            <h2 style={{ margin: 0, color: TEXT, fontSize: "20px" }}>🛒 Корзина</h2>
+            <button onClick={() => setView("shop")} style={{
+              color: ACCENT, background: "transparent", border: "none", cursor: "pointer", fontSize: "13px",
+            }}>
+              ← Продолжить покупки
+            </button>
+          </div>
+
+          {cart.length === 0 ? (
+            <div style={{ background: CARD, borderRadius: "14px", padding: "60px", textAlign: "center" }}>
+              <div style={{ fontSize: "48px", marginBottom: "12px" }}>🛒</div>
+              <p style={{ color: MUTED }}>Корзина пуста</p>
+              <button onClick={() => setView("shop")} style={{
+                padding: "10px 24px", background: ACCENT, color: "#fff",
+                border: "none", borderRadius: "8px", cursor: "pointer", fontWeight: 700,
+              }}>
+                В магазин
+              </button>
+            </div>
+          ) : (
+            <>
+              <div style={{ background: CARD, borderRadius: "14px", overflow: "hidden", marginBottom: "16px" }}>
+                {cart.map((item, i) => (
+                  <div key={item.product.id} style={{
+                    padding: "16px 20px",
+                    display: "grid",
+                    gridTemplateColumns: "48px 1fr auto auto",
+                    alignItems: "center",
+                    gap: "16px",
+                    borderBottom: i < cart.length - 1 ? "1px solid #334155" : "none",
+                  }}>
+                    <span style={{ fontSize: "32px", textAlign: "center" }}>{item.product.emoji}</span>
+                    <div>
+                      <div style={{ fontWeight: 600, color: TEXT, fontSize: "14px" }}>{item.product.name}</div>
+                      <div style={{ color: ACCENT, fontSize: "13px" }}>{formatPrice(item.product.price)}</div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <button onClick={() => updateQty(item.product.id, -1)} style={{
+                        width: "28px", height: "28px", background: "#334155", color: TEXT,
+                        border: "none", borderRadius: "6px", cursor: "pointer", fontSize: "16px",
+                      }}>−</button>
+                      <span style={{ fontWeight: 700, minWidth: "20px", textAlign: "center" }}>{item.qty}</span>
+                      <button onClick={() => updateQty(item.product.id, 1)} style={{
+                        width: "28px", height: "28px", background: ACCENT, color: "#fff",
+                        border: "none", borderRadius: "6px", cursor: "pointer", fontSize: "16px",
+                      }}>+</button>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontWeight: 700, color: TEXT }}>{formatPrice(item.product.price * item.qty)}</div>
+                      <button onClick={() => removeFromCart(item.product.id)} style={{
+                        color: ERROR, background: "transparent", border: "none",
+                        cursor: "pointer", fontSize: "11px", marginTop: "4px",
+                      }}>
+                        удалить
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ background: CARD, borderRadius: "14px", padding: "20px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "16px" }}>
+                  <span style={{ color: MUTED }}>Товаров: {totalItems}</span>
+                  <span style={{ color: TEXT }}>Итого: <strong style={{ color: ACCENT }}>{formatPrice(totalPrice)}</strong></span>
+                </div>
+                <button style={{
+                  width: "100%", padding: "14px", background: SUCCESS,
+                  color: "#fff", border: "none", borderRadius: "10px",
+                  cursor: "pointer", fontWeight: 700, fontSize: "15px",
+                }}>
+                  Оформить заказ →
+                </button>
+                <div style={{ textAlign: "center", marginTop: "10px", fontSize: "11px", color: MUTED }}>
+                  action() → создание заказа → redirect('/order/success')
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+` }} />

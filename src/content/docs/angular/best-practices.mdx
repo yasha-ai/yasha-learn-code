@@ -1,0 +1,633 @@
+---
+title: "62. Лучшие практики"
+sidebar:
+  order: 65
+---
+import { Playground } from '@components/Playground'
+
+
+## 65. Лучшие практики Angular 🏆
+
+Привет! Яша здесь. Последний урок курса! Сегодня соберём всё лучшее, что мы знаем об Angular, в один чеклист. Это production-ready паттерны от реальных проектов 🚀
+
+---
+
+### Архитектура: Smart/Dumb компоненты
+
+```typescript
+// ✅ Smart (Container) компонент — знает о стейте
+@Component({
+  selector: 'app-users-page',
+  template: `
+    <app-users-list
+      [users]="users$ | async"
+      [loading]="loading$ | async"
+      (deleteUser)="onDelete($event)"
+      (selectUser)="onSelect($event)">
+    </app-users-list>
+  `,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class UsersPageComponent {
+  users$ = this.usersFacade.users$;
+  loading$ = this.usersFacade.loading$;
+
+  constructor(private usersFacade: UsersFacade) {}
+
+  onDelete(id: string): void { this.usersFacade.deleteUser(id); }
+  onSelect(id: string): void { this.usersFacade.selectUser(id); }
+}
+
+// ✅ Dumb (Presentational) компонент — только отображение
+@Component({
+  selector: 'app-users-list',
+  template: `
+    @if (loading) { <app-spinner /> }
+    @for (user of users; track user.id) {
+      <app-user-card
+        [user]="user"
+        (delete)="deleteUser.emit(user.id)"
+        (select)="selectUser.emit(user.id)">
+      </app-user-card>
+    }
+  `,
+  changeDetection: ChangeDetectionStrategy.OnPush, // ← ВСЕГДА!
+})
+export class UsersListComponent {
+  @Input() users: User[] | null = null;
+  @Input() loading: boolean | null = false;
+  @Output() deleteUser = new EventEmitter<string>();
+  @Output() selectUser = new EventEmitter<string>();
+}
+```
+
+---
+
+### Naming Conventions (Angular Style Guide)
+
+```
+Файлы:
+users.component.ts       ✅ feature-name.type.ts
+users.component.html
+users.component.scss
+users.component.spec.ts
+users.service.ts
+users.module.ts          (если не standalone)
+users.model.ts           или user.model.ts
+users.facade.ts
+create-user.component.ts ✅ kebab-case для составных
+
+Классы:
+UsersComponent          ✅ PascalCase + тип
+UsersService
+UsersModule
+UsersFacade
+FeatureAuthModule
+CreateUserDTO
+
+Переменные:
+users$                  ✅ $ для Observable
+isLoading               ✅ is/has для boolean
+currentUser             ✅ camelCase
+MAX_RETRIES = 3         ✅ UPPER_SNAKE для констант
+```
+
+---
+
+### Feature Modules: правильная структура
+
+```
+src/
+├── app/
+│   ├── core/                    ← singleton сервисы, guards, interceptors
+│   │   ├── auth/
+│   │   │   ├── auth.service.ts
+│   │   │   ├── auth.guard.ts
+│   │   │   └── auth.interceptor.ts
+│   │   └── core.module.ts       ← импортируется ОДИН раз в AppModule
+│   │
+│   ├── shared/                  ← переиспользуемые компоненты/pipes/directives
+│   │   ├── components/
+│   │   │   ├── button/
+│   │   │   └── modal/
+│   │   ├── pipes/
+│   │   ├── directives/
+│   │   └── index.ts             ← barrel export!
+│   │
+│   ├── features/                ← lazy-loaded feature модули
+│   │   ├── users/
+│   │   │   ├── components/
+│   │   │   ├── pages/
+│   │   │   ├── services/
+│   │   │   ├── store/
+│   │   │   ├── users.routes.ts
+│   │   │   └── index.ts
+│   │   └── products/
+│   │
+│   └── app.component.ts
+```
+
+---
+
+### Barrel exports: index.ts
+
+```typescript
+// shared/index.ts — единая точка импорта
+export { ButtonComponent } from './components/button/button.component';
+export { InputComponent } from './components/input/input.component';
+export { ModalComponent } from './components/modal/modal.component';
+export { LoadingSpinnerComponent } from './components/loading-spinner/loading-spinner.component';
+export { TruncatePipe } from './pipes/truncate.pipe';
+export { ClickOutsideDirective } from './directives/click-outside.directive';
+
+// Использование:
+// import { ButtonComponent, ModalComponent } from '@/shared';
+// Вместо:
+// import { ButtonComponent } from '../../../shared/components/button/button.component';
+// import { ModalComponent } from '../../../shared/components/modal/modal.component';
+```
+
+---
+
+### SOLID принципы в Angular
+
+```typescript
+// S — Single Responsibility
+// ✅ Сервис делает одно дело
+@Injectable({ providedIn: 'root' })
+export class UserApiService {
+  getUsers() { return this.http.get<User[]>('/api/users'); }
+  // ТОЛЬКО HTTP. Не смешивай с форматированием, кэшем, логикой.
+}
+
+// O — Open/Closed
+// ✅ Расширяй без изменения через абстракции
+abstract class Validator {
+  abstract validate(value: unknown): ValidationErrors | null;
+}
+
+// L — Liskov Substitution
+// ✅ Подкласс не нарушает контракт базового класса
+
+// I — Interface Segregation
+// ✅ Небольшие интерфейсы
+interface Readable { read(): Observable<unknown>; }
+interface Writable { write(data: unknown): Observable<void>; }
+// Не делай один огромный interface Repository
+
+// D — Dependency Inversion
+// ✅ Зависи от абстракций, не от конкретных классов
+abstract class NotificationService {
+  abstract notify(message: string): void;
+}
+
+@Injectable()
+class EmailNotificationService extends NotificationService {
+  notify(message: string): void { /* email */ }
+}
+
+@Component({
+  providers: [
+    { provide: NotificationService, useClass: EmailNotificationService }
+  ]
+})
+export class OrderComponent {
+  constructor(private notifications: NotificationService) {} // ← абстракция!
+}
+```
+
+---
+
+### Performance Checklist
+
+```typescript
+// ✅ Change Detection
+// - OnPush ВЕЗДЕ
+// - async pipe вместо ручного subscribe
+// - trackBy во всех *ngFor / @for
+// - Иммутабельные данные
+
+// ✅ Bundle size
+// - Lazy loading feature modules
+// - @defer для off-screen компонентов
+// - NgOptimizedImage для изображений
+// - Удали неиспользуемые зависимости
+
+// ✅ Memory leaks
+// - takeUntilDestroyed() или takeUntil(destroy$)
+// - ngOnDestroy для отписки
+// - Проверь: componentRef.destroy()
+
+// ✅ Типичные анти-паттерны
+// ❌ subscribe() без unsubscribe
+// ❌ Методы в шаблонах (вместо pure pipes)
+// ❌ ChangeDetectionStrategy.Default
+// ❌ * import { everything } from 'lodash'
+// ❌ Огромные компоненты (>300 строк — признак проблемы)
+```
+
+---
+
+### Безопасность: XSS, Sanitization, CSP
+
+```typescript
+// Angular автоматически экранирует привязку данных
+// Но есть опасные паттерны:
+
+// ❌ innerHTML без sanitization
+@Component({
+  template: `<div [innerHTML]="userInput"></div>` // Опасно если userInput не очищен!
+})
+
+// ✅ Используй DomSanitizer
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
+
+@Component({
+  template: `<div [innerHTML]="safeContent"></div>`
+})
+export class ContentComponent {
+  safeContent: SafeHtml;
+
+  constructor(private sanitizer: DomSanitizer) {
+    const trustedContent = '<b>Безопасный HTML</b>';
+    // Используй только для ДОВЕРЕННОГО контента (из своего CMS)
+    this.safeContent = this.sanitizer.bypassSecurityTrustHtml(trustedContent);
+  }
+}
+
+// ✅ CSP заголовки (nginx.conf)
+// add_header Content-Security-Policy "default-src 'self'; script-src 'self';";
+
+// ✅ HTTP Only cookies для JWT (не localStorage!)
+// localStorage → виден JS → уязвим к XSS
+// HTTP Only cookie → недоступен JS → безопаснее
+
+// ✅ CSRF защита
+// HttpClient автоматически отправляет XSRF-TOKEN заголовок
+// if (cookie contains XSRF-TOKEN)
+```
+
+---
+
+### Типизация: строгий TypeScript
+
+```typescript
+// tsconfig.json — максимальная строгость
+{
+  "compilerOptions": {
+    "strict": true,           // включает все strict флаги
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noImplicitReturns": true,
+  }
+}
+
+// ✅ Не используй any
+function process(data: unknown): string {
+  if (typeof data === 'string') return data;
+  if (typeof data === 'number') return data.toString();
+  return JSON.stringify(data);
+}
+
+// ✅ Type guards
+function isUser(obj: unknown): obj is User {
+  return typeof obj === 'object' && obj !== null && 'id' in obj;
+}
+
+// ✅ Const assertions
+const ROLES = ['admin', 'user', 'moderator'] as const;
+type Role = typeof ROLES[number]; // 'admin' | 'user' | 'moderator'
+```
+
+---
+
+### Финальный чеклист проекта ✅
+
+```
+Архитектура:
+☑ Feature modules с lazy loading
+☑ Core/Shared/Features структура
+☑ Facade pattern для стейта
+☑ Smart/Dumb компоненты
+☑ Barrel exports (index.ts)
+
+Производительность:
+☑ OnPush везде
+☑ trackBy в ngFor
+☑ async pipe
+☑ @defer для heavy компонентов
+☑ NgOptimizedImage
+
+Безопасность:
+☑ Нет localStorage для JWT
+☑ DomSanitizer для HTML контента
+☑ CSP заголовки
+☑ HTTP interceptor для auth
+
+Качество кода:
+☑ strict TypeScript
+☑ ESLint + Prettier
+☑ Unit тесты (80%+ coverage)
+☑ E2E тесты для критических путей
+
+DevOps:
+☑ Budgets в angular.json
+☑ CI/CD pipeline
+☑ Production builds с source maps (hidden)
+☑ nx affected для монорепо
+```
+
+---
+
+## Playground 🎮
+
+Визуализатор кода: антипаттерны vs лучшие практики:
+
+<Playground client:visible
+  template="react"
+  files={{
+    "/App.tsx": `import { useState } from 'react';
+
+const ANGULAR_RED = '#dd0031';
+
+const PATTERNS = [
+  {
+    id: 'change-detection',
+    category: 'Change Detection',
+    bad: {
+      title: 'Default CD везде',
+      code: \`@Component({
+  // Нет changeDetection →
+  // Default по умолчанию
+  template: \\\`
+    <div *ngFor="let item of items">
+      {{ formatItem(item) }} <!-- метод! -->
+    </div>
+  \\\`
+})
+export class BadComponent {
+  items = this.loadItems();
+  formatItem(i: Item) { // вызов при КАЖДОМ CD
+    return i.name.toUpperCase();
+  }
+}\`,
+      issues: ['Все компоненты проверяются при любом событии', 'Метод в шаблоне = вызов при каждом CD'],
+    },
+    good: {
+      title: 'OnPush + Pure Pipe',
+      code: \`@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: \\\`
+    @for (item of items; track item.id) {
+      {{ item | formatItem }} <!-- pipe! -->
+    }
+  \\\`
+})
+export class GoodComponent {
+  @Input() items: Item[] = [];
+}
+
+@Pipe({ name: 'formatItem', pure: true })
+export class FormatItemPipe {
+  transform(i: Item) { // вызов только при изменении
+    return i.name.toUpperCase();
+  }
+}\`,
+      benefits: ['Проверяется только при изменении @Input', 'Pure pipe кэшируется Angular'],
+    },
+  },
+  {
+    id: 'memory-leaks',
+    category: 'Memory Leaks',
+    bad: {
+      title: 'Subscribe без отписки',
+      code: \`@Component({...})
+export class BadComponent implements OnInit {
+  ngOnInit() {
+    // ❌ Утечка памяти!
+    this.userService.getUsers().subscribe(
+      users => this.users = users
+    );
+    
+    // ❌ Ещё хуже — interval навсегда
+    interval(1000).subscribe(
+      () => this.tick()
+    );
+  }
+  // Нет OnDestroy!
+}\`,
+      issues: ['Observable живёт после destroy компонента', 'interval() продолжает работать', 'Накапливаются при создании/удалении'],
+    },
+    good: {
+      title: 'takeUntilDestroyed / async pipe',
+      code: \`@Component({
+  template: \\\`
+    <!-- async pipe сам отписывается -->
+    @for (user of users$ | async; track user.id) {
+      {{ user.name }}
+    }
+  \\\`
+})
+export class GoodComponent {
+  private destroyRef = inject(DestroyRef);
+  
+  users$ = this.userService.getUsers();
+  
+  ngOnInit() {
+    interval(1000).pipe(
+      takeUntilDestroyed(this.destroyRef) // ← автоотписка
+    ).subscribe(() => this.tick());
+  }
+}\`,
+      benefits: ['async pipe автоматически отписывается', 'takeUntilDestroyed — современный способ', 'Нет утечек памяти'],
+    },
+  },
+  {
+    id: 'structure',
+    category: 'Архитектура',
+    bad: {
+      title: 'God Component',
+      code: \`// ❌ Один компонент = 500+ строк
+@Component({...})
+export class OrdersComponent {
+  // HTTP запросы прямо в компоненте
+  orders$ = this.http.get('/api/orders');
+  
+  // Бизнес-логика в компоненте
+  calculateTotal(items: Item[]) {
+    return items.reduce((s, i) => s + i.price * i.qty, 0);
+  }
+  
+  // Форматирование в компоненте  
+  formatDate(d: Date) { return format(d, 'dd.MM.yyyy'); }
+  
+  // NgRx напрямую
+  constructor(
+    private http: HttpClient,
+    private store: Store,
+    private router: Router,
+    private fb: FormBuilder,
+    private snackbar: MatSnackBar,
+  ) {}
+}\`,
+      issues: ['Трудно тестировать', 'Нарушение SRP', 'Нет переиспользования'],
+    },
+    good: {
+      title: 'Smart/Dumb + Facade',
+      code: \`// ✅ Smart: только оркестрация
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: \\\`
+    <app-orders-list
+      [orders]="facade.orders()"
+      [loading]="facade.loading()"
+      (cancel)="facade.cancelOrder($event)">
+    </app-orders-list>
+  \\\`
+})
+export class OrdersPageComponent {
+  facade = inject(OrdersFacade); // ← всё через Facade
+}
+
+// ✅ Dumb: только отображение
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class OrdersListComponent {
+  @Input() orders: Order[] = [];
+  @Input() loading = false;
+  @Output() cancel = new EventEmitter<string>();
+}\`,
+      benefits: ['Легко тестировать', 'OnPush везде', 'Разделение ответственности'],
+    },
+  },
+];
+
+function CodeView({ code, type }) {
+  const borderColor = type === 'bad' ? '#7f1d1d' : '#14532d';
+  const textColor = type === 'bad' ? '#fca5a5' : '#86efac';
+  return (
+    <div style={{
+      background: '#0f172a', borderRadius: '8px', padding: '12px',
+      border: \`1px solid \${borderColor}\`, height: '180px', overflowY: 'auto',
+    }}>
+      <pre style={{ margin: 0, fontSize: '10.5px', color: textColor, fontFamily: 'monospace', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+        {code}
+      </pre>
+    </div>
+  );
+}
+
+export default function App() {
+  const [selected, setSelected] = useState('change-detection');
+  const pattern = PATTERNS.find(p => p.id === selected);
+
+  const totalScore = PATTERNS.length;
+  const [checked, setChecked] = useState(new Set());
+  const toggle = (id) => setChecked(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  return (
+    <div style={{
+      background: '#0f172a', minHeight: '100vh', padding: '24px',
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: 'white',
+    }}>
+      <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+        <div style={{
+          background: ANGULAR_RED, borderRadius: '12px', padding: '16px 20px',
+          marginBottom: '20px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: '20px', fontWeight: 'bold' }}>🏆 Best Practices Visualizer</div>
+          <div style={{ fontSize: '13px', opacity: 0.9 }}>Антипаттерны vs Лучшие практики</div>
+        </div>
+
+        {/* Category selector */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', flexWrap: 'wrap' }}>
+          {PATTERNS.map(p => (
+            <button key={p.id} onClick={() => setSelected(p.id)} style={{
+              padding: '8px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+              background: selected === p.id ? ANGULAR_RED : '#1e293b',
+              color: 'white', fontWeight: selected === p.id ? 'bold' : 'normal', fontSize: '13px',
+            }}>{p.category}</button>
+          ))}
+        </div>
+
+        {/* Pattern comparison */}
+        {pattern && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+              <div style={{ color: '#f87171', fontWeight: 'bold', fontSize: '13px', marginBottom: '10px' }}>
+                ❌ {pattern.bad.title}
+              </div>
+              <CodeView code={pattern.bad.code} type="bad" />
+              <div style={{ marginTop: '12px' }}>
+                {pattern.bad.issues.map((issue, i) => (
+                  <div key={i} style={{ color: '#f87171', fontSize: '12px', marginBottom: '6px' }}>⚠️ {issue}</div>
+                ))}
+              </div>
+            </div>
+            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+              <div style={{ color: '#4ade80', fontWeight: 'bold', fontSize: '13px', marginBottom: '10px' }}>
+                ✅ {pattern.good.title}
+              </div>
+              <CodeView code={pattern.good.code} type="good" />
+              <div style={{ marginTop: '12px' }}>
+                {pattern.good.benefits.map((benefit, i) => (
+                  <div key={i} style={{ color: '#4ade80', fontSize: '12px', marginBottom: '6px' }}>✅ {benefit}</div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Checklist */}
+        <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px' }}>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            marginBottom: '12px',
+          }}>
+            <div style={{ color: '#94a3b8', fontWeight: 'bold', fontSize: '13px' }}>
+              ЧЕКЛИСТ PRODUCTION-READY
+            </div>
+            <div style={{ color: checked.size === 9 ? '#4ade80' : ANGULAR_RED, fontWeight: 'bold' }}>
+              {checked.size}/9
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+            {[
+              'OnPush везде', 'trackBy в ngFor', 'async pipe',
+              'Lazy loading', 'Facade pattern', 'Smart/Dumb',
+              'Barrel exports', 'Strict TypeScript', 'Memory leak free',
+            ].map((item, i) => (
+              <div key={i} onClick={() => toggle(item)} style={{
+                padding: '8px 10px', borderRadius: '8px', cursor: 'pointer',
+                background: checked.has(item) ? '#14532d20' : '#0f172a',
+                border: \`1px solid \${checked.has(item) ? '#4ade80' : '#334155'}\`,
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}>
+                <div style={{
+                  width: '14px', height: '14px', borderRadius: '3px', flexShrink: 0,
+                  background: checked.has(item) ? '#4ade80' : '#334155',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '10px',
+                }}>{checked.has(item) ? '✓' : ''}</div>
+                <span style={{ color: checked.has(item) ? '#4ade80' : '#64748b', fontSize: '11px' }}>{item}</span>
+              </div>
+            ))}
+          </div>
+          {checked.size === 9 && (
+            <div style={{ marginTop: '12px', textAlign: 'center', color: '#4ade80', fontWeight: 'bold' }}>
+              🎉 Поздравляем! Твой Angular проект — production-ready!
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+`
+  }}
+/>

@@ -1,0 +1,263 @@
+---
+title: "17. TypeScript в Remix"
+sidebar:
+  order: 17
+---
+import { Playground } from '@components/Playground'
+
+
+Remix создан с первоклассной поддержкой TypeScript. Типизация loader и action данных происходит автоматически через `typeof loader`.
+
+## Базовая типизация
+
+```typescript
+// Типы автоматически выводятся из loader
+export async function loader({ params }: LoaderFunctionArgs) {
+  const post = await db.post.findUnique({
+    where: { id: params.id }
+  });
+
+  if (!post) throw new Response("Not Found", { status: 404 });
+
+  return { post };  // Нет json() — в Remix v2 возвращаем напрямую
+}
+
+export default function Post() {
+  // post: { id: string, title: string, content: string, ... }
+  const { post } = useLoaderData<typeof loader>();
+  return <h1>{post.title}</h1>;
+}
+```
+
+## LoaderFunctionArgs и ActionFunctionArgs
+
+```typescript
+import type {
+  LoaderFunctionArgs,
+  ActionFunctionArgs,
+  MetaFunction,
+  LinksFunction,
+} from "@remix-run/node";
+
+export async function loader({ request, params, context }: LoaderFunctionArgs) {
+  // request: Request
+  // params: Record<string, string | undefined>
+  // context: AppLoadContext
+}
+
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await request.formData();
+  const email = formData.get("email");  // → string | File | null
+  // Кастуем после валидации:
+  const validEmail = email as string;
+}
+```
+
+## Типизация useActionData
+
+```typescript
+type ActionData = {
+  errors?: {
+    email?: string;
+    password?: string;
+  };
+  user?: {
+    id: string;
+    email: string;
+  };
+};
+
+export async function action({ request }: ActionFunctionArgs) {
+  // ...
+  return json<ActionData>({ user: { id: "1", email: "a@b.com" } });
+}
+
+export default function LoginForm() {
+  const actionData = useActionData<ActionData>();
+  // actionData: ActionData | undefined
+  actionData?.errors?.email;  // string | undefined
+}
+```
+
+## useRouteLoaderData — данные родительских маршрутов
+
+```typescript
+import type { loader as rootLoader } from "~/root";
+import { useRouteLoaderData } from "@remix-run/react";
+
+export default function Child() {
+  const rootData = useRouteLoaderData<typeof rootLoader>("root");
+  // rootData полностью типизирован!
+  return <p>{rootData?.user.name}</p>;
+}
+```
+
+## Zod для валидации форм
+
+```typescript
+import { z } from "zod";
+
+const RegisterSchema = z.object({
+  email: z.string().email("Неверный email"),
+  password: z.string().min(8, "Минимум 8 символов"),
+  name: z.string().min(2, "Минимум 2 символа"),
+});
+
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await request.formData();
+  const raw = Object.fromEntries(formData);
+
+  const result = RegisterSchema.safeParse(raw);
+
+  if (!result.success) {
+    return json({
+      errors: result.error.flatten().fieldErrors,
+    }, { status: 400 });
+  }
+
+  // result.data полностью типизирован и валиден
+  const { email, password, name } = result.data;
+  await createUser({ email, password, name });
+  return redirect("/dashboard");
+}
+```
+
+## Типизация параметров маршрута
+
+```typescript
+// Кастомный хук для типизированных параметров
+function useTypedParams<T extends Record<string, string>>() {
+  const params = useParams();
+  return params as T;
+}
+
+// Использование
+const { id, slug } = useTypedParams<{ id: string; slug: string }>();
+```
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from "react";
+
+const BG = "#0f172a";
+const CARD = "#1e293b";
+const ACCENT = "#3992ff";
+const TEXT = "#e2e8f0";
+const MUTED = "#64748b";
+const REMIX = "#e8f2ff";
+const SUCCESS = "#10b981";
+const ERROR = "#ef4444";
+const WARN = "#f59e0b";
+
+type TypeExample = {
+  title: string;
+  code: string;
+  types: { name: string; type: string; color: string }[];
+};
+
+const examples: TypeExample[] = [
+  {
+    title: "loader данные",
+    code: \`async function loader() {
+  const user = await getUser();
+  return { user, posts: await getPosts() };
+}
+const { user, posts } = useLoaderData<typeof loader>();\`,
+    types: [
+      { name: "user", type: "{ id: string; name: string; email: string }", color: SUCCESS },
+      { name: "posts", type: "Post[]", color: ACCENT },
+      { name: "posts[0].title", type: "string", color: ACCENT },
+    ],
+  },
+  {
+    title: "LoaderFunctionArgs",
+    code: \`async function loader({
+  request,
+  params,
+  context
+}: LoaderFunctionArgs) {
+  // ...
+}\`,
+    types: [
+      { name: "request", type: "Request (Web API)", color: SUCCESS },
+      { name: "params", type: "Record<string, string | undefined>", color: ACCENT },
+      { name: "context", type: "AppLoadContext", color: WARN },
+    ],
+  },
+  {
+    title: "useActionData",
+    code: \`type ActionData = {
+  errors?: { email?: string };
+  success?: boolean;
+};
+const data = useActionData<ActionData>();\`,
+    types: [
+      { name: "data", type: "ActionData | undefined", color: WARN },
+      { name: "data?.errors", type: "{ email?: string } | undefined", color: ACCENT },
+      { name: "data?.success", type: "boolean | undefined", color: SUCCESS },
+    ],
+  },
+  {
+    title: "FormData типы",
+    code: \`const formData = await request.formData();
+const email = formData.get("email");
+// email: string | File | null
+const validEmail = email as string;\`,
+    types: [
+      { name: "formData.get()", type: "FormDataEntryValue | null", color: WARN },
+      { name: "FormDataEntryValue", type: "string | File", color: ACCENT },
+      { name: "email as string", type: "string (кастинг)", color: ERROR },
+    ],
+  },
+];
+
+export default function App() {
+  const [selected, setSelected] = useState(0);
+  const ex = examples[selected];
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "24px", fontFamily: "system-ui, sans-serif", color: TEXT }}>
+      <h1 style={{ color: REMIX, fontSize: "22px", marginBottom: "4px" }}>📘 TypeScript в Remix</h1>
+      <p style={{ color: MUTED, fontSize: "13px", marginBottom: "24px" }}>Типы основных API</p>
+
+      <div style={{ display: "flex", gap: "8px", marginBottom: "20px", flexWrap: "wrap" }}>
+        {examples.map((e, i) => (
+          <button key={i} onClick={() => setSelected(i)} style={{
+            padding: "8px 14px",
+            borderRadius: "8px",
+            border: \`2px solid \${selected === i ? ACCENT : "#334155"}\`,
+            background: selected === i ? ACCENT + "22" : CARD,
+            color: selected === i ? ACCENT : MUTED,
+            cursor: "pointer", fontSize: "12px",
+          }}>
+            {e.title}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", maxWidth: "900px" }}>
+        <div style={{ background: CARD, borderRadius: "12px", overflow: "hidden" }}>
+          <div style={{ padding: "10px 16px", background: "#1a2744", fontFamily: "monospace", fontSize: "11px", color: MUTED }}>
+            TypeScript
+          </div>
+          <pre style={{ margin: 0, padding: "16px", fontFamily: "monospace", fontSize: "12px", color: TEXT, lineHeight: 1.7, overflow: "auto" }}>
+            {ex.code}
+          </pre>
+        </div>
+
+        <div style={{ background: CARD, borderRadius: "12px", padding: "20px" }}>
+          <h3 style={{ color: ACCENT, margin: "0 0 16px", fontSize: "14px" }}>Инференс типов</h3>
+          {ex.types.map((t, i) => (
+            <div key={i} style={{ background: BG, borderRadius: "8px", padding: "10px 14px", marginBottom: "10px", borderLeft: \`3px solid \${t.color}\` }}>
+              <div style={{ fontFamily: "monospace", fontSize: "13px", color: t.color, marginBottom: "4px" }}>
+                {t.name}
+              </div>
+              <div style={{ fontFamily: "monospace", fontSize: "11px", color: MUTED }}>
+                : {t.type}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

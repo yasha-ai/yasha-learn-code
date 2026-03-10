@@ -1,0 +1,588 @@
+---
+title: "47. E2E тесты: Cypress/Playwright"
+sidebar:
+  order: 49
+---
+import { Playground } from '@components/Playground'
+
+
+## 🎭 E2E тестирование: Cypress и Playwright
+
+Unit-тесты проверяют функции, компонентные тесты — UI. A E2E тесты проверяют всё вместе: как реальный пользователь в реальном браузере. Это самый дорогой, но и самый ценный уровень тестирования 🏆
+
+---
+
+## Cypress vs Playwright для Angular
+
+| | Cypress | Playwright |
+|--|---------|-----------|
+| Скорость | Медленнее | Быстрее |
+| Отладка | Лучше (GUI) | Хорошо (Trace) |
+| Браузеры | Chrome/Firefox/Edge | Все + WebKit (Safari) |
+| Мобильные устройства | Нет | Да |
+| Auto-wait | Да | Да |
+| API тестирование | Ограниченно | Да |
+| Популярность в Angular | Высокая | Растёт |
+| Документация | Отличная | Отличная |
+
+---
+
+## Cypress — установка и конфигурация
+
+```bash
+ng add @cypress/schematic
+npm install --save-dev cypress
+npx cypress open
+```
+
+```typescript
+// cypress.config.ts
+import { defineConfig } from 'cypress';
+
+export default defineConfig({
+  e2e: {
+    baseUrl: 'http://localhost:4200',
+    specPattern: 'cypress/e2e/**/*.cy.ts',
+    supportFile: 'cypress/support/e2e.ts',
+    video: false,
+    screenshotOnRunFailure: true,
+    viewportWidth: 1280,
+    viewportHeight: 720,
+    defaultCommandTimeout: 10000,
+    retries: {
+      runMode: 2,     // В CI: 2 попытки
+      openMode: 0,    // В GUI: без повторов
+    },
+  },
+  component: {
+    devServer: {
+      framework: 'angular',
+      bundler: 'webpack',
+    },
+  },
+});
+```
+
+---
+
+## Page Object Pattern
+
+Page Object — это класс, инкапсулирующий взаимодействие со страницей. Если меняется UI — правишь только Page Object, а не все тесты:
+
+```typescript
+// cypress/pages/login.page.ts
+export class LoginPage {
+  visit() {
+    cy.visit('/login');
+  }
+
+  // Используем data-testid — не зависит от классов и текста
+  fillEmail(email: string) {
+    cy.getByTestId('email-input').clear().type(email);
+    return this; // Fluent API
+  }
+
+  fillPassword(password: string) {
+    cy.getByTestId('password-input').clear().type(password);
+    return this;
+  }
+
+  submit() {
+    cy.getByTestId('submit-btn').click();
+    return this;
+  }
+
+  expectError(message: string) {
+    cy.getByTestId('error-message').should('contain', message);
+    return this;
+  }
+
+  expectRedirectTo(url: string) {
+    cy.url().should('include', url);
+    return this;
+  }
+}
+
+// cypress/pages/users.page.ts
+export class UsersPage {
+  visit() {
+    cy.visit('/users');
+  }
+
+  searchFor(query: string) {
+    cy.getByTestId('search-input').type(query);
+    return this;
+  }
+
+  getUserRows() {
+    return cy.getByTestId('user-row');
+  }
+
+  clickDeleteUser(name: string) {
+    cy.contains('[data-testid="user-row"]', name)
+      .find('[data-testid="delete-btn"]')
+      .click();
+    return this;
+  }
+
+  confirmDelete() {
+    cy.getByTestId('confirm-dialog').within(() => {
+      cy.getByTestId('confirm-btn').click();
+    });
+    return this;
+  }
+}
+```
+
+---
+
+## data-testid конвенция
+
+Важнейшее правило: **никогда не выбирай элементы по CSS-классам или тексту** в тестах. Используй `data-testid`:
+
+```html
+<!-- ✅ Правильно — стабильные селекторы -->
+<button data-testid="submit-btn" type="submit">Войти</button>
+<input data-testid="email-input" type="email" />
+<div data-testid="error-message" *ngIf="error">{{ error }}</div>
+<tr data-testid="user-row" *ngFor="let user of users">...</tr>
+
+<!-- ❌ Неправильно — хрупкие селекторы -->
+<button class="btn btn-primary">Войти</button>
+<!-- cy.get('.btn.btn-primary') — ломается при рефакторинге -->
+```
+
+Добавь кастомную команду для удобства:
+
+```typescript
+// cypress/support/commands.ts
+Cypress.Commands.add('getByTestId', (testId: string) => {
+  return cy.get(`[data-testid="${testId}"]`);
+});
+
+// Типизация для TypeScript
+declare global {
+  namespace Cypress {
+    interface Chainable {
+      getByTestId(testId: string): Chainable<JQuery<HTMLElement>>;
+    }
+  }
+}
+```
+
+---
+
+## Полный пример Cypress теста
+
+```typescript
+// cypress/e2e/users/users-crud.cy.ts
+import { LoginPage } from '../pages/login.page';
+import { UsersPage } from '../pages/users.page';
+
+describe('Users CRUD', () => {
+  const login = new LoginPage();
+  const users = new UsersPage();
+
+  beforeEach(() => {
+    // Логинимся через API (быстрее чем через UI каждый раз)
+    cy.request('POST', '/api/auth/login', {
+      email: 'admin@test.com',
+      password: 'password'
+    }).then(response => {
+      localStorage.setItem('access_token', response.body.token);
+    });
+
+    users.visit();
+  });
+
+  it('should display users list', () => {
+    users.getUserRows().should('have.length.greaterThan', 0);
+  });
+
+  it('should filter users by search query', () => {
+    cy.intercept('GET', '/api/users?q=Яша').as('searchRequest');
+
+    users.searchFor('Яша');
+
+    cy.wait('@searchRequest');
+    users.getUserRows().should('have.length', 1);
+    cy.getByTestId('user-row').should('contain', 'Яша');
+  });
+
+  it('should delete user with confirmation', () => {
+    users.getUserRows().its('length').then(initialCount => {
+      users
+        .clickDeleteUser('Боб')
+        .confirmDelete();
+
+      users.getUserRows().should('have.length', initialCount - 1);
+      cy.getByTestId('notification').should('contain', 'Пользователь удалён');
+    });
+  });
+});
+```
+
+---
+
+## Перехват HTTP запросов (cy.intercept)
+
+```typescript
+it('should show loading state', () => {
+  // Задерживаем ответ для проверки лоадера
+  cy.intercept('GET', '/api/users', req => {
+    req.reply(res => {
+      res.setDelay(1000);
+    });
+  }).as('loadUsers');
+
+  cy.visit('/users');
+
+  // Лоадер должен быть виден пока идёт запрос
+  cy.getByTestId('loading-spinner').should('be.visible');
+
+  cy.wait('@loadUsers');
+
+  cy.getByTestId('loading-spinner').should('not.exist');
+});
+
+it('should handle API error gracefully', () => {
+  cy.intercept('GET', '/api/users', {
+    statusCode: 500,
+    body: { message: 'Internal Server Error' }
+  }).as('failedRequest');
+
+  cy.visit('/users');
+  cy.wait('@failedRequest');
+
+  cy.getByTestId('error-message').should('be.visible');
+  cy.getByTestId('retry-button').should('be.visible');
+});
+```
+
+---
+
+## Playwright — установка
+
+```bash
+npm init playwright@latest
+# или для Angular:
+npm install --save-dev @playwright/test
+npx playwright install
+```
+
+```typescript
+// playwright.config.ts
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './e2e',
+  timeout: 30_000,
+  retries: process.env.CI ? 2 : 0,
+  use: {
+    baseURL: 'http://localhost:4200',
+    trace: 'on-first-retry',      // Записывает трейс при ошибке
+    screenshot: 'only-on-failure',
+    video: 'off',
+  },
+  projects: [
+    { name: 'chromium', use: devices['Desktop Chrome'] },
+    { name: 'firefox', use: devices['Desktop Firefox'] },
+    { name: 'mobile', use: devices['Pixel 5'] },
+  ],
+  webServer: {
+    command: 'ng serve',
+    url: 'http://localhost:4200',
+    reuseExistingServer: !process.env.CI,
+  },
+});
+```
+
+---
+
+## Playwright тест
+
+```typescript
+// e2e/users.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Users Page', () => {
+  test.beforeEach(async ({ page }) => {
+    // Устанавливаем токен напрямую
+    await page.context().addCookies([{
+      name: 'access_token',
+      value: 'test-token',
+      domain: 'localhost',
+      path: '/',
+    }]);
+
+    await page.goto('/users');
+  });
+
+  test('should search users', async ({ page }) => {
+    const searchInput = page.getByTestId('search-input');
+    await searchInput.fill('Яша');
+
+    await expect(page.getByTestId('user-row')).toHaveCount(1);
+    await expect(page.getByTestId('user-row').first()).toContainText('Яша');
+  });
+
+  test('should show visual regression snapshot', async ({ page }) => {
+    await expect(page).toHaveScreenshot('users-page.png', {
+      maxDiffPixels: 100,
+    });
+  });
+});
+```
+
+---
+
+## CI интеграция (GitHub Actions)
+
+```yaml
+# .github/workflows/e2e.yml
+name: E2E Tests
+
+on: [push, pull_request]
+
+jobs:
+  cypress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with: { node-version: '20' }
+
+      - run: npm ci
+
+      - name: Build Angular app
+        run: npm run build
+
+      - name: Run Cypress E2E
+        uses: cypress-io/github-action@v6
+        with:
+          start: npx serve -s dist
+          wait-on: 'http://localhost:3000'
+          browser: chrome
+          record: true
+        env:
+          CYPRESS_RECORD_KEY: ${{ secrets.CYPRESS_RECORD_KEY }}
+```
+
+---
+
+### Практика
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useState } from 'react';
+
+const BG = '#0f172a';
+const RED = '#dd0031';
+const CARD = '#1e293b';
+const BORDER = '#334155';
+const SUCCESS = '#22c55e';
+const WARN = '#f59e0b';
+const BLUE = '#3b82f6';
+
+type Step = { id: string; label: string; type: 'navigate'|'input'|'click'|'assert'|'intercept'|'wait'; status: 'idle'|'running'|'pass'|'fail'; selector?: string; value?: string; };
+
+const testScenarios = [
+  {
+    name: '🔐 Login Flow',
+    steps: [
+      { id: 's1', label: 'cy.visit("/login")', type: 'navigate', status: 'idle', value: '/login' },
+      { id: 's2', label: 'cy.intercept("POST", "/api/auth/login")', type: 'intercept', status: 'idle', selector: '/api/auth/login' },
+      { id: 's3', label: 'cy.getByTestId("email-input").type("admin@test.com")', type: 'input', status: 'idle', selector: 'email-input', value: 'admin@test.com' },
+      { id: 's4', label: 'cy.getByTestId("password-input").type("••••••")', type: 'input', status: 'idle', selector: 'password-input', value: '••••••' },
+      { id: 's5', label: 'cy.getByTestId("submit-btn").click()', type: 'click', status: 'idle', selector: 'submit-btn' },
+      { id: 's6', label: 'cy.wait("@login")', type: 'wait', status: 'idle' },
+      { id: 's7', label: 'cy.url().should("include", "/dashboard")', type: 'assert', status: 'idle', value: '/dashboard' },
+    ] as Step[],
+  },
+  {
+    name: '👥 Users CRUD',
+    steps: [
+      { id: 'u1', label: 'cy.visit("/users")', type: 'navigate', status: 'idle', value: '/users' },
+      { id: 'u2', label: 'cy.getByTestId("user-row").should("have.length.gt", 0)', type: 'assert', status: 'idle', selector: 'user-row' },
+      { id: 'u3', label: 'cy.getByTestId("search-input").type("Яша")', type: 'input', status: 'idle', selector: 'search-input', value: 'Яша' },
+      { id: 'u4', label: 'cy.getByTestId("user-row").should("have.length", 1)', type: 'assert', status: 'idle', value: '1' },
+      { id: 'u5', label: 'cy.contains("[data-testid=\'user-row\']", "Яша").find("[data-testid=\'delete-btn\']").click()', type: 'click', status: 'idle', selector: 'delete-btn' },
+      { id: 'u6', label: 'cy.getByTestId("confirm-btn").click()', type: 'click', status: 'idle', selector: 'confirm-btn' },
+      { id: 'u7', label: 'cy.getByTestId("notification").should("contain", "Удалён")', type: 'assert', status: 'idle', value: 'Удалён' },
+    ] as Step[],
+  },
+];
+
+const typeIcons: Record<string, string> = { navigate: '🌐', input: '⌨️', click: '🖱️', assert: '✔️', intercept: '📡', wait: '⏳' };
+const typeColors: Record<string, string> = { navigate: BLUE, input: '#8b5cf6', click: WARN, assert: SUCCESS, intercept: '#ec4899', wait: '#64748b' };
+
+export default function App() {
+  const [scenarios, setScenarios] = useState(testScenarios);
+  const [activeScenario, setActiveScenario] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [browserUrl, setBrowserUrl] = useState('http://localhost:4200');
+  const [formState, setFormState] = useState({ email: '', password: '', search: '' });
+  const [appView, setAppView] = useState<'login'|'dashboard'|'users'>('login');
+  const [log, setLog] = useState<string[]>([]);
+
+  const addLog = (msg: string) => setLog(p => [msg, ...p.slice(0, 9)]);
+
+  const runScenario = async (scenarioIdx: number) => {
+    setRunning(true);
+    setScenarios(prev => prev.map((s, i) => i !== scenarioIdx ? s : {
+      ...s,
+      steps: s.steps.map(st => ({ ...st, status: 'idle' as const }))
+    }));
+
+    const steps = testScenarios[scenarioIdx].steps;
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      setScenarios(prev => prev.map((s, si) => si !== scenarioIdx ? s : {
+        ...s,
+        steps: s.steps.map(st => st.id === step.id ? { ...st, status: 'running' } : st)
+      }));
+
+      await new Promise(r => setTimeout(r, 300 + Math.random() * 300));
+
+      // Simulate browser interactions
+      if (step.type === 'navigate') {
+        setBrowserUrl(\`http://localhost:4200\${step.value}\`);
+        addLog(\`Navigated to \${step.value}\`);
+        if (step.value === '/login') setAppView('login');
+        if (step.value === '/users') setAppView('users');
+        if (step.value === '/dashboard') setAppView('dashboard');
+      } else if (step.type === 'input' && step.selector === 'email-input') {
+        setFormState(s => ({ ...s, email: step.value || '' }));
+        addLog(\`Typed "\${step.value}" in [data-testid="\${step.selector}"]\`);
+      } else if (step.type === 'input' && step.selector === 'password-input') {
+        setFormState(s => ({ ...s, password: step.value || '' }));
+        addLog(\`Typed password in [data-testid="\${step.selector}"]\`);
+      } else if (step.type === 'input' && step.selector === 'search-input') {
+        setFormState(s => ({ ...s, search: step.value || '' }));
+        addLog(\`Typed "\${step.value}" in [data-testid="\${step.selector}"]\`);
+      } else if (step.type === 'click' && step.selector === 'submit-btn') {
+        setAppView('dashboard');
+        setBrowserUrl('http://localhost:4200/dashboard');
+        addLog('Clicked submit, logged in!');
+      } else if (step.type === 'intercept') {
+        addLog(\`Intercepting \${step.selector}\`);
+      } else {
+        addLog(step.label.substring(0, 60) + (step.label.length > 60 ? '...' : ''));
+      }
+
+      const pass = Math.random() > 0.05;
+      setScenarios(prev => prev.map((s, si) => si !== scenarioIdx ? s : {
+        ...s,
+        steps: s.steps.map(st => st.id === step.id ? { ...st, status: pass ? 'pass' : 'fail' } : st)
+      }));
+
+      if (!pass) { setRunning(false); return; }
+    }
+
+    setRunning(false);
+  };
+
+  const currentSteps = scenarios[activeScenario].steps;
+  const passed = currentSteps.filter(s => s.status === 'pass').length;
+  const failed = currentSteps.filter(s => s.status === 'fail').length;
+
+  const users = [
+    { name: 'Яша', role: 'admin' },
+    { name: 'Алиса', role: 'user' },
+    { name: 'Боб', role: 'guest' },
+  ].filter(u => !formState.search || u.name.toLowerCase().includes(formState.search.toLowerCase()));
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '1.5rem', fontFamily: 'monospace', color: '#e2e8f0' }}>
+      <h2 style={{ color: RED, fontSize: '1.2rem', marginBottom: '0.25rem' }}>🎭 E2E Test Flow Visualizer</h2>
+      <p style={{ color: '#64748b', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+        Cypress Page Objects + data-testid + cy.intercept()
+      </p>
+
+      {/* Scenario selector */}
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+        {scenarios.map((s, i) => (
+          <button key={i} onClick={() => setActiveScenario(i)} style={{ padding: '0.4rem 0.75rem', background: activeScenario === i ? RED : CARD, color: activeScenario === i ? '#fff' : '#64748b', border: \`1px solid \${activeScenario === i ? RED : BORDER}\`, borderRadius: '6px', cursor: 'pointer', fontSize: '0.78rem', fontWeight: activeScenario === i ? 700 : 400 }}>
+            {s.name}
+          </button>
+        ))}
+        <button onClick={() => runScenario(activeScenario)} disabled={running} style={{ marginLeft: 'auto', padding: '0.4rem 1rem', background: running ? '#334155' : RED, color: running ? '#475569' : '#fff', border: 'none', borderRadius: '6px', cursor: running ? 'not-allowed' : 'pointer', fontSize: '0.78rem', fontWeight: 700 }}>
+          {running ? '⏳' : '▶ Run'}
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        {/* Test steps */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+            <span style={{ color: '#64748b', fontSize: '0.72rem', textTransform: 'uppercase' }}>Test Steps</span>
+            <span style={{ fontSize: '0.72rem', color: '#475569' }}>{passed}/{currentSteps.length} ✓</span>
+          </div>
+          {currentSteps.map(step => (
+            <div key={step.id} style={{ padding: '0.35rem 0.5rem', marginBottom: '0.25rem', background: BG, border: \`1px solid \${step.status === 'pass' ? SUCCESS : step.status === 'fail' ? RED : step.status === 'running' ? WARN : BORDER}\`, borderRadius: '4px', transition: 'border-color 0.2s', fontSize: '0.72rem' }}>
+              <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                <span style={{ color: typeColors[step.type] }}>{typeIcons[step.type]}</span>
+                <span style={{ flex: 1, color: step.status === 'running' ? WARN : step.status === 'pass' ? SUCCESS : step.status === 'fail' ? RED : '#64748b' }}>
+                  {step.label.length > 55 ? step.label.slice(0, 55) + '...' : step.label}
+                </span>
+                <span style={{ color: step.status === 'pass' ? SUCCESS : step.status === 'fail' ? RED : step.status === 'running' ? WARN : '#334155' }}>
+                  {step.status === 'running' ? '⏳' : step.status === 'pass' ? '✓' : step.status === 'fail' ? '✗' : '○'}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Browser preview */}
+        <div style={{ background: CARD, border: \`1px solid \${BORDER}\`, borderRadius: '8px', overflow: 'hidden' }}>
+          <div style={{ padding: '0.5rem 0.75rem', background: '#1a2538', borderBottom: \`1px solid \${BORDER}\`, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <div style={{ display: 'flex', gap: '0.3rem' }}>
+              {['#ff5f57','#febc2e','#28c840'].map(c => <div key={c} style={{ width: '8px', height: '8px', borderRadius: '50%', background: c }} />)}
+            </div>
+            <div style={{ flex: 1, background: BG, borderRadius: '3px', padding: '0.2rem 0.5rem', fontSize: '0.68rem', color: '#64748b' }}>
+              {browserUrl}
+            </div>
+          </div>
+          <div style={{ padding: '1rem', minHeight: '220px' }}>
+            {appView === 'login' && (
+              <div style={{ maxWidth: '240px', margin: '0 auto' }}>
+                <div style={{ color: RED, fontWeight: 700, marginBottom: '0.75rem', fontSize: '0.9rem' }}>🅰️ Login</div>
+                <input data-testid="email-input" readOnly value={formState.email} placeholder="Email" style={{ display: 'block', width: '100%', padding: '0.4rem', background: '#1a2538', border: \`1px solid \${formState.email ? RED : BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.75rem', marginBottom: '0.5rem', boxSizing: 'border-box' }} />
+                <input data-testid="password-input" readOnly value={formState.password} type="password" placeholder="Password" style={{ display: 'block', width: '100%', padding: '0.4rem', background: '#1a2538', border: \`1px solid \${formState.password ? RED : BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.75rem', marginBottom: '0.75rem', boxSizing: 'border-box' }} />
+                <button data-testid="submit-btn" style={{ width: '100%', padding: '0.45rem', background: RED, color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.78rem', fontWeight: 700 }}>Войти</button>
+              </div>
+            )}
+            {appView === 'dashboard' && (
+              <div style={{ textAlign: 'center', paddingTop: '1rem' }}>
+                <div style={{ fontSize: '2rem' }}>🎉</div>
+                <div style={{ color: SUCCESS, fontWeight: 700, fontSize: '0.9rem' }}>Dashboard</div>
+                <div style={{ color: '#475569', fontSize: '0.78rem' }}>Успешная авторизация</div>
+              </div>
+            )}
+            {appView === 'users' && (
+              <div>
+                <input data-testid="search-input" readOnly value={formState.search} placeholder="Search users..." style={{ width: '100%', padding: '0.35rem', background: '#1a2538', border: \`1px solid \${BORDER}\`, borderRadius: '4px', color: '#e2e8f0', fontSize: '0.75rem', marginBottom: '0.5rem', boxSizing: 'border-box' }} />
+                {users.map(u => (
+                  <div key={u.name} data-testid="user-row" style={{ padding: '0.4rem 0.5rem', background: '#1a2538', border: \`1px solid \${BORDER}\`, borderRadius: '4px', marginBottom: '0.25rem', display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem' }}>
+                    <span>{u.name}</span>
+                    <span style={{ color: '#475569' }}>{u.role}</span>
+                    <button data-testid="delete-btn" style={{ background: 'transparent', border: 'none', color: RED, cursor: 'pointer', fontSize: '0.8rem' }}>✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Log */}
+      <div style={{ background: '#0a0f1e', border: \`1px solid \${BORDER}\`, borderRadius: '8px', padding: '0.75rem', maxHeight: '100px', overflowY: 'auto' }}>
+        <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: '0.35rem' }}>Cypress Command Log</div>
+        {log.length === 0
+          ? <div style={{ color: '#334155', fontSize: '0.78rem' }}>// Run a test scenario...</div>
+          : log.map((l, i) => <div key={i} style={{ fontSize: '0.75rem', marginBottom: '0.1rem', color: i === 0 ? SUCCESS : '#475569' }}>▶ {l}</div>)
+        }
+      </div>
+    </div>
+  );
+}
+` }} />

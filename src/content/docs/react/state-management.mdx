@@ -1,0 +1,826 @@
+---
+title: "29. State Managers (Глубокое погружение)"
+sidebar:
+  order: 29
+---
+import { Playground } from '@components/Playground'
+
+
+Вы уже знаете [базовый обзор подходов](/react/state-management-overview/). Теперь — детальное сравнение, продвинутые паттерны, DevTools и реальные сценарии применения.
+
+---
+
+## Архитектурные модели управления стейтом
+
+### Flux/Centralized Store (Redux, Zustand)
+
+Всё состояние в одном хранилище. Компоненты подписываются на нужные части.
+
+```
+Компонент → dispatch(action) → Reducer/Mutator → Store → React re-render
+```
+
+**Плюсы:** Предсказуемость, time-travel debugging, единый источник правды.
+**Минусы:** Boilerplate (у Redux), централизованная точка отказа.
+
+### Atomic State (Jotai, Recoil)
+
+Состояние разбито на атомы — минимальные единицы, которые могут зависеть от друг друга.
+
+```
+Atom A ←→ Atom B → Selector (computed) → Компонент
+```
+
+**Плюсы:** Гранулярные обновления, нет лишних ре-рендеров, граф зависимостей.
+**Минусы:** Сложность при большом числе атомов, непривычная ментальная модель.
+
+### Server State (TanStack Query, SWR)
+
+Данные с сервера — это не просто объект в памяти. Это кэш с TTL, состоянием загрузки, ошибками, ретраями.
+
+```
+Network → Cache → Stale/Fresh state → Компонент
+```
+
+**Правило:** 80% "глобального" стейта в типичном приложении — это данные с сервера. Используйте специализированные инструменты.
+
+---
+
+## Redux Toolkit: DevTools & продвинутые паттерны
+
+### Redux DevTools
+
+Redux DevTools Extension — главная суперсила Redux. Позволяет:
+- **Time-travel debugging:** перематывать состояние назад/вперёд
+- **Inspect actions:** видеть каждое действие и его payload
+- **Diff state:** сравнивать состояние до/после action
+- **Import/Export state:** сохранять и восстанавливать состояние
+
+```tsx
+// store.ts — Redux DevTools включены автоматически в development
+import { configureStore } from '@reduxjs/toolkit';
+import counterReducer from './counterSlice';
+
+export const store = configureStore({
+  reducer: {
+    counter: counterReducer,
+  },
+  // devTools: process.env.NODE_ENV !== 'production' — включено по умолчанию!
+});
+```
+
+### Паттерн: Entity Adapter (нормализация данных)
+
+RTK предоставляет `createEntityAdapter` для работы со списками сущностей:
+
+```tsx
+import { createEntityAdapter, createSlice, createAsyncThunk } from '@reduxjs/toolkit';
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+// Адаптер автоматически создаёт CRUD-операции
+const usersAdapter = createEntityAdapter<User>({
+  sortComparer: (a, b) => a.name.localeCompare(b.name),
+});
+
+// Асинхронная загрузка
+export const fetchUsers = createAsyncThunk('users/fetchAll', async () => {
+  const response = await fetch('/api/users');
+  return response.json() as Promise<User[]>;
+});
+
+const usersSlice = createSlice({
+  name: 'users',
+  initialState: usersAdapter.getInitialState({
+    loading: false,
+    error: null as string | null,
+  }),
+  reducers: {
+    // Встроенные методы адаптера
+    userAdded: usersAdapter.addOne,
+    userUpdated: usersAdapter.updateOne,
+    userRemoved: usersAdapter.removeOne,
+    usersReceived: usersAdapter.setAll,
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(fetchUsers.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
+      .addCase(fetchUsers.fulfilled, (state, action) => {
+        state.loading = false;
+        usersAdapter.setAll(state, action.payload);
+      })
+      .addCase(fetchUsers.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.error.message ?? 'Ошибка загрузки';
+      });
+  },
+});
+
+// Готовые селекторы из адаптера
+export const {
+  selectAll: selectAllUsers,
+  selectById: selectUserById,
+  selectIds: selectUserIds,
+  selectTotal: selectUsersTotal,
+} = usersAdapter.getSelectors((state: RootState) => state.users);
+
+export const { userAdded, userUpdated, userRemoved } = usersSlice.actions;
+export default usersSlice.reducer;
+```
+
+### RTK Query: API Layer
+
+RTK Query — встроенный инструмент для работы с сервером, встроенный в RTK:
+
+```tsx
+import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react';
+
+export const usersApi = createApi({
+  reducerPath: 'usersApi',
+  baseQuery: fetchBaseQuery({ baseUrl: '/api' }),
+  tagTypes: ['User'],
+  endpoints: (builder) => ({
+    getUsers: builder.query<User[], void>({
+      query: () => '/users',
+      providesTags: ['User'],
+    }),
+    getUserById: builder.query<User, string>({
+      query: (id) => `/users/${id}`,
+      providesTags: (result, error, id) => [{ type: 'User', id }],
+    }),
+    createUser: builder.mutation<User, Partial<User>>({
+      query: (body) => ({ url: '/users', method: 'POST', body }),
+      invalidatesTags: ['User'], // Автоматически инвалидирует кэш
+    }),
+    updateUser: builder.mutation<User, Pick<User, 'id'> & Partial<User>>({
+      query: ({ id, ...patch }) => ({ url: `/users/${id}`, method: 'PATCH', body: patch }),
+      invalidatesTags: (result, error, { id }) => [{ type: 'User', id }],
+    }),
+  }),
+});
+
+export const {
+  useGetUsersQuery,
+  useGetUserByIdQuery,
+  useCreateUserMutation,
+  useUpdateUserMutation,
+} = usersApi;
+
+// Использование в компоненте
+function UserList() {
+  const { data: users, isLoading, isError } = useGetUsersQuery();
+  const [createUser, { isLoading: isCreating }] = useCreateUserMutation();
+
+  if (isLoading) return <div>Загрузка...</div>;
+  if (isError) return <div>Ошибка!</div>;
+
+  return (
+    <ul>
+      {users?.map(user => <li key={user.id}>{user.name}</li>)}
+    </ul>
+  );
+}
+```
+
+---
+
+## Zustand: Продвинутые паттерны
+
+### Middleware: Persist
+
+Сохранение стейта в localStorage:
+
+```tsx
+import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+
+interface SettingsStore {
+  theme: 'light' | 'dark';
+  language: 'ru' | 'en';
+  setTheme: (theme: 'light' | 'dark') => void;
+  setLanguage: (lang: 'ru' | 'en') => void;
+}
+
+export const useSettingsStore = create<SettingsStore>()(
+  persist(
+    (set) => ({
+      theme: 'dark',
+      language: 'ru',
+      setTheme: (theme) => set({ theme }),
+      setLanguage: (language) => set({ language }),
+    }),
+    {
+      name: 'app-settings', // Ключ в localStorage
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({ theme: state.theme, language: state.language }), // Только эти поля
+    }
+  )
+);
+```
+
+### Middleware: Immer (мутируемые обновления)
+
+```tsx
+import { create } from 'zustand';
+import { immer } from 'zustand/middleware/immer';
+
+interface TodoStore {
+  todos: { id: string; text: string; done: boolean }[];
+  addTodo: (text: string) => void;
+  toggleTodo: (id: string) => void;
+  removeDone: () => void;
+}
+
+export const useTodoStore = create<TodoStore>()(
+  immer((set) => ({
+    todos: [],
+    addTodo: (text) =>
+      set((state) => {
+        // Immer позволяет писать мутабельный код!
+        state.todos.push({ id: crypto.randomUUID(), text, done: false });
+      }),
+    toggleTodo: (id) =>
+      set((state) => {
+        const todo = state.todos.find((t) => t.id === id);
+        if (todo) todo.done = !todo.done;
+      }),
+    removeDone: () =>
+      set((state) => {
+        state.todos = state.todos.filter((t) => !t.done);
+      }),
+  }))
+);
+```
+
+### Devtools Middleware для Zustand
+
+```tsx
+import { create } from 'zustand';
+import { devtools } from 'zustand/middleware';
+
+const useStore = create<CounterStore>()(
+  devtools(
+    (set) => ({
+      count: 0,
+      increment: () => set((state) => ({ count: state.count + 1 }), false, 'increment'),
+      decrement: () => set((state) => ({ count: state.count - 1 }), false, 'decrement'),
+      reset: () => set({ count: 0 }, false, 'reset'),
+    }),
+    { name: 'CounterStore' } // Имя в Redux DevTools
+  )
+);
+```
+
+### Паттерн: Slices (разделение большого стора)
+
+```tsx
+// Вместо одного огромного стора — несколько слайсов
+import { StateCreator } from 'zustand';
+
+// Слайс для авторизации
+interface AuthSlice {
+  user: User | null;
+  token: string | null;
+  login: (credentials: Credentials) => Promise<void>;
+  logout: () => void;
+}
+
+const createAuthSlice: StateCreator<AppStore, [], [], AuthSlice> = (set) => ({
+  user: null,
+  token: null,
+  login: async ({ email, password }) => {
+    const { user, token } = await api.login({ email, password });
+    set({ user, token });
+  },
+  logout: () => set({ user: null, token: null }),
+});
+
+// Слайс для UI
+interface UISlice {
+  sidebarOpen: boolean;
+  modal: string | null;
+  toggleSidebar: () => void;
+  openModal: (name: string) => void;
+  closeModal: () => void;
+}
+
+const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set) => ({
+  sidebarOpen: true,
+  modal: null,
+  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  openModal: (name) => set({ modal: name }),
+  closeModal: () => set({ modal: null }),
+});
+
+// Объединяем в один стор
+type AppStore = AuthSlice & UISlice;
+
+export const useAppStore = create<AppStore>()((...a) => ({
+  ...createAuthSlice(...a),
+  ...createUISlice(...a),
+}));
+```
+
+---
+
+## Jotai: Продвинутые паттерны
+
+### Derived Atoms (вычисляемый стейт)
+
+```tsx
+import { atom, useAtom, useAtomValue } from 'jotai';
+
+// Базовые атомы
+const firstNameAtom = atom('Иван');
+const lastNameAtom = atom('Иванов');
+const ageAtom = atom(25);
+
+// Derived atom — только чтение, вычисляется автоматически
+const fullNameAtom = atom((get) => `${get(firstNameAtom)} ${get(lastNameAtom)}`);
+
+// Writable derived atom — можно читать и писать
+const fullNameWritableAtom = atom(
+  (get) => `${get(firstNameAtom)} ${get(lastNameAtom)}`,
+  (get, set, newFullName: string) => {
+    const [first, ...rest] = newFullName.split(' ');
+    set(firstNameAtom, first);
+    set(lastNameAtom, rest.join(' '));
+  }
+);
+
+// Async atom
+const userAtom = atom(async (get) => {
+  const id = get(userIdAtom);
+  const response = await fetch(`/api/users/${id}`);
+  return response.json();
+});
+```
+
+### atomFamily: Атомы для коллекций
+
+```tsx
+import { atomFamily, useAtom } from 'jotai';
+
+// Создаёт уникальный атом для каждого ID
+const todoAtomFamily = atomFamily((id: string) =>
+  atom({ id, text: '', done: false })
+);
+
+// Использование
+function TodoItem({ id }: { id: string }) {
+  const [todo, setTodo] = useAtom(todoAtomFamily(id));
+  return (
+    <label>
+      <input
+        type="checkbox"
+        checked={todo.done}
+        onChange={() => setTodo((prev) => ({ ...prev, done: !prev.done }))}
+      />
+      {todo.text}
+    </label>
+  );
+}
+```
+
+### Jotai DevTools
+
+```tsx
+import { useAtomsDevtools } from 'jotai-devtools';
+
+// В корне приложения
+function AtomsDebugger() {
+  useAtomsDevtools('JotaiStore');
+  return null;
+}
+
+export default function App() {
+  return (
+    <>
+      {process.env.NODE_ENV !== 'production' && <AtomsDebugger />}
+      <YourApp />
+    </>
+  );
+}
+```
+
+---
+
+## Recoil: Selectors & эффекты
+
+### Selectors как вычисляемые данные
+
+```tsx
+import { atom, selector, useRecoilValue, useRecoilState } from 'recoil';
+
+const todoListState = atom<Todo[]>({
+  key: 'todoListState',
+  default: [],
+});
+
+const filterState = atom<'all' | 'active' | 'completed'>({
+  key: 'filterState',
+  default: 'all',
+});
+
+// Selector автоматически пересчитывается при изменении зависимостей
+const filteredTodosSelector = selector({
+  key: 'filteredTodos',
+  get: ({ get }) => {
+    const todos = get(todoListState);
+    const filter = get(filterState);
+    switch (filter) {
+      case 'active':    return todos.filter((t) => !t.done);
+      case 'completed': return todos.filter((t) => t.done);
+      default:          return todos;
+    }
+  },
+});
+
+const statsSelector = selector({
+  key: 'todoStats',
+  get: ({ get }) => {
+    const todos = get(todoListState);
+    return {
+      total: todos.length,
+      active: todos.filter((t) => !t.done).length,
+      completed: todos.filter((t) => t.done).length,
+      percentCompleted: todos.length ? Math.round((todos.filter((t) => t.done).length / todos.length) * 100) : 0,
+    };
+  },
+});
+```
+
+### Atom Effects (побочные эффекты)
+
+```tsx
+import { atom, AtomEffect } from 'recoil';
+
+// Эффект: синхронизация с localStorage
+function localStorageEffect<T>(key: string): AtomEffect<T> {
+  return ({ setSelf, onSet }) => {
+    const savedValue = localStorage.getItem(key);
+    if (savedValue !== null) {
+      setSelf(JSON.parse(savedValue));
+    }
+    onSet((newValue, _, isReset) => {
+      isReset
+        ? localStorage.removeItem(key)
+        : localStorage.setItem(key, JSON.stringify(newValue));
+    });
+  };
+}
+
+const userPrefsAtom = atom({
+  key: 'userPrefs',
+  default: { theme: 'dark', lang: 'ru' },
+  effects: [localStorageEffect('user-prefs')],
+});
+```
+
+---
+
+## Сравнение производительности
+
+### Гранулярность обновлений
+
+```
+Redux:   Весь store → selector → shouldComponentUpdate → ре-рендер
+Zustand: Подписка на slice → точечный ре-рендер
+Jotai:   Атом изменился → только подписчики этого атома → ре-рендер
+```
+
+**Jotai и Recoil выигрывают** в сценариях с большим числом независимых небольших данных (таблицы, списки задач, формы).
+
+**Zustand выигрывает** по простоте и скорости разработки при среднем масштабе.
+
+**Redux** — оптимален для команд с чёткими процессами, где нужна строгая типизация, аудит и DevTools.
+
+### Оптимизация в Zustand: Shallow Equality
+
+```tsx
+import { useShallow } from 'zustand/react/shallow';
+
+// ❌ Ре-рендер при ЛЮБОМ изменении стора (новая ссылка на объект)
+const { count, user } = useStore((state) => ({ count: state.count, user: state.user }));
+
+// ✅ Ре-рендер только если count или user реально изменились
+const { count, user } = useStore(
+  useShallow((state) => ({ count: state.count, user: state.user }))
+);
+```
+
+### Мемоизированные селекторы в Redux (reselect)
+
+```tsx
+import { createSelector } from '@reduxjs/toolkit';
+
+const selectTodos = (state: RootState) => state.todos.items;
+const selectFilter = (state: RootState) => state.todos.filter;
+
+// Пересчитывается только при изменении зависимостей
+export const selectFilteredTodos = createSelector(
+  [selectTodos, selectFilter],
+  (todos, filter) => {
+    switch (filter) {
+      case 'active':    return todos.filter((t) => !t.done);
+      case 'completed': return todos.filter((t) => t.done);
+      default:          return todos;
+    }
+  }
+);
+```
+
+---
+
+## Когда что выбирать: практическое руководство
+
+### Маленькое приложение (лендинг, портфолио)
+
+```
+useState + useContext
+```
+Не усложняйте. State management — это инструмент для сложности, которой у вас нет.
+
+### Средний проект (SPA, дашборд, B2C)
+
+```
+Zustand + TanStack Query
+```
+Zustand для UI-стейта (модалки, фильтры, авторизация), TanStack Query для данных с сервера.
+
+### Крупный корпоративный проект
+
+```
+Redux Toolkit + RTK Query
+```
+Когда нужны: строгий code review, DevTools, time-travel debugging, большая команда.
+
+### Сложные зависимости данных (финансы, аналитика)
+
+```
+Jotai или Recoil
+```
+Когда у вас граф зависимостей, derived data, и важна гранулярность обновлений.
+
+### Матрица решений
+
+| Критерий | Context API | Redux | Zustand | Jotai |
+|:--|:--|:--|:--|:--|
+| Размер бандла | 0 (встроен) | ~10KB | ~1KB | ~3KB |
+| Кривая обучения | Низкая | Высокая | Низкая | Средняя |
+| Boilerplate | Минимум | Много | Мало | Мало |
+| DevTools | Нет | Отличные | Через middleware | Отдельный пакет |
+| SSR | Сложно | Хорошо | Хорошо | Отлично |
+| TypeScript | Хорошо | Отлично | Отлично | Отлично |
+| Гранулярность | Низкая | Средняя | Средняя | Высокая |
+
+---
+
+## Практика
+
+Интерактивное сравнение подходов к управлению стейтом:
+
+<Playground client:visible template="react" files={{ "/App.tsx": `import { useState, useReducer, createContext, useContext, useMemo, useCallback } from "react";
+
+// === Сравнение Redux-паттерна vs Zustand-паттерна vs Atomic-паттерна ===
+
+// --- Паттерн 1: Redux (Reducer + Dispatch) ---
+type Action = 
+  | { type: "ADD_ITEM"; payload: string }
+  | { type: "TOGGLE_ITEM"; payload: number }
+  | { type: "REMOVE_DONE" };
+
+interface State {
+  items: { id: number; text: string; done: boolean }[];
+}
+
+function todoReducer(state: State, action: Action): State {
+  switch (action.type) {
+    case "ADD_ITEM":
+      return {
+        items: [...state.items, { id: Date.now(), text: action.payload, done: false }],
+      };
+    case "TOGGLE_ITEM":
+      return {
+        items: state.items.map((item) =>
+          item.id === action.payload ? { ...item, done: !item.done } : item
+        ),
+      };
+    case "REMOVE_DONE":
+      return { items: state.items.filter((i) => !i.done) };
+    default:
+      return state;
+  }
+}
+
+// --- Паттерн 2: Context API (Centralized Store) ---
+const StoreCtx = createContext<{ count: number; inc: () => void; dec: () => void } | null>(null);
+
+function StoreProvider({ children }: { children: React.ReactNode }) {
+  const [count, setCount] = useState(0);
+  const value = useMemo(() => ({
+    count,
+    inc: () => setCount((c) => c + 1),
+    dec: () => setCount((c) => c - 1),
+  }), [count]);
+  return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;
+}
+
+function useStore() {
+  const ctx = useContext(StoreCtx);
+  if (!ctx) throw new Error("No StoreProvider");
+  return ctx;
+}
+
+// --- Паттерн 3: Atomic (Jotai-style ручная реализация) ---
+type Listener = () => void;
+function createAtom<T>(initial: T) {
+  let value = initial;
+  const listeners = new Set<Listener>();
+  return {
+    get: () => value,
+    set: (newVal: T | ((prev: T) => T)) => {
+      value = typeof newVal === "function" ? (newVal as (prev: T) => T)(value) : newVal;
+      listeners.forEach((l) => l());
+    },
+    subscribe: (l: Listener) => { listeners.add(l); return () => listeners.delete(l); },
+  };
+}
+function useAtom<T>(atom: ReturnType<typeof createAtom<T>>) {
+  const [, rerender] = useState(0);
+  useCallback(() => { atom.subscribe(() => rerender((n) => n + 1)); }, [atom]);
+  useState(() => atom.subscribe(() => rerender((n) => n + 1)));
+  return [atom.get(), atom.set] as const;
+}
+
+const nameAtom = createAtom("Алексей");
+const ageAtom = createAtom(25);
+// Derived value
+function useDerived() {
+  const [name] = useAtom(nameAtom);
+  const [age] = useAtom(ageAtom);
+  return \`\${name}, \${age} лет\`;
+}
+
+// --- UI ---
+const card = (bg: string): React.CSSProperties => ({
+  background: bg, borderRadius: 10, padding: "16px 18px", marginBottom: 12,
+});
+const btn = (bg: string): React.CSSProperties => ({
+  background: bg, color: "#fff", border: "none", borderRadius: 6,
+  padding: "6px 14px", cursor: "pointer", fontWeight: 700, fontSize: 12,
+});
+const tab = (active: boolean, color: string): React.CSSProperties => ({
+  padding: "8px 16px", borderRadius: 8, border: "none", cursor: "pointer",
+  fontWeight: 700, fontSize: 13, background: active ? color : "#1e293b",
+  color: active ? "#fff" : "#94a3b8", transition: "all .15s",
+});
+
+// Panel 1: Redux-паттерн
+function ReduxPanel() {
+  const [state, dispatch] = useReducer(todoReducer, { items: [] });
+  const [input, setInput] = useState("");
+
+  const handleAdd = () => {
+    if (input.trim()) {
+      dispatch({ type: "ADD_ITEM", payload: input.trim() });
+      setInput("");
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>
+        // useReducer + dispatch — Redux-паттерн локально
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+          placeholder="Новая задача..."
+          style={{ flex: 1, padding: "6px 10px", borderRadius: 6, border: "1px solid #334155", background: "#0f172a", color: "#f8fafc", fontSize: 13 }}
+        />
+        <button style={btn("#3b82f6")} onClick={handleAdd}>+</button>
+      </div>
+      <div style={{ minHeight: 80 }}>
+        {state.items.map((item) => (
+          <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+            <input type="checkbox" checked={item.done} onChange={() => dispatch({ type: "TOGGLE_ITEM", payload: item.id })} />
+            <span style={{ color: item.done ? "#64748b" : "#f8fafc", textDecoration: item.done ? "line-through" : "none", fontSize: 13 }}>{item.text}</span>
+          </div>
+        ))}
+      </div>
+      {state.items.some((i) => i.done) && (
+        <button style={{ ...btn("#ef4444"), marginTop: 6, fontSize: 11 }} onClick={() => dispatch({ type: "REMOVE_DONE" })}>
+          Удалить выполненные
+        </button>
+      )}
+      <div style={{ color: "#64748b", fontSize: 11, marginTop: 8 }}>
+        Действий: {state.items.length > 0 ? state.items.length : "—"} задач
+      </div>
+    </div>
+  );
+}
+
+// Panel 2: Context Store
+function CounterPanel() {
+  const { count, inc, dec } = useStore();
+  return (
+    <div>
+      <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>
+        // Context API — глобальный стейт без prop drilling
+      </div>
+      <div style={{ textAlign: "center", padding: "10px 0" }}>
+        <div style={{ fontSize: 56, fontWeight: 700, color: "#10b981" }}>{count}</div>
+        <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 12 }}>
+          <button style={btn("#ef4444")} onClick={dec}>−</button>
+          <button style={btn("#10b981")} onClick={inc}>+</button>
+        </div>
+      </div>
+      <div style={{ color: "#64748b", fontSize: 11, marginTop: 8 }}>
+        {count > 0 ? "Положительное" : count < 0 ? "Отрицательное" : "Ноль"}
+      </div>
+    </div>
+  );
+}
+
+// Panel 3: Atomic
+function AtomicPanel() {
+  const [name, setName] = useAtom(nameAtom);
+  const [age, setAge] = useAtom(ageAtom);
+  const derived = useDerived();
+
+  return (
+    <div>
+      <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>
+        // Atomic — независимые атомы + вычисляемый стейт
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <label style={{ color: "#94a3b8", fontSize: 12 }}>Имя:</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={{ display: "block", width: "100%", marginTop: 4, padding: "6px 10px", borderRadius: 6, border: "1px solid #334155", background: "#0f172a", color: "#f8fafc", fontSize: 13, boxSizing: "border-box" }}
+        />
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <label style={{ color: "#94a3b8", fontSize: 12 }}>Возраст:</label>
+        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <button style={btn("#6366f1")} onClick={() => setAge((a) => Math.max(0, a - 1))}>−</button>
+          <span style={{ color: "#f8fafc", fontSize: 18, fontWeight: 700, lineHeight: "32px" }}>{age}</span>
+          <button style={btn("#6366f1")} onClick={() => setAge((a) => a + 1)}>+</button>
+        </div>
+      </div>
+      <div style={{ background: "#0f172a", borderRadius: 8, padding: "10px 12px", marginTop: 8 }}>
+        <span style={{ color: "#64748b", fontSize: 11 }}>Derived atom: </span>
+        <span style={{ color: "#a78bfa", fontSize: 13, fontWeight: 700 }}>{derived}</span>
+      </div>
+    </div>
+  );
+}
+
+const TABS = [
+  { id: "redux",   label: "Redux-паттерн",  color: "#7c3aed", panel: ReduxPanel },
+  { id: "context", label: "Context Store",  color: "#059669", panel: () => <StoreProvider><CounterPanel /></StoreProvider> },
+  { id: "atomic",  label: "Atomic State",   color: "#d97706", panel: AtomicPanel },
+];
+
+export default function App() {
+  const [active, setActive] = useState("redux");
+  const { panel: Panel, color } = TABS.find((t) => t.id === active)!;
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, fontFamily: "sans-serif" }}>
+      <div style={{ background: "#1e293b", borderRadius: 14, padding: 24, width: 420, boxShadow: "0 8px 40px rgba(0,0,0,.5)" }}>
+        <h2 style={{ color: "#f8fafc", margin: "0 0 4px", fontSize: 17 }}>State Management</h2>
+        <p style={{ color: "#64748b", fontSize: 12, margin: "0 0 18px" }}>Сравнение архитектурных паттернов</p>
+
+        <div style={{ display: "flex", gap: 6, marginBottom: 20, flexWrap: "wrap" }}>
+          {TABS.map((t) => (
+            <button key={t.id} style={tab(active === t.id, t.color)} onClick={() => setActive(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={card("#0f172a")}>
+          <Panel />
+        </div>
+
+        <div style={{ color: "#475569", fontSize: 11, textAlign: "center", marginTop: 4 }}>
+          Переключайся между паттернами ↑
+        </div>
+      </div>
+    </div>
+  );
+}
+` }}
+/>

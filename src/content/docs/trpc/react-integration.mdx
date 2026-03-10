@@ -1,0 +1,295 @@
+---
+title: "10. Интеграция с React"
+sidebar:
+  order: 10
+---
+import { Playground } from '@components/Playground'
+
+
+Пакет `@trpc/react-query` предоставляет удобные React-хуки для работы с tRPC API. Под капотом он использует `@tanstack/react-query`, что даёт все преимущества React Query: кеширование, фоновые обновления, оптимистичные обновления.
+
+## Создание клиента
+
+Функция `createTRPCReact<AppRouter>()` создаёт типизированный объект `trpc`, через который вы вызываете хуки. Этот объект создаётся один раз и экспортируется для использования по всему приложению.
+
+## Провайдеры
+
+Для работы необходимо обернуть приложение в два провайдера: `QueryClientProvider` из React Query (управляет кешем) и `trpc.Provider` (передаёт tRPC клиент). Оба провайдера должны быть в корне дерева компонентов.
+
+## useQuery в tRPC
+
+`trpc.procedureName.useQuery(input)` — эквивалент `useQuery` из React Query, но с полной типизацией входных и выходных данных. Возвращает `{ data, isLoading, isError, error, refetch }`.
+
+## useMutation в tRPC
+
+`trpc.procedureName.useMutation()` — для вызова mutation-процедур. Возвращает объект с методом `mutate(input)` и `mutateAsync(input)`, а также состояниями `isLoading`, `isSuccess`, `isError`.
+
+## Инвалидация кеша
+
+После успешной мутации обычно нужно инвалидировать кеш связанных запросов. Используйте `utils.procedureName.invalidate()` через `trpc.useContext()` или `useUtils()`.
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState } from 'react';
+
+const BG = '#0f172a';
+const TRPC = '#398ccb';
+const CARD = '#1e293b';
+const TEXT = '#e2e8f0';
+const GREEN = '#22c55e';
+const YELLOW = '#eab308';
+const RED = '#ef4444';
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  createdAt: string;
+}
+
+type QueryState = 'idle' | 'loading' | 'success' | 'error';
+type MutationState = 'idle' | 'loading' | 'success' | 'error';
+
+const mockUsers: User[] = [
+  { id: '1', name: 'Alice Johnson', email: 'alice@example.com', role: 'admin', createdAt: '2024-01-15' },
+  { id: '2', name: 'Bob Smith', email: 'bob@example.com', role: 'user', createdAt: '2024-02-20' },
+  { id: '3', name: 'Carol White', email: 'carol@example.com', role: 'moderator', createdAt: '2024-03-10' },
+];
+
+let nextUserId = 4;
+
+export default function App() {
+  const [users, setUsers] = useState<User[]>([]);
+  const [queryState, setQueryState] = useState<QueryState>('idle');
+  const [mutationState, setMutationState] = useState<MutationState>('idle');
+  const [newName, setNewName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'query' | 'mutation' | 'setup'>('query');
+
+  const runQuery = () => {
+    setQueryState('loading');
+    setUsers([]);
+    setTimeout(() => {
+      setQueryState('success');
+      setUsers([...mockUsers]);
+    }, 1200);
+  };
+
+  const triggerError = () => {
+    setQueryState('loading');
+    setUsers([]);
+    setTimeout(() => {
+      setQueryState('error');
+    }, 800);
+  };
+
+  const addUser = () => {
+    if (!newName || !newEmail) return;
+    setMutationState('loading');
+    setTimeout(() => {
+      const newUser: User = {
+        id: String(nextUserId++),
+        name: newName,
+        email: newEmail,
+        role: 'user',
+        createdAt: new Date().toISOString().split('T')[0],
+      };
+      setUsers(prev => [...prev, newUser]);
+      setMutationState('success');
+      setNewName('');
+      setNewEmail('');
+      setTimeout(() => setMutationState('idle'), 2000);
+    }, 900);
+  };
+
+  const deleteUser = (id: string) => {
+    setDeleteId(id);
+    setTimeout(() => {
+      setUsers(prev => prev.filter(u => u.id !== id));
+      setDeleteId(null);
+    }, 600);
+  };
+
+  const setupCode =
+    '// 1. Создание trpc-клиента\n' +
+    'export const trpc = createTRPCReact<AppRouter>();\n\n' +
+    '// 2. Провайдеры в _app.tsx\n' +
+    'const queryClient = new QueryClient();\n' +
+    'const trpcClient = trpc.createClient({\n' +
+    '  links: [httpBatchLink({ url: "/api/trpc" })],\n' +
+    '});\n\n' +
+    'export default function App() {\n' +
+    '  return (\n' +
+    '    <trpc.Provider client={trpcClient} queryClient={queryClient}>\n' +
+    '      <QueryClientProvider client={queryClient}>\n' +
+    '        <YourApp />\n' +
+    '      </QueryClientProvider>\n' +
+    '    </trpc.Provider>\n' +
+    '  );\n' +
+    '}';
+
+  const queryCode =
+    '// useQuery - получение данных\n' +
+    'const {\n' +
+    '  data: users,\n' +
+    '  isLoading,\n' +
+    '  isError,\n' +
+    '  error,\n' +
+    '  refetch,\n' +
+    '} = trpc.user.getAll.useQuery();\n\n' +
+    '// С параметрами:\n' +
+    'const { data: user } = trpc.user.getById\n' +
+    '  .useQuery({ id: "1" });';
+
+  const mutationCode =
+    '// useMutation - изменение данных\n' +
+    'const createUser = trpc.user.create.useMutation({\n' +
+    '  onSuccess: () => {\n' +
+    '    // Инвалидируем кеш\n' +
+    '    utils.user.getAll.invalidate();\n' +
+    '  },\n' +
+    '});\n\n' +
+    'createUser.mutate({\n' +
+    '  name: "Alice",\n' +
+    '  email: "alice@test.com",\n' +
+    '});';
+
+  const roleColors: Record<string, string> = {
+    admin: RED,
+    moderator: YELLOW,
+    user: GREEN,
+  };
+
+  return (
+    <div style={{ background: BG, minHeight: '100vh', padding: '20px', fontFamily: 'monospace', color: TEXT }}>
+      <h2 style={{ color: TRPC, textAlign: 'center', marginTop: 0, fontSize: '20px' }}>
+        tRPC + React — демо
+      </h2>
+
+      <div style={{ display: 'flex', justifyContent: 'center', gap: '6px', marginBottom: '16px' }}>
+        {(['setup', 'query', 'mutation'] as const).map(tab => (
+          <button key={tab} onClick={() => setActiveTab(tab)} style={{
+            background: activeTab === tab ? TRPC : CARD,
+            color: activeTab === tab ? '#fff' : TEXT,
+            border: '1px solid ' + (activeTab === tab ? TRPC : '#334155'),
+            borderRadius: '6px', padding: '7px 16px', cursor: 'pointer', fontSize: '12px',
+          }}>
+            {tab === 'setup' ? '⚙️ Настройка' : tab === 'query' ? '📖 useQuery' : '✏️ useMutation'}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <div style={{ background: CARD, border: '1px solid ' + TRPC, borderRadius: '10px', padding: '14px', minWidth: '240px', flex: '0 0 auto' }}>
+          <div style={{ color: TRPC, fontWeight: 'bold', fontSize: '11px', marginBottom: '8px' }}>
+            {activeTab === 'setup' ? 'Настройка провайдеров' : activeTab === 'query' ? 'useQuery код' : 'useMutation код'}
+          </div>
+          <pre style={{ margin: 0, fontSize: '9px', color: TEXT, lineHeight: '1.6', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+            {activeTab === 'setup' ? setupCode : activeTab === 'query' ? queryCode : mutationCode}
+          </pre>
+        </div>
+
+        <div style={{ flex: '1', minWidth: '260px' }}>
+          {activeTab === 'query' && (
+            <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                <button onClick={runQuery} disabled={queryState === 'loading'} style={{
+                  background: TRPC, color: '#fff', border: 'none', borderRadius: '6px',
+                  padding: '7px 16px', cursor: 'pointer', fontSize: '12px',
+                }}>
+                  {queryState === 'loading' ? '⏳ Загрузка...' : '▶ Выполнить useQuery'}
+                </button>
+                <button onClick={triggerError} style={{ background: 'rgba(239,68,68,0.2)', color: RED, border: '1px solid ' + RED, borderRadius: '6px', padding: '7px 12px', cursor: 'pointer', fontSize: '12px' }}>
+                  ❌ Симулировать ошибку
+                </button>
+              </div>
+
+              <div style={{ marginBottom: '8px', display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: queryState === 'loading' ? YELLOW : queryState === 'success' ? GREEN : queryState === 'error' ? RED : '#475569', transition: 'background 0.3s' }} />
+                <span style={{ color: TEXT, opacity: 0.7, fontSize: '11px' }}>
+                  {queryState === 'idle' ? 'isLoading: false, data: undefined' : queryState === 'loading' ? 'isLoading: true...' : queryState === 'success' ? 'isLoading: false, data: User[]' : 'isError: true, error: TRPCError'}
+                </span>
+              </div>
+
+              {queryState === 'error' && (
+                <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid ' + RED, borderRadius: '6px', padding: '10px', marginBottom: '8px', fontSize: '11px', color: RED }}>
+                  ❌ error.data.code: "INTERNAL_SERVER_ERROR"<br />
+                  error.message: "Failed to fetch users"
+                </div>
+              )}
+
+              {users.map(user => (
+                <div key={user.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: BG, borderRadius: '6px', padding: '8px 12px', marginBottom: '6px', border: '1px solid #334155' }}>
+                  <div>
+                    <div style={{ color: TEXT, fontSize: '12px', fontWeight: 'bold' }}>{user.name}</div>
+                    <div style={{ color: TEXT, opacity: 0.5, fontSize: '10px' }}>{user.email}</div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ background: roleColors[user.role] + '22', color: roleColors[user.role], fontSize: '10px', padding: '2px 6px', borderRadius: '4px' }}>{user.role}</span>
+                    <button onClick={() => deleteUser(user.id)} disabled={deleteId === user.id} style={{ background: 'transparent', border: 'none', color: '#475569', cursor: 'pointer', fontSize: '14px' }}>
+                      {deleteId === user.id ? '⏳' : '🗑'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {activeTab === 'mutation' && (
+            <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+              <div style={{ color: TEXT, fontWeight: 'bold', fontSize: '12px', marginBottom: '12px' }}>✏️ Добавить пользователя</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
+                <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Имя пользователя" style={{ background: BG, border: '1px solid #334155', borderRadius: '6px', padding: '7px 10px', color: TEXT, fontSize: '12px' }} />
+                <input value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="Email" style={{ background: BG, border: '1px solid #334155', borderRadius: '6px', padding: '7px 10px', color: TEXT, fontSize: '12px' }} />
+                <button onClick={addUser} disabled={mutationState === 'loading' || !newName || !newEmail} style={{ background: mutationState === 'loading' ? '#334155' : GREEN, color: '#fff', border: 'none', borderRadius: '6px', padding: '8px', cursor: 'pointer', fontSize: '12px' }}>
+                  {mutationState === 'loading' ? '⏳ Создание...' : '+ Создать пользователя'}
+                </button>
+              </div>
+              {mutationState === 'success' && (
+                <div style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid ' + GREEN, borderRadius: '6px', padding: '8px', fontSize: '11px', color: GREEN, marginBottom: '8px' }}>
+                  ✅ isSuccess: true — пользователь создан!
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {users.map(user => (
+                  <div key={user.id} style={{ display: 'flex', justifyContent: 'space-between', background: BG, borderRadius: '5px', padding: '7px 10px', fontSize: '11px', border: '1px solid #334155' }}>
+                    <span style={{ color: TEXT }}>{user.name}</span>
+                    <span style={{ color: TEXT, opacity: 0.5 }}>{user.email}</span>
+                  </div>
+                ))}
+                {users.length === 0 && queryState !== 'success' && (
+                  <div style={{ color: TEXT, opacity: 0.4, textAlign: 'center', padding: '20px', fontSize: '11px' }}>
+                    Перейдите во вкладку useQuery и загрузите данные
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'setup' && (
+            <div style={{ background: CARD, border: '1px solid #334155', borderRadius: '10px', padding: '14px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {[
+                  { label: 'QueryClient создан', done: true },
+                  { label: 'trpc.Provider настроен', done: true },
+                  { label: 'QueryClientProvider добавлен', done: true },
+                  { label: 'httpBatchLink настроен', done: true },
+                  { label: 'AppRouter тип импортирован', done: true },
+                ].map((item, i) => (
+                  <div key={i} style={{ display: 'flex', gap: '8px', alignItems: 'center', background: BG, borderRadius: '6px', padding: '8px 12px' }}>
+                    <span style={{ color: GREEN, fontSize: '14px' }}>✅</span>
+                    <span style={{ color: TEXT, fontSize: '12px' }}>{item.label}</span>
+                  </div>
+                ))}
+                <div style={{ background: 'rgba(57,140,203,0.1)', border: '1px solid ' + TRPC, borderRadius: '6px', padding: '10px', marginTop: '4px', fontSize: '11px', color: TRPC }}>
+                  🎉 Конфигурация завершена! Используйте trpc.* хуки в любом компоненте.
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />

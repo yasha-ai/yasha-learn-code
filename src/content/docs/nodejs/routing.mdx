@@ -1,0 +1,313 @@
+---
+title: "10. Роутинг и параметры URL"
+sidebar:
+  order: 10
+---
+
+import { Playground } from "@components/Playground"
+
+![Иллюстрация к уроку](/lessons/nodejs-routing.png)
+
+Роутинг — это определение, как приложение отвечает на запросы к определённым URL с определённым HTTP методом.
+
+## HTTP методы
+
+```javascript
+app.get('/users', handler);       // Получить список
+app.post('/users', handler);      // Создать
+app.put('/users/:id', handler);   // Полная замена
+app.patch('/users/:id', handler); // Частичное обновление
+app.delete('/users/:id', handler);// Удалить
+app.all('/path', handler);        // Любой метод
+app.options('/path', handler);    // Preflight CORS
+```
+
+## Параметры URL
+
+```javascript
+// :id — обязательный параметр
+app.get('/users/:id', (req, res) => {
+  const { id } = req.params;
+  res.json({ id, message: `Пользователь ${id}` });
+});
+
+// Несколько параметров
+app.get('/posts/:year/:month/:slug', (req, res) => {
+  const { year, month, slug } = req.params;
+  res.json({ year, month, slug });
+  // GET /posts/2024/01/hello-world
+  // → { year: '2024', month: '01', slug: 'hello-world' }
+});
+
+// Необязательный параметр с ?
+app.get('/files/:name.:ext?', (req, res) => {
+  const { name, ext = 'txt' } = req.params;
+  res.json({ name, ext });
+});
+
+// Wildcard *
+app.get('/public/*', (req, res) => {
+  res.json({ path: req.params[0] });
+  // GET /public/images/logo.png → { path: 'images/logo.png' }
+});
+```
+
+## Query параметры
+
+```javascript
+// GET /users?page=2&limit=10&sort=name&order=asc&role=admin
+app.get('/users', (req, res) => {
+  const {
+    page = 1,
+    limit = 10,
+    sort = 'createdAt',
+    order = 'desc',
+    role,
+    search,
+  } = req.query;
+
+  // Конвертируем строки в числа
+  const pageNum = parseInt(page, 10);
+  const limitNum = Math.min(parseInt(limit, 10), 100); // не больше 100
+
+  const query = {
+    page: pageNum,
+    limit: limitNum,
+    sort,
+    order: order === 'asc' ? 'asc' : 'desc',
+    ...(role && { role }),
+    ...(search && { search }),
+  };
+
+  res.json({ query, data: [] });
+});
+
+// Массивы в query: ?tags[]=js&tags[]=node или ?tags=js&tags=node
+app.get('/articles', (req, res) => {
+  const tags = [].concat(req.query.tags || []); // всегда массив
+  res.json({ tags });
+});
+```
+
+## Express Router — модульный роутинг
+
+```javascript
+// routes/users.js
+const { Router } = require('express');
+const router = Router();
+
+// Все роуты здесь будут с префиксом /api/users
+router.get('/', getUsers);
+router.get('/:id', getUserById);
+router.post('/', createUser);
+router.put('/:id', updateUser);
+router.delete('/:id', deleteUser);
+
+// Цепочка для одного пути
+router.route('/:id')
+  .get(getUserById)
+  .put(updateUser)
+  .delete(deleteUser);
+
+module.exports = router;
+```
+
+```javascript
+// app.js
+const usersRouter = require('./routes/users');
+const postsRouter = require('./routes/posts');
+const authRouter = require('./routes/auth');
+
+app.use('/api/users', usersRouter);
+app.use('/api/posts', postsRouter);
+app.use('/api/auth', authRouter);
+```
+
+## Контроллеры
+
+```javascript
+// controllers/users.js — бизнес-логика отдельно от роутов
+const { db } = require('../db');
+
+const getUsers = async (req, res, next) => {
+  try {
+    const { page = 1, limit = 10 } = req.query;
+    const offset = (page - 1) * limit;
+
+    const users = await db.users.findMany({
+      skip: offset,
+      take: parseInt(limit),
+      orderBy: { createdAt: 'desc' },
+    });
+    const total = await db.users.count();
+
+    res.json({
+      data: users,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    next(error);  // передаём ошибку в error handler
+  }
+};
+
+const getUserById = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) {
+      return res.status(400).json({ error: 'Invalid ID' });
+    }
+
+    const user = await db.users.findUnique({ where: { id } });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json(user);
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = { getUsers, getUserById };
+```
+
+## Валидация параметров
+
+```javascript
+// Ручная валидация
+app.get('/users/:id', (req, res, next) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id <= 0) {
+    return res.status(400).json({
+      error: 'ID должен быть положительным числом',
+    });
+  }
+  req.userId = id;
+  next();
+}, getUserById);
+
+// Через Zod (рекомендуется)
+const { z } = require('zod');
+
+const paginationSchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+  sort: z.enum(['name', 'email', 'createdAt']).default('createdAt'),
+});
+
+app.get('/users', (req, res, next) => {
+  const result = paginationSchema.safeParse(req.query);
+  if (!result.success) {
+    return res.status(400).json({
+      error: 'Некорректные параметры',
+      details: result.error.flatten(),
+    });
+  }
+  req.query = result.data;
+  next();
+}, getUsers);
+```
+
+## Вложенные роуты (nested resources)
+
+```javascript
+// /users/:userId/posts/:postId/comments
+const router = Router({ mergeParams: true });
+// mergeParams: true — доступ к параметрам родительского роутера
+
+// routes/comments.js
+router.get('/', async (req, res) => {
+  const { userId, postId } = req.params;  // mergeParams нужен!
+  const comments = await db.comments.findMany({
+    where: { post: { id: postId, authorId: userId } },
+  });
+  res.json(comments);
+});
+
+// app.js
+const commentsRouter = require('./routes/comments');
+app.use('/users/:userId/posts/:postId/comments', commentsRouter);
+```
+
+## Практика
+
+1. Создай файл `routes/products.js` с полным CRUD (GET list, GET one, POST, PUT, DELETE)
+2. Реализуй пагинацию через query параметры `?page=1&limit=10`
+3. Добавь валидацию ID параметра (должен быть числом)
+4. Создай вложенные роуты: `/categories/:catId/products`
+5. Реализуй фильтрацию через query: `?minPrice=100&maxPrice=500&category=electronics`
+
+## Попробуй
+
+<Playground client:visible
+  template="vite-react"
+  files={{
+    "/App.jsx": `import { useState } from "react";
+
+export default function App() {
+  const [url, setUrl] = useState("/api/users/42");
+  const [method, setMethod] = useState("GET");
+  const [result, setResult] = useState(null);
+
+  const routeTable = [
+    { method: "GET", pattern: "/api/users", handler: () => ({ users: [{ id: 1 }, { id: 2 }] }) },
+    { method: "GET", pattern: "/api/users/:id", handler: (p) => ({ user: { id: p.id, name: "User " + p.id } }) },
+    { method: "POST", pattern: "/api/users", handler: () => ({ created: { id: 3 } }) },
+    { method: "GET", pattern: "/api/posts/:postId/comments/:commentId", handler: (p) => ({ postId: p.postId, commentId: p.commentId }) },
+    { method: "GET", pattern: "/api/search", handler: () => ({ query: "?q=node&limit=10", results: [] }) },
+  ];
+
+  const match = () => {
+    for (const route of routeTable) {
+      if (route.method !== method) continue;
+      const regex = new RegExp("^" + route.pattern.replace(/:([^/]+)/g, "(?<$1>[^/]+)") + "$");
+      const m = url.match(regex);
+      if (m) {
+        setResult({ matched: route.method + " " + route.pattern, params: m.groups || {}, body: route.handler(m.groups || {}) });
+        return;
+      }
+    }
+    setResult({ matched: null, params: {}, body: { error: "Cannot " + method + " " + url } });
+  };
+
+  return (
+    <div style={{ fontFamily: "monospace", padding: 16 }}>
+      <h3>Роутинг и параметры</h3>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        {["GET", "POST", "PUT", "DELETE"].map(m => (
+          <button key={m} onClick={() => setMethod(m)}
+            style={{ padding: "3px 10px", background: method === m ? "#3b82f6" : "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, cursor: "pointer", fontSize: 11 }}>
+            {m}
+          </button>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        <input value={url} onChange={e => setUrl(e.target.value)}
+          style={{ flex: 1, padding: "5px 8px", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, fontSize: 12 }} />
+        <button onClick={match} style={{ padding: "5px 12px", background: "#10b981", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}>Match</button>
+      </div>
+      <div style={{ fontSize: 11, color: "#475569", marginBottom: 8 }}>
+        Роуты: GET /api/users, GET /api/users/:id, POST /api/users, GET /api/posts/:postId/comments/:commentId
+      </div>
+      {result && (
+        <div style={{ background: "#0f172a", padding: 12, borderRadius: 6 }}>
+          <div style={{ color: result.matched ? "#10b981" : "#ef4444", fontSize: 12 }}>
+            {result.matched ? "✓ Matched: " + result.matched : "✕ No route matched"}
+          </div>
+          {Object.keys(result.params).length > 0 && (
+            <div style={{ color: "#f59e0b", fontSize: 12 }}>Params: {JSON.stringify(result.params)}</div>
+          )}
+          <pre style={{ color: "#e2e8f0", fontSize: 11, margin: "6px 0 0" }}>{JSON.stringify(result.body, null, 2)}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+`
+  }}
+/>

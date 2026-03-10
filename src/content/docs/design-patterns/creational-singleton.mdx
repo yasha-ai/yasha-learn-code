@@ -1,0 +1,280 @@
+---
+title: "7. Singleton"
+sidebar:
+  order: 7
+---
+import { Playground } from '@components/Playground'
+
+## Design Patterns. Урок: Singleton (Одиночка)
+
+**Singleton** — порождающий паттерн, гарантирующий что у класса есть только один экземпляр, и предоставляющий глобальную точку доступа к нему.
+
+---
+
+### Когда нужен Singleton?
+
+- Подключение к базе данных (один connection pool)
+- Конфигурация приложения (один объект настроек)
+- Логгер (единая точка записи логов)
+- Кеш (единое хранилище)
+- Event bus (единый шина событий)
+
+---
+
+### Классическая реализация
+
+```typescript
+class DatabaseConnection {
+  private static instance: DatabaseConnection | null = null;
+  private connection: any;
+
+  // Приватный конструктор — никто не может создать экземпляр снаружи
+  private constructor() {
+    this.connection = createDatabaseConnection({
+      host: process.env.DB_HOST,
+      port: Number(process.env.DB_PORT),
+      database: process.env.DB_NAME,
+    });
+    console.log('Database connection created');
+  }
+
+  // Единственный способ получить экземпляр
+  static getInstance(): DatabaseConnection {
+    if (!DatabaseConnection.instance) {
+      DatabaseConnection.instance = new DatabaseConnection();
+    }
+    return DatabaseConnection.instance;
+  }
+
+  query(sql: string, params?: any[]): Promise<any> {
+    return this.connection.execute(sql, params);
+  }
+}
+
+// Использование
+const db1 = DatabaseConnection.getInstance();
+const db2 = DatabaseConnection.getInstance();
+console.log(db1 === db2); // true — один и тот же объект
+```
+
+---
+
+### Thread-safe Singleton (для Node.js worker threads)
+
+```typescript
+class ConfigManager {
+  private static instance: ConfigManager | null = null;
+  private static isCreating = false;
+  private config: Record<string, any> = {};
+
+  private constructor() {
+    this.loadConfig();
+  }
+
+  static getInstance(): ConfigManager {
+    if (!ConfigManager.instance) {
+      if (ConfigManager.isCreating) {
+        throw new Error('Circular dependency detected in ConfigManager');
+      }
+      ConfigManager.isCreating = true;
+      ConfigManager.instance = new ConfigManager();
+      ConfigManager.isCreating = false;
+    }
+    return ConfigManager.instance;
+  }
+
+  private loadConfig(): void {
+    this.config = {
+      apiUrl: process.env.API_URL ?? 'http://localhost:3000',
+      debug: process.env.DEBUG === 'true',
+      maxRetries: Number(process.env.MAX_RETRIES ?? 3),
+    };
+  }
+
+  get<T>(key: string): T {
+    return this.config[key] as T;
+  }
+
+  set(key: string, value: any): void {
+    this.config[key] = value;
+  }
+}
+
+// Использование
+const config = ConfigManager.getInstance();
+const apiUrl = config.get<string>('apiUrl');
+```
+
+---
+
+### Современный подход: модульный Singleton
+
+В Node.js каждый модуль кешируется при первом `import` — это встроенный Singleton:
+
+```typescript
+// logger.ts — это уже Singleton благодаря модульной системе Node.js
+class Logger {
+  private logs: string[] = [];
+
+  log(message: string): void {
+    const entry = `[${new Date().toISOString()}] ${message}`;
+    this.logs.push(entry);
+    console.log(entry);
+  }
+
+  getLogs(): string[] {
+    return [...this.logs];
+  }
+}
+
+// Экспортируем единственный экземпляр
+export const logger = new Logger();
+
+// В любом файле проекта:
+import { logger } from './logger';
+logger.log('App started'); // Всегда один и тот же экземпляр
+```
+
+---
+
+### Singleton vs Global Variable
+
+Singleton — не просто глобальная переменная. Ключевые отличия:
+
+| Аспект | Global Variable | Singleton |
+|--------|----------------|-----------|
+| Контроль создания | ❌ Создаётся сразу | ✅ Ленивая инициализация |
+| Защита от множественных экземпляров | ❌ Нет | ✅ Есть |
+| Наследование и расширение | ❌ Сложно | ✅ Возможно |
+| Тестирование | ❌ Трудно мокать | ✅ Можно сбросить instance |
+
+---
+
+### Проблемы Singleton и как их избежать
+
+**Проблема 1: Тяжело тестировать**
+```typescript
+// Решение: добавь возможность сброса для тестов
+class EventBus {
+  private static instance: EventBus | null = null;
+  
+  static getInstance(): EventBus {
+    if (!EventBus.instance) {
+      EventBus.instance = new EventBus();
+    }
+    return EventBus.instance;
+  }
+  
+  // Только для тестов!
+  static resetInstance(): void {
+    if (process.env.NODE_ENV === 'test') {
+      EventBus.instance = null;
+    }
+  }
+}
+```
+
+**Проблема 2: Скрытые зависимости**
+```typescript
+// ❌ Синглтон внутри функции — скрытая зависимость
+function processOrder(order: Order): void {
+  const db = DatabaseConnection.getInstance(); // Скрыто!
+  db.query('...');
+}
+
+// ✅ Явная зависимость через DIP
+function processOrder(order: Order, db: Database): void {
+  db.query('...');
+}
+```
+
+---
+
+### Singleton в WordPress
+
+```php
+// WordPress часто использует Singleton для плагинов
+class MyPlugin {
+  private static ?MyPlugin $instance = null;
+
+  public static function getInstance(): self {
+    if (self::$instance === null) {
+      self::$instance = new self();
+    }
+    return self::$instance;
+  }
+
+  private function __construct() {
+    add_action('init', [$this, 'init']);
+    add_action('wp_enqueue_scripts', [$this, 'enqueueScripts']);
+  }
+
+  public function init(): void { /* ... */ }
+  public function enqueueScripts(): void { /* ... */ }
+}
+
+// Инициализация
+MyPlugin::getInstance();
+```
+
+---
+
+### Практические задания
+
+1. Реализуй `CacheManager` — Singleton с методами `get(key)`, `set(key, value, ttlMs)`, `delete(key)`, `clear()`.
+
+2. Создай `EventBus` Singleton с методами `on(event, handler)`, `off(event, handler)`, `emit(event, data)`.
+
+3. Напиши тест для Singleton: убедись что `getInstance()` всегда возвращает один объект.
+
+4. Чем отличается Singleton от статического класса (все методы static)? Когда что использовать?
+
+5. Изучи паттерн «Multiton» — обобщение Singleton для заданного количества экземпляров.
+
+---
+
+### Playground: Singleton в действии
+
+<Playground client:visible template="vanilla" files={{ '/index.js': `// Singleton: только один экземпляр класса
+
+class ConfigManager {
+  static instance = null;
+
+  static getInstance() {
+    if (!ConfigManager.instance) {
+      ConfigManager.instance = new ConfigManager();
+      console.log("ConfigManager created (once!)");
+    }
+    return ConfigManager.instance;
+  }
+
+  constructor() {
+    this.config = { apiUrl: "https://api.example.com", debug: false };
+  }
+
+  get(key) { return this.config[key]; }
+  set(key, value) { this.config[key] = value; }
+}
+
+// Всегда один и тот же экземпляр
+const c1 = ConfigManager.getInstance();
+const c2 = ConfigManager.getInstance();
+
+console.log("Same instance?", c1 === c2); // true
+
+c1.set("debug", true);
+console.log("c2.debug:", c2.get("debug")); // true (тот же объект)
+
+// Module-level singleton (Node.js style)
+const logger = (() => {
+  const logs = [];
+  return {
+    log(msg) { logs.push(msg); console.log("[LOG]", msg); },
+    getLogs() { return logs; }
+  };
+})();
+
+logger.log("App started");
+logger.log("Config loaded");
+console.log("All logs:", logger.getLogs());
+` }} />

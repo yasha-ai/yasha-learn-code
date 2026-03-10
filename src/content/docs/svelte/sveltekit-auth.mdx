@@ -1,0 +1,820 @@
+---
+title: "26. SvelteKit: Аутентификация"
+sidebar:
+  order: 26
+---
+import { Playground } from '@components/Playground'
+
+
+## 🔐 SvelteKit Аутентификация: Защищаем приложение
+
+Привет! 👋 Аутентификация — это охранник на входе в клуб 🏴. Он проверяет пригласительные (токены/куки), знает кто VIP (admin), и не пускает чужих. В SvelteKit есть несколько подходов — от простых куки до OAuth с социальными сетями.
+
+---
+
+## 🎯 Обзор подходов к аутентификации
+
+```
+Подход                    Сложность    Когда использовать
+──────────────────────────────────────────────────────────
+Куки + JWT (вручную)      Средняя      Контроль над каждой деталью
+Auth.js (NextAuth)        Низкая       OAuth + социальные сети
+Lucia Auth                Средняя      Гибкость + DB сессии
+Supabase Auth             Низкая       Supabase как backend
+PocketBase Auth           Низкая       Self-hosted альтернатива
+```
+
+---
+
+## 🍪 Cookie-based аутентификация с нуля
+
+Самый прозрачный подход — понимаешь каждую строчку:
+
+```typescript
+// src/lib/server/auth.ts — утилиты аутентификации
+import { db } from './database';
+import { createHash, randomBytes } from 'crypto';
+
+// Хэшируем пароль:
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16).toString('hex');
+  const hash = createHash('sha256')
+    .update(password + salt)
+    .digest('hex');
+  return `${salt}:${hash}`;
+}
+
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [salt, hash] = stored.split(':');
+  const attempt = createHash('sha256')
+    .update(password + salt)
+    .digest('hex');
+  return attempt === hash;
+}
+
+// Создаём сессию:
+export async function createSession(userId: string) {
+  const token = randomBytes(32).toString('hex');
+  const session = await db.session.create({
+    data: {
+      token,
+      userId,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 дней
+    },
+  });
+  return session;
+}
+
+// Верифицируем сессию:
+export async function verifySession(token: string) {
+  const session = await db.session.findUnique({
+    where: { token },
+    include: { user: true },
+  });
+
+  if (!session) return null;
+  if (session.expiresAt < new Date()) {
+    await db.session.delete({ where: { token } });
+    return null;
+  }
+
+  return session.user;
+}
+
+// Удаляем сессию:
+export async function deleteSession(token: string) {
+  await db.session.delete({ where: { token } }).catch(() => {});
+}
+```
+
+```typescript
+// src/routes/(auth)/login/+page.server.ts
+import type { Actions, PageServerLoad } from './$types';
+import { fail, redirect } from '@sveltejs/kit';
+import { hashPassword, verifyPassword, createSession } from '$lib/server/auth';
+
+export const load: PageServerLoad = async ({ locals }) => {
+  if (locals.user) redirect(307, '/dashboard');
+  return {};
+};
+
+export const actions: Actions = {
+  login: async ({ request, cookies }) => {
+    const data = await request.formData();
+    const email = data.get('email') as string;
+    const password = data.get('password') as string;
+
+    if (!email || !password) {
+      return fail(400, { error: 'Заполните все поля' });
+    }
+
+    const user = await db.user.findUnique({ where: { email } });
+
+    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+      // Намеренно не говорим что именно неверно — безопасность!
+      return fail(401, { error: 'Неверный email или пароль' });
+    }
+
+    const session = await createSession(user.id);
+
+    cookies.set('session', session.token, {
+      path: '/',
+      httpOnly: true,      // JavaScript не может читать
+      secure: true,        // Только HTTPS
+      sameSite: 'lax',     // Защита от CSRF
+      maxAge: 60 * 60 * 24 * 7, // 7 дней
+    });
+
+    redirect(303, '/dashboard');
+  },
+
+  register: async ({ request, cookies }) => {
+    const data = await request.formData();
+    const name = data.get('name') as string;
+    const email = data.get('email') as string;
+    const password = data.get('password') as string;
+
+    // Валидация:
+    const errors: Record<string, string> = {};
+    if (!name?.trim()) errors.name = 'Имя обязательно';
+    if (!email?.includes('@')) errors.email = 'Неверный email';
+    if (password?.length < 8) errors.password = 'Минимум 8 символов';
+
+    if (Object.keys(errors).length > 0) {
+      return fail(400, { errors });
+    }
+
+    // Проверяем дубликат:
+    const existing = await db.user.findUnique({ where: { email } });
+    if (existing) return fail(409, { errors: { email: 'Email уже занят' } });
+
+    const user = await db.user.create({
+      data: { name, email, passwordHash: await hashPassword(password) },
+    });
+
+    const session = await createSession(user.id);
+    cookies.set('session', session.token, {
+      path: '/', httpOnly: true, secure: true, sameSite: 'lax',
+      maxAge: 60 * 60 * 24 * 7,
+    });
+
+    redirect(303, '/dashboard');
+  },
+};
+```
+
+---
+
+## 🪝 hooks.server.ts: проверяем аутентификацию при каждом запросе
+
+```typescript
+// src/hooks.server.ts
+import type { Handle } from '@sveltejs/kit';
+import { verifySession } from '$lib/server/auth';
+
+export const handle: Handle = async ({ event, resolve }) => {
+  const token = event.cookies.get('session');
+
+  if (token) {
+    const user = await verifySession(token);
+
+    if (user) {
+      // Добавляем пользователя в locals — доступен во всех load функциях
+      event.locals.user = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      };
+    } else {
+      // Удаляем невалидную куку:
+      event.cookies.delete('session', { path: '/' });
+    }
+  }
+
+  return resolve(event);
+};
+```
+
+---
+
+## 🛡️ Защита маршрутов через +layout.server.ts
+
+```typescript
+// src/routes/(app)/+layout.server.ts
+// Этот layout защищает все страницы внутри (app) группы
+import type { LayoutServerLoad } from './$types';
+import { redirect } from '@sveltejs/kit';
+
+export const load: LayoutServerLoad = async ({ locals, url }) => {
+  if (!locals.user) {
+    // Сохраняем URL куда пытались попасть:
+    const redirectTo = url.pathname;
+    redirect(307, `/login?redirectTo=${encodeURIComponent(redirectTo)}`);
+  }
+
+  return {
+    user: locals.user,
+  };
+};
+```
+
+```typescript
+// src/routes/(admin)/+layout.server.ts
+// Дополнительная проверка роли:
+import type { LayoutServerLoad } from './$types';
+import { error, redirect } from '@sveltejs/kit';
+
+export const load: LayoutServerLoad = async ({ locals }) => {
+  if (!locals.user) redirect(307, '/login');
+
+  if (locals.user.role !== 'admin') {
+    error(403, 'Только для администраторов');
+  }
+
+  return { user: locals.user };
+};
+```
+
+---
+
+## 🔑 Auth.js (бывший NextAuth) для SvelteKit
+
+Auth.js — самый популярный способ добавить OAuth (GitHub, Google, etc.):
+
+```bash
+npm install @auth/sveltekit
+```
+
+```typescript
+// src/auth.ts
+import { SvelteKitAuth } from '@auth/sveltekit';
+import GitHub from '@auth/sveltekit/providers/github';
+import Google from '@auth/sveltekit/providers/google';
+import { PrismaAdapter } from '@auth/prisma-adapter';
+import { db } from '$lib/server/database';
+
+export const { handle, signIn, signOut } = SvelteKitAuth({
+  adapter: PrismaAdapter(db),
+
+  providers: [
+    GitHub({
+      clientId: process.env.GITHUB_ID,
+      clientSecret: process.env.GITHUB_SECRET,
+    }),
+    Google({
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    }),
+  ],
+
+  // Callbacks для кастомизации:
+  callbacks: {
+    session: async ({ session, user }) => {
+      // Добавляем id и role в сессию:
+      if (session.user && user) {
+        session.user.id = user.id;
+        session.user.role = (user as any).role ?? 'user';
+      }
+      return session;
+    },
+
+    authorized: async ({ auth }) => {
+      // Возвращает true если авторизован
+      return !!auth;
+    },
+  },
+
+  pages: {
+    signIn: '/login',       // Кастомная страница входа
+    error: '/auth/error',   // Страница ошибки
+  },
+});
+```
+
+```typescript
+// src/hooks.server.ts — подключаем Auth.js handle
+export { handle } from './auth';
+```
+
+```svelte
+<!-- src/routes/(auth)/login/+page.svelte -->
+<script lang="ts">
+  import { signIn } from '@auth/sveltekit/client';
+</script>
+
+<h1>Войти</h1>
+
+<button onclick={() => signIn('github', { redirectTo: '/dashboard' })}>
+  🐙 Войти через GitHub
+</button>
+
+<button onclick={() => signIn('google', { redirectTo: '/dashboard' })}>
+  🔵 Войти через Google
+</button>
+```
+
+```typescript
+// Использование в load функциях:
+import { auth } from '../auth';
+import type { PageServerLoad } from './$types';
+
+export const load: PageServerLoad = async (event) => {
+  const session = await auth(event);
+
+  if (!session?.user) {
+    redirect(307, '/login');
+  }
+
+  return { session };
+};
+```
+
+---
+
+## 🦙 Lucia Auth: современный подход
+
+Lucia — минималистичная библиотека для аутентификации с отличной поддержкой TypeScript:
+
+```bash
+npm install lucia @lucia-auth/adapter-prisma
+```
+
+```typescript
+// src/lib/server/lucia.ts
+import { Lucia } from 'lucia';
+import { PrismaAdapter } from '@lucia-auth/adapter-prisma';
+import { db } from './database';
+import { dev } from '$app/environment';
+
+const adapter = new PrismaAdapter(db.session, db.user);
+
+export const lucia = new Lucia(adapter, {
+  sessionCookie: {
+    attributes: {
+      secure: !dev, // Только HTTPS в продакшне
+    },
+  },
+
+  // Что передаётся в сессию:
+  getUserAttributes: (attributes) => {
+    return {
+      username: attributes.username,
+      email: attributes.email,
+      role: attributes.role,
+    };
+  },
+});
+
+declare module 'lucia' {
+  interface Register {
+    Lucia: typeof lucia;
+    DatabaseUserAttributes: {
+      username: string;
+      email: string;
+      role: 'user' | 'admin';
+    };
+  }
+}
+```
+
+```typescript
+// src/hooks.server.ts с Lucia:
+import { lucia } from '$lib/server/lucia';
+import type { Handle } from '@sveltejs/kit';
+
+export const handle: Handle = async ({ event, resolve }) => {
+  const sessionId = event.cookies.get(lucia.sessionCookieName);
+
+  if (!sessionId) {
+    event.locals.user = null;
+    event.locals.session = null;
+    return resolve(event);
+  }
+
+  const { session, user } = await lucia.validateSession(sessionId);
+
+  if (session?.fresh) {
+    // Обновляем куку если сессия продлена:
+    const sessionCookie = lucia.createSessionCookie(session.id);
+    event.cookies.set(sessionCookie.name, sessionCookie.value, {
+      path: '.',
+      ...sessionCookie.attributes,
+    });
+  }
+
+  if (!session) {
+    const blankCookie = lucia.createBlankSessionCookie();
+    event.cookies.set(blankCookie.name, blankCookie.value, {
+      path: '.',
+      ...blankCookie.attributes,
+    });
+  }
+
+  event.locals.user = user;
+  event.locals.session = session;
+
+  return resolve(event);
+};
+```
+
+---
+
+## 🎫 JWT vs Database сессии
+
+```
+JWT токены:
+  ✅ Stateless — не нужна БД для проверки
+  ✅ Масштабируемость — любой сервер может проверить
+  ✅ Можно передать данные в payload
+  ❌ Нельзя инвалидировать до истечения
+  ❌ Нужно хранить refresh токены
+  ❌ Если украли — воспользуются до истечения
+
+Database сессии:
+  ✅ Мгновенная инвалидация (logout везде)
+  ✅ Полный контроль над сессиями
+  ✅ Можно видеть активные устройства
+  ❌ Нужен запрос в БД при каждом запросе
+  ❌ Менее масштабируемы (решается через Redis)
+```
+
+```typescript
+// JWT подход:
+import * as jose from 'jose';
+
+const SECRET = new TextEncoder().encode(process.env.JWT_SECRET);
+
+export async function createJWT(payload: { userId: string; role: string }) {
+  return await new jose.SignJWT(payload)
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('7d')
+    .sign(SECRET);
+}
+
+export async function verifyJWT(token: string) {
+  try {
+    const { payload } = await jose.jwtVerify(token, SECRET);
+    return payload as { userId: string; role: string };
+  } catch {
+    return null;
+  }
+}
+```
+
+---
+
+## 🔄 OAuth flow: понимаем что происходит
+
+```
+1. Пользователь нажимает "Войти через GitHub"
+2. Редирект на https://github.com/login/oauth/authorize?
+     client_id=YOUR_CLIENT_ID&
+     redirect_uri=YOUR_APP/auth/callback/github&
+     scope=user:email&
+     state=RANDOM_STRING    ← CSRF защита
+3. Пользователь разрешает доступ на GitHub
+4. GitHub редиректит на YOUR_APP/auth/callback/github?
+     code=TEMP_CODE&
+     state=RANDOM_STRING
+5. SvelteKit обменивает code на access_token (server-side!)
+6. Получает данные пользователя через GitHub API
+7. Создаёт/обновляет запись в БД
+8. Устанавливает сессионную куку
+9. Редирект на /dashboard
+```
+
+---
+
+## 🌐 Защита API routes
+
+```typescript
+// src/routes/api/protected/+server.ts
+import type { RequestHandler } from './$types';
+import { json, error } from '@sveltejs/kit';
+
+export const GET: RequestHandler = async ({ locals }) => {
+  if (!locals.user) {
+    error(401, {
+      message: 'Не авторизован',
+      code: 'UNAUTHORIZED',
+    });
+  }
+
+  if (locals.user.role !== 'admin') {
+    error(403, {
+      message: 'Доступ запрещён',
+      code: 'FORBIDDEN',
+    });
+  }
+
+  return json({ secret: 'Секретные данные для админа' });
+};
+```
+
+---
+
+<Playground client:visible template="react" files={{ 'App.tsx': `import { useState, useCallback } from "react";
+
+const SVELTE_ORANGE = "#ff3e00";
+const SVELTE_YELLOW = "#ffba00";
+const BG = "#0f172a";
+const BG2 = "#1e293b";
+const BG3 = "#334155";
+
+type Tab = "cookie" | "oauth" | "protect" | "sessions";
+type Role = "guest" | "user" | "admin";
+
+const tabs = [
+  { id: "cookie" as Tab, label: "Cookie Auth", emoji: "🍪" },
+  { id: "oauth" as Tab, label: "OAuth Flow", emoji: "🔑" },
+  { id: "protect" as Tab, label: "Защита роутов", emoji: "🛡️" },
+  { id: "sessions" as Tab, label: "JWT vs DB", emoji: "🎫" },
+];
+
+function CookieDemo() {
+  const [step, setStep] = useState<"form" | "loading" | "success" | "error">("form");
+  const [email, setEmail] = useState("test@example.com");
+  const [password, setPassword] = useState("password123");
+  const [error, setError] = useState("");
+  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+
+  const login = async () => {
+    setStep("loading");
+    await new Promise((r) => setTimeout(r, 800));
+
+    if (email === "test@example.com" && password === "password123") {
+      setUser({ name: "Яша", email });
+      setStep("success");
+    } else {
+      setError("Неверный email или пароль");
+      setStep("error");
+    }
+  };
+
+  const logout = () => {
+    setUser(null);
+    setStep("form");
+    setError("");
+  };
+
+  return (
+    <div>
+      {step === "success" && user ? (
+        <div>
+          <div style={{ background: "#34d39922", border: "1px solid #34d399", borderRadius: "8px", padding: "12px", marginBottom: "12px" }}>
+            <div style={{ color: "#34d399", fontSize: "13px", fontWeight: "bold" }}>✅ Авторизован!</div>
+            <div style={{ color: "#94a3b8", fontSize: "12px", marginTop: "4px" }}>👤 {user.name} ({user.email})</div>
+            <div style={{ color: "#64748b", fontSize: "11px", fontFamily: "monospace", marginTop: "6px" }}>
+              Set-Cookie: session=abc123xyz; HttpOnly; Secure; SameSite=Lax
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "12px" }}>
+            {["/dashboard", "/profile", "/admin (403)", "/settings"].map((path) => (
+              <div key={path} style={{ background: BG3, borderRadius: "6px", padding: "8px", fontSize: "12px" }}>
+                <span style={{ color: path.includes("403") ? "#f87171" : "#34d399" }}>
+                  {path.includes("403") ? "❌" : "✅"}
+                </span>
+                <span style={{ color: "#e2e8f0", marginLeft: "6px" }}>{path}</span>
+              </div>
+            ))}
+          </div>
+          <button onClick={logout} style={{ width: "100%", background: BG3, color: "#94a3b8", border: "1px solid #475569", borderRadius: "8px", padding: "8px", cursor: "pointer", fontSize: "12px" }}>
+            Выйти (delete cookie)
+          </button>
+        </div>
+      ) : (
+        <div>
+          <div style={{ fontFamily: "monospace", fontSize: "11px", color: "#64748b", marginBottom: "10px" }}>
+            // action="?/login" в +page.server.ts
+          </div>
+          <div style={{ fontSize: "11px", color: "#475569", marginBottom: "10px", fontFamily: "monospace" }}>
+            💡 test@example.com / password123
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" placeholder="Email" style={{ padding: "8px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px" }} />
+            <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="Пароль" style={{ padding: "8px", background: BG3, border: "1px solid #475569", borderRadius: "6px", color: "#e2e8f0", fontSize: "13px" }} />
+
+            {step === "error" && (
+              <div style={{ background: "#f8717122", border: "1px solid #f87171", borderRadius: "6px", padding: "8px", fontSize: "12px", color: "#f87171" }}>
+                ❌ {error}
+              </div>
+            )}
+
+            <button onClick={login} disabled={step === "loading"} style={{ background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "10px", cursor: "pointer", fontSize: "13px" }}>
+              {step === "loading" ? "⏳ Проверяем..." : "Войти"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OAuthDemo() {
+  const [oauthStep, setOauthStep] = useState(0);
+  const [provider, setProvider] = useState<"github" | "google">("github");
+
+  const steps = [
+    { icon: "👆", title: "Клик на кнопку", desc: \`signIn('\${provider}')\` },
+    { icon: "↩️", title: "Редирект на провайдера", desc: \`https://\${provider}.com/oauth/authorize?client_id=...\` },
+    { icon: "✅", title: "Пользователь разрешил", desc: "Callback URL получает code" },
+    { icon: "🔄", title: "Обмен code на token", desc: "Server-side запрос к API провайдера" },
+    { icon: "👤", title: "Получение данных", desc: \`GET https://api.\${provider}.com/user\` },
+    { icon: "💾", title: "Сохранение в БД", desc: "upsert user в database" },
+    { icon: "🍪", title: "Установка сессии", desc: "Set-Cookie: session=..." },
+    { icon: "🎉", title: "redirect(/dashboard)", desc: "Пользователь авторизован!" },
+  ];
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
+        {(["github", "google"] as const).map((p) => (
+          <button key={p} onClick={() => { setProvider(p); setOauthStep(0); }} style={{ flex: 1, padding: "8px", border: \`1px solid \${provider === p ? SVELTE_ORANGE : "#475569"}\`, borderRadius: "6px", background: provider === p ? \`\${SVELTE_ORANGE}22\` : BG3, cursor: "pointer", color: "#e2e8f0", fontSize: "12px" }}>
+            {p === "github" ? "🐙 GitHub" : "🔵 Google"}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ marginBottom: "10px" }}>
+        {steps.map((step, i) => (
+          <div
+            key={i}
+            onClick={() => setOauthStep(i)}
+            style={{ display: "flex", alignItems: "center", gap: "10px", padding: "8px", background: i === oauthStep ? \`\${SVELTE_ORANGE}22\` : i < oauthStep ? "#34d39911" : BG3, borderRadius: "6px", marginBottom: "4px", cursor: "pointer", border: \`1px solid \${i === oauthStep ? SVELTE_ORANGE : i < oauthStep ? "#34d39944" : "#334155"}\`, transition: "all 0.15s" }}
+          >
+            <span style={{ fontSize: "16px", minWidth: "24px" }}>{step.icon}</span>
+            <div>
+              <div style={{ fontSize: "12px", color: i === oauthStep ? SVELTE_ORANGE : i < oauthStep ? "#34d399" : "#94a3b8", fontWeight: i === oauthStep ? "bold" : "normal" }}>
+                {i + 1}. {step.title}
+              </div>
+              <div style={{ fontSize: "10px", color: "#64748b", fontFamily: "monospace" }}>{step.desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <button
+        onClick={() => setOauthStep((s) => Math.min(s + 1, steps.length - 1))}
+        style={{ width: "100%", background: SVELTE_ORANGE, color: "#fff", border: "none", borderRadius: "8px", padding: "8px", cursor: "pointer", fontSize: "12px" }}
+      >
+        {oauthStep < steps.length - 1 ? "Следующий шаг →" : "✅ Готово! Начать снова"}
+      </button>
+    </div>
+  );
+}
+
+const protectedRoutes = [
+  { path: "/", role: "guest" as Role, label: "Главная", icon: "🏠" },
+  { path: "/about", role: "guest" as Role, label: "О нас", icon: "ℹ️" },
+  { path: "/blog", role: "guest" as Role, label: "Блог", icon: "📝" },
+  { path: "/dashboard", role: "user" as Role, label: "Dashboard", icon: "📊" },
+  { path: "/profile", role: "user" as Role, label: "Профиль", icon: "👤" },
+  { path: "/settings", role: "user" as Role, label: "Настройки", icon: "⚙️" },
+  { path: "/admin", role: "admin" as Role, label: "Админ", icon: "🔧" },
+  { path: "/admin/users", role: "admin" as Role, label: "Пользователи", icon: "👥" },
+];
+
+function ProtectDemo() {
+  const [currentRole, setCurrentRole] = useState<Role>("guest");
+  const [visitedPath, setVisitedPath] = useState<string | null>(null);
+  const [result, setResult] = useState<"allowed" | "redirect" | "forbidden" | null>(null);
+
+  const roleOrder: Role[] = ["guest", "user", "admin"];
+
+  const canAccess = (required: Role, current: Role) =>
+    roleOrder.indexOf(current) >= roleOrder.indexOf(required);
+
+  const tryNavigate = (path: string, required: Role) => {
+    setVisitedPath(path);
+    if (canAccess(required, currentRole)) {
+      setResult("allowed");
+    } else if (currentRole === "guest") {
+      setResult("redirect");
+    } else {
+      setResult("forbidden");
+    }
+  };
+
+  const roleColors: Record<Role, string> = { guest: "#64748b", user: SVELTE_ORANGE, admin: "#f59e0b" };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "6px", marginBottom: "12px" }}>
+        {(roleOrder).map((r) => (
+          <button key={r} onClick={() => { setCurrentRole(r); setResult(null); }} style={{ flex: 1, padding: "8px", border: \`1px solid \${currentRole === r ? roleColors[r] : "#475569"}\`, borderRadius: "6px", background: currentRole === r ? \`\${roleColors[r]}22\` : BG3, cursor: "pointer", color: roleColors[r], fontSize: "12px", fontWeight: "bold" }}>
+            {r === "guest" ? "👻" : r === "user" ? "👤" : "👑"} {r}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ marginBottom: "10px" }}>
+        {protectedRoutes.map((route) => {
+          const accessible = canAccess(route.role, currentRole);
+          return (
+            <div
+              key={route.path}
+              onClick={() => tryNavigate(route.path, route.role)}
+              style={{ display: "flex", alignItems: "center", gap: "8px", padding: "7px 10px", background: visitedPath === route.path ? \`\${SVELTE_ORANGE}22\` : accessible ? BG3 : "#1e2a3a", borderRadius: "6px", marginBottom: "4px", cursor: "pointer", opacity: accessible ? 1 : 0.6, border: \`1px solid \${visitedPath === route.path ? SVELTE_ORANGE : accessible ? "#334155" : "#1e293b"}\` }}
+            >
+              <span>{route.icon}</span>
+              <span style={{ flex: 1, fontSize: "12px", color: accessible ? "#e2e8f0" : "#475569" }}>{route.label}</span>
+              <span style={{ fontSize: "10px", color: roleColors[route.role], background: \`\${roleColors[route.role]}22\`, padding: "2px 6px", borderRadius: "4px" }}>{route.role}</span>
+              <span style={{ fontSize: "12px" }}>{accessible ? "✅" : "🔒"}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {result && visitedPath && (
+        <div style={{ background: BG, borderRadius: "8px", padding: "10px", border: \`1px solid \${result === "allowed" ? "#34d399" : result === "redirect" ? SVELTE_YELLOW : "#f87171"}44\` }}>
+          <div style={{ fontSize: "13px", color: result === "allowed" ? "#34d399" : result === "redirect" ? SVELTE_YELLOW : "#f87171", fontWeight: "bold" }}>
+            {result === "allowed" ? \`✅ Доступ разрешён → \${visitedPath}\` : result === "redirect" ? \`↩️ redirect(307, '/login?redirectTo=\${visitedPath}')\` : \`❌ error(403, 'Доступ запрещён')\`}
+          </div>
+          <div style={{ fontSize: "11px", color: "#64748b", fontFamily: "monospace", marginTop: "4px" }}>
+            {result === "allowed" ? "locals.user.role проверен в +layout.server.ts" : result === "redirect" ? "Нет сессии → редирект на логин" : "Роль недостаточна"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionsDemo() {
+  const [type, setType] = useState<"jwt" | "db">("jwt");
+
+  const jwtPros = ["Stateless — нет запроса в БД", "Масштабируется горизонтально", "Данные в payload"];
+  const jwtCons = ["Нельзя инвалидировать сразу", "Нужен refresh token", "Уязвим при краже до expiry"];
+  const dbPros = ["Мгновенный logout везде", "Видишь все активные сессии", "Полный контроль"];
+  const dbCons = ["Запрос в БД каждый запрос", "Менее масштабируемо", "Нужна чистка истёкших сессий"];
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "6px", marginBottom: "16px" }}>
+        {(["jwt", "db"] as const).map((t) => (
+          <button key={t} onClick={() => setType(t)} style={{ flex: 1, padding: "10px", border: \`1px solid \${type === t ? SVELTE_ORANGE : "#475569"}\`, borderRadius: "8px", background: type === t ? \`\${SVELTE_ORANGE}22\` : BG3, cursor: "pointer", color: type === t ? SVELTE_ORANGE : "#94a3b8", fontSize: "12px", fontWeight: "bold" }}>
+            {t === "jwt" ? "🎫 JWT Tokens" : "💾 DB Sessions"}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+        <div style={{ background: "#34d39911", borderRadius: "8px", padding: "10px", border: "1px solid #34d39933" }}>
+          <div style={{ fontSize: "12px", color: "#34d399", fontWeight: "bold", marginBottom: "8px" }}>✅ Плюсы</div>
+          {(type === "jwt" ? jwtPros : dbPros).map((pro, i) => (
+            <div key={i} style={{ fontSize: "11px", color: "#e2e8f0", padding: "3px 0", borderBottom: i < 2 ? "1px solid #34d39911" : "none" }}>
+              + {pro}
+            </div>
+          ))}
+        </div>
+        <div style={{ background: "#f8717111", borderRadius: "8px", padding: "10px", border: "1px solid #f8717133" }}>
+          <div style={{ fontSize: "12px", color: "#f87171", fontWeight: "bold", marginBottom: "8px" }}>❌ Минусы</div>
+          {(type === "jwt" ? jwtCons : dbCons).map((con, i) => (
+            <div key={i} style={{ fontSize: "11px", color: "#e2e8f0", padding: "3px 0", borderBottom: i < 2 ? "1px solid #f8717111" : "none" }}>
+              − {con}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginTop: "12px", background: BG3, borderRadius: "8px", padding: "10px" }}>
+        <div style={{ fontSize: "11px", color: SVELTE_YELLOW, fontFamily: "monospace" }}>Рекомендация:</div>
+        <div style={{ fontSize: "12px", color: "#94a3b8", marginTop: "4px" }}>
+          {type === "jwt" ? "JWT — для микросервисов и горизонтального масштабирования. Используй короткий expiry (15 мин) + refresh tokens." : "DB сессии — для монолитов и когда нужна мгновенная инвалидация. Используй Redis для кэширования."}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("cookie");
+
+  return (
+    <div style={{ background: BG, minHeight: "100vh", padding: "20px", fontFamily: "system-ui, sans-serif", color: "#e2e8f0" }}>
+      <div style={{ maxWidth: "520px", margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: "20px" }}>
+          <div style={{ fontSize: "26px", fontWeight: "bold", color: SVELTE_ORANGE }}>Аутентификация</div>
+          <div style={{ fontSize: "13px", color: "#64748b", marginTop: "4px" }}>SvelteKit Auth 🔐</div>
+        </div>
+
+        <div style={{ display: "flex", gap: "4px", marginBottom: "16px", background: BG2, padding: "4px", borderRadius: "10px" }}>
+          {tabs.map((tab) => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "7px 2px", border: "none", borderRadius: "7px", cursor: "pointer", background: activeTab === tab.id ? SVELTE_ORANGE : "transparent", color: activeTab === tab.id ? "#fff" : "#94a3b8", fontSize: "10px", fontWeight: activeTab === tab.id ? "bold" : "normal", transition: "all 0.15s" }}>
+              {tab.emoji} {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: BG2, borderRadius: "12px", padding: "16px", border: "1px solid #1e293b" }}>
+          {activeTab === "cookie" && <CookieDemo />}
+          {activeTab === "oauth" && <OAuthDemo />}
+          {activeTab === "protect" && <ProtectDemo />}
+          {activeTab === "sessions" && <SessionsDemo />}
+        </div>
+      </div>
+    </div>
+  );
+}
+` }} />
