@@ -1,10 +1,6 @@
 # Stage 1: Install dependencies
 FROM node:20-alpine AS deps
 
-# Install git (required by nextra for last-modified timestamps)
-RUN apk add --no-cache git
-
-# Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
@@ -16,7 +12,6 @@ RUN pnpm install --frozen-lockfile
 # Stage 2: Build
 FROM node:20-alpine AS builder
 
-RUN apk add --no-cache git
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
@@ -24,35 +19,20 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Init a dummy git repo so nextra doesn't warn and fail
-RUN git config --global user.email "build@docker.local" && \
-    git config --global user.name "Docker Build" && \
-    git init && \
-    git add -A && \
-    git commit -m "build snapshot" --quiet
-
-ENV NEXT_TELEMETRY_DISABLED=1
-# 1200+ MDX files require ~9-10GB for webpack compilation
+# 1100+ MDX files require extra memory for Astro build
 ENV NODE_OPTIONS="--max-old-space-size=12288"
 
 RUN pnpm run build
 
 
-# Stage 3: Production runner (minimal image)
-FROM node:20-alpine AS runner
+# Stage 3: Serve static files with nginx
+FROM nginx:alpine AS runner
 
-WORKDIR /app
+COPY --from=builder /app/dist /usr/share/nginx/html
 
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-ENV PORT=4010
-ENV HOSTNAME="0.0.0.0"
-
-# standalone output contains everything needed to run
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+# SPA-like fallback for 404
+RUN printf 'server {\n  listen 4010;\n  root /usr/share/nginx/html;\n  index index.html;\n  location / {\n    try_files $uri $uri/index.html $uri.html /404.html;\n  }\n  error_page 404 /404.html;\n}\n' > /etc/nginx/conf.d/default.conf
 
 EXPOSE 4010
 
-CMD ["node", "server.js"]
+CMD ["nginx", "-g", "daemon off;"]
