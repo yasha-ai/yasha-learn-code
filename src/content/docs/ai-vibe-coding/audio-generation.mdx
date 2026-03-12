@@ -1,0 +1,575 @@
+---
+title: "Урок 5: Генерация звука — Suno AI и ElevenLabs"
+sidebar:
+  order: 8
+---
+
+import { Aside, Steps, Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Эпоха AI-аудио настала
+
+Если 2024 год был годом текста и изображений, то 2025–2026 — это **эра AI-аудио**. Инструменты вроде Suno и ElevenLabs сделали для музыки и голоса то, что ChatGPT сделал для письма.
+
+Для разработчика это открывает огромные возможности:
+
+- **Динамические саундтреки** для игр, меняющиеся в зависимости от действий игрока
+- **Персонализированные джинглы** для маркетинговых кампаний
+- **Голосовые интерфейсы** для продуктов (приложения, боты, ассистенты)
+- **Автоматическое озвучивание** контента (новости, статьи, документация)
+- **Дубляж и локализация** видео на 29+ языках
+
+---
+
+## Suno AI — музыка из текста
+
+**Suno** — лидер в генерации полноценных музыкальных треков с вокалом, инструментами и аранжировкой. С выходом **Suno V5** платформа вышла на уровень, при котором результат сложно отличить от профессиональной записи.
+
+### Что умеет Suno V5
+
+- **Вокальная генерация** — полноценные песни с текстом, близкие к человеческому исполнению
+- **Инструментальный режим** — фоновые треки, биты, саундскейпы без вокала
+- **Custom Mode** — раздельный контроль текста, жанра и настроения
+- **Audio Extension** — продолжение существующего трека с сохранением темпа и тональности
+- **Stem export** — экспорт отдельных дорожек (вокал, бас, барабаны) для работы в DAW
+
+### Технические характеристики V5
+
+| Параметр | Значение |
+|----------|----------|
+| Качество аудио | 44.1 kHz stereo |
+| ELO-рейтинг | 1,293 (лучший в классе) |
+| Время генерации | 20–30 секунд на трек |
+| Первый чанк | ~10–15 секунд |
+| Точность промпта | 88% совпадений по жанру |
+| Lyric Hallucination | менее 5% |
+
+### Важно: API-реальность 2026
+
+<Aside type="caution">
+**Официального публичного API от Suno пока нет.** Компания сосредоточена на потребительской платформе и предоставляет API только select-партнёрам. Для разработчиков работает экосистема **третьесторонних провайдеров** (EvoLink, APIPASS), которые предоставляют стабильный REST API поверх Suno.
+</Aside>
+
+Правовой контекст: Warner и Universal урегулировали судебные претензии к Suno и Udio — новые модели обучаются на лицензированных данных.
+
+### Интеграция через third-party API
+
+<Tabs>
+  <TabItem label="Python">
+```python
+import requests
+import time
+
+API_KEY = "your_suno_api_key"
+BASE_URL = "https://api.your-suno-provider.com/v1"
+
+def generate_track(prompt: str, style: str = "", lyrics: str = "") -> dict:
+    """Генерация музыкального трека через Suno API."""
+    
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "prompt": prompt,
+        "custom_mode": True,
+        "style": style,         # "Cyberpunk synthwave, 140 BPM, aggressive bass"
+        "lyrics": lyrics,       # Текст песни или пусто для инструментала
+        "instrumental": not bool(lyrics),
+        "make_instrumental": not bool(lyrics)
+    }
+    
+    # Отправляем запрос на генерацию
+    response = requests.post(
+        f"{BASE_URL}/generate",
+        json=payload,
+        headers=headers
+    )
+    response.raise_for_status()
+    task = response.json()
+    task_id = task["task_id"]
+    
+    # Polling статуса (генерация занимает 20-30 сек)
+    return poll_task(task_id, headers)
+
+def poll_task(task_id: str, headers: dict, timeout: int = 120) -> dict:
+    """Опрашиваем API до готовности трека."""
+    start = time.time()
+    
+    while time.time() - start < timeout:
+        resp = requests.get(
+            f"{BASE_URL}/task/{task_id}",
+            headers=headers
+        )
+        data = resp.json()
+        
+        if data["status"] == "completed":
+            return {
+                "audio_url": data["audio_url"],
+                "duration": data["duration"],
+                "title": data.get("title", "Generated Track")
+            }
+        elif data["status"] == "failed":
+            raise Exception(f"Generation failed: {data.get('error')}")
+        
+        time.sleep(2)  # Ждём 2 секунды между запросами
+    
+    raise TimeoutError("Track generation timed out")
+
+# Использование
+track = generate_track(
+    prompt="Epic battle theme for a mobile game",
+    style="Orchestral, dramatic, 120 BPM, strings and brass",
+    lyrics=""  # Инструментал
+)
+
+print(f"Трек готов: {track['audio_url']}")
+```
+  </TabItem>
+  <TabItem label="TypeScript">
+```typescript
+const API_KEY = process.env.SUNO_API_KEY!;
+const BASE_URL = "https://api.your-suno-provider.com/v1";
+
+interface GenerateOptions {
+  prompt: string;
+  style?: string;
+  lyrics?: string;
+}
+
+interface TrackResult {
+  audioUrl: string;
+  duration: number;
+  title: string;
+}
+
+async function generateTrack(options: GenerateOptions): Promise<TrackResult> {
+  const { prompt, style = "", lyrics = "" } = options;
+  
+  // Запрос на генерацию
+  const res = await fetch(`${BASE_URL}/generate`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      prompt,
+      custom_mode: true,
+      style,
+      lyrics,
+      instrumental: !lyrics,
+    }),
+  });
+  
+  const { task_id } = await res.json();
+  
+  // Polling до готовности
+  return pollTask(task_id);
+}
+
+async function pollTask(taskId: string): Promise<TrackResult> {
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    
+    const res = await fetch(`${BASE_URL}/task/${taskId}`, {
+      headers: { "Authorization": `Bearer ${API_KEY}` },
+    });
+    const data = await res.json();
+    
+    if (data.status === "completed") {
+      return {
+        audioUrl: data.audio_url,
+        duration: data.duration,
+        title: data.title ?? "Generated Track",
+      };
+    }
+    
+    if (data.status === "failed") {
+      throw new Error(`Generation failed: ${data.error}`);
+    }
+  }
+  
+  throw new Error("Timeout: track not ready in 120s");
+}
+
+// Использование
+const track = await generateTrack({
+  prompt: "Lo-fi hip-hop for a coding session",
+  style: "Lo-fi, chill, 80 BPM, jazzy piano, vinyl crackle",
+});
+
+console.log(`Track ready: ${track.audioUrl}`);
+```
+  </TabItem>
+</Tabs>
+
+### Real Use Cases для Suno
+
+<CardGrid>
+  <Card title="Игровые саундтреки">
+    Динамическая музыка, меняющаяся по биому или интенсивности боя. API принимает параметры состояния игры и генерирует соответствующий трек.
+  </Card>
+  <Card title="Маркетинговый контент">
+    Персонализированные джинглы и фоновая музыка для видео, рекламы и соцсетей — масштабируемо и быстро.
+  </Card>
+  <Card title="Подкасты и YouTube">
+    Уникальная интро/аутро музыка для каждого эпизода. Никаких роялти, никаких претензий.
+  </Card>
+  <Card title="EdTech и e-learning">
+    Адаптивный звуковой фон для обучающих платформ, поддерживающий концентрацию.
+  </Card>
+</CardGrid>
+
+### Стоимость (2026)
+
+| Провайдер | Цена за трек | Concurrency | Надёжность |
+|-----------|-------------|-------------|------------|
+| Прямая подписка (~$30/мес) | ~$0.03–0.04 | 1 (sequential) | Низкая для API |
+| Raw third-party wrapper | $0.05–0.10 | Средняя | Вариативная |
+| Enterprise API solutions | $0.02–0.05 | 50+ запросов | Высокая |
+
+---
+
+## ElevenLabs — голос из текста
+
+**ElevenLabs** — мировой стандарт для Text-to-Speech и Voice Cloning. Поддержка 29+ языков, реалистичные голоса, мгновенное клонирование.
+
+### Ключевые возможности
+
+- **Text-to-Speech** — гиперреалистичный синтез речи (Multilingual v2, Flash)
+- **Voice Cloning** — мгновенное и профессиональное клонирование голоса
+- **Conversational AI** — интерактивные голосовые агенты в реальном времени
+- **Speech-to-Text** — транскрипция через API и UI
+- **Voice Changer** — трансформация голоса в реальном времени
+- **Voice Isolator** — очистка аудио от фонового шума
+- **Sound Effects** — генерация звуковых эффектов по описанию
+- **Dubbing** — автоматический дубляж видео с сохранением тембра голоса
+
+### Тарифные планы ElevenLabs (2026)
+
+| План | Цена | Символы/мес | Клонирование | Качество |
+|------|------|-------------|--------------|---------|
+| Free | $0 | 10k (Multi) / 20k (Flash) | Нет | 128 kbps |
+| Starter | $5 | 30k / 60k | Instant | 128 kbps |
+| Creator | $11 | 100k / 200k | 1 Pro Clone | 192 kbps |
+| Pro | $99 | 500k / 1M | 1 Pro Clone | 192 kbps |
+| Scale | $330 | 2M / 4M | 1 Pro Clone | 192 kbps |
+| Business | $1,320 | 11M / 22M | 3 PVCs | 192 kbps + SLA |
+| Enterprise | Custom | Custom | Custom | Custom |
+
+<Aside type="tip">
+**Совет:** Flash-модель генерирует вдвое больше символов в рамках того же плана, но чуть менее натурально для сложных интонаций. Для большинства случаев Flash — лучший выбор по соотношению цена/качество.
+</Aside>
+
+### Интеграция ElevenLabs API
+
+<Tabs>
+  <TabItem label="Python (официальный SDK)">
+```python
+from elevenlabs import ElevenLabs, VoiceSettings
+
+client = ElevenLabs(api_key="your_elevenlabs_api_key")
+
+def text_to_speech(
+    text: str,
+    voice_id: str = "JBFqnCBsd6RMkjVDRZzb",  # George (по умолчанию)
+    model: str = "eleven_multilingual_v2",
+    output_path: str = "output.mp3"
+) -> str:
+    """Конвертация текста в речь."""
+    
+    audio = client.text_to_speech.convert(
+        voice_id=voice_id,
+        text=text,
+        model_id=model,
+        voice_settings=VoiceSettings(
+            stability=0.5,        # 0-1, выше = стабильнее
+            similarity_boost=0.75, # 0-1, близость к оригинальному голосу
+            style=0.0,            # 0-1, стилистическое усиление
+            use_speaker_boost=True
+        ),
+        output_format="mp3_44100_128",
+    )
+    
+    # Сохраняем аудио в файл
+    with open(output_path, "wb") as f:
+        for chunk in audio:
+            if chunk:
+                f.write(chunk)
+    
+    return output_path
+
+# Получение списка доступных голосов
+def list_voices():
+    voices = client.voices.get_all()
+    for voice in voices.voices:
+        print(f"{voice.name}: {voice.voice_id} ({voice.labels})")
+
+# Instant Voice Cloning (нужно 1+ минута аудио)
+def clone_voice(name: str, sample_files: list[str]) -> str:
+    voice = client.clone(
+        name=name,
+        description="My custom voice clone",
+        files=sample_files,  # Пути к .mp3/.wav файлам
+    )
+    return voice.voice_id
+
+# Использование
+audio_path = text_to_speech(
+    text="Привет! Это тест ElevenLabs API на русском языке.",
+    voice_id="JBFqnCBsd6RMkjVDRZzb",
+    model="eleven_multilingual_v2",
+    output_path="hello_russian.mp3"
+)
+print(f"Аудио готово: {audio_path}")
+```
+  </TabItem>
+  <TabItem label="TypeScript (fetch API)">
+```typescript
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY!;
+const BASE_URL = "https://api.elevenlabs.io/v1";
+
+interface TTSOptions {
+  text: string;
+  voiceId?: string;
+  modelId?: string;
+  stability?: number;
+  similarityBoost?: number;
+}
+
+async function textToSpeech(options: TTSOptions): Promise<ArrayBuffer> {
+  const {
+    text,
+    voiceId = "JBFqnCBsd6RMkjVDRZzb",
+    modelId = "eleven_multilingual_v2",
+    stability = 0.5,
+    similarityBoost = 0.75,
+  } = options;
+
+  const response = await fetch(
+    `${BASE_URL}/text-to-speech/${voiceId}`,
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: modelId,
+        voice_settings: {
+          stability,
+          similarity_boost: similarityBoost,
+          style: 0,
+          use_speaker_boost: true,
+        },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`ElevenLabs API error: ${response.status}`);
+  }
+
+  return response.arrayBuffer();
+}
+
+// Streaming TTS (для real-time приложений)
+async function textToSpeechStream(
+  text: string,
+  voiceId: string = "JBFqnCBsd6RMkjVDRZzb"
+): Promise<ReadableStream> {
+  const response = await fetch(
+    `${BASE_URL}/text-to-speech/${voiceId}/stream`,
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_flash_v2_5", // Flash для скорости
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    }
+  );
+
+  return response.body!;
+}
+
+// Next.js API Route пример
+export async function POST(request: Request) {
+  const { text } = await request.json();
+  
+  const audioBuffer = await textToSpeech({ text });
+  
+  return new Response(audioBuffer, {
+    headers: {
+      "Content-Type": "audio/mpeg",
+      "Content-Length": audioBuffer.byteLength.toString(),
+    },
+  });
+}
+```
+  </TabItem>
+  <TabItem label="cURL">
+```bash
+# Простая генерация речи
+curl -X POST \
+  "https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb" \
+  -H "xi-api-key: $ELEVENLABS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Hello from ElevenLabs!",
+    "model_id": "eleven_multilingual_v2",
+    "voice_settings": {
+      "stability": 0.5,
+      "similarity_boost": 0.75
+    }
+  }' \
+  --output output.mp3
+
+# Получить список голосов
+curl -X GET \
+  "https://api.elevenlabs.io/v1/voices" \
+  -H "xi-api-key: $ELEVENLABS_API_KEY"
+
+# Проверить баланс
+curl -X GET \
+  "https://api.elevenlabs.io/v1/user/subscription" \
+  -H "xi-api-key: $ELEVENLABS_API_KEY"
+```
+  </TabItem>
+</Tabs>
+
+### Модели ElevenLabs: что выбрать
+
+| Модель | Скорость | Качество | Языки | Use Case |
+|--------|----------|----------|-------|----------|
+| `eleven_multilingual_v2` | Медленнее | Лучшее | 29+ | Продакшн-контент, нарратив |
+| `eleven_flash_v2_5` | Быстрее (~2x) | Отличное | 29+ | Real-time, чатботы |
+| `eleven_turbo_v2` | Самый быстрый | Хорошее | EN | Low-latency приложения |
+
+### Conversational AI с ElevenLabs
+
+ElevenLabs предоставляет полноценный фреймворк для голосовых агентов:
+
+```python
+from elevenlabs.conversational_ai.conversation import Conversation
+from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
+
+# Конфигурация агента создаётся в ElevenLabs Dashboard
+AGENT_ID = "your_agent_id"
+
+conversation = Conversation(
+    client=client,
+    agent_id=AGENT_ID,
+    requires_auth=False,
+    audio_interface=DefaultAudioInterface(),
+    callback_agent_response=lambda r: print(f"Агент: {r}"),
+    callback_user_transcript=lambda t: print(f"Пользователь: {t}"),
+)
+
+conversation.start_session()
+# ... голосовой диалог в реальном времени
+conversation.end_session()
+```
+
+---
+
+## Другие Audio AI инструменты 2026
+
+<CardGrid>
+  <Card title="Udio">
+    Сильный конкурент Suno. Лучше для экспериментов и необычных жанров. Урегулировал споры с Universal, переходит на лицензированные данные.
+  </Card>
+  <Card title="AIVA">
+    Специализируется на классической и оркестровой музыке. Отлично для кино и игр, требующих академического звучания.
+  </Card>
+  <Card title="Mubert">
+    Генерация бесконечного адаптивного фона. API для стриминга музыки под любое настроение — идеально для приложений.
+  </Card>
+  <Card title="ElevenLabs Sound Effects">
+    Генерация звуковых эффектов по описанию: "глухой удар металла о камень", "звук открывающегося портала".
+  </Card>
+</CardGrid>
+
+---
+
+## Практический проект: Голосовой Telegram-бот
+
+Соберём всё вместе — бот принимает текст и отвечает голосом через ElevenLabs:
+
+```python
+import os
+import asyncio
+import tempfile
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from elevenlabs import ElevenLabs
+
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+ELEVENLABS_KEY = os.environ["ELEVENLABS_API_KEY"]
+VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
+
+el_client = ElevenLabs(api_key=ELEVENLABS_KEY)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    # Генерируем голосовое сообщение
+    audio_stream = el_client.text_to_speech.convert(
+        voice_id=VOICE_ID,
+        text=text,
+        model_id="eleven_flash_v2_5",  # Flash для скорости
+    )
+    
+    # Сохраняем во временный файл
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        for chunk in audio_stream:
+            if chunk:
+                tmp.write(chunk)
+        tmp_path = tmp.name
+    
+    # Отправляем голосовое сообщение
+    with open(tmp_path, "rb") as audio:
+        await update.message.reply_voice(voice=audio)
+    
+    os.unlink(tmp_path)
+
+def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
+```
+
+<Aside type="tip">
+**Совет по оптимизации:** Кешируй часто используемые фразы (приветствия, стандартные ответы) — не генерируй одно и то же дважды. Это снизит расход символов на 40–60%.
+</Aside>
+
+---
+
+## Итоги: Что и когда использовать
+
+| Задача | Инструмент | Модель/Режим |
+|--------|------------|--------------|
+| Музыка для игры | Suno V5 API | Custom Mode, instrumental |
+| TTS для бота/ассистента | ElevenLabs | Flash v2.5, streaming |
+| Клонирование голоса | ElevenLabs | Professional Voice Clone |
+| Классическая музыка | AIVA | — |
+| Звуковые эффекты | ElevenLabs | Sound Effects endpoint |
+| Бесконечный фон | Mubert | Streaming API |
+| Дубляж видео | ElevenLabs | Dubbing API |
+| Голосовой агент | ElevenLabs | Conversational AI |
+
+---
+
+## Что дальше
+
+В следующем уроке разберём **OpenClaw AI Agent** — как автоматизировать повторяющиеся задачи с помощью агентного AI прямо в своём окружении.
