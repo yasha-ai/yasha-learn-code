@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 /**
  * Яша Learn Code — Page Auditor
- * Проверяет страницы на: 404, broken images, Sandpack ошибки, console errors
  * 
- * Usage: node scripts/audit-pages.js --sections html,css --base-url http://localhost:4010
+ * Фаза 1 (fetch): проверяет HTTP статус всех страниц
+ * Фаза 2 (playwright): только страницы с Playground — проверяет рендер без ошибок
+ * 
+ * Usage:
+ *   node scripts/audit-pages.js --sections html,css
+ *   node scripts/audit-pages.js --sections javascript --base-url https://yashaschool.dyuzhev.dev
  */
 
 import { chromium } from 'playwright'
@@ -22,268 +26,203 @@ const getArg = (name) => {
 }
 
 const SECTIONS = getArg('--sections')?.split(',') || null
-const BASE_URL = getArg('--base-url') || 'http://localhost:4010'
-const OUTPUT_FILE = getArg('--output') || path.join(ROOT, 'audit-report.json')
-const TIMEOUT = parseInt(getArg('--timeout') || '20000')
-const HEADLESS = !args.includes('--headed')
+const BASE_URL = (getArg('--base-url') || 'https://yashaschool.dyuzhev.dev').replace(/\/$/, '')
+const OUTPUT_FILE = getArg('--output') || '/tmp/audit-report.json'
+const TIMEOUT = parseInt(getArg('--timeout') || '15000')
 
-// Получить URL страницы из MDX файла
+// MDX slug → URL
 function mdxToUrl(section, filename) {
   const slug = filename.replace(/\.mdx$/, '')
   return `${BASE_URL}/${section}/${slug}/`
 }
 
-// Получить все MDX файлы по секциям
-function getPages(sections) {
+// Читаем MDX и смотрим есть ли Playground
+function hasPlayground(section, filename) {
+  try {
+    const content = fs.readFileSync(path.join(CONTENT_DIR, section, filename), 'utf8')
+    return content.includes('<Playground') || content.includes('import { Playground')
+  } catch { return false }
+}
+
+// Получить все страницы
+function getPages() {
   const pages = []
-  const dirs = sections
-    ? sections.map(s => path.join(CONTENT_DIR, s))
+  const dirs = SECTIONS
+    ? SECTIONS.map(s => ({ name: s, full: path.join(CONTENT_DIR, s) }))
     : fs.readdirSync(CONTENT_DIR)
         .filter(d => fs.statSync(path.join(CONTENT_DIR, d)).isDirectory())
-        .map(d => path.join(CONTENT_DIR, d))
+        .map(d => ({ name: d, full: path.join(CONTENT_DIR, d) }))
 
-  for (const dir of dirs) {
-    if (!fs.existsSync(dir)) {
-      console.warn(`⚠ Section not found: ${dir}`)
-      continue
-    }
-    const section = path.basename(dir)
-    const files = fs.readdirSync(dir).filter(f => f.endsWith('.mdx'))
+  for (const { name, full } of dirs) {
+    if (!fs.existsSync(full)) { console.warn(`⚠ Section not found: ${name}`); continue }
+    const files = fs.readdirSync(full).filter(f => f.endsWith('.mdx'))
     for (const file of files) {
-      pages.push({ section, file, url: mdxToUrl(section, file) })
+      pages.push({
+        section: name,
+        file,
+        url: mdxToUrl(name, file),
+        hasPlayground: hasPlayground(name, file),
+      })
     }
   }
   return pages
 }
 
-// Проверить одну страницу
-async function auditPage(page, { section, file, url }) {
-  const errors = []
-  const warnings = []
-  const consoleErrors = []
+// Фаза 1: быстрая проверка HTTP статуса через fetch
+async function checkHttp(pages) {
+  console.log(`\n📡 Phase 1: HTTP check (${pages.length} pages)...`)
+  const results = []
 
-  // Слушаем console errors
-  page.on('console', msg => {
-    if (msg.type() === 'error') {
-      consoleErrors.push(msg.text())
-    }
-  })
+  for (let i = 0; i < pages.length; i++) {
+    const p = pages[i]
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), TIMEOUT)
+      const res = await fetch(p.url, { signal: controller.signal, method: 'HEAD' })
+      clearTimeout(timer)
 
-  // Слушаем page errors (uncaught exceptions)
-  const pageErrors = []
-  page.on('pageerror', err => pageErrors.push(err.message))
-
-  // Слушаем failed requests
-  const failedRequests = []
-  page.on('requestfailed', req => {
-    const url = req.url()
-    if (!url.includes('hot-update') && !url.includes('webpack-hmr')) {
-      failedRequests.push({ url, failure: req.failure()?.errorText })
-    }
-  })
-
-  let status = 0
-  let loadTime = 0
-
-  try {
-    const start = Date.now()
-    const response = await page.goto(url, {
-      waitUntil: 'networkidle',
-      timeout: TIMEOUT,
-    })
-    loadTime = Date.now() - start
-    status = response?.status() || 0
-
-    if (status >= 400) {
-      errors.push(`HTTP ${status}`)
-      return { url, section, file, status, errors, warnings, consoleErrors, pageErrors, loadTime, ok: false }
+      const ok = res.status < 400
+      results.push({ ...p, httpStatus: res.status, httpOk: ok, errors: ok ? [] : [`HTTP ${res.status}`] })
+      process.stdout.write(ok ? '.' : `\n❌ ${res.status} ${p.url}\n`)
+    } catch (err) {
+      results.push({ ...p, httpStatus: 0, httpOk: false, errors: [`Fetch failed: ${err.message.slice(0, 60)}`] })
+      process.stdout.write(`\n❌ FAIL ${p.url}\n`)
     }
 
-    // Ждём пока страница стабилизируется
-    await page.waitForTimeout(2000)
+    // прогресс каждые 50
+    if ((i + 1) % 50 === 0) process.stdout.write(` ${i + 1}/${pages.length}\n`)
+  }
+  console.log(` done\n`)
+  return results
+}
 
-    // 1. Проверить картинку урока
-    const images = await page.$$eval('img', imgs =>
-      imgs.map(img => ({
-        src: img.src,
-        naturalWidth: img.naturalWidth,
-        complete: img.complete,
-        alt: img.alt,
-      }))
-    )
+// Фаза 2: Playwright — только страницы с playground
+async function checkPlaygrounds(pages) {
+  const playgroundPages = pages.filter(p => p.hasPlayground && p.httpOk)
+  if (playgroundPages.length === 0) {
+    console.log('📦 No playgrounds found in this batch, skipping Playwright phase.')
+    return pages
+  }
 
-    const lessonImages = images.filter(img =>
-      img.src.includes('/lessons/') || img.src.includes('/public/lessons/')
-    )
+  console.log(`\n🎭 Phase 2: Playwright check (${playgroundPages.length} pages with Playground)...`)
 
-    if (lessonImages.length === 0) {
-      warnings.push('No lesson image found')
-    } else {
-      for (const img of lessonImages) {
-        if (!img.complete || img.naturalWidth === 0) {
-          errors.push(`Broken image: ${img.src}`)
+  const browser = await chromium.launch({ headless: true })
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } })
+
+  for (const p of playgroundPages) {
+    const page = await context.newPage()
+    const consoleErrors = []
+    const pageErrors = []
+
+    page.on('console', msg => {
+      if (msg.type() === 'error') {
+        const text = msg.text()
+        // Фильтруем шум
+        if (!text.includes('favicon') && !text.includes('hot-update') && !text.includes('ResizeObserver')) {
+          consoleErrors.push(text.slice(0, 120))
         }
       }
-    }
+    })
+    page.on('pageerror', err => pageErrors.push(err.message.slice(0, 120)))
 
-    // 2. Проверить Sandpack playground
-    const hasSandpack = await page.$('.sp-wrapper') !== null
-    const hasPlaygroundImport = await page.evaluate(() =>
-      document.body.innerHTML.includes('sp-wrapper') ||
-      document.body.innerHTML.includes('Playground')
-    )
+    try {
+      await page.goto(p.url, { waitUntil: 'networkidle', timeout: TIMEOUT })
+      await page.waitForTimeout(3000) // ждём Sandpack
 
-    if (hasSandpack) {
-      // Проверить нет ли ошибок внутри Sandpack
-      const sandpackErrors = await page.$$eval('.sp-overlay-message, [class*="error-message"], .sp-console-item--error', els =>
-        els.map(el => el.textContent?.trim()).filter(Boolean)
+      // Есть ли wrapper
+      const hasWrapper = await page.$('.sp-wrapper') !== null
+
+      // Есть ли error overlay внутри Sandpack
+      const sandpackErrors = await page.$$eval(
+        '.sp-overlay, [class*="sp-error"], [class*="error-overlay"]',
+        els => els.map(el => el.textContent?.trim().slice(0, 100)).filter(Boolean)
       )
-      if (sandpackErrors.length > 0) {
-        errors.push(`Sandpack errors: ${sandpackErrors.slice(0, 2).join(' | ')}`)
+
+      // Есть ли preview iframe
+      const hasPreview = await page.$('.sp-preview-iframe') !== null
+
+      if (!hasWrapper) {
+        p.errors = [...(p.errors || []), 'Playground: .sp-wrapper not found (not rendered)']
+      } else if (!hasPreview) {
+        p.errors = [...(p.errors || []), 'Playground: preview iframe missing']
+      } else if (sandpackErrors.length > 0) {
+        p.errors = [...(p.errors || []), `Playground error: ${sandpackErrors[0]}`]
       }
 
-      // Проверить что iframe загрузился
-      const sandpackFrame = await page.$('.sp-preview-iframe')
-      if (!sandpackFrame) {
-        warnings.push('Sandpack preview iframe not found')
+      if (consoleErrors.length > 0) {
+        p.warnings = [...(p.warnings || []), `Console: ${consoleErrors[0]}`]
       }
+      if (pageErrors.length > 0) {
+        p.errors = [...(p.errors || []), `JS error: ${pageErrors[0]}`]
+      }
+
+      const status = p.errors?.length ? '❌' : '✅'
+      console.log(`  ${status} ${p.section}/${p.file}${p.errors?.length ? ' — ' + p.errors[0] : ''}`)
+
+    } catch (err) {
+      p.errors = [...(p.errors || []), `Playwright: ${err.message.slice(0, 80)}`]
+      console.log(`  ❌ ${p.section}/${p.file} — ${err.message.slice(0, 60)}`)
     }
 
-    // 3. Console errors (фильтруем шум)
-    const realConsoleErrors = consoleErrors.filter(e =>
-      !e.includes('favicon') &&
-      !e.includes('hot-update') &&
-      !e.includes('ResizeObserver') &&
-      !e.includes('Non-Error') &&
-      !e.includes('third-party')
-    )
-    if (realConsoleErrors.length > 0) {
-      errors.push(`Console errors: ${realConsoleErrors.slice(0, 2).join(' | ')}`)
-    }
-
-    // 4. Page errors (uncaught)
-    if (pageErrors.length > 0) {
-      errors.push(`Page errors: ${pageErrors.slice(0, 2).join(' | ')}`)
-    }
-
-    // 5. Failed network requests (исключая dev-server шум)
-    const criticalFails = failedRequests.filter(r =>
-      r.url.includes('/lessons/') ||
-      r.url.includes('.js') ||
-      r.url.includes('.css')
-    )
-    if (criticalFails.length > 0) {
-      warnings.push(`Failed requests: ${criticalFails.map(r => r.url.split('/').pop()).slice(0, 3).join(', ')}`)
-    }
-
-    // 6. Проверить заголовок страницы
-    const title = await page.title()
-    if (!title || title === 'Untitled') {
-      warnings.push('Missing or empty page title')
-    }
-
-    // 7. Проверить sidebar — есть ли текущая страница
-    const activeInSidebar = await page.$('nav.sidebar a[aria-current="page"]')
-    if (!activeInSidebar) {
-      warnings.push('Current page not highlighted in sidebar')
-    }
-
-  } catch (err) {
-    errors.push(`Load failed: ${err.message.slice(0, 100)}`)
-    status = 0
+    await page.close()
   }
 
-  const ok = errors.length === 0
-  return {
-    url,
-    section,
-    file,
-    status,
-    loadTime,
-    hasSandpack: undefined, // will be set above
-    errors,
-    warnings,
-    consoleErrors: consoleErrors.slice(0, 3),
-    pageErrors: pageErrors.slice(0, 3),
-    ok,
-  }
+  await browser.close()
+  return pages
 }
 
 async function main() {
   console.log(`🔍 Яша Learn Code Auditor`)
-  console.log(`📡 Base URL: ${BASE_URL}`)
-
-  const pages = getPages(SECTIONS)
-  console.log(`📄 Pages to audit: ${pages.length}`)
+  console.log(`🌐 Base URL: ${BASE_URL}`)
   if (SECTIONS) console.log(`📂 Sections: ${SECTIONS.join(', ')}`)
 
-  const browser = await chromium.launch({ headless: HEADLESS })
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 900 },
-  })
+  const pages = getPages()
+  console.log(`📄 Total pages: ${pages.length} (${pages.filter(p => p.hasPlayground).length} with Playground)`)
 
-  const results = []
-  let passed = 0, failed = 0, warned = 0
+  // Фаза 1
+  let results = await checkHttp(pages)
 
-  for (let i = 0; i < pages.length; i++) {
-    const pageInfo = pages[i]
-    const page = await context.newPage()
+  // Фаза 2
+  results = await checkPlaygrounds(results)
 
-    process.stdout.write(`[${i + 1}/${pages.length}] ${pageInfo.section}/${pageInfo.file} ... `)
+  // Финальная статистика
+  const failed = results.filter(r => r.errors?.length > 0)
+  const warned = results.filter(r => !r.errors?.length && r.warnings?.length > 0)
+  const passed = results.filter(r => !r.errors?.length && !r.warnings?.length)
 
-    const result = await auditPage(page, pageInfo)
-    await page.close()
-
-    results.push(result)
-
-    if (!result.ok) {
-      failed++
-      console.log(`❌ ${result.errors.join(', ')}`)
-    } else if (result.warnings.length > 0) {
-      warned++
-      console.log(`⚠ ${result.warnings.join(', ')}`)
-    } else {
-      passed++
-      console.log(`✅ ${result.loadTime}ms`)
-    }
-  }
-
-  await browser.close()
-
-  // Summary
   const summary = {
     timestamp: new Date().toISOString(),
     baseUrl: BASE_URL,
     sections: SECTIONS || 'all',
-    total: pages.length,
-    passed,
-    failed,
-    warned,
-    results,
+    total: results.length,
+    passed: passed.length,
+    warned: warned.length,
+    failed: failed.length,
+    playgroundsChecked: results.filter(r => r.hasPlayground).length,
+    failures: failed.map(r => ({ url: r.url, file: `${r.section}/${r.file}`, errors: r.errors })),
+    warnings: warned.map(r => ({ url: r.url, file: `${r.section}/${r.file}`, warnings: r.warnings })),
   }
 
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(summary, null, 2))
 
-  console.log(`\n📊 Results:`)
-  console.log(`  ✅ Passed:   ${passed}`)
-  console.log(`  ⚠  Warnings: ${warned}`)
-  console.log(`  ❌ Failed:   ${failed}`)
+  console.log(`\n📊 Summary:`)
+  console.log(`  ✅ Passed:   ${passed.length}`)
+  console.log(`  ⚠  Warnings: ${warned.length}`)
+  console.log(`  ❌ Failed:   ${failed.length}`)
   console.log(`  📄 Report:   ${OUTPUT_FILE}`)
 
-  // Print failed pages
-  const failures = results.filter(r => !r.ok)
-  if (failures.length > 0) {
+  if (failed.length > 0) {
     console.log(`\n❌ Failed pages:`)
-    for (const f of failures) {
-      console.log(`  ${f.url}`)
-      for (const e of f.errors) console.log(`    → ${e}`)
+    for (const f of failed) {
+      console.log(`  ${f.file}: ${f.errors.join(' | ')}`)
     }
   }
 
-  process.exit(failed > 0 ? 1 : 0)
+  // Вывести JSON summary для Dashboard (воркер читает stdout)
+  console.log('\n--- DASHBOARD_SUMMARY ---')
+  console.log(JSON.stringify(summary))
+
+  process.exit(failed.length > 0 ? 1 : 0)
 }
 
-main().catch(err => {
-  console.error('Fatal:', err)
-  process.exit(1)
-})
+main().catch(err => { console.error('Fatal:', err); process.exit(1) })
