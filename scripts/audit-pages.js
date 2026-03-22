@@ -127,6 +127,15 @@ async function checkPlaygrounds(pages) {
 
     try {
       await page.goto(p.url, { waitUntil: 'networkidle', timeout: TIMEOUT })
+
+      // Прокручиваем к astro-island с Playground (нужно для client:visible IntersectionObserver)
+      try {
+        const island = await page.$('astro-island[component-url*="Playground"]')
+        if (island) {
+          await island.scrollIntoViewIfNeeded()
+          await page.waitForTimeout(500) // небольшая пауза после скролла
+        }
+      } catch {}
       await page.waitForTimeout(3000) // ждём Sandpack
 
       // Есть ли wrapper
