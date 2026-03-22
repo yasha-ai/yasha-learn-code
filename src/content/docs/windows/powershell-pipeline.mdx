@@ -1,0 +1,210 @@
+---
+title: "5. PowerShell Pipeline"
+sidebar:
+  order: 5
+---
+
+## Pipeline — сила PowerShell
+
+Pipeline в PowerShell работает иначе, чем в bash. В bash по конвейеру передаётся **текст**. В PowerShell — **объекты**. Это принципиальное отличие, которое делает PowerShell намного мощнее для автоматизации.
+
+```powershell
+# В bash: парсим текст
+ps aux | grep chrome | awk '{print $2}'
+
+# В PowerShell: работаем с объектами!
+Get-Process chrome | Select-Object Id, Name, CPU
+```
+
+## Оператор | (пайп)
+
+```powershell
+# Базовый пайп
+Get-Process | Get-Member             # посмотреть свойства объектов
+Get-Service | Format-Table           # форматировать вывод
+Get-ChildItem | Sort-Object Length   # сортировать файлы по размеру
+```
+
+## Where-Object — фильтрация объектов
+
+`Where-Object` (алиас: `?` или `where`) фильтрует объекты по условию.
+
+```powershell
+# Синтаксис с блоком скрипта
+Get-Process | Where-Object { $_.CPU -gt 50 }
+Get-Service | Where-Object { $_.Status -eq "Running" }
+Get-ChildItem | Where-Object { $_.Extension -eq ".txt" }
+
+# Краткий синтаксис (PS 3+)
+Get-Process | Where-Object CPU -gt 50
+Get-Service | Where-Object Status -eq "Running"
+Get-ChildItem | Where-Object Name -like "*.txt"
+
+# Алиасы
+Get-Process | ? { $_.CPU -gt 50 }    # ? = Where-Object
+
+# Операторы сравнения в Where-Object
+# -eq    равно
+# -ne    не равно
+# -gt    больше
+# -lt    меньше
+# -ge    больше или равно
+# -le    меньше или равно
+# -like  маска (* = любые символы)
+# -match регулярное выражение
+# -in    входит в список
+
+Get-Process | Where-Object Name -in @("chrome", "firefox", "edge")
+Get-ChildItem | Where-Object Name -match "^\d{4}"   # начинается с 4 цифр
+```
+
+## Select-Object — выбор свойств и объектов
+
+```powershell
+# Выбрать свойства
+Get-Process | Select-Object Name, CPU, Id, WorkingSet64
+
+# Вычисляемые свойства
+Get-Process | Select-Object Name, @{
+    Name = "MemoryMB"
+    Expression = { [Math]::Round($_.WorkingSet64 / 1MB, 2) }
+}
+
+# Первые/последние N объектов
+Get-Process | Select-Object -First 5
+Get-Process | Select-Object -Last 5
+Get-Process | Select-Object -Skip 10 -First 5    # с 11-го по 15-й
+
+# Уникальные значения
+Get-Process | Select-Object -ExpandProperty Name | Sort-Object -Unique
+
+# Исключить свойства
+Get-Process | Select-Object -ExcludeProperty Id, SessionId
+```
+
+## Sort-Object — сортировка
+
+```powershell
+# По одному полю
+Get-Process | Sort-Object CPU                        # возрастание
+Get-Process | Sort-Object CPU -Descending            # убывание
+
+# По нескольким полям
+Get-Process | Sort-Object @(
+    @{Expression = "CPU"; Descending = $true},
+    @{Expression = "Name"; Ascending = $true}
+)
+
+# Сортировка строк
+"banana", "apple", "cherry" | Sort-Object
+
+# Уникальные значения
+Get-ChildItem | Sort-Object Extension -Unique
+```
+
+## ForEach-Object — обработка каждого объекта
+
+```powershell
+# Базовый синтаксис
+Get-Process | ForEach-Object { Write-Output $_.Name }
+
+# Краткий синтаксис
+Get-Process | ForEach-Object Name
+
+# Делать что-то с каждым объектом
+Get-ChildItem *.txt | ForEach-Object {
+    $content = Get-Content $_.FullName
+    Write-Output "$($_.Name): $($content.Count) строк"
+}
+
+# Алиас % = ForEach-Object
+1..10 | % { $_ * 2 }
+
+# Begin/Process/End блоки
+1..5 | ForEach-Object -Begin {
+    Write-Output "Начало"
+} -Process {
+    Write-Output "Обрабатываю: $_"
+} -End {
+    Write-Output "Конец"
+}
+```
+
+## Measure-Object — статистика
+
+```powershell
+Get-Process | Measure-Object CPU -Sum -Average -Maximum -Minimum
+Get-ChildItem | Measure-Object Length -Sum -Average
+"Hello World" | Measure-Object -Word -Character -Line
+Get-Content log.txt | Measure-Object -Line
+```
+
+## Group-Object — группировка
+
+```powershell
+Get-Process | Group-Object Name                    # группировать по имени
+Get-ChildItem | Group-Object Extension             # группировать по расширению
+Get-Service | Group-Object Status                  # Running/Stopped
+Get-Process | Group-Object -Property {$_.CPU -gt 1 ? "High" : "Low"}
+```
+
+## Tee-Object — разветвление потока
+
+```powershell
+Get-Process | Tee-Object -FilePath processes.txt | Where-Object CPU -gt 5
+# Запишет все процессы в файл И покажет только с CPU > 5
+```
+
+## Реальные примеры
+
+```powershell
+# Топ-5 процессов по памяти в МБ
+Get-Process |
+    Sort-Object WorkingSet64 -Descending |
+    Select-Object -First 5 |
+    Select-Object Name, @{N="MB"; E={[Math]::Round($_.WorkingSet64/1MB, 1)}}
+
+# Список запущенных сервисов с именем и описанием
+Get-Service |
+    Where-Object Status -eq "Running" |
+    Select-Object Name, DisplayName |
+    Sort-Object Name |
+    Format-Table -AutoSize
+
+# Файлы изменённые за последние 7 дней
+Get-ChildItem -Recurse |
+    Where-Object { $_.LastWriteTime -gt (Get-Date).AddDays(-7) } |
+    Select-Object Name, LastWriteTime, Length |
+    Sort-Object LastWriteTime -Descending
+
+# Статистика по расширениям файлов
+Get-ChildItem -Recurse -File |
+    Group-Object Extension |
+    Select-Object Name, Count, @{N="SizeKB"; E={[Math]::Round(($_.Group | Measure-Object Length -Sum).Sum / 1KB, 1)}} |
+    Sort-Object Count -Descending
+```
+
+## Практика
+
+```powershell
+# 1. Найди все процессы Chrome/Edge
+Get-Process | Where-Object Name -in @("chrome", "msedge", "firefox")
+
+# 2. Топ-3 по CPU
+Get-Process | Sort-Object CPU -Descending | Select-Object -First 3 | Select-Object Name, CPU
+
+# 3. Статистика памяти
+Get-Process | Measure-Object WorkingSet64 -Sum -Average |
+    Select-Object @{N="TotalMB"; E={[Math]::Round($_.Sum/1MB)}}, @{N="AvgMB"; E={[Math]::Round($_.Average/1MB)}}
+
+# 4. Запущенные сервисы
+Get-Service | Where-Object Status -eq "Running" | Measure-Object
+
+# 5. Файлы в System32 по расширению (первые 5 групп)
+Get-ChildItem C:\Windows\System32 |
+    Group-Object Extension |
+    Sort-Object Count -Descending |
+    Select-Object -First 5
+```
+
+Pipeline — это то, что делает PowerShell действительно мощным инструментом для автоматизации!

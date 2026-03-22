@@ -1,0 +1,204 @@
+---
+title: "4. Системная информация macOS"
+sidebar:
+  order: 4
+---
+
+## Диагностика системы через терминал
+
+macOS предоставляет мощные инструменты командной строки для получения информации о системе: процессоре, памяти, дисках, аккумуляторе. Это незаменимо для диагностики проблем и мониторинга.
+
+## sw_vers — версия macOS
+
+```bash
+sw_vers                        # все данные
+sw_vers -productName           # macOS
+sw_vers -productVersion        # 14.3.1
+sw_vers -buildVersion          # 23D60
+
+# Альтернатива
+uname -a                       # версия ядра Darwin
+uname -r                       # только версия ядра
+```
+
+## system_profiler — полная информация о системе
+
+`system_profiler` — детальный отчёт о каждом аспекте системы. Аналог «Об этом Mac» в GUI.
+
+```bash
+system_profiler                          # ВСЁ (очень много!)
+system_profiler SPHardwareDataType       # железо: CPU, RAM, серийный номер
+system_profiler SPSoftwareDataType       # ПО: macOS версия, uptime
+system_profiler SPMemoryDataType         # оперативная память
+system_profiler SPStorageDataType        # хранилище
+system_profiler SPDisplaysDataType       # дисплеи и GPU
+system_profiler SPNetworkDataType        # сетевые интерфейсы
+system_profiler SPUSBDataType            # USB устройства
+system_profiler SPBluetoothDataType      # Bluetooth
+
+# Вывод в JSON
+system_profiler SPHardwareDataType -json
+system_profiler SPHardwareDataType -json | python3 -m json.tool
+
+# Сохранить отчёт
+system_profiler SPHardwareDataType > hardware_report.txt
+```
+
+Полезные типы данных:
+- `SPHardwareDataType` — модель, CPU, RAM, серийный номер
+- `SPSoftwareDataType` — версия macOS, время работы
+- `SPStorageDataType` — диски и разделы
+- `SPNetworkDataType` — сетевые интерфейсы
+- `SPPowerDataType` — состояние батареи
+
+## diskutil — управление дисками
+
+```bash
+diskutil list                          # все диски и разделы
+diskutil info /                        # информация о корневом диске
+diskutil info /Volumes/MyDisk          # информация о диске
+diskutil listFilesystems               # поддерживаемые файловые системы
+
+# Статистика использования диска
+df -h                                  # использование всех разделов
+df -h /                                # только корневой
+du -sh ~                               # размер домашней директории
+du -sh ~/Downloads/*                   # что занимает место в Downloads
+du -sh * | sort -h | tail -20          # топ папок по размеру
+
+# Управление томами
+diskutil eject /dev/disk2              # извлечь внешний диск
+diskutil mountDisk /dev/disk2          # смонтировать
+diskutil unmountDisk /dev/disk2        # размонтировать
+
+# Форматирование (ОСТОРОЖНО!)
+# diskutil eraseVolume APFS "NewName" /dev/disk3s1
+```
+
+## ioreg — дерево устройств
+
+```bash
+ioreg -l                               # полный список (очень длинный)
+ioreg -p IOUSBHostDevice               # USB устройства
+ioreg -p IODeviceTree -n AppleSmartBattery  # батарея
+
+# Информация о батарее
+ioreg -l -n AppleSmartBattery | grep -i capacity
+ioreg -l -n AppleSmartBattery | grep -E "CurrentCapacity|MaxCapacity|CycleCount|Temperature"
+```
+
+## pmset — управление питанием
+
+```bash
+pmset -g                              # текущие настройки питания
+pmset -g batt                         # статус батареи
+pmset -g ps                           # источник питания
+pmset -g log                          # лог событий питания
+pmset -g assertions                   # что мешает системе спать
+
+# Статус батареи подробно
+ioreg -l -n AppleSmartBattery | \
+  grep -E '"(CurrentCapacity|MaxCapacity|CycleCount|DesignCapacity|Temperature)"' | \
+  awk '{print $1, $3}'
+```
+
+## Мониторинг в реальном времени
+
+```bash
+# top — стандартный мониторинг
+top
+top -u username                        # только процессы пользователя
+top -n 1 -l 1                         # один снимок без интерактива
+
+# htop — улучшенный (установить через brew)
+brew install htop
+htop
+
+# vm_stat — статистика виртуальной памяти
+vm_stat
+vm_stat 2                              # обновлять каждые 2 секунды
+
+# Загрузка CPU
+sysctl -n hw.ncpu                      # количество CPU ядер
+sysctl -n machdep.cpu.brand_string     # модель CPU
+sysctl hw.memsize                      # объём RAM в байтах
+echo "$(($(sysctl -n hw.memsize) / 1073741824)) GB"  # в GB
+
+# Сеть
+netstat -an | grep LISTEN              # прослушиваемые порты
+netstat -i                             # статистика интерфейсов
+ifconfig                               # конфигурация интерфейсов
+ifconfig en0                           # только Wi-Fi
+```
+
+## Скрипт системного дашборда
+
+```bash
+#!/bin/bash
+# system-info.sh — быстрый обзор системы
+
+echo "=== macOS System Info ==="
+echo ""
+
+# Версия ОС
+echo "OS: $(sw_vers -productName) $(sw_vers -productVersion)"
+echo "Kernel: $(uname -r)"
+echo ""
+
+# Железо
+CPU=$(sysctl -n machdep.cpu.brand_string)
+CORES=$(sysctl -n hw.ncpu)
+RAM=$(($(sysctl -n hw.memsize) / 1073741824))
+echo "CPU: $CPU ($CORES cores)"
+echo "RAM: ${RAM}GB"
+echo ""
+
+# Диск
+echo "Disk Usage:"
+df -h / | tail -1 | awk '{print "  Root: " $3 " used of " $2 " (" $5 " full)"}'
+echo ""
+
+# Батарея (если MacBook)
+BATTERY=$(pmset -g batt 2>/dev/null | grep -Eo "[0-9]+%" | head -1)
+if [ -n "$BATTERY" ]; then
+    echo "Battery: $BATTERY"
+fi
+
+# Uptime
+echo "Uptime: $(uptime | awk '{print $3, $4}' | sed 's/,//')"
+
+echo ""
+echo "=== Top Processes by CPU ==="
+top -l 1 -n 5 -stats pid,command,cpu | tail -6
+```
+
+## Практика
+
+```bash
+# 1. Узнай всё о своём Mac
+system_profiler SPHardwareDataType
+
+# 2. Проверь версию macOS
+sw_vers
+
+# 3. Посмотри использование диска
+df -h
+
+# 4. Узнай что занимает больше всего места в домашней директории
+du -sh ~/* 2>/dev/null | sort -h | tail -10
+
+# 5. Статус батареи (если MacBook)
+pmset -g batt
+
+# 6. Сколько оперативки
+echo "RAM: $(($(sysctl -n hw.memsize) / 1073741824)) GB"
+
+# 7. Сколько CPU ядер
+sysctl -n hw.ncpu
+
+# 8. Сохрани полный отчёт о системе
+system_profiler > ~/Desktop/system_report.txt
+open ~/Desktop/system_report.txt
+```
+
+Знание системных инструментов помогает быстро диагностировать проблемы с производительностью и состоянием оборудования!
