@@ -57,9 +57,11 @@ export const Playground = ({
   } else if (hasOnlyHtml || (hasInlineScript && !fileKeys.some(f => f.endsWith('.js') || f.endsWith('.ts')))) {
     autoTemplate = 'static';
   } else if (hasTsFiles && template === 'react') {
-    autoTemplate = 'react-ts';
+    autoTemplate = 'vite-react-ts';
   } else if (hasTsFiles && template === 'vite-react') {
     autoTemplate = 'vite-react-ts';
+  } else if (!hasTsFiles && template === 'react') {
+    autoTemplate = 'vite-react';
   }
 
   const finalTemplate = autoTemplate;
