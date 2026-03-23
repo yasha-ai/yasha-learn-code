@@ -5,6 +5,7 @@ interface PlaygroundProps {
   template?: "react" | "react-ts" | "vanilla" | "vanilla-ts" | "static" | "vite" | "vite-react" | "vite-react-ts";
   files?: Record<string, string | { code: string; active?: boolean; hidden?: boolean }>;
   options?: any;
+  dependencies?: Record<string, string>;
   html?: string;
   css?: string;
   js?: string;
@@ -14,6 +15,7 @@ export const Playground = ({
   template = "vite-react",
   files = {},
   options = {},
+  dependencies = {},
   html,
   css,
   js
@@ -91,6 +93,7 @@ export const Playground = ({
         template={finalTemplate}
         theme="dark"
         files={finalFiles}
+        customSetup={Object.keys(dependencies).length > 0 ? { dependencies } : undefined}
         options={{
           showNavigator: true,
           showLineNumbers: true,
