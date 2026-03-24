@@ -68,6 +68,25 @@ export const Playground = ({
 
   const finalTemplate = autoTemplate;
   const finalFiles = fileKeys.length > 0 ? convertedFiles : files;
+
+  // Auto-detect active file: prefer /App.tsx > /App.jsx > /App.js > first file
+  // This prevents Sandpack from defaulting to its own App.jsx when we provide App.tsx
+  const activeFile = (() => {
+    const keys = Object.keys(finalFiles);
+    if (keys.length === 0) return undefined;
+    // Check if any file is explicitly marked as active
+    const explicitActive = keys.find(k => {
+      const v = finalFiles[k];
+      return typeof v === 'object' && v !== null && (v as any).active === true;
+    });
+    if (explicitActive) return explicitActive;
+    // Auto-pick: prefer tsx > jsx > js > first
+    const preferred = ['/App.tsx', '/App.jsx', '/App.js', '/index.tsx', '/index.jsx', '/index.js', '/index.html'];
+    for (const p of preferred) {
+      if (keys.includes(p)) return p;
+    }
+    return keys[0];
+  })();
   const [isSecure, setIsSecure] = useState(true);
   const [mounted, setMounted] = useState(false);
 
@@ -104,6 +123,7 @@ export const Playground = ({
           showInlineErrors: true,
           wrapContent: false,
           editorHeight: 450,
+          activeFile: activeFile,
           ...options,
         }}
       />
