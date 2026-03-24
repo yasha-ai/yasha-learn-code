@@ -67,20 +67,38 @@ export const Playground = ({
   }
 
   const finalTemplate = autoTemplate;
-  const finalFiles = fileKeys.length > 0 ? convertedFiles : files;
 
-  // Auto-detect active file: prefer /App.tsx > /App.jsx > /App.js > first file
-  // This prevents Sandpack from defaulting to its own App.jsx when we provide App.tsx
+  // For vite-react template: if user provides /App.tsx but template has /App.jsx as main,
+  // we need to override /App.jsx to re-export from /App.tsx so the preview renders correctly.
+  // Without this, Sandpack renders its own "Hello World" /App.jsx instead of custom /App.tsx.
+  let patchedFiles = fileKeys.length > 0 ? convertedFiles : files;
+  if (autoTemplate === 'vite-react') {
+    const patchedKeys = Object.keys(patchedFiles);
+    const hasTsx = patchedKeys.includes('/App.tsx');
+    const hasJsx = patchedKeys.includes('/App.jsx');
+    if (hasTsx && !hasJsx) {
+      // Inject /App.jsx that re-exports from /App.tsx so vite-react renders our component
+      patchedFiles = {
+        ...patchedFiles,
+        '/App.jsx': { code: `export { default } from './App.tsx';`, hidden: true },
+      };
+    }
+  }
+
+  const finalFiles = patchedFiles;
+
+  // Auto-detect active file for the editor tab
   const activeFile = (() => {
-    const keys = Object.keys(finalFiles);
+    const keys = Object.keys(finalFiles).filter(k => {
+      const v = (finalFiles as any)[k];
+      return !(typeof v === 'object' && v !== null && v.hidden === true);
+    });
     if (keys.length === 0) return undefined;
-    // Check if any file is explicitly marked as active
     const explicitActive = keys.find(k => {
-      const v = finalFiles[k];
-      return typeof v === 'object' && v !== null && (v as any).active === true;
+      const v = (finalFiles as any)[k];
+      return typeof v === 'object' && v !== null && v.active === true;
     });
     if (explicitActive) return explicitActive;
-    // Auto-pick: prefer tsx > jsx > js > first
     const preferred = ['/App.tsx', '/App.jsx', '/App.js', '/index.tsx', '/index.jsx', '/index.js', '/index.html'];
     for (const p of preferred) {
       if (keys.includes(p)) return p;
