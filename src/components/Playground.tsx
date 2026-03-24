@@ -49,17 +49,19 @@ export const Playground = ({
   // Auto-detect best template:
   // 1. Old format (html/css/js) → static
   // 2. Only index.html with inline scripts → static (vanilla would add conflicting default index.js)
-  // 3. TypeScript files → upgrade to TS template
+  // 3. TypeScript files → use vite-react (Babel, NOT vite-react-ts which uses NodeBox/SharedArrayBuffer)
+  //    vite-react-ts requires Cross-Origin Isolation headers (COOP/COEP) for SharedArrayBuffer.
+  //    Without those headers NodeBox fails and shows "Open on CodeSandbox" fallback.
+  //    vite-react with Babel handles .tsx/.ts files fine without NodeBox.
   // 4. Otherwise → use specified template
   let autoTemplate = template;
   if (html || css || js) {
     autoTemplate = 'static';
   } else if (hasOnlyHtml || (hasInlineScript && !fileKeys.some(f => f.endsWith('.js') || f.endsWith('.ts')))) {
     autoTemplate = 'static';
-  } else if (hasTsFiles && template === 'react') {
-    autoTemplate = 'vite-react-ts';
-  } else if (hasTsFiles && template === 'vite-react') {
-    autoTemplate = 'vite-react-ts';
+  } else if (hasTsFiles && (template === 'react' || template === 'vite-react')) {
+    // Use vite-react (Babel) instead of vite-react-ts (NodeBox) to avoid SharedArrayBuffer requirement
+    autoTemplate = 'vite-react';
   } else if (!hasTsFiles && template === 'react') {
     autoTemplate = 'vite-react';
   }
